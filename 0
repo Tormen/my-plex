@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+
+import argparse
+from plexapi.server import PlexServer
+from plexapi.myplex import MyPlexAccount
+from plexapi.video import Show
+from plexapi.exceptions import NotFound
+from datetime import datetime
+
+# Plex server details
+PLEX_URL = 'http://<your-plex-server-ip>:32400'  # Replace with your Plex server IP
+PLEX_TOKEN = '<your-plex-token>'  # Replace with your Plex token
+PLEX_USERNAME = '<your-plex-username>'  # Replace with your Plex username
+PLEX_PASSWORD = '<your-plex-password>'  # Replace with your Plex password (optional)
+
+# Connect to the Plex server
+plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+account = MyPlexAccount(PLEX_USERNAME, PLEX_PASSWORD)
+
+# Function to list all libraries and their contents
+def list_libraries():
+    for library in plex.library.sections():
+        print(f"Library: {library.title} ({library.type})")
+        for item in library.all():
+            print(f"  - {item.title} ({item.type})")
+
+# Function to list items in a specific library
+def list_items_in_library(library_name):
+    try:
+        library = plex.library.section(library_name)
+        for item in library.all():
+            print(f"  - {item.title} ({item.type})")
+    except NotFound:
+        print(f"Library '{library_name}' not found.")
+
+# Function to mark an item as watched by ratingKey
+def mark_watched(rating_key):
+    item = plex.fetchItem(rating_key)
+    item.markWatched()
+    print(f"Marked '{item.title}' as watched.")
+
+# Function to mark an item as unwatched by ratingKey
+def mark_unwatched(rating_key):
+    item = plex.fetchItem(rating_key)
+    item.markUnwatched()
+    print(f"Marked '{item.title}' as unwatched.")
+
+# Function to set a custom seen date (only stored locally)
+custom_seen_dates = {}
+def set_custom_seen_date(rating_key, custom_date):
+    item = plex.fetchItem(rating_key)
+    custom_seen_dates[rating_key] = custom_date.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"Set custom seen date for '{item.title}' to {custom_seen_dates[rating_key]}")
+
+# Function to show information about an item by ratingKey
+def show_item_info(rating_key):
+    item = plex.fetchItem(rating_key)
+    last_viewed_at = item.lastViewedAt.strftime('%Y-%m-%d %H:%M:%S') if item.lastViewedAt else 'Unwatched'
+    marked_as_watched = item.viewedAt.strftime('%Y-%m-%d %H:%M:%S') if item.viewedAt else 'Not marked as watched'
+    
+    print(f"Title: {item.title}")
+    print(f"Type: {item.type}")
+    print(f"Rating Key: {item.ratingKey}")
+    print(f"Library: {item.librarySectionID}")
+    print(f"Seen Date: {last_viewed_at}")
+    print(f"Marked as Watched: {marked_as_watched}")
+
+# Function to search for a media item by name
+def search_media(name):
+    results = plex.search(name)
+    if results:
+        for item in results:
+            print(f"Found: {item.title} ({item.type})")
+    else:
+        print(f"No results found for '{name}'.")
+
+# Function to list all users sharing the Plex library
+def list_users():
+    for user in account.users():
+        print(f"User: {user.title} (email: {user.email})")
+
+# Function to add a new user to the Plex library
+def add_user(email, server_name):
+    server = plex
+    user = account.inviteFriend(email, server)
+    print(f"Invited {user.title} (email: {email}) to access '{server_name}' library.")
+
+# Function to remove a user from the Plex library
+def remove_user(email):
+    user = account.user(email)
+    user.remove()
+    print(f"Removed {user.title} (email: {email}) from Plex library.")
+
+# Function to list all collections in a library
+def list_collections(library_name):
+    try:
+        library = plex.library.section(library_name)
+        for collection in library.collections():
+            print(f"Collection: {collection.title}")
+    except NotFound:
+        print(f"Library '{library_name}' not found.")
+
+# Function to show recent added items
+def show_recent(library_name):
+    try:
+        library = plex.library.section(library_name)
+        for item in library.recentlyAdded():
+            print(f"Recently Added: {item.title} ({item.type})")
+    except NotFound:
+        print(f"Library '{library_name}' not found.")
+
+# Function to list the latest episode of a TV show
+def latest_episode(show_name):
+    try:
+        show = plex.library.section('TV Shows').get(show_name)
+        episode = show.episodes()[-1]
+        print(f"Latest Episode: {episode.seasonEpisode} - {episode.title}")
+        print(f"  Air Date: {episode.originallyAvailableAt}")
+        print(f"  File Path: {episode.media[0].parts[0].file}")
+    except NotFound:
+        print(f"Show '{show_name}' not found.")
+    except IndexError:
+        print(f"No episodes found for '{show_name}'.")
+
+# Function to list all episodes of a TV show
+def list_episodes(show_name):
+    try:
+        show = plex.library.section('TV Shows').get(show_name)
+        for episode in show.episodes():
+            print(f"{episode.seasonEpisode} - {episode.title} (Air Date: {episode.originallyAvailableAt})")
+    except NotFound:
+        print(f"Show '{show_name}' not found.")
+
+# Function to list file paths of all episodes of a TV show
+def list_episode_files(show_name):
+    try:
+        show = plex.library.section('TV Shows').get(show_name)
+        for episode in show.episodes():
+            print(f"{episode.seasonEpisode} - {episode.title}: {episode.media[0].parts[0].file}")
+    except NotFound:
+        print(f"Show '{show_name}' not found.")
+
+# Command-line argument parser setup
+def main():
+    parser = argparse.ArgumentParser(description="Plex API Command Line Interface")
+
+    subparsers = parser.add_subparsers(dest='command')
+
+    # List all libraries
+    subparsers.add_parser('list-libraries', help="List all libraries")
+
+    # List items in a specific library
+    list_parser = subparsers.add_parser('list-items', help="List all items in a specified library")
+    list_parser.add_argument('library', help="Library name to list items from")
+
+    # Mark as watched
+    mark_watched_parser = subparsers.add_parser('mark-watched', help="Mark an item as watched")
+    mark_watched_parser.add_argument('rating_key', help="Rating Key of the item to mark as watched")
+
+    # Mark as unwatched
+    mark_unwatched_parser = subparsers.add_parser('mark-unwatched', help="Mark an item as unwatched")
+    mark_unwatched_parser.add_argument('rating_key', help="Rating Key of the item to mark as unwatched")
+
+    # Set custom seen date
+    custom_date_parser = subparsers.add_parser('set-seen-date', help="Set a custom seen date for an item")
+    custom_date_parser.add_argument('rating_key', help="Rating Key of the item")
+    custom_date_parser.add_argument('custom_date', help="Custom date in YYYY-MM-DD format")
+
+    # Show item information
+    show_info_parser = subparsers.add_parser('show-info', help="Show detailed info about an item")
+    show_info_parser.add_argument('rating_key', help="Rating Key of the item")
+
+    # Search media
+    search_parser = subparsers.add_parser('search', help="Search for media by name")
+    search_parser.add_argument('name', help="Name of the media item to search for")
+
+    # List users
+    subparsers.add_parser('list-users', help="List all users sharing the Plex library")
+
+    # Add user
+    add_user_parser = subparsers.add_parser('add-user', help="Add a new user to the Plex library")
+    add_user_parser.add_argument('email', help="Email address of the user to add")
+    add_user_parser.add_argument('server', help="Name of the Plex server to share")
+
+    # Remove user
+    remove_user_parser = subparsers.add_parser('remove-user', help="Remove a user from the Plex library")
+    remove_user_parser.add_argument('email', help="Email address of the user to remove")
+
+    # List collections
+    list_collections_parser = subparsers.add_parser('list-collections', help="List all collections in a specified library")
+

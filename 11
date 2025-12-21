@@ -1,0 +1,126 @@
+from plexapi.server import PlexServer
+from plexapi.myplex import MyPlexAccount
+from datetime import datetime
+
+# Plex Server credentials
+PLEX_URL = 'http://<PLEX_SERVER_IP>:32400'
+PLEX_TOKEN = '<YOUR_PLEX_TOKEN>'
+
+# Connect to Plex server
+def connect_plex():
+    try:
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+        print(f"Connected to Plex server: {plex.friendlyName}")
+        return plex
+    except Exception as e:
+        print(f"Failed to connect to Plex: {e}")
+        return None
+
+# Get the watched status of media
+def get_watched_status(title, plex):
+    try:
+        media = plex.library.search(title)[0]
+        print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
+        print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
+        print(f"View count: {media.viewCount}")
+    except Exception as e:
+        print(f"Error fetching watched status: {e}")
+
+# Set media as watched
+def set_watched(title, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.markWatched()
+        print(f"Media '{media.title}' marked as watched.")
+    except Exception as e:
+        print(f"Error setting watched status: {e}")
+
+# Set media as unwatched
+def set_unwatched(title, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.markUnwatched()
+        print(f"Media '{media.title}' marked as unwatched.")
+    except Exception as e:
+        print(f"Error setting unwatched status: {e}")
+
+# Set the watched date
+def set_watched_date(title, watched_date, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.markWatched()
+        media.lastViewedAt = watched_date
+        media.save()
+        print(f"Watched date set to {watched_date} for '{media.title}'.")
+    except Exception as e:
+        print(f"Error setting watched date: {e}")
+
+# Set viewOffset (progress)
+def set_view_offset(title, offset, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.updateProgress(viewOffset=offset, viewCount=media.viewCount)
+        print(f"View offset set to {offset} milliseconds for '{media.title}'.")
+    except Exception as e:
+        print(f"Error setting view offset: {e}")
+
+# Get viewOffset (progress)
+def get_view_offset(title, plex):
+    try:
+        media = plex.library.search(title)[0]
+        print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
+    except Exception as e:
+        print(f"Error fetching view offset: {e}")
+
+# Set user rating
+def set_user_rating(title, rating, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.userRating = rating
+        media.save()
+        print(f"User rating set to {rating} for '{media.title}'.")
+    except Exception as e:
+        print(f"Error setting user rating: {e}")
+
+# Clear user rating
+def clear_user_rating(title, plex):
+    try:
+        media = plex.library.search(title)[0]
+        media.userRating = None
+        media.save()
+        print(f"User rating cleared for '{media.title}'.")
+    except Exception as e:
+        print(f"Error clearing user rating: {e}")
+
+# Main function to demonstrate metadata management
+if __name__ == "__main__":
+    # Connect to Plex
+    plex = connect_plex()
+
+    if plex:
+        # Metadata management examples
+
+        # Get watched status
+        get_watched_status("Inception", plex)
+
+        # Set media as watched
+        set_watched("Inception", plex)
+
+        # Set media as unwatched
+        set_unwatched("Inception", plex)
+
+        # Set watched date
+        # The date should be in Python's datetime format, e.g., datetime(2024, 10, 11, 18, 30)
+        set_watched_date("Inception", datetime(2024, 10, 11, 18, 30), plex)
+
+        # Set view offset (e.g., 600000 ms = 10 minutes)
+        set_view_offset("Inception", 600000, plex)
+
+        # Get view offset
+        get_view_offset("Inception", plex)
+
+        # Set user rating (scale 1 to 10)
+        set_user_rating("Inception", 9, plex)
+
+        # Clear user rating
+        clear_user_rating("Inception", plex)

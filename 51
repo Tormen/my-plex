@@ -1,0 +1,922 @@
+#!/usr/bin/python3
+
+# max err_code: 1002
+from abc import ABC, abstractmethod
+import os
+import sys
+import argparse
+# HELP: https://python-plexapi.readthedocs.io/
+from plexapi.server import PlexServer
+from plexapi.playlist import Playlist
+from plexapi.collection import Collection
+from datetime import datetime
+
+###########################################################################################
+#### GLOBAL VARIABLES FROM CONFIG FILE
+###########################################################################################
+
+# Allows to provide LIST of Tuples of alternative PATHNAMES (useful e.g. in case of symlinking)
+# The tuples will be used BOTH-WAYs: if LEFT is matching a pathname, it is replaced (swapped) with RIGHT
+# AND THE INVERSE: if RIGHT is matching a pathname, it is replaced (swapped) with LEFT
+# and then BOTH - the original + the new alternative path (with swapped ROOTPATH) is used.
+# All paths here need to be ABOLUTE PATHs:
+ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/') ]
+
+# Plex Server credentials
+#PLEX_HOSTNAME = 'ada'
+#PLEX_USER = ''
+#PLEX_PASSWORD = ''
+PLEX_URL = 'https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400'
+PLEX_TOKEN = '-BfszsiY4sVQ16fsa7yv'
+#
+# HOW TO GET THE TOKEN ?
+#FROM: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+# https://app.plex.tv/desktop/#!/server/a3bc2487eddf87b6c8eb5b971ff40b6e3b9bb36f/details?key=%2Flibrary%2Fmetadata%2F94997&context=home%3Ahub.continueWatching~0~1
+
+###########################################################################################
+#### GLOBAL VARIABLES SET+USED BY THIS SCRIPT:
+###########################################################################################
+
+US=os.path.basename(__file__); # "my-plex-api.py"
+
+DBG=False # default value for DBG
+VRB=False # default value for VRB
+DBGPFX=" ~~~ "
+VRBPFX=" >>> "
+
+GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
+PLEX_SERVER = None # server instance will be set where needed
+
+PLEXPATHS = None         # map all realpaths of PLEX Library locations to library name
+                         # (key = realpath of library locations - value = list of libraries that share this directory)
+
+PLEXOBJ = {}            # Store the corresponding information for each PLEXOBJ_TYPE:
+PARSER = 'arg-parser'
+PLEXOBJ[PARSER] = {}    # PLEXOBJ[PARSER][OBJ_TYPE] = corresponding argparse parser for this OBJ_TYPE
+FN = 'doit-function'
+PLEXOBJ[FN] = {}        # PLEXOBJ[FN][OBJ_TYPE]     = corresponding python function to call for this OBJ_TYPE 
+DETECT = 'detect-function'
+PLEXOBJ[DETECT] = {}    # PLEXOBJ[DETECT][OBJ_TYPE] = corresponding detection function for this OBJ_TYPE
+
+# additional explanation needed as we do a partial_parse and then detect object and then parse the rest
+HELP_SUFFIX="""
+supported <OBJECT_TYPE>s:
+
+    library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library
+                      To force this OBJECT_TYPE call with: --library <library_name>
+    media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title> or <media_filename>. For more info: --help media
+                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>
+    playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>. For more info: --help playlist
+                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>
+"""
+
+###########################################################################################
+#### GLOBAL HELPER FUNCTIONS
+###########################################################################################
+
+def err(err_code, err_msg):
+    print(f"\nERROR #{err_code}: {err_msg}\n")
+    sys.exit(1)
+
+############################################################
+#### PLEX SERVER HELPER FUNCTIONS
+
+# Connect to Plex server
+def connect_to_plex(plex_url, plex_token):
+    """ connect to plex server and return PLEX_SERVER object """
+    res = None
+    try:
+        #from plexapi.myplex import MyPlexAccount
+        #account = MyPlexAccount(PLEX_USER, PLEX_PASSWORD)
+        #plex = account.resource(PLEX_HOSTNAME).connect()  # returns a PlexServer instance
+
+        res = PlexServer(plex_url, plex_token)
+        print(f"Connected to Plex server: {res.friendlyName}")
+    except Exception as e:
+        print(f"Failed to connect to Plex: {e}")
+    return res
+
+def get_alternative_paths(path, including_path=False):
+    global ALTERNATIVE_ROOTPATHS
+    if including_path: res = [path]
+    else:              res = []
+    for (rootpath1,rootpath2) in ALTERNATIVE_ROOTPATHS:
+        if path.startswith(rootpath1):
+            new_path = path.replace(rootpath1, rootpath2, 1) # max 1 replacement
+            res.append( new_path )
+        elif path.startswith(rootpath2):
+            new_path = path.replace(rootpath2, rootpath1, 1) # max 1 replacement
+            res.append( new_path )
+    return res
+
+def get_plexpaths():
+    """ collect_all_paths_linked_to_plex_libraries_including_alternative_paths() and return PLEXPATHS dictionary """
+    global PLEX_SERVER
+    if DBG: print(f"{DBGPFX}get_plexpaths()")
+
+    res = {}
+    # Iterate over each library section
+    for section in PLEX_SERVER.library.sections():
+        if DBG: print(f"{DBGPFX}get_plexpaths: LOOP 1 (libraries) > library '{section.title}'")
+        # List all paths for the current library
+        for path in section.locations:
+            if DBG: print(f"{DBGPFX}get_plexpaths: LOOP 2 (section.locations) >> path '{path}'")
+            for alternative_path in get_alternative_paths(path, including_path=True):
+                if DBG: print(f"{DBGPFX}get_plexpaths: LOOP 3 (alternative_paths) >>> alternative_path '{alternative_path}'")
+                if alternative_path in res:
+                    if DBG: print(f"{DBGPFX}get_plexpaths: EXISTING dict entry: res[{alternative_path}] = {res[alternative_path]} ++ ['{section.title}']")
+                    # making sure entry is unique - not sure if this CAN happen... but better save
+                    if section.title not in res[alternative_path]: res[alternative_path].append(section.title) 
+                else:
+                    if DBG: print(f"{DBGPFX}get_plexpaths: NEW dict entry: res[{alternative_path}] = ['{section.title}']")
+                    res[alternative_path] = [section.title]
+    return res
+
+def init_plex_connection(args):
+    global PLEX_SERVER, PLEXPATHS
+    if PLEX_SERVER is None: PLEX_SERVER = connect_to_plex(args.plex_url, args.plex_token)
+    if PLEXPATHS is None: PLEXPATHS = get_plexpaths()
+
+def resolve_media_by_path_or_title(media_identifier, library_name=None):
+    """Resolve media entry by title or file path and optional library_name.
+       With or without library_name:
+          1.) we try to get media_identifier_realpath (=realpath(media_identifier))
+          2.) we'll check if either media_identifier OR media_identifier_realpath startwith one of the paths in the PLEXPATHS dict.
+       For the case that media_dentifier is a PATH:
+          1.) all matching libraries are then searched for media_identifier to confirm that PLEX knows about this file
+       For the case that media_identifier is a MEDIA-TITLE:
+          2.) all matching libraries are used to lookup media_identifier (as title)
+          ELSE
+          3.) all matching libraries are used to SEARCH for media_identifier
+    """
+
+    global PLEX_SERVER, PLEXPATHS
+
+    if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title( media_identifier='{media_identifier}', library='{library_name}')")
+    if media_identifier is None: err(1008, f"This should never be. Please contact maintainer.")
+
+    if library_name is None:
+        potential_libraries = []
+    else:
+        potential_libraries = [library_name]
+    if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() potential_libraries = {potential_libraries} -- based on root-path of libraries!")
+
+    # Gather all potential libraries based on PLEXPATHS dict - this already contains all altnerative paths versions (to compare our path againast)!
+    for (path,library_names) in PLEXPATHS.items():
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over PLEXPATHS: path='{path}'")
+        if media_identifier.startswith(path):
+            for x in library_names: potential_libraries.append(x) if x not in potential_libraries else next # push only NEW library_names
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over PLEXPATHS: after media_identifier check: potential_libraries={potential_libraries}")
+
+    try:
+        normalized_filepath = os.path.normpath(media_identifier)
+        # If file exists -> search for it
+        for library_name in potential_libraries:
+            if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: > library_name='{library_name}'")
+            library = PLEX_SERVER.library.section(library_name)
+            # Iterate through all items in the library
+            for item in library.all():
+                # Search within movies
+                if item.type == 'movie':
+                    for media in item.media:
+                        for part in media.parts:
+                            if os.path.normpath(part.file) == normalized_filepath:
+                                print(f"File '{filepath}' found as part of movie '{item.title}' ({item.year})")
+                                return item  # Return the found item
+
+                # Search within TV shows (seasons and episodes)
+                elif item.type == 'show':
+                    for season in item.seasons():
+                        for episode in season.episodes():
+                            for media in episode.media:
+                                for part in media.parts:
+                                    if os.path.normpath(part.file) == normalized_filepath:
+                                        print(f"File '{filepath}' found as part of episode '{episode.title}' in show '{item.title}'")
+                                        return episode  # Return the found episode
+    except:
+        pass
+
+    print("XXX")            
+    sys.exit(0)
+
+    for entry in library.all():
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over entries: >> entry '{entry}'")
+        match entry.TYPE:
+            case 'movie': all_items = [entry]
+            case 'show': all_items = entry.episodes()
+            case _: err(1009, f"Invalid item.TYPE {entry.TYPE}: {entry}. Please report to maintainer.")
+        for item in all_items:
+            if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over items: >> item '{item}'")
+            for part in item.iterParts(): # Iterates over the parts of this media item.
+                if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over parts: >> part '{part}'")
+                # to compare part.file with our media_identifier, first collect ALTERNATIVE versions of part.file:
+                for path in get_alternative_paths( part.file ):
+                    if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over all versions of part.file: >>> path '{path}'")
+                    if path == media_identifier:
+                        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over : >> matched part.file '{part}' with path!")
+                        return item
+    if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: Unable to match part.file of all parts of all items of all potential libraries")
+    try:
+        # First, try to find by title
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: Using media_identifier as title to lookup media...")
+        media = library.get(media_identifier)
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: FOUND media by title!")
+        return media
+    except:
+        if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: Did NOT find media by title!")
+        # If not found by title, search for it
+        try:
+            if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: Searching media via media_identifier...")
+            media = PLEX_SERVER.library.search(media_identifier)[0]
+            if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: FOUND media by search in library!")
+            return media
+        except:
+            if DBG: print(f"{DBGPFX}resolve_media_by_path_or_title() LOOP over potential_libraries: NOT found media by search in library!")
+            next
+            #raise Exception(f"Media not found for title or file path: {media_identifier}")
+
+    # in case potential_libraries would be empty list /or/ in case NON of the attempts in LOOP over potential_libraries was able to find 'media':
+    return None
+
+###########################################################################################
+#### PLEX OBJ_TYPE MANAGEMENT
+###########################################################################################
+
+# PLEX OBJ_TYPE Interface / Abstract Base Class: --------------------------------------------------
+class PLEX_OBJ_TYPE_ABC(ABC):
+
+    type_str = None
+    argparser = None
+
+    @staticmethod
+    @abstractmethod
+    def detect_if_of_OBJ_TYPE(args, obj):
+        pass
+
+    # The cmd(s) to exeucte will be provided via 'obj_args'
+    @staticmethod
+    @abstractmethod
+    def execute_cmd(args, obj, obj_args):
+        pass
+
+def add_PLEX_OBJ_TYPE(obj_class):
+    PLEXOBJ[PARSER][obj_class.type_str] = obj_class.argparser;
+    PLEXOBJ[FN][obj_class.type_str] = obj_class.execute_cmd;
+    PLEXOBJ[DETECT][obj_class.type_str] = obj_class.detect_if_of_OBJ_TYPE;
+
+
+###########################################################################################
+#### PLEX LIBRARY OBJECT
+###########################################################################################
+
+class PLEX_Library(PLEX_OBJ_TYPE_ABC):
+    type_str = 'library'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.", exit_on_error=False)
+    # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
+    #library_parser = subparsers.add_parser('library',      help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library", add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.")
+    argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--list', '--media', action='store_true',   help="List all media entries in a specified library. Example: --media [--type <movie|show>] [--detailed]")
+    argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
+    argparser.add_argument('--detailed', action='store_true',help=argparse.SUPPRESS) #="If provided, --list-media shows list seasons and episodes for TV shows with filenames and filenames for movies as well.")
+    argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
+    argparser.add_argument('--delete', action='store_true',help="Delete the library.")
+    argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
+        Available filters: \
+        title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
+        writer=<writer>, studio=<studio>, type=<type>, contentRating=<content_rating>, \
+        sortBy=<sort_by>, sortOrder=<asc|desc>, includeChildren=<true|false>, \
+        collection=<collection>, date=<date>, summary=<summary>, \
+        label=<label>, duration=<duration>, viewCount=<view_count>, \
+        recentlyAdded=<true|false>, watched=<true|false>, \
+        unwatched=<true|false>, partTitle=<part_title>, \
+        partRatingKey=<part_rating_key>.")
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        return False
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
+        if obj_args.list:
+            media_type = None  # Default to ALL (movies + show)
+            if hasattr(obj_args, 'type'):
+                media_type = args.type
+            if hasattr(obj_args, 'detailed'): detailed=True
+            else:                             detailed=False
+            PLEX_Media.list(obj, media_type, detailed)
+        if obj_args.create_library:     create(obj)
+        if obj_args.delete:             delete(obj)
+        if obj_args.search:
+            filters = {item.split('=')[0]: item.split('=')[1] for item in obj_args.search}
+            advanced_search(obj, **filters)
+
+    @staticmethod
+    def list_of():
+        global PLEX_SERVER
+        return [ l.title for l in PLEX_SERVER.library.sections() ]
+
+    @staticmethod
+    def list(library_name, media_type, detailed=False):
+        global PLEX_SERVER
+        try:
+            library = PLEX_SERVER.library.section(library_name)
+            if media_type is None:
+              print(f"\nMedia in '{library_name}':")
+              media_entries = library.all()
+            else:
+              print(f"\nMedia in '{library_name}' ({media_type}):")
+              if media_type == "series" or media_type == "show":
+                  media_entries = library.all().get('show')
+              elif media_type == "movie":
+                  media_entries = library.all().get('movie')
+
+            for media in media_entries:
+                 if media.type == 'show':
+                     print(f"Series\t{media.title} ({media.year}): {len(media.seasons())} seasons")
+                     if detailed:
+                         for season in media.seasons():
+                             if (len(season.title)>0): print(f"Series\t{media.title} Season {season.index}: {season.title}")
+                             for episode in season.episodes():
+                                 print(f"Series\t{media.title} S{season.index:02d}E{episode.index:02d}: {episode.title}\t'{episode.media[0].parts[0].file}'")
+                 elif media.type == 'movie':
+                     if detailed: print(f"Movie\t{media.title} ({media.year})\t'{media.media[0].parts[0].file}'")
+                     else:        print(f"Movie\t{media.title} ({media.year})")
+
+        except Exception as e:
+            print(f"Error listing media: {e}")
+
+    @staticmethod
+    def create(library_name):
+        # Implement library creation logic here
+        print(f"Library '{library_name}' created (implement the actual logic).")
+
+    @staticmethod
+    def delete(library_name):
+        # Implement library deletion logic here
+        print(f"Library '{library_name}' deleted (implement the actual logic).")
+
+    @staticmethod
+    def advanced_search(library_name, **filters):
+        global PLEX_SERVER
+        try:
+            library = PLEX_SERVER.library.section(library_name)
+            results = library.search(**filters)
+            print(f"\nAdvanced search results:")
+            for media in results:
+                print(f"- {media.title} ({media.year}) [{media.type}]")
+        except Exception as e:
+            print(f"Error in advanced search: {e}")
+
+
+###########################################################################################
+#### PLEX COLLECTION MANAGEMENT
+###########################################################################################
+
+class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
+    type_str = 'collection'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage="{US} [--collection] <collection_name> [<COLLECTION_COMMAND> [..]]", description="Without any COLLECTION_COMMAND> this does the same as with <COLLECTION_COMMAND> '--list'.", exit_on_error=False)
+    argparser._optionals.title = "supported <COLLECTION_COMMAND>s"
+    argparser.add_argument('--list', action='store_true',  help="List media items to collection.")
+    argparser.add_argument('--add-to', nargs='+',      help="Add media items to collection. Example: --add-to-collection <media1> <media2>...", metavar='MEDIA_ITEM')
+    argparser.add_argument('--remove-from', nargs='+', help="Remove media items from collection. Example: --remove-from-collection <media1> <media2>...", metavar='MEDIA_ITEM')
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        global PLEX_SERVER
+        return (obj in [ x.title for x in PLEX_SERVER.playlists() ])
+        return False
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
+        if obj_args.list: PLEX_COllection.list(obj, obj_args.add_to)
+        elif obj_args.add_to: add_to(obj, obj_args.add_to)
+        elif obj_args.remove_from: remove_from(obj, obj_args.remove_from_collection)
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def list(library_name):
+        global PLEX_SERVER
+        try:
+            library = PLEX_SERVER.library.section(library_name)
+            print(f"\nCollections in library '{library_name}':")
+            for collection in library.collections():
+                print(f"- {collection.title}")
+        except Exception as e:
+            print(f"Error listing collections: {e}")
+
+    @staticmethod
+    def add_to(collection_name, media_identifiers):
+        global PLEX_SERVER
+        try:
+            collection = PLEX_SERVER.library.collection(collection_name)
+        except:
+            collection = Collection.create(server=PLEX_SERVER, title=collection_name, section=PLEX_SERVER.library.section('Movies'))
+
+        media_items = [resolve_media_by_path_or_title(identifier) for identifier in media_identifiers]
+        for media in media_items:
+            media.addCollection(collection_name)
+            print(f"Media '{media.title}' added to collection '{collection_name}'.")
+
+    @staticmethod
+    def remove_from(collection_name, media_identifiers):
+        global PLEX_SERVER
+        try:
+            collection = PLEX_SERVER.library.collection(collection_name)
+            media_items = [resolve_media_by_path_or_title(identifier) for identifier in media_identifiers]
+
+            for media in media_items:
+                media.removeCollection(collection_name)
+                print(f"Media '{media.title}' removed from collection '{collection_name}'.")
+        except Exception as e:
+            print(f"Error removing media from collection: {e}")
+
+
+###########################################################################################
+#### PLEX MEDIA MANAGEMENT  //   MEDIA-ITEMS MANAGEMENT
+###########################################################################################
+
+class PLEX_Media(PLEX_OBJ_TYPE_ABC):
+    type_str = 'media'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--media] <media_item> [<MEDIA_COMMAND> [..]]", description="Without any <MEDIA_COMMAND> this does the same as with <MEDIA_COMMAND> '--info'.", exit_on_error=False)
+    # help="Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title> or <media_filename>. For more info: --help media",
+    argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
+    argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
+    argparser.add_argument('--delete', action='store_true',           help="Delete a specific media entry by title or file path.")
+    argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
+    argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
+    argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
+    argparser.add_argument('--clear-user-rating', action='store_true',help="Clear user rating for media.")
+    argparser.add_argument('--set-unwatched', action='store_true',    help="Set media as unwatched.")
+    argparser.add_argument('--set-watched', nargs='?',                help="Set media as watched, optionally to provided watched-date. Example: --set-watched <watched-date in format YYYY-MM-DD HH:MM:SS>")
+    argparser.add_argument('--set-view-offset',                       help="Set view offset for media. Example: --set-view-offset <offset_in_milliseconds>")
+    argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        return (resolve_media_by_path_or_title(obj) is not None)
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
+        if obj_args.info:               get_info(obj)
+        if obj_args.refresh:            refresh(obj)
+        if obj_args.delete:             delete(obj)
+        if obj_args.get_watched:        get_watched_status(obj)
+        if obj_args.get_view_offset:    get_view_offset(obj)
+        if obj_args.get_user_rating:    get_user_rating(obj)
+        if obj_args.clear_user_rating:  clear_user_rating(obj)
+        if obj_args.set_unwatched:      set_unwatched_status(obj)
+        if obj_args.set_watched:        set_watched_status(obj, obj_args.set_watched)
+        if obj_args.set_view_offset:    set_view_offset(obj, int(obj_args.set_view_offset))
+        if obj_args.set_user_rating:    set_user_rating(obj, float(obj_args.set_user_rating))
+
+    ############################################################
+    ###### HELPER FUNCTIONS:
+
+    def print_details(media):
+        print(f"\nDetails of '{media.title}':")
+        print(f"- Type: {media.type}")
+        print(f"- Year: {media.year}")
+        print(f"- Rating: {media.rating}")
+        print(f"- Summary: {media.summary}")
+        print(f"- Duration: {media.duration} ms")
+        print(f"- Director(s): {', '.join([d.tag for d in media.directors])}")
+        print(f"- Writer(s): {', '.join([w.tag for w in media.writers])}")
+        print(f"- Genre(s): {', '.join([g.tag for g in media.genres])}")
+        print(f"- Studio: {media.studio}")
+        print(f"- Collection(s): {', '.join([c.tag for c in media.collections])}")
+        print(f"- Content Rating: {media.contentRating}")
+        print(f"- View Count: {media.viewCount}")
+        print(f"- Last Viewed At: {media.lastViewedAt}")
+        print(f"- Added At: {media.addedAt}")
+        print(f"- Updated At: {media.updatedAt}")
+        print(f"- User Rating: {media.userRating}")
+        print(f"- Season Count: {media.seasonCount if hasattr(media, 'seasonCount') else 'N/A'}")
+        print(f"- Episode Count: {media.episodeCount if hasattr(media, 'episodeCount') else 'N/A'}")
+        print(f"- Part Count: {len(media.parts)}")
+        for part in media.parts:
+            print(f"  - Part: {part.title} | Duration: {part.duration} ms | Codec: {part.videoCodec}")
+        print(f"- Labels: {', '.join([l.tag for l in media.labels])}")
+        print(f"- Original Title: {media.originalTitle}")
+        print(f"- Language: {media.language}")
+        print(f"- Country: {media.country}")
+        print(f"- Resolution: {media.width}x{media.height}")
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def get_info(library_name, media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier, library_name)
+            print_details(media)
+        except Exception as e:
+            print(f"Error fetching media details: {e}")
+
+    @staticmethod
+    def refresh(library_name, media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier, library_name)
+            media.refresh()
+            print(f"Refreshed '{media.title}'.")
+        except Exception as e:
+            print(f"Error refreshing media: {e}")
+
+    @staticmethod
+    def delete(library_name, media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier, library_name)
+            media.delete()
+            print(f"Deleted '{media.title}'.")
+        except Exception as e:
+            print(f"Error deleting media: {e}")
+
+    ###### Metadata management ---------------------------------------------------
+
+    @staticmethod
+    def get_watched_status(media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
+            print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
+            print(f"View count: {media.viewCount}")
+        except Exception as e:
+            print(f"Error fetching watched status: {e}")
+
+    @staticmethod
+    def set_watched(media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.markWatched()
+            print(f"Media '{media.title}' marked as watched.")
+        except Exception as e:
+            print(f"Error setting watched status: {e}")
+
+    @staticmethod
+    def set_unwatched(media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.markUnwatched()
+            print(f"Media '{media.title}' marked as unwatched.")
+        except Exception as e:
+            print(f"Error setting unwatched status: {e}")
+
+    @staticmethod
+    def set_watched_date(media_identifier, watched_date):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.markWatched()
+            media.lastViewedAt = watched_date
+            media.save()
+            print(f"Watched date set to {watched_date} for '{media.title}'.")
+        except Exception as e:
+            print(f"Error setting watched date: {e}")
+
+    @staticmethod
+    def set_view_offset(media_identifier, offset):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.updateProgress(viewOffset=offset, viewCount=media.viewCount)
+            print(f"View offset set to {offset} milliseconds for '{media.title}'.")
+        except Exception as e:
+            print(f"Error setting view offset: {e}")
+
+    @staticmethod
+    def get_view_offset(media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
+        except Exception as e:
+            print(f"Error fetching view offset: {e}")
+
+    @staticmethod
+    def set_user_rating(media_identifier, rating):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.userRating = rating
+            media.save()
+            print(f"User rating set to {rating} for '{media.title}'.")
+        except Exception as e:
+            print(f"Error setting user rating: {e}")
+
+    @staticmethod
+    def clear_user_rating(media_identifier):
+        try:
+            media = resolve_media_by_path_or_title(media_identifier)
+            media.userRating = None
+            media.save()
+            print(f"User rating cleared for '{media.title}'.")
+        except Exception as e:
+            print(f"Error clearing user rating: {e}")
+
+
+###########################################################################################
+#### PLEX PLAYLIST MANAGEMENT
+###########################################################################################
+
+class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
+    type_str = 'playlist'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--playlist] <playlist_name> [<PLAYLIST_COMMAND> [..]]", description="Without any PLAYLIST_COMMAND> this does the same as with <PLAYLIST_COMMAND> '--list'.", exit_on_error=False)
+    # help="Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>. For more info: --help playlist",
+    argparser._optionals.title = '// if PLEX_OBJECT is a playlist_name: Available <PLAYLIST_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--list', action='store_true', help="List all items in the playlist.")
+    argparser.add_argument('--delete', action='store_true', help="Delete the specified playlist.")
+    argparser.add_argument('--create-playlist', nargs='+', help="Create a playlist. Example: --create <media1> <media2>...")
+    argparser.add_argument('--add-to', nargs='+', metavar='<MEDIA_ITEM>', help="Add <MEDIA_ITEM> to the specified playlist.")
+    argparser.add_argument('--remove-from', nargs='+', metavar='<MEDIA_ITEM>', help="Remove <MEDIA_ITEM> from the specified playlist.")
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        global PLEX_SERVER
+        return (obj in [ x.title for x in PLEX_SERVER.playlists() ])
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
+        if obj_args.list: PLEX_Playlist.list(obj)
+        elif obj_args.create_playlist: create(obj, obj_args.create)
+        elif obj_args.add_to: update(obj, obj_args.add_to, 'add')
+        elif obj_args.remove_from: update(obj, obj_args.remove_from, 'remove')
+        elif obj_args.delete: PLEX_Playlist.delete(obj)
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def list(playlist_name):
+        global PLEX_SERVER
+        for playlist in PLEX_SERVER.playlists():
+            print(f"Playlist: {playlist.title}")
+
+    @staticmethod
+    def create(playlist_name, media_identifiers):
+        global PLEX_SERVER
+        try:
+            media_items = [resolve_media_by_path_or_title(identifier) for identifier in media_identifiers]
+            Playlist.create(server=PLEX_SERVER, title=playlist_name, items=media_items)
+            print(f"Playlist '{playlist_name}' created successfully.")
+        except Exception as e:
+            print(f"Error creating playlist: {e}")
+
+    @staticmethod
+    def update(playlist_name, media_identifiers, action):
+        global PLEX_SERVER
+        try:
+            playlist = PLEX_SERVER.playlist(playlist_name)
+            media_items = [resolve_media_by_path_or_title(identifier) for identifier in media_identifiers]
+
+            if action == 'add':
+                playlist.addItems(media_items)
+                print(f"Media added to playlist '{playlist_name}'.")
+            elif action == 'remove':
+                playlist.removeItems(media_items)
+                print(f"Media removed from playlist '{playlist_name}'.")
+        except Exception as e:
+            print(f"Error updating playlist: {e}")
+
+    @staticmethod
+    def delete(playlist_name):
+        global PLEX_SERVER
+        try:
+            playlist = PLEX_SERVER.playlist(playlist_name)
+            playlist.delete()
+            print(f"Playlist '{playlist_name}' deleted successfully.")
+        except Exception as e:
+            print(f"Error deleting playlist: {e}")
+
+
+###########################################################################################
+#### PRINT HELP
+###########################################################################################
+
+def main_print_help_of_subparsers(parser):
+    # retrieve subparsers from parser
+    subparsers_actions = [
+        action for action in parser._actions 
+        if isinstance(action, argparse._SubParsersAction) ]
+    # there will probably only be one subparser_action,
+    # but better safe than sorry
+    for subparsers_action in subparsers_actions:
+        # get all subparsers and print help
+        for choice, subparser in subparsers_action.choices.items():
+            print()
+            if DBG: print("Subparser '{}'".format(choice))
+            print(subparser.format_help())
+
+
+def main_print_help(args, remaining_args, main_parser):
+    global GLOBAL_CMD_PARSER
+    if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
+    if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0):
+        if DBG: print( f"{DBGPFX}main_print_help(): standard help output..." )
+        main_parser.print_help() #(sys.stderr)
+        print()
+        GLOBAL_CMD_PARSER.usage = argparse.SUPPRESS;
+        GLOBAL_CMD_PARSER.description = argparse.SUPPRESS;
+        GLOBAL_CMD_PARSER.print_help()
+        print(HELP_SUFFIX)
+        sys.exit(0)
+
+    if args.help is None: return
+
+    match args.help.lower():
+        case 'all':
+            if DBG: print( f"{DBGPFX}main_print_help(): ALL help output..." )
+            main_parser.print_help()
+            print()
+            GLOBAL_CMD_PARSER.usage = argparse.SUPPRESS;
+            GLOBAL_CMD_PARSER.description = argparse.SUPPRESS;
+            GLOBAL_CMD_PARSER.print_help()
+            print(HELP_SUFFIX)
+            for parser in PLEXOBJ[PARSER].values():
+                print("///////////////////////////////////////////////////////////////////////////////");
+                parser.usage = argparse.SUPPRESS;
+                tmpstr = parser.description;
+                parser.description = argparse.SUPPRESS;
+                parser.print_help()
+                if len(tmpstr) > 0: print(tmpstr)
+                main_print_help_of_subparsers(parser)
+                print()
+            sys.exit(0)
+        case 'global' | 'glob' | 'cmd':
+            if DBG: print( f"{DBGPFX}main_print_help(): GLOBAL_CMD_PARSER output..." )
+            GLOBAL_CMD_PARSER.print_help()
+            sys.exit(0)
+
+    if args.help.lower() not in PLEXOBJ[PARSER]: err(1001, f"Unknown parameter of --help '{args.help}'. Call without parameter for more info.")
+
+    if DBG: print( f"{DBGPFX}main_print_help(): parser of '{args.help.lower()}' output..." )
+    PLEXOBJ[PARSER][ args.help.lower() ].print_help()
+    main_print_help_of_subparsers( PLEXOBJ[PARSER][ args.help.lower() ] )
+    sys.exit(0)
+
+
+###########################################################################################
+#### GLOBAL PLEX COMMANDS:
+###########################################################################################
+
+def execute_global_commands(args, cmd_args):
+    global PLEX_SERVER, PLEXPATHS
+    if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
+    init_plex_connection(args)
+    if cmd_args.list_libraries:
+        print( "\nAvailable Libraries:" )
+        [ print( f"- {l.title}") for l in PLEX_SERVER.library.sections() ]
+        #libraries = PLEX_SERVER.library.sections()
+        #for library in libraries:
+        #    print(f"- {library.title}")
+
+###########################################################################################
+#### DO IT
+###########################################################################################
+
+def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
+    if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
+    init_plex_connection(args)
+
+    for obj_type in PLEXOBJ[DETECT]:
+        if PLEXOBJ[DETECT][obj_type](args,obj):
+            if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: Determined type of obj as '{obj_type}'" )
+            return obj_type
+        else:
+            if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: obj is NOT of type '{obj_type}'" )
+    err(1007, f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
+
+def execute_plex_cmd(args, obj, obj_type, obj_args_list):
+    if obj_type not in PLEXOBJ[PARSER]: err(1005, f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    obj_parser = PLEXOBJ[PARSER][obj_type]
+    obj_args = obj_parser.parse_args(obj_args_list)
+    if obj_type not in PLEXOBJ[FN]: err(1006, f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+
+    init_plex_connection(args)
+    if VRB: print( f"{VRBPFX}Executing on [{obj_type}] '{obj}' with {obj_args_list}" )
+    if DBG: print( f"{DBGPFX}obj_args = {obj_args}" )
+    PLEXOBJ[FN][obj_type] (args, obj, obj_args)
+
+def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
+    global GLOBAL_CMD_PARSER
+    # HERE: args.CMD_OR_PLEXOBJECT can be also None (if there was ONLY a global command provided)!
+
+    # STATEMACHINE:
+    #    0: look for PLEXOBJECT: arg needs to be either GLOBAL_CMD /or/ PLEXOBJ !
+    #       0 --> 1 : if PLEXOBJECT found: set obj, oby_type and start collecting obj_args
+    #    1: PLEXOBJECT found: treat global_cmds
+    #       1 --> 2 : if another PLEXOBJECT found while still collecting obj_args for obj of obj_typ
+    #       1 --> 3 : reached END of args (none left), while collecting obj_args for obj of obj_typ
+    state = 0 # means we did not yet find a PLEXOBJECT
+    obj = None
+    obj_type = None
+    obj_args_list = []
+    while len(remaining_args) > 0:
+        arg = remaining_args.pop(0)
+        if DBG: print( f"{DBGPFX}DO-IT LOOP state={state} [{len(remaining_args)} arg='{arg}', remaining_args = {remaining_args}" )
+
+        # Check for GLOBAL_CMD and execute if found:
+        cmd_args = None
+        try: # regardless the state, we check for GLOBAL_CMD and execute if found:
+            cmd_args = GLOBAL_CMD_PARSER.parse_args( [arg] )
+        except Exception as e:
+            if DBG: print( f"{DBGPFX}DO-IT LOOP GLOBAL_CMD_PARSER.parse_args() FAILED: '{e}'" )
+            None
+        if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
+            if DBG: print( f"{DBGPFX}DO-IT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
+            execute_global_commands(args, cmd_args)
+            continue
+
+        # if CMD_OR_PLEXOBJECT is NOT a CMD, check if it is a PLEX_OBJ:
+        new_obj_type = detect_PLEX_OBJ_TYPE(args, arg)
+        if DBG: print( f"{DBGPFX}DO-IT LOOP: PLEX_OBJ_TYPE is '{new_obj_type}' of '{arg}'" )
+
+        if new_obj_type is not None:   # PLEXOBJECT FOUND !
+            match state:
+                case 0:            # new PLEXOBJ -> state = 1 and continue (to look for either parameters, new PLEXOBJ or 
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 0 --> state 1| Found new PLEXOBJECT." )
+                    obj = arg
+                    obj_type = new_obj_type
+                    state = 1
+                    continue
+                case 1:
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 1 --> state 2| Found new PLEXOBJECT while we still treat old PLEXOBJECT." )
+                    state = 2      # new PLEXOBJ found while we have still old PLEXOBJ (not yet executed)
+        else:                      # no PLEXOBJECT and NO GLOBAL_CMD
+            match state:
+                case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
+                    err(1002, f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\nPlease call with --help and correct.")
+                case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
+                    obj_args_list.append(arg)
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
+                    if len(remaining_args) != 0: continue   # only continue in case there are more args left ! (else we need to execute on what we have!)
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 1 --> state 3| as no remaining_args left!" )
+                    state = 3;
+                case _: # state 2 should NEVER happen here as state 2 should only be set IF PLEXOBJECT FOUND and then directly USED below!
+                    err(1003, f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+
+        # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
+        if (state != 2 and state != 3): err(1004, f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+
+        execute_plex_cmd(args, obj, obj_type, obj_args_list)
+        match state:
+            case 3: continue # state 3: there are NO remaining args left -> we are done :)
+            case 2:
+                obj = arg
+                obj_type = new_obj_type
+                obj_args_list = []
+                if len(remaining_args) != 0:
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 2 --> state 1| switching to NEW PLEXOBJ (to parse remaining_args (and collect obj_args_list))" )
+                    state = 1
+                    continue     # if NOT yet done -> continue to collect obj_args_list or find new PLEXOBJ
+                else: # if no args left -> we also execute the last PLEX_OBJ we had found in this loop
+                    if DBG: print( f"{DBGPFX}DO-IT LOOP|state 2 --> state 0| no remaining_args left! -> now executing the NEW PLEXOBJ (default action)" )
+                    execute_plex_cmd(args, obj, obj_type, obj_args_list)
+                    state = 0                                 # it should not matter as we are done now
+
+
+#############################################################################
+#### MAIN PROGRAM
+#############################################################################
+
+def main():
+    global DBG, PLEXOBJ, GLOBAL_CMD_PARSER
+
+    main_parser = argparse.ArgumentParser( description="Plex API Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", exit_on_error=False)
+    main_parser.add_argument('--plex-url', metavar="URL", help="Plex server URL.", default=PLEX_URL)
+    main_parser.add_argument('--plex-token', metavar="TOKEN", help="Plex authentication token.", default=PLEX_TOKEN)
+    main_parser.add_argument('-D', '--debug', action='store_true', help="Turn on debugging", default=DBG)
+    main_parser.add_argument('-V', '--verbose', action='store_true', help="Turn on verbose output", default=DBG)
+    main_parser.add_argument('--help', nargs='?', metavar="WHAT", help="Without WHAT, print this help. --help 'global' prints help on available <GLOBAL_COMMAND>s. --help <OBJECT_TYPE> prints available commands for this OBJECT_TYPE. --help 'all' will print all available --help texts.", default=None, const="default") # default + const necessary in order to be able to detect a simple '--help' without parameter!
+    main_parser.add_argument('CMD_OR_PLEXOBJECT', nargs='?', help="can be a <GLOBAL_COMMAND> or a <PLEX_OBJECT>. For <PLEX_OBJECT> the OBJECT_TYPE will be auto-detected. Or you can force the type of the <PLEX_OBJECT>. For possible choices see below 'available <GLOBAL_COMMAND>s' and 'supported <OBJECT_TYPE>s'.")
+    #main_parser.add_argument('GLOBAL_COMMAND', nargs='?', help="Global command. For possible choices see below 'available <GLOBAL_COMMAND>s'. For more info: --help 'global'")
+    #main_parser.add_argument('PLEX_OBJECT', nargs='?', help="The PLEX object you are interested in. For possible object types see below 'supported <OBJECT_TYPE>s'. The OBJECT_TYPE will be auto-detected. Or you can force the type of the PLEX_OBJECT. For more info: --help <OBJECT_TYPE>")
+
+    # Create subcommands for different object types
+    #subparsers = main_parser.add_subparsers(title="supported <OBJECT_TYPE>s", dest='object_command', prog=None, metavar="", help=None)
+
+    GLOBAL_CMD_PARSER = argparse.ArgumentParser(description=None, add_help=False, usage="my-pex-api.py <GLOBAL_COMMAND>", exit_on_error=False)
+    GLOBAL_CMD_PARSER._positionals.title = ''
+    GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
+    GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
+
+    add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands
+    add_PLEX_OBJ_TYPE( PLEX_Media )      # Media commands
+    add_PLEX_OBJ_TYPE( PLEX_Playlist )   # Playlist commands
+
+    # Parse arguments
+    (args, remaining_args) = main_parser.parse_known_args()
+    # ensuring remaining_args has ALL the potential [GLOBAL_CMDs] + [PLEXOBJECTs] + [PLEXOBJ_CMDS]:
+    if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
+    DBG = args.debug
+    if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+
+    main_print_help(args, remaining_args, main_parser)
+
+    parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args)
+
+    sys.exit(0)
+
+if __name__ == '__main__':
+    main()
