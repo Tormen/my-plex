@@ -8757,10 +8757,10 @@ def show_system_info():
 
         # Print each structure
         for key, count, size_mb in structure_sizes:
-            print(f"    {key:25s}: {count:6,} items, {size_mb:>6.2f} MB")
+            print(f"    {key:25s}: {count:6,} items, {size_mb:>9.2f} MB")
 
         print("  " + "-"*70)
-        print(f"    {'TOTAL':25s}:              {total_size:>6.2f} MB")
+        print(f"    {'TOTAL':25s}: {'':15s}{total_size:>8.2f} MB")
 
     # Libraries information (table with Type column)
     print("\nLIBRARIES:")
@@ -8802,24 +8802,28 @@ def show_system_info():
         for lib_name in PLEX_Library.OBJ_DICT.keys():
             lib_objects = {k: v for k, v in PLEX_Media.OBJ_BY_ID.items() if v.get('library') == lib_name}
             if lib_objects:
-                library_cache_sizes[lib_name] = len(pickle.dumps(lib_objects))
                 library_obj_counts[lib_name] = len(lib_objects)
 
-        # Calculate size of supporting structures and distribute proportionally
+        # Get actual sizes from cache breakdown (instead of re-serializing)
+        obj_by_id_total_size = 0
+        supporting_structures_total_size = 0
+
+        if 'obj_by_id' in CACHE:
+            obj_by_id_total_size = len(pickle.dumps(CACHE['obj_by_id']))
+
+        # Calculate size of supporting structures
+        supporting_structures = ['obj_by_filepath', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes', 'obj_by_library']
+        for struct_name in supporting_structures:
+            if struct_name in CACHE:
+                supporting_structures_total_size += len(pickle.dumps(CACHE[struct_name]))
+
+        # Distribute both obj_by_id AND supporting structures proportionally based on object count
         total_obj_by_id_count = len(PLEX_Media.OBJ_BY_ID)
         if total_obj_by_id_count > 0:
-            # Supporting structures: obj_by_filepath, obj_by_movie, obj_by_show, obj_by_show_episodes, obj_by_library
-            supporting_structures = ['obj_by_filepath', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes', 'obj_by_library']
-            total_supporting_size = 0
-
-            for struct_name in supporting_structures:
-                if struct_name in CACHE:
-                    total_supporting_size += len(pickle.dumps(CACHE[struct_name]))
-
-            # Distribute supporting structure size proportionally based on object count
             for lib_name, obj_count in library_obj_counts.items():
                 proportion = obj_count / total_obj_by_id_count
-                library_cache_sizes[lib_name] += int(total_supporting_size * proportion)
+                # Each library gets its proportional share of obj_by_id AND supporting structures
+                library_cache_sizes[lib_name] = int((obj_by_id_total_size + supporting_structures_total_size) * proportion)
 
         # Print table header
         print(f"  {'Type':<8}  {'Name':<{name_width}}  {'Items':>10}  {'Cache Size':>12}")
@@ -8855,20 +8859,19 @@ def show_system_info():
         total_cache_mb = total_cache_bytes / (1024*1024)
         print(f"  {'TOTAL':<8}  {'':<{name_width}}  {total_items:>10,}  {total_cache_mb:>9.2f} MB")
 
-        # Calculate and show overhead (difference from actual cache file total)
-        # This overhead comes from: cache metadata, non-library structures, and pickle serialization overhead
-        cache_total_from_breakdown = 0
-        for key in ['media_objs', 'library_stats', 'labels_index', 'obj_by_id',
-                    'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
-                    'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
-            if key in CACHE:
-                cache_total_from_breakdown += len(pickle.dumps(CACHE[key])) / (1024*1024)
+        # Calculate overhead from non-library structures (structures not distributed to libraries)
+        # This includes: media_objs, library_stats, labels_index, library_object_counts
+        overhead_structures = ['media_objs', 'library_stats', 'labels_index', 'library_object_counts']
+        overhead_mb = 0
+        for struct_name in overhead_structures:
+            if struct_name in CACHE:
+                overhead_mb += len(pickle.dumps(CACHE[struct_name])) / (1024*1024)
 
-        overhead_mb = cache_total_from_breakdown - total_cache_mb
         if overhead_mb > 0.01:  # Only show if significant
-            print(f"  {'Overhead (from pickle)':<{8+2+name_width}}  {'':<10}  {overhead_mb:>9.2f} MB")
+            print(f"  {'Overhead':<8}  {'(metadata & stats)':<{name_width}}  {'':<10}  {overhead_mb:>9.2f} MB")
             print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}")
-            print(f"  {'CACHE':<8}  {'':<{name_width}}  {'':<10}  {cache_total_from_breakdown:>9.2f} MB")
+            cache_total_with_overhead = total_cache_mb + overhead_mb
+            print(f"  {'CACHE':<8}  {'':<{name_width}}  {'':<10}  {cache_total_with_overhead:>9.2f} MB")
     else:
         print("  No libraries loaded")
         if OFFLINE:
