@@ -2278,12 +2278,42 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
         key_to_remove = keys[0] if len(keys) > 0 else None
         if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
             obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
-            removed_file = obj.get('file')
+            removed_file = file1  # Use the actual file path passed in, not obj['file']
             library = obj.get('library')
             obj_type = obj.get('type')
 
-            # Remove from OBJ_BY_ID
-            del PLEX_Media.OBJ_BY_ID[key_to_remove]
+            # Check if this is a multi-version item (has multiple files in files dict)
+            files_dict = obj.get('files', {})
+            is_multi_version_obj = len(files_dict) > 1
+
+            if is_multi_version_obj:
+                # Multi-version item: only remove the specific file version from files dict
+                # Find and remove the version that matches file1
+                version_to_remove = None
+                for version_str, filepath in list(files_dict.items()):
+                    if filepath == removed_file:
+                        version_to_remove = version_str
+                        break
+
+                if version_to_remove:
+                    del files_dict[version_str]
+                    print(f"Cache updated: removed version '{version_to_remove}' from multi-version entry")
+
+                    # Update the main 'file' field to point to one of the remaining versions
+                    if files_dict:
+                        # Pick the first remaining version
+                        remaining_version, remaining_path = next(iter(files_dict.items()))
+                        obj['file'] = remaining_path
+                        obj['version'] = remaining_version
+
+                    # Don't delete the object, just modified it
+                    return library
+                else:
+                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    return library
+            else:
+                # Single-version item: remove the entire object
+                del PLEX_Media.OBJ_BY_ID[key_to_remove]
 
             # Remove from OBJ_BY_FILEPATH
             if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
@@ -2310,15 +2340,45 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
 
     elif choice == '4':
         # Remove file [2] from cache
-        key_to_remove = keys[1] if len(keys) > 1 else None
+        key_to_remove = keys[1] if len(keys) > 1 else keys[0]  # For multi-version, keys[0] is the original key
         if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
             obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
-            removed_file = obj.get('file')
+            removed_file = file2  # Use the actual file path passed in
             library = obj.get('library')
             obj_type = obj.get('type')
 
-            # Remove from OBJ_BY_ID
-            del PLEX_Media.OBJ_BY_ID[key_to_remove]
+            # Check if this is a multi-version item (has multiple files in files dict)
+            files_dict = obj.get('files', {})
+            is_multi_version_obj = len(files_dict) > 1
+
+            if is_multi_version_obj:
+                # Multi-version item: only remove the specific file version from files dict
+                # Find and remove the version that matches file2
+                version_to_remove = None
+                for version_str, filepath in list(files_dict.items()):
+                    if filepath == removed_file:
+                        version_to_remove = version_str
+                        break
+
+                if version_to_remove:
+                    del files_dict[version_str]
+                    print(f"Cache updated: removed version '{version_to_remove}' from multi-version entry")
+
+                    # Update the main 'file' field to point to one of the remaining versions
+                    if files_dict:
+                        # Pick the first remaining version
+                        remaining_version, remaining_path = next(iter(files_dict.items()))
+                        obj['file'] = remaining_path
+                        obj['version'] = remaining_version
+
+                    # Don't delete the object, just modified it
+                    return library
+                else:
+                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    return library
+            else:
+                # Single-version item: remove the entire object
+                del PLEX_Media.OBJ_BY_ID[key_to_remove]
 
             # Remove from OBJ_BY_FILEPATH
             if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
@@ -7635,6 +7695,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if same_file:
                                     print(f"  NOTE: Both entries point to the SAME file (Plex database corruption)")
                                     print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove the duplicate Plex entry.")
+                                elif is_multi_version:
+                                    print(f"  NOTE: This is a multi-version item (single Plex entry with multiple file versions)")
+                                    print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove a specific version.")
                                 else:
                                     print(f"  5 = Trash [1] and move [2] to library of [1]. Trash \"{file1_folder}\" && mv \"{file2_folder}\" \"{lib1_dir}/\"")
                                     print(f"  6 = Trash [2] and move [1] to library of [2]. Trash \"{file2_folder}\" && mv \"{file1_folder}\" \"{lib2_dir}/\"")
@@ -7795,6 +7858,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     print(f"Options 5 and 6 are not available when both entries point to the same file.")
                                     print(f"This is a Plex database corruption. Use option 3 or 4 to trash the duplicate entry.")
                                     continue
+
+                                # Prevent options 5 and 6 for multi-version items
+                                if choice in ['5', '6'] and is_multi_version:
+                                    print(f"Options 5 and 6 are not available for multi-version items (single Plex entry with multiple file versions).")
+                                    print(f"Use option 3 or 4 to remove a specific version.")
+                                    continue
     
                                 # Handle option 7 only when directories are different
                                 if choice == '7' and not show_rename_option:
@@ -7850,6 +7919,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 else:
                                     # Record non-play actions for later execution
                                     operation_counter += 1
+
+                                    # For multi-version items, store original key instead of synthetic keys
+                                    actual_keys = keys
+                                    if is_multi_version and len(keys) > 0:
+                                        # Get the original key from the first synthetic object
+                                        first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
+                                        original_key = first_obj.get('_original_key')
+                                        if original_key:
+                                            # Store only the original key for cache updates
+                                            actual_keys = [original_key]
+
                                     pending_op = {
                                         'operation_number': operation_counter,
                                         'choice': choice,
@@ -7857,9 +7937,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         'file2': file2,
                                         'remote_host': remote_host,
                                         'all_files': all_files,
-                                        'keys': keys,
+                                        'keys': actual_keys,
                                         'same_file': same_file,
-                                        'dup_key': dup_key
+                                        'dup_key': dup_key,
+                                        'is_multi_version': is_multi_version
                                     }
                                     pending_operations.append(pending_op)
 
@@ -7887,6 +7968,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                         # DEBUG: Confirm we finished processing this duplicate
                         print(f"[DEBUG] Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
+
+                        # Cleanup: Remove synthetic objects from OBJ_BY_ID to prevent them from being saved to cache
+                        if is_multi_version:
+                            for key in keys:
+                                if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                                    del PLEX_Media.OBJ_BY_ID[key]
+                            print(f"[DEBUG] Cleaned up {len(keys)} synthetic objects for multi-version item")
 
                     # After processing all duplicates, prompt user for final action if there are pending operations
                     # Also check if no duplicates were actually processed (all skipped)
