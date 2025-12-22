@@ -3506,12 +3506,18 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             except Exception as e:
                 print(f"✗ Error: {e}")
 
-        # Cache has been updated inline during operation execution
-        # (removed entries for trashed/moved files)
-        # Don't fetch from Plex immediately - database may still be processing
-        # User can run --update-cache manually to sync new items after Plex finishes indexing
+        # Re-sync cache from Plex after scanning to detect files that were deleted/moved
+        # This ensures the cache reflects what Plex now knows after the scan
+        if successfully_scanned_libraries:
+            print(f"\n  Re-syncing cache from Plex for scanned libraries...")
+            for lib_name in successfully_scanned_libraries:
+                try:
+                    update_cache_for_library(lib_name)
+                    print(f"    ✓ Synced: {lib_name}")
+                except Exception as e:
+                    print(f"    ✗ Failed to sync {lib_name}: {e}")
 
-        # Save cache with inline updates
+        # Save cache with updates
         try:
             cache_dict = {
                 'obj_by_id': PLEX_Media.OBJ_BY_ID,
