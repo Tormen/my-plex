@@ -4312,7 +4312,15 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
     elif choice == '4':
         # For multi-version items: trash only the FILE (not the directory)
         # For regular items: trash the entire movie directory
-        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
+
+        # For multi-version items, both files belong to the same Plex entry (keys[0])
+        # For regular items, file2 belongs to keys[1]
+        if is_multi_version:
+            cache_key = keys[0] if keys and len(keys) > 0 else None
+        else:
+            cache_key = keys[1] if keys and len(keys) > 1 else None
+
+        lib2 = PLEX_Media.OBJ_BY_ID[cache_key]['library'] if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
 
         if is_multi_version:
             # Multi-version: trash only the specific file
@@ -4325,15 +4333,15 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
 
         # Capture cache entry before deletion (for undo)
         deleted_cache_entry = None
-        if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID:
-            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[1]])  # Make a copy
+        if cache_key and cache_key in PLEX_Media.OBJ_BY_ID:
+            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[cache_key])  # Make a copy
 
         if operation_log:
             operation_log["files"]["file2"] = {
                 "path": file2,
                 "movie_directory": target_to_trash if not is_multi_version else get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2),
                 "library": lib2,
-                "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
+                "plex_id": PLEX_Media.OBJ_BY_ID[cache_key].get('id') if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None,
                 "cache_entry": deleted_cache_entry,
                 "is_multi_version": is_multi_version
             }
@@ -4343,7 +4351,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
             print(f"Removing Plex entry [2] from database (file will NOT be trashed)")
 
             # Delete from Plex database
-            plex_id = PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None
+            plex_id = PLEX_Media.OBJ_BY_ID[cache_key].get('id') if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
             if plex_id:
                 try:
                     for media in resolve_plex_media_obj(str(plex_id)):
@@ -4362,7 +4370,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     "target": "plex_entry_2",
                     "plex_id": plex_id,
                     "deleted_cache_entry": deleted_cache_entry,
-                    "deleted_cache_key": keys[1] if keys and len(keys) > 1 else None,
+                    "deleted_cache_key": cache_key,
                     "status": "success"
                 })
                 operation_log["result"] = "success"
@@ -4439,7 +4447,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         "original_path": target_to_trash,
                         "trash_path": trash_path,
                         "deleted_cache_entry": deleted_cache_entry,
-                        "deleted_cache_key": keys[1] if keys and len(keys) > 1 else None,
+                        "deleted_cache_key": cache_key,
                         "status": "success"
                     })
                     operation_log["result"] = "success"
@@ -7997,14 +8005,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     # Record non-play actions for later execution
                                     operation_counter += 1
 
-                                    # For multi-version items, store original key instead of synthetic keys
+                                    # For multi-version items, replace synthetic keys with original key
+                                    # This is because synthetic objects are cleaned up after each duplicate
                                     actual_keys = keys
                                     if is_multi_version and len(keys) > 0:
                                         # Get the original key from the first synthetic object
                                         first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
                                         original_key = first_obj.get('_original_key')
                                         if original_key:
-                                            # Store only the original key for cache updates
+                                            # For multi-version, store original key only (not synthetic keys)
+                                            # The file paths in file1/file2 tell us which version to operate on
                                             actual_keys = [original_key]
 
                                     pending_op = {
