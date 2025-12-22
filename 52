@@ -3405,6 +3405,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         keys = pending_op['keys']
         same_file = pending_op['same_file']
         dup_key = pending_op['dup_key']
+        is_multi_version = pending_op.get('is_multi_version', False)
 
         # Display what we're doing
         choice_desc = {
@@ -3430,7 +3431,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                 modified_libraries.add(lib2)
 
         # Execute the operation
-        success = execute_resolution_action(choice, file1, file2, remote_host, all_files, keys, resolution_log_data, operation_number, same_file)
+        success = execute_resolution_action(choice, file1, file2, remote_host, all_files, keys, resolution_log_data, operation_number, same_file, is_multi_version)
 
         if success:
             print(f"  ✓ Operation #{operation_number} completed successfully")
@@ -4107,7 +4108,7 @@ def generate_undo_instructions(choice, operation_log):
 
     return undo_instructions
 
-def execute_resolution_action(choice, file1, file2, remote_host, all_files=None, keys=None, resolution_log_data=None, operation_number=None, same_file=False):
+def execute_resolution_action(choice, file1, file2, remote_host, all_files=None, keys=None, resolution_log_data=None, operation_number=None, same_file=False, is_multi_version=False):
     """Execute the chosen resolution action for duplicate files
 
     Args:
@@ -4120,6 +4121,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         resolution_log_data: Dictionary for JSON logging (optional)
         operation_number: Sequential operation number for logging (optional)
         same_file: True if both entries point to same file (Plex DB corruption)
+        is_multi_version: True if this is a multi-version item (single Plex entry with multiple file versions)
 
     Returns:
         True if operation succeeded, False otherwise
@@ -4152,9 +4154,18 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         return play_media_file(file2, remote_host)
 
     elif choice == '3':
-        # Get movie directory for file [1] (directory directly within library)
+        # For multi-version items: trash only the FILE (not the directory)
+        # For regular items: trash the entire movie directory
         lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
-        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else file1
+
+        if is_multi_version:
+            # Multi-version: trash only the specific file
+            target_to_trash = file1
+            print(f"[DEBUG] Multi-version item: will trash FILE only (not directory): {file1}")
+        else:
+            # Regular item: trash the entire movie directory
+            target_to_trash = get_movie_dir_from_path(file1, lib1) if lib1 else file1
+            movie_dir1 = target_to_trash
 
         # Capture cache entry before deletion (for undo)
         deleted_cache_entry = None
@@ -4164,10 +4175,11 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         if operation_log:
             operation_log["files"]["file1"] = {
                 "path": file1,
-                "movie_directory": movie_dir1,
+                "movie_directory": target_to_trash if not is_multi_version else get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1),
                 "library": lib1,
                 "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
-                "cache_entry": deleted_cache_entry
+                "cache_entry": deleted_cache_entry,
+                "is_multi_version": is_multi_version
             }
 
         if same_file:
@@ -4206,58 +4218,69 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
             return True
         else:
             # Different files - trash file [1]
-            # Check if [vu] marker exists on directory or file [1]
-            vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir1))
-            vu_marker_file = extract_vu_marker(os.path.basename(file1))
+            if is_multi_version:
+                # For multi-version: only trash the specific file, no [vu] marker transfer needed
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving FILE [1] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ File [1] moved to trash successfully.")
+            else:
+                # For regular items: trash entire directory and handle [vu] markers
+                # Check if [vu] marker exists on directory or file [1]
+                vu_marker_dir = extract_vu_marker(os.path.basename(target_to_trash))
+                vu_marker_file = extract_vu_marker(os.path.basename(file1))
 
-            # Add remote SSH notation if path is on mounted volume
-            remote_note = " (remote via SSH)" if movie_dir1.startswith("/Volumes/") else ""
-            print(f"Moving MOVIE DIRECTORY [1] to trash: {movie_dir1}{remote_note}")
-            success, trash_path = move_to_trash(movie_dir1, remote_host)
+                # Add remote SSH notation if path is on mounted volume
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving MOVIE DIRECTORY [1] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ Movie directory [1] moved to trash successfully.")
+
+                    # Transfer [vu] marker from directory [1] to directory [2]
+                    if vu_marker_dir:
+                        dir2_basename = os.path.basename(movie_dir2)
+                        new_dir2_name = dir2_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                        vu_success, renamed_dir = rename_file(movie_dir2, new_dir2_name, remote_host)
+                        if vu_success:
+                            print(f"✓ Directory [2] appended with \"{vu_marker_dir}\" marker")
+                            movie_dir2 = renamed_dir
+                            file2 = os.path.join(renamed_dir, os.path.basename(file2))
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "movie_directory_2",
+                                    "marker": vu_marker_dir,
+                                    "old_path": movie_dir2,
+                                    "new_path": renamed_dir,
+                                    "status": "success"
+                                })
+
+                    # Transfer [vu] marker from file [1] to file [2]
+                    if vu_marker_file:
+                        vu_success, new_file2_path = add_vu_marker_to_file(file2, vu_marker_file, remote_host)
+                        if vu_success and new_file2_path != file2:
+                            print(f"✓ File [2] appended with \"{vu_marker_file}\" marker")
+                            file2 = new_file2_path
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "file2",
+                                    "marker": vu_marker_file,
+                                    "old_path": file2,
+                                    "new_path": new_file2_path,
+                                    "status": "success"
+                                })
+
+            # Handle success/failure for both multi-version and regular items
             if success:
-                print("✓ Movie directory [1] moved to trash successfully.")
-
-                # Transfer [vu] marker from directory [1] to directory [2]
-                if vu_marker_dir:
-                    dir2_basename = os.path.basename(movie_dir2)
-                    new_dir2_name = dir2_basename.rstrip('/') + ' ' + vu_marker_dir
-
-                    vu_success, renamed_dir = rename_file(movie_dir2, new_dir2_name, remote_host)
-                    if vu_success:
-                        print(f"✓ Directory [2] appended with \"{vu_marker_dir}\" marker")
-                        movie_dir2 = renamed_dir
-                        file2 = os.path.join(renamed_dir, os.path.basename(file2))
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "movie_directory_2",
-                                "marker": vu_marker_dir,
-                                "old_path": movie_dir2,
-                                "new_path": renamed_dir,
-                                "status": "success"
-                            })
-
-                # Transfer [vu] marker from file [1] to file [2]
-                if vu_marker_file:
-                    vu_success, new_file2_path = add_vu_marker_to_file(file2, vu_marker_file, remote_host)
-                    if vu_success and new_file2_path != file2:
-                        print(f"✓ File [2] appended with \"{vu_marker_file}\" marker")
-                        file2 = new_file2_path
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "file2",
-                                "marker": vu_marker_file,
-                                "old_path": file2,
-                                "new_path": new_file2_path,
-                                "status": "success"
-                            })
-
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
-                        "target": "movie_directory_1",
-                        "original_path": movie_dir1,
+                        "target": "file_1" if is_multi_version else "movie_directory_1",
+                        "original_path": target_to_trash,
                         "trash_path": trash_path,
                         "deleted_cache_entry": deleted_cache_entry,
                         "deleted_cache_key": keys[0] if keys and len(keys) > 0 else None,
@@ -4273,12 +4296,12 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     resolution_log_data["operations"].append(operation_log)
                 return True
             else:
-                print("✗ Failed to move movie directory [1] to trash.")
+                print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [1] to trash.")
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
-                        "target": "movie_directory_1",
-                        "original_path": movie_dir1,
+                        "target": "file_1" if is_multi_version else "movie_directory_1",
+                        "original_path": target_to_trash,
                         "status": "failed",
                         "error": "Could not move to trash"
                     })
@@ -4287,9 +4310,18 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                 return False
 
     elif choice == '4':
-        # Get movie directory for file [2] (directory directly within library)
+        # For multi-version items: trash only the FILE (not the directory)
+        # For regular items: trash the entire movie directory
         lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
-        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else file2
+
+        if is_multi_version:
+            # Multi-version: trash only the specific file
+            target_to_trash = file2
+            print(f"[DEBUG] Multi-version item: will trash FILE only (not directory): {file2}")
+        else:
+            # Regular item: trash the entire movie directory
+            target_to_trash = get_movie_dir_from_path(file2, lib2) if lib2 else file2
+            movie_dir2 = target_to_trash
 
         # Capture cache entry before deletion (for undo)
         deleted_cache_entry = None
@@ -4299,10 +4331,11 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         if operation_log:
             operation_log["files"]["file2"] = {
                 "path": file2,
-                "movie_directory": movie_dir2,
+                "movie_directory": target_to_trash if not is_multi_version else get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2),
                 "library": lib2,
                 "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
-                "cache_entry": deleted_cache_entry
+                "cache_entry": deleted_cache_entry,
+                "is_multi_version": is_multi_version
             }
 
         if same_file:
@@ -4341,58 +4374,69 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
             return True
         else:
             # Different files - trash file [2]
-            # Check if [vu] marker exists on directory or file [2]
-            vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir2))
-            vu_marker_file = extract_vu_marker(os.path.basename(file2))
+            if is_multi_version:
+                # For multi-version: only trash the specific file, no [vu] marker transfer needed
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving FILE [2] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ File [2] moved to trash successfully.")
+            else:
+                # For regular items: trash entire directory and handle [vu] markers
+                # Check if [vu] marker exists on directory or file [2]
+                vu_marker_dir = extract_vu_marker(os.path.basename(target_to_trash))
+                vu_marker_file = extract_vu_marker(os.path.basename(file2))
 
-            # Add remote SSH notation if path is on mounted volume
-            remote_note = " (remote via SSH)" if movie_dir2.startswith("/Volumes/") else ""
-            print(f"Moving MOVIE DIRECTORY [2] to trash: {movie_dir2}{remote_note}")
-            success, trash_path = move_to_trash(movie_dir2, remote_host)
+                # Add remote SSH notation if path is on mounted volume
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving MOVIE DIRECTORY [2] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ Movie directory [2] moved to trash successfully.")
+
+                    # Transfer [vu] marker from directory [2] to directory [1]
+                    if vu_marker_dir:
+                        dir1_basename = os.path.basename(movie_dir1)
+                        new_dir1_name = dir1_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                        vu_success, renamed_dir = rename_file(movie_dir1, new_dir1_name, remote_host)
+                        if vu_success:
+                            print(f"✓ Directory [1] appended with \"{vu_marker_dir}\" marker")
+                            movie_dir1 = renamed_dir
+                            file1 = os.path.join(renamed_dir, os.path.basename(file1))
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "movie_directory_1",
+                                    "marker": vu_marker_dir,
+                                    "old_path": movie_dir1,
+                                    "new_path": renamed_dir,
+                                    "status": "success"
+                                })
+
+                    # Transfer [vu] marker from file [2] to file [1]
+                    if vu_marker_file:
+                        vu_success, new_file1_path = add_vu_marker_to_file(file1, vu_marker_file, remote_host)
+                        if vu_success and new_file1_path != file1:
+                            print(f"✓ File [1] appended with \"{vu_marker_file}\" marker")
+                            file1 = new_file1_path
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "file1",
+                                    "marker": vu_marker_file,
+                                    "old_path": file1,
+                                    "new_path": new_file1_path,
+                                    "status": "success"
+                                })
+
+            # Handle success/failure for both multi-version and regular items
             if success:
-                print("✓ Movie directory [2] moved to trash successfully.")
-
-                # Transfer [vu] marker from directory [2] to directory [1]
-                if vu_marker_dir:
-                    dir1_basename = os.path.basename(movie_dir1)
-                    new_dir1_name = dir1_basename.rstrip('/') + ' ' + vu_marker_dir
-
-                    vu_success, renamed_dir = rename_file(movie_dir1, new_dir1_name, remote_host)
-                    if vu_success:
-                        print(f"✓ Directory [1] appended with \"{vu_marker_dir}\" marker")
-                        movie_dir1 = renamed_dir
-                        file1 = os.path.join(renamed_dir, os.path.basename(file1))
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "movie_directory_1",
-                                "marker": vu_marker_dir,
-                                "old_path": movie_dir1,
-                                "new_path": renamed_dir,
-                                "status": "success"
-                            })
-
-                # Transfer [vu] marker from file [2] to file [1]
-                if vu_marker_file:
-                    vu_success, new_file1_path = add_vu_marker_to_file(file1, vu_marker_file, remote_host)
-                    if vu_success and new_file1_path != file1:
-                        print(f"✓ File [1] appended with \"{vu_marker_file}\" marker")
-                        file1 = new_file1_path
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "file1",
-                                "marker": vu_marker_file,
-                                "old_path": file1,
-                                "new_path": new_file1_path,
-                                "status": "success"
-                            })
-
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
-                        "target": "movie_directory_2",
-                        "original_path": movie_dir2,
+                        "target": "file_2" if is_multi_version else "movie_directory_2",
+                        "original_path": target_to_trash,
                         "trash_path": trash_path,
                         "deleted_cache_entry": deleted_cache_entry,
                         "deleted_cache_key": keys[1] if keys and len(keys) > 1 else None,
@@ -4408,12 +4452,12 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     resolution_log_data["operations"].append(operation_log)
                 return True
             else:
-                print("✗ Failed to move movie directory [2] to trash.")
+                print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [2] to trash.")
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
-                        "target": "movie_directory_2",
-                        "original_path": movie_dir2,
+                        "target": "file_2" if is_multi_version else "movie_directory_2",
+                        "original_path": target_to_trash,
                         "status": "failed",
                         "error": "Could not move to trash"
                     })
