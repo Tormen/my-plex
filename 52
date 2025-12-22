@@ -4297,6 +4297,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                 return True
             else:
                 print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [1] to trash.")
+
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
@@ -4461,6 +4462,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                 return True
             else:
                 print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [2] to trash.")
+
                 if operation_log:
                     operation_log["actions"].append({
                         "action": "trash",
@@ -6131,6 +6133,48 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         Update PLEX_Library cache objects.
         """
         global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE
+
+        # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
+        # This makes --update-cache self-healing
+        if not OFFLINE and PLEX_Library.OBJ_DICT:
+            print(f"\n{'='*76}")
+            print(f"SCANNING {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO DETECT FILESYSTEM CHANGES")
+            print(f"{'='*76}")
+            import time
+
+            for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
+                try:
+                    lib = PLEX_Library.OBJ_DICT[lib_name]
+                    print(f"  Scanning: {lib_name}...", end=' ', flush=True)
+                    lib.update()
+
+                    # Wait for scan to complete
+                    max_wait = 60  # Maximum 60 seconds
+                    waited = 0
+                    while waited < max_wait:
+                        lib.reload()
+                        if not lib.refreshing:
+                            break
+                        time.sleep(1)
+                        waited += 1
+                        if waited % 5 == 0:
+                            print(".", end='', flush=True)
+
+                    if waited >= max_wait:
+                        print(f" ⚠ (timeout after {max_wait}s)")
+                    else:
+                        print(f" ✓ ({waited}s)")
+                except Exception as e:
+                    print(f"✗ Error: {e}")
+
+            print(f"{'='*76}")
+
+            # Wait for Plex to finish database indexing after scans
+            # Even though lib.refreshing becomes False, Plex may still be indexing
+            print(f"  Waiting for Plex to finish indexing...", end=' ', flush=True)
+            time.sleep(5)  # Give Plex 5 seconds to finish indexing
+            print(f"✓")
+            print(f"{'='*76}\n")
 
         try:
             old_library_stats = CACHE['library_stats']
