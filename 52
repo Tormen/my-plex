@@ -7569,6 +7569,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                 operation_counter = 0
                 pending_operations = []  # Track pending operations (not yet applied)
+                operations_all_succeeded = True  # Track if all applied operations succeeded
 
                 # DEBUG: Show how many duplicates we're going to process
                 total_duplicates = len(sorted_duplicates)
@@ -7789,10 +7790,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
                                     print(f"{'='*139}")
                                     # Apply all pending operations
-                                    apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    if not all_success:
+                                        operations_all_succeeded = False
+                                    num_ops = len(pending_operations)
                                     # Clear pending operations since they've been applied
                                     pending_operations.clear()
-                                    print("\n✓ All pending operations applied successfully.")
+                                    if all_success:
+                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                                    else:
+                                        print(f"\n⚠ Some operations failed. Check output above for details.")
                                     print("Exiting resolution mode.")
                                     return
 
@@ -8034,10 +8041,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
                                     print(f"{'='*139}")
                                     # Apply all pending operations
-                                    apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    if not all_success:
+                                        operations_all_succeeded = False
+                                    num_ops = len(pending_operations)
                                     # Clear pending operations since they've been applied
                                     pending_operations.clear()
-                                    print("\n✓ All pending operations applied successfully.")
+                                    if all_success:
+                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                                    else:
+                                        print(f"\n⚠ Some operations failed. Check output above for details.")
                                     break
                                 elif final_choice == 'Q':
                                     print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
@@ -8089,7 +8102,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) were NOT applied.")
                         print(f"   To apply them, re-run resolution mode and press 'A' to apply and quit.")
                     elif operation_counter > 0:
-                        print(f"\n✓ All {operation_counter} operation(s) were successfully applied.")
+                        if operations_all_succeeded:
+                            print(f"\n✓ All {operation_counter} operation(s) were successfully applied.")
+                        else:
+                            print(f"\n⚠ Some operations failed. Check output above for details.")
                     else:
                         print(f"\n   No operations were performed.")
         else:
