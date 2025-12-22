@@ -7488,6 +7488,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
                         print(f"\n[DEBUG] Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
                         if len(keys) < 2:
+                            print(f"[DEBUG] Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
                             continue  # Skip if not actually duplicates
     
                         # Format the duplicate key for display (add parentheses around year for movies)
@@ -7838,6 +7839,53 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                         # DEBUG: Confirm we finished processing this duplicate
                         print(f"[DEBUG] Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
+
+                    # After processing all duplicates, prompt user for final action if there are pending operations
+                    if pending_operations:
+                        print(f"\n{'='*139}")
+                        print(f"ALL DUPLICATES PROCESSED")
+                        print(f"{'='*139}")
+                        print(f"\nYou have {len(pending_operations)} pending operation(s) that need to be applied.")
+                        print("Choose final action:")
+                        print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                        print("  Q = Quit without applying pending operations")
+
+                        while True:
+                            try:
+                                print("\nYour choice: ", end='', flush=True)
+                                final_choice = readchar.readchar()
+                                print(final_choice)
+
+                                if final_choice == 'A':
+                                    print(f"\n{'='*139}")
+                                    print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
+                                    print(f"{'='*139}")
+                                    # Apply all pending operations
+                                    apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    # Clear pending operations since they've been applied
+                                    pending_operations.clear()
+                                    print("\n✓ All pending operations applied successfully.")
+                                    break
+                                elif final_choice == 'Q':
+                                    print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
+                                    print("Are you sure you want to quit without applying them?")
+                                    print("  Y = Yes, quit without applying")
+                                    print("  N = No, go back")
+                                    print("\nYour choice: ", end='', flush=True)
+                                    confirm = readchar.readchar()
+                                    print(confirm)
+                                    if confirm == 'Y':
+                                        print("Exiting without applying pending operations.")
+                                        break
+                                    else:
+                                        print("Cancelled. Choose A or Q.")
+                                        continue
+                                else:
+                                    print(f"Invalid choice. Please enter A or Q.")
+                                    continue
+                            except KeyboardInterrupt:
+                                print("\n\nInterrupted by user.")
+                                break
 
                 except KeyboardInterrupt:
                     # Ctrl+C pressed during resolution
