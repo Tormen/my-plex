@@ -3357,7 +3357,11 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                     'obj_by_library': PLEX_Media.OBJ_BY_LIBRARY,
                     'obj_by_movie': PLEX_Media.OBJ_BY_MOVIE,
                     'obj_by_show': PLEX_Media.OBJ_BY_SHOW,
-                    'obj_by_show_episodes': PLEX_Media.OBJ_BY_SHOW_EPISODES
+                    'obj_by_show_episodes': PLEX_Media.OBJ_BY_SHOW_EPISODES,
+                    'library_stats': CACHE.get('library_stats', {}),
+                    'labels_index': CACHE.get('labels_index', {}),
+                    'media_objs': CACHE.get('media_objs', {}),
+                    'library_object_counts': CACHE.get('library_object_counts', {})
                 }
                 update_and_save_cache(cache_dict)
             except Exception as e:
@@ -7487,25 +7491,69 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 try:
                     for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
                         print(f"\n[DEBUG] Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
-                        if len(keys) < 2:
+
+                        # Check if this is a multi-version item (single Plex entry with multiple file versions)
+                        is_multi_version = False
+                        multi_version_files = []
+                        if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
+                            files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
+                            if len(files_dict) > 1:
+                                is_multi_version = True
+                                # Store (version_str, filepath) for each version
+                                multi_version_files = [(ver, path) for ver, path in files_dict.items()]
+                                print(f"[DEBUG] This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
+
+                        # Skip only if we have less than 2 keys AND it's not a multi-version item
+                        if len(keys) < 2 and not is_multi_version:
                             print(f"[DEBUG] Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
                             continue  # Skip if not actually duplicates
-    
+
                         # Format the duplicate key for display (add parentheses around year for movies)
                         display_key = dup_key
                         if dup_key.startswith('movie:'):
                             parts = dup_key.split(':')
                             if len(parts) == 3:
                                 display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
-    
+
                         # Display the duplicate pair/group
                         print(f"\n{'='*139}")
                         print(f"RESOLVING DUPLICATES FOR: {display_key}")
                         print(f"{'='*139}")
-    
-                        # Always sort keys by file path for consistent display
-                        # This ensures entries are shown in alphabetical order by file location
-                        keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
+
+                        # For multi-version items, expand into separate virtual entries
+                        # Create temporary objects for each version so the rest of the code can handle them uniformly
+                        if is_multi_version:
+                            print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
+                            print(f"       Expanding into separate entries for resolution.\n")
+
+                            # Get the original object
+                            original_obj = PLEX_Media.OBJ_BY_ID[keys[0]]
+                            original_key = keys[0]
+
+                            # Create synthetic objects for each file version
+                            synthetic_keys = []
+                            for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
+                                # Create a synthetic key
+                                synthetic_key = f"{original_key}_version{idx}"
+
+                                # Create a copy of the original object but with updated file info
+                                synthetic_obj = dict(original_obj)
+                                synthetic_obj['file'] = filepath
+                                synthetic_obj['version'] = version_str
+                                synthetic_obj['_is_synthetic'] = True
+                                synthetic_obj['_original_key'] = original_key
+                                synthetic_obj['_version_index'] = idx
+
+                                # Temporarily add to OBJ_BY_ID so display/resolution code can access it
+                                PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
+                                synthetic_keys.append(synthetic_key)
+
+                            # Replace keys with synthetic keys
+                            keys = synthetic_keys
+                        else:
+                            # Always sort keys by file path for consistent display
+                            # This ensures entries are shown in alphabetical order by file location
+                            keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
     
                         # Check if both files point to the same physical file (Plex database corruption)
                         same_file = False
@@ -7841,7 +7889,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"[DEBUG] Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
 
                     # After processing all duplicates, prompt user for final action if there are pending operations
-                    if pending_operations:
+                    # Also check if no duplicates were actually processed (all skipped)
+                    if not pending_operations and dup_idx == total_duplicates:
+                        # Check if all duplicates were skipped
+                        # This happens when the cache is stale and contains duplicates that were already resolved
+                        print(f"\n{'='*139}")
+                        print(f"ALL DUPLICATES ALREADY RESOLVED")
+                        print(f"{'='*139}")
+                        print(f"\nAll {total_duplicates} duplicate(s) in the list have already been resolved (only 1 item remaining).")
+                        print(f"This means your cache is stale and needs to be refreshed from the Plex server.")
+                        print(f"\nTo update the cache and see only current duplicates, run:")
+                        print(f"  my-plex --update-cache")
+                    elif pending_operations:
                         print(f"\n{'='*139}")
                         print(f"ALL DUPLICATES PROCESSED")
                         print(f"{'='*139}")
