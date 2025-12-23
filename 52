@@ -457,7 +457,7 @@ def load_cache():
             if file_size == 0:
                 print(f"CACHE file '{CACHE_FILE}' is EMPTY (0 bytes) - needs to be rebuilt.")
                 print(f"Please run: my-plex --update-cache")
-                CACHE = EMPTY_CACHE
+                CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
             else:
                 try:
                     with open(CACHE_FILE, 'rb') as f:
@@ -474,13 +474,13 @@ def load_cache():
                     print(f"CACHE file '{CACHE_FILE}' is CORRUPTED - needs to be rebuilt.")
                     print(f"Error: {e}")
                     print(f"Please run: my-plex --update-cache")
-                    CACHE = EMPTY_CACHE
+                    CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
         else:
             # Don't show error if we're doing a force rebuild (cache was intentionally moved aside)
             if not FORCE_REBUILD:
                 print(f"CACHE file '{CACHE_FILE}' is MISSING - needs to be built.")
                 print(f"Please run: my-plex --update-cache")
-            CACHE = EMPTY_CACHE
+            CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
     CACHE_LOADED = True
 
 def update_and_save_cache(obj_dict):
@@ -5900,15 +5900,18 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # if current_timestamp != old_timestamp or old_totalItemsCount != current_totalItemsCount:
         if not FORCE_CACHE_UPDATE:
+            # Show the actual timestamps so user can see the difference
             print(f"Updating cache for library '{title}' (newer timestamp found on Plex server)")
+            print(f"  Cache timestamp: {old_timestamp}")
+            print(f"  Plex timestamp:  {current_timestamp}")
         if DBG:
             if current_timestamp != old_timestamp:
-                print(f"{DBGPFX}Library '{title}': Different last-updated timestamp (before:{old_timestamp}, now:{current_timestamp}).")
+                print(f"{DBGPFX}Library '{title}': Different last-updated timestamp (cache:{old_timestamp}, plex:{current_timestamp}).")
             if not counts_match:
                 if lib_type == 'Show':
-                    print(f"{DBGPFX}Library '{title}': Different show count (before:{old_show_count}, now:{current_itemsCount}).")
+                    print(f"{DBGPFX}Library '{title}': Different show count (cache:{old_show_count}, plex:{current_itemsCount}).")
                 else:
-                    print(f"{DBGPFX}Library '{title}': Different movie count (before:{old_movie_count}, now:{current_itemsCount}).")
+                    print(f"{DBGPFX}Library '{title}': Different movie count (cache:{old_movie_count}, plex:{current_itemsCount}).")
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
@@ -6190,6 +6193,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             old_library_stats = EMPTY_LIBRARY_STATS
             if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): No library_stats in cache, using EMPTY template")
 
+        # Get library stats BEFORE scanning (for comparison)
+        # Will be refreshed AFTER scans if --update-cache is used
         current_library_stats = get_library_stats()
         if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Got current library_stats from Plex")
 
@@ -6606,6 +6611,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
+
+        # If we triggered library scans (via --update-cache), refresh library stats to get updated timestamps
+        if FORCE_CACHE_UPDATE and not OFFLINE:
+            current_library_stats = get_library_stats()
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Refreshed library_stats after scans")
 
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
