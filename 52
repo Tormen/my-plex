@@ -47,6 +47,44 @@ import requests.exceptions
 ###########################################################################################
 #### CONFIG FILE SUPPORT
 ###########################################################################################
+#
+# THREE-TIER CONFIGURATION ARCHITECTURE:
+# ======================================
+# The configuration system has a complete three-tier architecture with the following priority:
+#
+#   1. CONFIG_DEFAULTS (lowest priority)
+#      - Defined in the CONFIG_DEFAULTS dictionary below
+#      - Provides sensible defaults for all configuration variables
+#      - PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values that must be configured
+#
+#   2. CONFIG_FILE (medium priority)
+#      - Loaded from ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
+#      - Values in config file override CONFIG_DEFAULTS
+#      - Use --config-file | -C to specify a custom config file path
+#      - Use --create with --config-file to generate a config file with default values
+#
+#   3. COMMAND-LINE (highest priority)
+#      - Command-line arguments override both CONFIG_FILE and CONFIG_DEFAULTS
+#      - Examples: --plex-url, --plex-token, --debug, --verbose, etc.
+#
+# VALIDATION & DEBUG:
+# ===================
+# - All configuration variables are validated after command-line parsing (see validation in main())
+# - Use --debug (-D) to see all configuration variables and their final values
+# - Invalid configurations will result in clear error messages and exit code 1
+#
+# ALL GLOBAL VARIABLES:
+# =====================
+# All global variables (lines ~224-321) are initialized from CONFIG_DEFAULTS to ensure
+# a single source of truth. This includes:
+# - Plex connection parameters (PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, PLEX_TIMEOUT)
+# - Path configuration (ALTERNATIVE_ROOTPATHS, CACHE_FILE, LOCK_FILE, DUPLICATE_FILE)
+# - Output configuration (FORMAT, LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX)
+# - Debug/verbose flags (DBG, VRB, VERYVRB, DEEPDBG, OFFLINE)
+# - Cache configuration (FORCE_CACHE_UPDATE, FORCE_REBUILD, READ_ONLY_MODE, CACHE_CHECKPOINT_INTERVAL)
+# - Performance tuning (MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS)
+#
+###########################################################################################
 
 # Config file search paths (in order of precedence)
 CONFIG_FILE_PATHS = [
@@ -57,20 +95,41 @@ CONFIG_FILE_PATHS = [
 
 # Default configuration values
 CONFIG_DEFAULTS = {
+    # Plex Server Configuration
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
     'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
     'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
     'PLEX_XML_URL': '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >',
     'PLEX_TIMEOUT': 42,
+
+    # Output Configuration
     'DUPLICATE_FILE': '/tmp/duplicates',
     'FORMAT': 'tsv_labeled',
+    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
+    'DBGPFX': ' ~~~ ',
+    'PRINTPFX': ' >>> ',
+    'VRBPFX': '  >> ',
+
+    # Debug/Verbose Flags
+    'DBG': False,
+    'VRB': False,
+    'VERYVRB': False,
+    'DEEPDBG': False,
+    'OFFLINE': False,
+
+    # Cache Configuration
     'CACHE_FILE': '.plex_media_cache.pkl',
     'LOCK_FILE': '.plex_media_cache.lock',
+    'CACHE_CHECKPOINT_INTERVAL': 100,
+    'FORCE_CACHE_UPDATE': False,
+    'FORCE_REBUILD': False,
+    'READ_ONLY_MODE': False,
+
+    # Performance Configuration
     'MAX_PARALLEL_WORKERS': 4,
     'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
     'LIBRARY_START_DELAY': 1.0,
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
-    'CACHE_CHECKPOINT_INTERVAL': 100,
 }
 
 def load_config_file(config_file=None):
@@ -175,10 +234,37 @@ def generate_default_config():
         f"PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}",
         "",
         "###############################################################################",
+        "# Output Prefixes",
+        "###############################################################################",
+        "",
+        f"DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}",
+        f"PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}",
+        f"VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}",
+        "",
+        "###############################################################################",
+        "# Debug/Verbose Flags",
+        "###############################################################################",
+        "",
+        f"DBG = {CONFIG_DEFAULTS['DBG']}",
+        f"VRB = {CONFIG_DEFAULTS['VRB']}",
+        f"VERYVRB = {CONFIG_DEFAULTS['VERYVRB']}",
+        f"DEEPDBG = {CONFIG_DEFAULTS['DEEPDBG']}",
+        f"OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}",
+        "",
+        "###############################################################################",
+        "# Cache Flags",
+        "###############################################################################",
+        "",
+        f"FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}",
+        f"FORCE_REBUILD = {CONFIG_DEFAULTS['FORCE_REBUILD']}",
+        f"READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}",
+        "",
+        "###############################################################################",
         "# Output Configuration",
         "###############################################################################",
         "",
         f"FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}",
+        f"LIST_MEDIA_DEFAULT_TSV_FORMAT = {CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']!r}",
         f"DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}",
         ""
     ]
@@ -187,6 +273,8 @@ def generate_default_config():
 ###########################################################################################
 #### GLOBAL VARIABLES FROM CONFIG FILE
 ###########################################################################################
+# All configuration variables are initialized from CONFIG_DEFAULTS
+# and can be overridden by config file and command-line arguments
 
 # Allows to provide LIST of Tuples of alternative PATHNAMES (useful e.g. in case of symlinking)
 # The tuples will be used BOTH-WAYs: if LEFT is matching a pathname, it is replaced (swapped) with RIGHT
@@ -197,29 +285,28 @@ def generate_default_config():
 # We will use to translate to alternative path version that will e.g. also be searched, also be printed.
 #
 # !!! All paths here need to be ABOLUTE PATHs !!!
-ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/') ]
+ALTERNATIVE_ROOTPATHS = CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']
 
 # Plex Server credentials
-#PLEX_HOSTNAME = 'ada'
-#PLEX_USER = ''
-#PLEX_PASSWORD = ''
-PLEX_URL = None # 'https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400'
-PLEX_TOKEN = None # '-BfszsiY4sVQ16fsa7yv'
-PLEX_XML_URL = 'https://192-168-192-252.ad306dcb6f424ce79b8a2c5d9fc34193.plex.direct:32400/library/metadata/23317?checkFiles=1&includeAllConcerts=1&includeBandwidths=1&includeChapters=1&includeChildren=1&includeConcerts=1&includeExtras=1&includeFields=1&includeGeolocation=1&includeLoudnessRamps=1&includeMarkers=1&includeOnDeck=1&includePopularLeaves=1&includePreferences=1&includeRelated=1&includeRelatedCount=1&includeReviews=1&includeStations=1&X-Plex-Token=zzBNn3VjLar1-mpzkQR4'  # If set, this will override PLEX_URL and PLEX_TOKEN
-PLEX_TIMEOUT = 42
+# Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
+# They must be set via config file or command-line arguments
+PLEX_URL = None  # Will be set from config file or command-line if provided
+PLEX_TOKEN = None  # Will be set from config file or command-line if provided
+PLEX_XML_URL = None  # Will be set from config file or command-line if provided
+PLEX_TIMEOUT = CONFIG_DEFAULTS['PLEX_TIMEOUT']
 #
 # HOW TO GET THE TOKEN ?
 #FROM: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
-# https://app.plex.tv/desktop/#!/server/a3bc2487eddf87b6c8eb5b971ff40b6e3b9bb36f/details?key=%2Flibrary%2Fmetadata%2F94997&context=home%3Ahub.continueWatching~0~1
+# https://app.plex.tv/desktop/#!/server/SERVER_ID/details?key=%2Flibrary%2Fmetadata%2FITEM_ID&context=home%3Ahub.continueWatching~0~1
 # You can also set PLEX_XML_URL to the full URL from "View XML" and it will automatically extract the server URL and token
 
 # Here we will list all duplicates that were found during scanning of library
 # (that happens for caching purposes):
-DUPLICATE_FILE = '/tmp/duplicates'
+DUPLICATE_FILE = CONFIG_DEFAULTS['DUPLICATE_FILE']
 
-#FORMAT = 'tsv_labeled' # default format
-FORMAT = 'tsv_labeled' # default format
-LIST_MEDIA_DEFAULT_TSV_FORMAT = '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}'
+# Default output format for --list-media
+FORMAT = CONFIG_DEFAULTS['FORMAT']
+LIST_MEDIA_DEFAULT_TSV_FORMAT = CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']
 
 ###########################################################################################
 #### GLOBAL VARIABLES SET+USED BY THIS SCRIPT:
@@ -227,58 +314,63 @@ LIST_MEDIA_DEFAULT_TSV_FORMAT = '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION
 
 US=os.path.basename(__file__); # "my-plex-api.py"
 
-DBG=False # default value for DBG
-VRB=False # default value for VRB
-VERYVRB=False # default value for VERYVRB
-DEEPDBG=False # default value for DEEPDBG
-DBGPFX   = " ~~~ "
-PRINTPFX = " >>> "
-VRBPFX   = "  >> "
+# Debug and verbose flags - initialized from CONFIG_DEFAULTS
+DBG = CONFIG_DEFAULTS['DBG']
+VRB = CONFIG_DEFAULTS['VRB']
+VERYVRB = CONFIG_DEFAULTS['VERYVRB']
+DEEPDBG = CONFIG_DEFAULTS['DEEPDBG']
+DBGPFX = CONFIG_DEFAULTS['DBGPFX']
+PRINTPFX = CONFIG_DEFAULTS['PRINTPFX']
+VRBPFX = CONFIG_DEFAULTS['VRBPFX']
 #DEEPDBG uses DBGPFX
 #VERYVRB uses VRBPFX
-OFFLINE = False
+OFFLINE = CONFIG_DEFAULTS['OFFLINE']
 
+# Cache configuration - initialized from CONFIG_DEFAULTS
 # can be absolute path /or/ a relative path to the current users home directory
-CACHE = {} # global cache object - content written to / read from CACHE_FILE
-CACHE_FILE = '.plex_media_cache.pkl'
-LOCK_FILE = '.plex_media_cache.lock'
-CACHE_LOADED = False # to know if we already loaded the cache
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'itemsCount':{}, 'totalDuration':{}, 'totalStorage':{} }
-EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
-FORCE_CACHE_UPDATE = False
-FORCE_REBUILD = False  # When True with --update-cache, rebuilds from scratch instead of incremental update
-READ_ONLY_MODE = False  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
+CACHE_FILE = CONFIG_DEFAULTS['CACHE_FILE']
+LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
+FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
+FORCE_REBUILD = CONFIG_DEFAULTS['FORCE_REBUILD']  # When True with --update-cache, rebuilds from scratch instead of incremental update
+READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
 # Lower values = more stable but slower, Higher values = faster but may trigger Plex throttling
 # Recommended: 1 for slow/remote servers, 2 for normal servers, 4 for fast local servers
-MAX_PARALLEL_WORKERS = 4  # Conservative default to avoid Plex server throttling
+MAX_PARALLEL_WORKERS = CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']  # Conservative default to avoid Plex server throttling
 
 # Rate limiting configuration to prevent Plex server throttling
 # Random delay added between processing each item during cache rebuilds
 # Format: (min_seconds, max_seconds) - actual delay is randomly chosen in this range
 # Examples: (0.1, 1.0) = 100ms-1s, (0.05, 0.3) = 50ms-300ms, (0.5, 2.0) = 500ms-2s
-RATE_LIMIT_DELAY_RANGE = (0.1, 0.7)  # Conservative: 100ms-1000ms random delay per item
+RATE_LIMIT_DELAY_RANGE = CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']  # Conservative: 100ms-1000ms random delay per item
 
 # Delay between starting each library worker (in seconds)
 # Prevents all workers from hitting Plex server simultaneously
 # Recommended: 0.5s for balanced, 0.0s to disable, 1.0s for very conservative
-LIBRARY_START_DELAY = 1.0  # 500ms stagger between library starts
+LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']  # 500ms stagger between library starts
 
 # Retry configuration for Plex API operations (exponential backoff)
 # List of wait times (in seconds) between retry attempts
 # Total attempts = len(list) + 1 (first attempt + retries)
 # Example: [5, 30, 60] = 4 total attempts with 5s, 30s, 60s waits
 # Current: [5, 30, 60, 120, 240, 480] = 7 attempts, max ~15min total wait
-PLEX_RETRY_DELAYS = [5, 30, 60, 120, 240, 480]  # Exponential: 5s, 30s, 1m, 2m, 4m, 8m
+PLEX_RETRY_DELAYS = CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']  # Exponential: 5s, 30s, 1m, 2m, 4m, 8m
 
 # Checkpoint configuration for cache rebuilds
 # Saves cache periodically during rebuild to prevent total loss on failure
 # Cache is saved after processing N items (0 = disabled, save only at end)
 # Recommended: 100-500 items for large libraries
 # During rebuild, cache is saved as '.plex_media_cache.pkl.partial' and renamed on completion
-CACHE_CHECKPOINT_INTERVAL = 100  # Save cache every 100 media files (movies/episodes)
+CACHE_CHECKPOINT_INTERVAL = CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']  # Save cache every 100 media files (movies/episodes)
+
+#######################################################
+
+CACHE = {} # global cache object - content written to / read from CACHE_FILE
+CACHE_LOADED = False # to know if we already loaded the cache
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'itemsCount':{}, 'totalDuration':{}, 'totalStorage':{} }
+EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
 PLEX_SERVER = None # server instance will be set where needed
@@ -10075,6 +10167,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_REBUILD, FORMAT, OFFLINE, READ_ONLY_MODE
     global ALTERNATIVE_ROOTPATHS, PLEX_TIMEOUT, DUPLICATE_FILE, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
+    global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX
 
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
@@ -10233,6 +10326,75 @@ def main():
     # ensuring remaining_args has ALL the potential [GLOBAL_CMDs] + [PLEXOBJECTs] + [PLEXOBJ_CMDS]:
     if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
     if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+
+    # DEBUG: Print all configuration variables after command-line parsing
+    if DBG:
+        print(f"\n{DBGPFX}=== ALL CONFIGURATION VARIABLES ===")
+        for key in sorted(CONFIG_DEFAULTS.keys()):
+            value = globals().get(key, '<not set>')
+            # Mask sensitive values
+            if key in ['PLEX_TOKEN']:
+                display_value = f"{'*' * len(value)}" if value and value != '<not set>' else value
+            elif key in ['PLEX_URL', 'PLEX_XML_URL'] and value and isinstance(value, str) and 'plex.direct' in value:
+                # Show abbreviated URL for security
+                display_value = value[:50] + '...' if len(value) > 50 else value
+            else:
+                display_value = value
+            print(f"{DBGPFX}  {key} = {display_value!r}")
+        print(f"{DBGPFX}=== END CONFIGURATION VARIABLES ===\n")
+
+    # Validation: Check that all required variables have sensible values
+    validation_errors = []
+
+    # Check required Plex connection parameters
+    if not PLEX_URL or PLEX_URL.startswith('< PLEASE CONFIGURE'):
+        validation_errors.append("PLEX_URL not configured")
+    if not PLEX_TOKEN or PLEX_TOKEN.startswith('< PLEASE CONFIGURE'):
+        validation_errors.append("PLEX_TOKEN not configured")
+
+    # Check numeric ranges
+    if PLEX_TIMEOUT <= 0:
+        validation_errors.append(f"PLEX_TIMEOUT must be > 0 (got {PLEX_TIMEOUT})")
+    if CACHE_CHECKPOINT_INTERVAL < 0:
+        validation_errors.append(f"CACHE_CHECKPOINT_INTERVAL must be >= 0 (got {CACHE_CHECKPOINT_INTERVAL})")
+    if MAX_PARALLEL_WORKERS < 1:
+        validation_errors.append(f"MAX_PARALLEL_WORKERS must be >= 1 (got {MAX_PARALLEL_WORKERS})")
+    if LIBRARY_START_DELAY < 0:
+        validation_errors.append(f"LIBRARY_START_DELAY must be >= 0 (got {LIBRARY_START_DELAY})")
+
+    # Check tuple values
+    if not isinstance(RATE_LIMIT_DELAY_RANGE, tuple) or len(RATE_LIMIT_DELAY_RANGE) != 2:
+        validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be a tuple of 2 values (got {RATE_LIMIT_DELAY_RANGE!r})")
+    elif RATE_LIMIT_DELAY_RANGE[0] < 0 or RATE_LIMIT_DELAY_RANGE[1] < RATE_LIMIT_DELAY_RANGE[0]:
+        validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be (min, max) with min >= 0 and max >= min (got {RATE_LIMIT_DELAY_RANGE!r})")
+
+    # Check list values
+    if not isinstance(PLEX_RETRY_DELAYS, list):
+        validation_errors.append(f"PLEX_RETRY_DELAYS must be a list (got {type(PLEX_RETRY_DELAYS).__name__})")
+    elif not all(isinstance(d, (int, float)) and d > 0 for d in PLEX_RETRY_DELAYS):
+        validation_errors.append(f"PLEX_RETRY_DELAYS must be a list of positive numbers (got {PLEX_RETRY_DELAYS!r})")
+
+    if not isinstance(ALTERNATIVE_ROOTPATHS, list):
+        validation_errors.append(f"ALTERNATIVE_ROOTPATHS must be a list (got {type(ALTERNATIVE_ROOTPATHS).__name__})")
+
+    # Check path values
+    if not CACHE_FILE:
+        validation_errors.append("CACHE_FILE must be set")
+    if not LOCK_FILE:
+        validation_errors.append("LOCK_FILE must be set")
+    if not DUPLICATE_FILE:
+        validation_errors.append("DUPLICATE_FILE must be set")
+
+    # Check format values
+    if FORMAT not in ['pretty', 'tsv', 'tsv_labeled'] and not (isinstance(FORMAT, str) and '{' in FORMAT):
+        validation_errors.append(f"FORMAT must be 'pretty', 'tsv', 'tsv_labeled', or a format string (got {FORMAT!r})")
+
+    if validation_errors:
+        print(f"\n⚠  Configuration Validation Errors:", file=sys.stderr)
+        for error in validation_errors:
+            print(f"  - {error}", file=sys.stderr)
+        print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
+        sys.exit(1)
 
     init(args)
 

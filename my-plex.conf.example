@@ -22,8 +22,10 @@ PLEX_XML_URL = '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >'
 # PLEX_TOKEN = 'zzBNn3VjLar1-mpzkQR4'
 # PLEX_XML_URL = 'https://192-168-192-252.ad306dcb6f424ce79b8a2c5d9fc34193.plex.direct:32400/library/metadata/23317?X-Plex-Token=zzBNn3VjLar1-mpzkQR4'
 
-# How to get the token:
-# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+# HOW TO GET THE TOKEN?
+# FROM: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+# https://app.plex.tv/desktop/#!/server/SERVER_ID/details?key=%2Flibrary%2Fmetadata%2FITEM_ID&context=home%3Ahub.continueWatching~0~1
+# You can also set PLEX_XML_URL to the full URL from "View XML" and it will automatically extract the server URL and token
 
 ###############################################################################
 # Path Configuration
@@ -81,5 +83,53 @@ PLEX_TIMEOUT = 42
 # Default output format for --list-media
 FORMAT = 'tsv_labeled'
 
+# Default TSV format string for --list-media
+LIST_MEDIA_DEFAULT_TSV_FORMAT = '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}'
+
 # File to write duplicate list during cache scanning
 DUPLICATE_FILE = '/tmp/duplicates'
+
+###############################################################################
+# Output Prefixes
+###############################################################################
+
+# Prefix for debug output
+DBGPFX = ' ~~~ '
+
+# Prefix for print output
+PRINTPFX = ' >>> '
+
+# Prefix for verbose output
+VRBPFX = '  >> '
+
+###############################################################################
+# Debug/Verbose Flags
+###############################################################################
+
+# Debug mode - enables detailed debug output
+DBG = False
+
+# Verbose mode - enables verbose output
+VRB = False
+
+# Very verbose mode - enables very detailed output
+VERYVRB = False
+
+# Deep debug mode - enables extremely detailed debug output
+DEEPDBG = False
+
+# Offline mode - don't connect to Plex server
+OFFLINE = False
+
+###############################################################################
+# Cache Flags
+###############################################################################
+
+# Force cache update even if cache is fresh
+FORCE_CACHE_UPDATE = False
+
+# Force complete cache rebuild
+FORCE_REBUILD = False
+
+# Read-only mode - don't update cache
+READ_ONLY_MODE = False
