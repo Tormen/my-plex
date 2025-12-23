@@ -312,8 +312,6 @@ LIST_MEDIA_DEFAULT_TSV_FORMAT = CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']
 #### GLOBAL VARIABLES SET+USED BY THIS SCRIPT:
 ###########################################################################################
 
-US=os.path.basename(__file__); # "my-plex-api.py"
-
 # Debug and verbose flags - initialized from CONFIG_DEFAULTS
 DBG = CONFIG_DEFAULTS['DBG']
 VRB = CONFIG_DEFAULTS['VRB']
@@ -322,8 +320,6 @@ DEEPDBG = CONFIG_DEFAULTS['DEEPDBG']
 DBGPFX = CONFIG_DEFAULTS['DBGPFX']
 PRINTPFX = CONFIG_DEFAULTS['PRINTPFX']
 VRBPFX = CONFIG_DEFAULTS['VRBPFX']
-#DEEPDBG uses DBGPFX
-#VERYVRB uses VRBPFX
 OFFLINE = CONFIG_DEFAULTS['OFFLINE']
 
 # Cache configuration - initialized from CONFIG_DEFAULTS
@@ -367,8 +363,11 @@ CACHE_CHECKPOINT_INTERVAL = CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']  # Save
 
 #######################################################
 
+US=os.path.basename(__file__); # "my-plex-api.py"
+
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
+
 EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'itemsCount':{}, 'totalDuration':{}, 'totalStorage':{} }
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
 
