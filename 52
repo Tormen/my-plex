@@ -484,7 +484,7 @@ def load_cache():
     CACHE_LOADED = True
 
 def update_and_save_cache(obj_dict):
-    global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE
+    global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
     # Update global CACHE
     CACHE.update( obj_dict )
 
@@ -492,6 +492,18 @@ def update_and_save_cache(obj_dict):
     if READ_ONLY_MODE:
         if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
         return
+
+    # If we triggered library scans (via --update-cache), update timestamps to current time
+    # RIGHT BEFORE saving to disk - this ensures timestamps match when cache is actually saved
+    if FORCE_CACHE_UPDATE and not OFFLINE and 'library_stats' in CACHE:
+        from datetime import datetime
+        current_time = datetime.now().replace(microsecond=0)
+        # Update all library timestamps to current time
+        if 'updatedAt' in CACHE['library_stats']:
+            for lib_name in CACHE['library_stats']['updatedAt'].keys():
+                CACHE['library_stats']['updatedAt'][lib_name] = current_time
+            if VRB:
+                print(f"{VRBPFX}Updated library timestamps to current time (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Save the current cache to file
     # During cache rebuild, we already hold the lock, so don't try to acquire it again
@@ -6618,25 +6630,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
 
-        # If we triggered library scans (via --update-cache), update timestamps to current time
-        # We just completed scanning all libraries, so the cache is current as of now
-        # Cache timestamps should always be >= Plex timestamps (never earlier)
-        if FORCE_CACHE_UPDATE and not OFFLINE:
-            from datetime import datetime
-            current_time = datetime.now().replace(microsecond=0)
-            # Update all library timestamps to current time
-            for lib_name in current_library_stats.get('updatedAt', {}).keys():
-                current_library_stats['updatedAt'][lib_name] = current_time
-            if VRB:
-                print(f"{VRBPFX}Updated library timestamps to current time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-        # Store current_library_stats as class variable so PLEX_Media.init() can access it
-        PLEX_Library.current_library_stats = current_library_stats
-        if VRB:
-            print(f"{VRBPFX}Stored library timestamps for SUMMARY:")
-            for lib, ts in sorted(current_library_stats.get('updatedAt', {}).items()):
-                print(f"{VRBPFX}  {lib:25} {ts}")
-
+        # Save cache to disk (timestamps will be updated to current time inside update_and_save_cache())
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
             'obj_by_movie': PLEX_Media.OBJ_BY_MOVIE,
@@ -6645,6 +6639,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             'library_stats': current_library_stats,
             'library_object_counts': updated_library_object_counts  # Cache this to avoid recalculation
         })
+
+        # Store current_library_stats (now with updated timestamps) for SUMMARY display
+        # The timestamps in CACHE['library_stats'] were just updated to current time
+        PLEX_Library.current_library_stats = CACHE.get('library_stats', current_library_stats)
 
         # Count objects by type
         total_count = len(PLEX_Media.OBJ_BY_ID)
