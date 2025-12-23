@@ -6612,10 +6612,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
 
-        # If we triggered library scans (via --update-cache), refresh library stats to get updated timestamps
+        # If we triggered library scans (via --update-cache), wait a bit more and refresh library stats to get updated timestamps
+        # Plex updates timestamps asynchronously after processing completes, so we need to wait
         if FORCE_CACHE_UPDATE and not OFFLINE:
+            import time
+            if VRB: print(f"{VRBPFX}Waiting for Plex to finalize library timestamps...")
+            time.sleep(10)  # Wait 10 seconds for Plex to update all library timestamps
             current_library_stats = get_library_stats()
-            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Refreshed library_stats after scans")
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Refreshed library_stats after processing complete")
 
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
@@ -7195,25 +7199,30 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         other_libs.append((lib_name, change_parts))
 
-                # Combine all libraries for table output
+                # Combine all libraries for table output (with timestamps)
                 all_libs = []
                 for lib_name, change_parts in show_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    all_libs.append(('Show', lib_name, status))
+                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    all_libs.append(('Show', lib_name, status, timestamp))
                 for lib_name, change_parts in movie_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    all_libs.append(('Movie', lib_name, status))
+                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    all_libs.append(('Movie', lib_name, status, timestamp))
                 for lib_name, change_parts in other_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    all_libs.append(('Other', lib_name, status))
+                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    all_libs.append(('Other', lib_name, status, timestamp))
 
                 # Print table header
-                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status'}")
-                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*40}")
+                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<40} | {'Updated'}")
+                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*40}-+-{'-'*19}")
 
                 # Print table rows
-                for lib_type, lib_name, status in all_libs:
-                    print(f"{lib_type:<12} | {lib_name:<20} | {status}")
+                for lib_type, lib_name, status, timestamp in all_libs:
+                    # Format timestamp for display
+                    ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
+                    print(f"{lib_type:<12} | {lib_name:<20} | {status:<40} | {ts_str}")
 
                 # Keep these for backwards compatibility but make them empty
                 if False and show_libs:
