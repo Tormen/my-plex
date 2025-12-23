@@ -6621,6 +6621,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             current_library_stats = get_library_stats()
             if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Refreshed library_stats after processing complete")
 
+        # Store current_library_stats as class variable so PLEX_Media.init() can access it
+        PLEX_Library.current_library_stats = current_library_stats
+
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
             'obj_by_movie': PLEX_Media.OBJ_BY_MOVIE,
@@ -7200,18 +7203,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         other_libs.append((lib_name, change_parts))
 
                 # Combine all libraries for table output (with timestamps)
+                # Get timestamps from PLEX_Library.current_library_stats (set by update_cache())
+                library_timestamps = {}
+                if hasattr(PLEX_Library, 'current_library_stats') and PLEX_Library.current_library_stats:
+                    library_timestamps = PLEX_Library.current_library_stats.get('updatedAt', {})
+
                 all_libs = []
                 for lib_name, change_parts in show_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
                     all_libs.append(('Show', lib_name, status, timestamp))
                 for lib_name, change_parts in movie_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
                     all_libs.append(('Movie', lib_name, status, timestamp))
                 for lib_name, change_parts in other_libs:
                     status = ', '.join(change_parts) if change_parts else 'no changes'
-                    timestamp = current_library_stats['updatedAt'].get(lib_name, 'N/A')
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
                     all_libs.append(('Other', lib_name, status, timestamp))
 
                 # Print table header
