@@ -9379,11 +9379,14 @@ def verify_cache():
     max_name = max(len(name) for name in PLEX_Library.OBJ_DICT.keys()) if PLEX_Library.OBJ_DICT else 12
     name_width = min(max(max_name, 12), 40)
 
-    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>20}  {'PLEX Server':>20}  {'Status'}")
-    print(f"{'-'*name_width}  {'-'*8}  {'-'*20}  {'-'*20}  {'-'*10}")
+    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>20}  {'PLEX Server':>20}  {'Updated':<19}  {'Status'}")
+    print(f"{'-'*name_width}  {'-'*8}  {'-'*20}  {'-'*20}  {'-'*19}  {'-'*10}")
 
     # Track inconsistencies for detailed reporting
     inconsistencies = []
+
+    # Get library timestamps from cache
+    library_timestamps = CACHE.get('library_stats', {}).get('updatedAt', {})
 
     try:
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
@@ -9497,8 +9500,15 @@ def verify_cache():
             else:
                 status = "✓ OK"
 
+            # Get timestamp for this library
+            timestamp = library_timestamps.get(lib_name, 'N/A')
+            if timestamp != 'N/A':
+                timestamp_str = str(timestamp)
+            else:
+                timestamp_str = 'N/A'
+
             # Print line immediately as we process each library
-            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>20}  {server_str:>20}  {status}", flush=True)
+            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>20}  {server_str:>20}  {timestamp_str:<19}  {status}", flush=True)
 
             # In -V mode: immediately show differences inline after the library row
             if VRB and not VERYVRB and lib_name in inconsistencies:
