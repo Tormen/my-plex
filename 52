@@ -484,9 +484,14 @@ def load_cache():
     CACHE_LOADED = True
 
 def update_and_save_cache(obj_dict):
-    global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE
+    global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE
     # Update global CACHE
     CACHE.update( obj_dict )
+
+    # In read-only mode (--info, --verify-cache), don't save to disk
+    if READ_ONLY_MODE:
+        if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
+        return
 
     # Save the current cache to file
     # During cache rebuild, we already hold the lock, so don't try to acquire it again
@@ -6137,6 +6142,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
         # This makes --update-cache self-healing
         # ONLY scan when --update-cache is explicitly used (not during --list-duplicates, etc.)
+        if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}")
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT:
             print(f"\n{'='*76}")
             print(f"SCANNING {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO DETECT FILESYSTEM CHANGES")
