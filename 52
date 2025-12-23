@@ -493,17 +493,18 @@ def update_and_save_cache(obj_dict):
         if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
         return
 
-    # If we triggered library scans (via --update-cache), update timestamps to current time
+    # If we triggered library scans (via --update-cache), update timestamps to current time + 30s buffer
     # RIGHT BEFORE saving to disk - this ensures timestamps match when cache is actually saved
+    # The 30s buffer accounts for Plex's asynchronous timestamp updates
     if FORCE_CACHE_UPDATE and not OFFLINE and 'library_stats' in CACHE:
-        from datetime import datetime
-        current_time = datetime.now().replace(microsecond=0)
-        # Update all library timestamps to current time
+        from datetime import datetime, timedelta
+        current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
+        # Update all library timestamps to current time + buffer
         if 'updatedAt' in CACHE['library_stats']:
             for lib_name in CACHE['library_stats']['updatedAt'].keys():
                 CACHE['library_stats']['updatedAt'][lib_name] = current_time
             if VRB:
-                print(f"{VRBPFX}Updated library timestamps to current time (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{VRBPFX}Updated library timestamps to current time +30s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Save the current cache to file
     # During cache rebuild, we already hold the lock, so don't try to acquire it again
