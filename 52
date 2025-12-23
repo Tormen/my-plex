@@ -6136,7 +6136,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
         # This makes --update-cache self-healing
-        if not OFFLINE and PLEX_Library.OBJ_DICT:
+        # ONLY scan when --update-cache is explicitly used (not during --list-duplicates, etc.)
+        if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT:
             print(f"\n{'='*76}")
             print(f"SCANNING {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO DETECT FILESYSTEM CHANGES")
             print(f"{'='*76}")
