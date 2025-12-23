@@ -6612,17 +6612,23 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
 
-        # If we triggered library scans (via --update-cache), wait a bit more and refresh library stats to get updated timestamps
-        # Plex updates timestamps asynchronously after processing completes, so we need to wait
+        # If we triggered library scans (via --update-cache), update timestamps to current time
+        # Plex updates timestamps asynchronously and unpredictably, so we use current time for accuracy
         if FORCE_CACHE_UPDATE and not OFFLINE:
-            import time
-            if VRB: print(f"{VRBPFX}Waiting for Plex to finalize library timestamps...")
-            time.sleep(10)  # Wait 10 seconds for Plex to update all library timestamps
-            current_library_stats = get_library_stats()
-            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Refreshed library_stats after processing complete")
+            from datetime import datetime
+            current_time = datetime.now().replace(microsecond=0)  # Remove microseconds for cleaner display
+            # Update all library timestamps to current time since we just scanned them
+            for lib_name in current_library_stats.get('updatedAt', {}).keys():
+                current_library_stats['updatedAt'][lib_name] = current_time
+            if VRB:
+                print(f"{VRBPFX}Updated library timestamps to current time after scans: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Store current_library_stats as class variable so PLEX_Media.init() can access it
         PLEX_Library.current_library_stats = current_library_stats
+        if VRB:
+            print(f"{VRBPFX}Stored library timestamps for SUMMARY:")
+            for lib, ts in sorted(current_library_stats.get('updatedAt', {}).items()):
+                print(f"{VRBPFX}  {lib:25} {ts}")
 
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
