@@ -1,0 +1,85 @@
+# my-plex configuration file
+# Copy this file to ~/.my-plex.conf (or /etc/my-plex.conf, /usr/local/etc/my-plex.conf)
+# and customize the values below.
+#
+# All variables are optional except PLEX_URL/PLEX_TOKEN or PLEX_XML_URL
+# Values here override the built-in defaults
+# Command-line arguments override config file values
+
+###############################################################################
+# Plex Server Configuration (REQUIRED)
+###############################################################################
+
+# Option 1: Set PLEX_URL and PLEX_TOKEN separately
+PLEX_URL = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
+PLEX_TOKEN = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
+
+# Option 2: Use PLEX_XML_URL (from "View XML" in Plex)
+PLEX_XML_URL = '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >'
+
+# Examples (uncomment and customize):
+# PLEX_URL = 'https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400'
+# PLEX_TOKEN = 'zzBNn3VjLar1-mpzkQR4'
+# PLEX_XML_URL = 'https://192-168-192-252.ad306dcb6f424ce79b8a2c5d9fc34193.plex.direct:32400/library/metadata/23317?X-Plex-Token=zzBNn3VjLar1-mpzkQR4'
+
+# How to get the token:
+# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+
+###############################################################################
+# Path Configuration
+###############################################################################
+
+# Alternative root paths for file path translations (useful for symlinks/mounts)
+# Format: list of tuples (original_path, alternative_path)
+# Paths work bidirectionally - either can be swapped for the other
+ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
+
+###############################################################################
+# Cache Configuration
+###############################################################################
+
+# Cache file location (relative to home directory or absolute path)
+CACHE_FILE = '.plex_media_cache.pkl'
+LOCK_FILE = '.plex_media_cache.lock'
+
+# Save cache checkpoint every N items during rebuild (0 = only save at end)
+CACHE_CHECKPOINT_INTERVAL = 100
+
+###############################################################################
+# Performance Configuration
+###############################################################################
+
+# Maximum number of libraries to process in parallel during --update-cache
+# Lower = more stable but slower, Higher = faster but may trigger Plex throttling
+# Recommended: 1 for remote servers, 2 for normal servers, 4 for fast local servers
+MAX_PARALLEL_WORKERS = 4
+
+# Random delay range (min, max) in seconds between processing each item
+# Prevents Plex server throttling during cache rebuilds
+# Format: (min_seconds, max_seconds)
+RATE_LIMIT_DELAY_RANGE = (0.1, 0.7)
+
+# Delay in seconds between starting each library worker
+# Prevents all workers from hitting Plex server simultaneously
+LIBRARY_START_DELAY = 1.0
+
+###############################################################################
+# Retry Configuration
+###############################################################################
+
+# Retry delays (in seconds) for failed Plex API operations (exponential backoff)
+# Total attempts = len(list) + 1
+PLEX_RETRY_DELAYS = [5, 30, 60, 120, 240, 480]
+
+# Plex API timeout in seconds
+PLEX_TIMEOUT = 42
+
+###############################################################################
+# Output Configuration
+###############################################################################
+
+# Default output format for --list-media
+FORMAT = 'tsv_labeled'
+
+# File to write duplicate list during cache scanning
+DUPLICATE_FILE = '/tmp/duplicates'

@@ -45,6 +45,146 @@ import requests.exceptions
 
 
 ###########################################################################################
+#### CONFIG FILE SUPPORT
+###########################################################################################
+
+# Config file search paths (in order of precedence)
+CONFIG_FILE_PATHS = [
+    os.path.expanduser('~/.my-plex.conf'),
+    '/etc/my-plex.conf',
+    '/usr/local/etc/my-plex.conf'
+]
+
+# Default configuration values
+CONFIG_DEFAULTS = {
+    'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
+    'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_XML_URL': '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >',
+    'PLEX_TIMEOUT': 42,
+    'DUPLICATE_FILE': '/tmp/duplicates',
+    'FORMAT': 'tsv_labeled',
+    'CACHE_FILE': '.plex_media_cache.pkl',
+    'LOCK_FILE': '.plex_media_cache.lock',
+    'MAX_PARALLEL_WORKERS': 4,
+    'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
+    'LIBRARY_START_DELAY': 1.0,
+    'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
+    'CACHE_CHECKPOINT_INTERVAL': 100,
+}
+
+def load_config_file(config_file=None):
+    """Load configuration from file if it exists.
+
+    Args:
+        config_file: Optional path to config file. If None, searches default locations.
+
+    Returns:
+        dict: Configuration dictionary
+    """
+    config = {}
+
+    # Determine which config file to use
+    if config_file:
+        config_paths = [config_file]
+    else:
+        config_paths = CONFIG_FILE_PATHS
+
+    # Find first existing config file
+    config_file_used = None
+    for path in config_paths:
+        if os.path.exists(path):
+            config_file_used = path
+            break
+
+    if not config_file_used:
+        return config
+
+    # Load config file
+    try:
+        with open(config_file_used, 'r') as f:
+            exec_globals = {}
+            exec(f.read(), exec_globals)
+
+            # Extract config variables (uppercase names)
+            for key, value in exec_globals.items():
+                if key.isupper() and not key.startswith('_'):
+                    config[key] = value
+
+        # Note: Can't use VRB here as it's not set yet during early config loading
+    except Exception as e:
+        print(f"Warning: Failed to load config file '{config_file_used}': {e}", file=sys.stderr)
+
+    return config
+
+def generate_default_config():
+    """Generate a default config file content with all available options.
+
+    Returns:
+        str: Config file content
+    """
+    config_lines = [
+        "# my-plex configuration file",
+        "# Customize the values below as needed.",
+        "#",
+        "# All variables are optional except PLEX_URL/PLEX_TOKEN or PLEX_XML_URL",
+        "# Values here override the built-in defaults",
+        "# Command-line arguments override config file values",
+        "",
+        "###############################################################################",
+        "# Plex Server Configuration (REQUIRED)",
+        "###############################################################################",
+        "",
+        "# Option 1: Set PLEX_URL and PLEX_TOKEN separately",
+        f"PLEX_URL = {CONFIG_DEFAULTS['PLEX_URL']!r}",
+        f"PLEX_TOKEN = {CONFIG_DEFAULTS['PLEX_TOKEN']!r}",
+        "",
+        "# Option 2: Use PLEX_XML_URL (from \"View XML\" in Plex)",
+        f"PLEX_XML_URL = {CONFIG_DEFAULTS['PLEX_XML_URL']!r}",
+        "",
+        "# How to get the token:",
+        "# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/",
+        "",
+        "###############################################################################",
+        "# Path Configuration",
+        "###############################################################################",
+        "",
+        f"ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}",
+        "",
+        "###############################################################################",
+        "# Cache Configuration",
+        "###############################################################################",
+        "",
+        f"CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}",
+        f"LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}",
+        f"CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}",
+        "",
+        "###############################################################################",
+        "# Performance Configuration",
+        "###############################################################################",
+        "",
+        f"MAX_PARALLEL_WORKERS = {CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']}",
+        f"RATE_LIMIT_DELAY_RANGE = {CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']!r}",
+        f"LIBRARY_START_DELAY = {CONFIG_DEFAULTS['LIBRARY_START_DELAY']}",
+        "",
+        "###############################################################################",
+        "# Retry Configuration",
+        "###############################################################################",
+        "",
+        f"PLEX_RETRY_DELAYS = {CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']!r}",
+        f"PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}",
+        "",
+        "###############################################################################",
+        "# Output Configuration",
+        "###############################################################################",
+        "",
+        f"FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}",
+        f"DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}",
+        ""
+    ]
+    return '\n'.join(config_lines)
+
+###########################################################################################
 #### GLOBAL VARIABLES FROM CONFIG FILE
 ###########################################################################################
 
@@ -9934,8 +10074,63 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 
 def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_REBUILD, FORMAT, OFFLINE, READ_ONLY_MODE
+    global ALTERNATIVE_ROOTPATHS, PLEX_TIMEOUT, DUPLICATE_FILE, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
 
-    main_parser = argparse.ArgumentParser( description="Plex API Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False)
+    # Early argument parsing for --config-file option
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)})")
+    config_parser.add_argument('--create', action='store_true', help="Create config file with default values (requires --config-file)")
+    config_args, _ = config_parser.parse_known_args()
+
+    # Handle --create option
+    if config_args.create:
+        if not config_args.config_file:
+            print("Error: --create requires --config-file <path> to be specified", file=sys.stderr)
+            sys.exit(1)
+
+        # Create config file with defaults
+        try:
+            # Read the example config file from the same directory as the script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            example_file = os.path.join(script_dir, 'my-plex.conf.example')
+
+            if os.path.exists(example_file):
+                with open(example_file, 'r') as f:
+                    config_content = f.read()
+            else:
+                # Fallback: generate config content from defaults
+                config_content = generate_default_config()
+
+            # Write to specified file
+            with open(config_args.config_file, 'w') as f:
+                f.write(config_content)
+
+            print(f"Created config file: {config_args.config_file}")
+            print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error creating config file '{config_args.config_file}': {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Load configuration file
+    loaded_config = load_config_file(config_args.config_file)
+
+    # Apply config values (config file overrides defaults, command-line will override config file)
+    for key in CONFIG_DEFAULTS:
+        value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+
+        # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+        if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+            # Check if value is the placeholder or if it's been configured
+            if value and not value.startswith('< PLEASE CONFIGURE'):
+                globals()[key] = value
+            else:
+                # Keep the None default from the variable initialization
+                pass
+        else:
+            globals()[key] = value
+
+    main_parser = argparse.ArgumentParser( description="Plex API Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
     main_parser.add_argument('-O', '--offline', action='store_true', help=f"Only work on cached information - defaults to '{OFFLINE}'", default=OFFLINE)
     main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}. Example: https://SERVER:32400/library/metadata/12345?X-Plex-Token=TOKEN", default=PLEX_XML_URL)
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
