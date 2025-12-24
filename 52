@@ -6319,6 +6319,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries}: Processing '{title}'...")
 
+        # Print progress to terminal (always, not just in verbose mode)
+        if FORCE_CACHE_UPDATE:
+            print(f"  [{library_idx}/{total_libraries}] {title}...", end=' ', flush=True)
+
         # Differentiate between Movie and Show libraries
         completed = True  # Assume completed unless function returns False
         try:
@@ -6528,12 +6532,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         delta_parts.append(f"{'/'.join(parts)} movies")
 
             # Print completion message with delta (always show status)
-            lib_label = f"library '{display_title}'"
             if delta_parts:
                 delta_str = ", ".join(delta_parts)
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: completed ({format_elapsed_time(total_elapsed)}): {delta_str}")
+                print(f"✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
             else:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: completed ({format_elapsed_time(total_elapsed)}): no changes")
+                print(f"✓ ({format_elapsed_time(total_elapsed)}) no changes")
 
         return True  # Library was updated
 
@@ -6691,7 +6694,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         max_workers = min(MAX_PARALLEL_WORKERS, total_libraries) if total_libraries > 1 else 1
 
         if FORCE_CACHE_UPDATE and max_workers > 1:
-            if VRB: print(f"{VRBPFX}Processing {total_libraries} libraries in parallel with {max_workers} workers...")
+            print(f"\nProcessing {total_libraries} libraries in parallel with {max_workers} workers...")
+            print(f"{'='*76}")
 
             # Thread-safe counter for library index
             library_counter = threading.Lock()
@@ -6964,6 +6968,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     # Use os._exit() to bypass Python cleanup that might hang
                     # This is safe here because we've already saved the checkpoint
                     os._exit(0)
+
+            # Print separator after parallel processing completes
+            if FORCE_CACHE_UPDATE:
+                print(f"{'='*76}")
         else:
             # Sequential processing (original behavior for non-rebuild or single library)
             library_idx = 0
