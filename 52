@@ -1655,6 +1655,65 @@ def get_alternative_paths(path, including_path=False, path_2nd=None):
     return res
 
 
+def resolve_filepath_with_alternatives(filepath, remote_host=None):
+    """Resolve filepath by checking all alternative paths and returning the first existing one.
+
+    This function checks:
+    1. The original filepath
+    2. All alternative paths generated from ALTERNATIVE_ROOTPATHS
+
+    Args:
+        filepath: Original file path to check
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        tuple: (resolved_path, exists)
+            - resolved_path: First existing path found, or original filepath if none exist
+            - exists: True if file was found, False otherwise
+
+    Example:
+        If ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
+        And filepath = '/j2/watch.v/movie.mp4' doesn't exist
+        But '/Volumes/2/watch.v/movie.mp4' does exist
+        Returns: ('/Volumes/2/watch.v/movie.mp4', True)
+    """
+    # Get list of paths to check: [original, alternative1, alternative2, ...]
+    paths_to_check = get_alternative_paths(filepath, including_path=True)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}resolve_filepath_with_alternatives: checking {len(paths_to_check)} paths for '{filepath}'")
+
+    # Check each path for existence
+    for check_path in paths_to_check:
+        if check_path is None:
+            continue
+
+        if remote_host:
+            # Remote check
+            escaped_path = escape_path_for_ssh(check_path)
+            cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_path}\\\" ] && echo EXISTS || echo NOTFOUND\""
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip() == 'EXISTS':
+                if DEEPDBG:
+                    print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
+                return (check_path, True)
+            elif DEEPDBG:
+                print(f"{DBGPFX}  -> not found on remote {remote_host}: {check_path}")
+        else:
+            # Local check
+            if os.path.exists(check_path):
+                if DEEPDBG:
+                    print(f"{DBGPFX}  -> FOUND locally: {check_path}")
+                return (check_path, True)
+            elif DEEPDBG:
+                print(f"{DBGPFX}  -> not found locally: {check_path}")
+
+    # None of the paths exist - return original filepath with exists=False
+    if DEEPDBG:
+        print(f"{DBGPFX}  -> NOT FOUND in any alternative path, returning original: {filepath}")
+    return (filepath, False)
+
+
 def get_library_stats(supported=True):
     """Collect statical information about libraries: 'updatedAt' --> lastUpdated timestamp
        RETURNS dict: {
@@ -1953,6 +2012,10 @@ def escape_path_for_ssh(filepath):
 def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
     """Central function for all file operations - executes check + action in ONE SSH call
 
+    This function automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    For example, if /j2/watch.v/file.mp4 doesn't exist but /Volumes/2/watch.v/file.mp4 does,
+    it will automatically use the existing alternative path.
+
     Args:
         operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE'
         filepath: Full path to source file
@@ -1961,12 +2024,28 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             - trash_dir: For TRASH operation
             - new_filename: For RENAME operation
             - dest_path: For MOVE operation
+            - skip_alternatives: Set to True to skip alternative path resolution (default: False)
 
     Returns:
-        For CHECK: (exists: bool, None)
+        For CHECK: (exists: bool, resolved_filepath or None)
         For TRASH/RENAME/MOVE: (success: bool, result_path: str or None)
         For REMOVE: (success: bool, None)
     """
+    # Resolve filepath using alternative paths (unless explicitly disabled)
+    skip_alternatives = kwargs.get('skip_alternatives', False)
+    if not skip_alternatives:
+        resolved_filepath, exists = resolve_filepath_with_alternatives(filepath, remote_host)
+        if operation == 'CHECK':
+            # For CHECK operation, return the resolved path if it exists
+            return (exists, resolved_filepath if exists else None)
+        elif exists:
+            # For other operations, use the resolved path if it exists
+            filepath = resolved_filepath
+            if DEEPDBG:
+                print(f"{DBGPFX}Using resolved filepath for {operation}: {filepath}")
+        # If file doesn't exist in any alternative path, continue with original filepath
+        # (the operation will likely fail, but that's expected behavior)
+
     if remote_host:
         escaped_src = escape_path_for_ssh(filepath)
 
@@ -2146,18 +2225,50 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 def check_file_exists(filepath, remote_host=None):
     """Check if file exists locally or on remote host
 
+    This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
+    For example, if ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]:
+    - Checking '/j2/watch.v/movie.mp4' will also check '/Volumes/2/watch.v/movie.mp4'
+    - Returns True if the file exists in ANY of the alternative locations
+
     Args:
         filepath: Full path to file
         remote_host: SSH host for remote operations, None for local
 
     Returns:
-        True if file exists, False otherwise
+        True if file exists (in original or any alternative path), False otherwise
     """
     exists, _ = my_plex_file_operation('CHECK', filepath, remote_host)
     return exists
 
+
+def check_file_exists_with_path(filepath, remote_host=None):
+    """Check if file exists and return the resolved path
+
+    This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
+    Unlike check_file_exists(), this returns both the existence status AND the resolved path.
+
+    Args:
+        filepath: Full path to file
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        tuple: (exists: bool, resolved_path: str or None)
+            - exists: True if file was found in any alternative location
+            - resolved_path: The actual path where file was found, or None if not found
+
+    Example:
+        exists, path = check_file_exists_with_path('/j2/watch.v/movie.mp4')
+        if exists:
+            print(f"File found at: {path}")  # Might print: /Volumes/2/watch.v/movie.mp4
+    """
+    return my_plex_file_operation('CHECK', filepath, remote_host)
+
+
 def move_to_trash(filepath, remote_host=None):
     """Move file to trash directory
+
+    Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    If filepath doesn't exist but an alternative path does, uses the alternative.
 
     Args:
         filepath: Full path to file to trash
@@ -2170,6 +2281,9 @@ def move_to_trash(filepath, remote_host=None):
 
 def rename_file(src_path, new_filename, remote_host=None):
     """Rename file in the same directory
+
+    Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    If src_path doesn't exist but an alternative path does, uses the alternative.
 
     Args:
         src_path: Full path to source file
@@ -2230,6 +2344,10 @@ def add_vu_marker_to_file(file_path, vu_marker, remote_host=None):
 
 def move_file(src_path, dst_dir, remote_host=None):
     """Move file from src to dst directory
+
+    NOTE: This function uses its own SSH implementation and does NOT automatically
+    resolve alternative paths. For operations that need alternative path support,
+    use my_plex_file_operation() directly.
 
     Args:
         src_path: Full path to source file
