@@ -105,7 +105,7 @@ CONFIG_DEFAULTS = {
     # Output Configuration
     'DUPLICATE_FILE': '/tmp/duplicates',
     'FORMAT': 'tsv_labeled',
-    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
+    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{ORIGINALTITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
     'DBGPFX': ' ~~~ ',
     'PRINTPFX': ' >>> ',
     'VRBPFX': '  >> ',
@@ -5452,6 +5452,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
     item_ratingKey = item.ratingKey
     obj_title = obj.title
+    obj_originalTitle = plex_retry_operation(lambda: obj.originalTitle if hasattr(obj, 'originalTitle') else None, context=f"{key} originalTitle", library=library.title)
     lib_title = library.title  # For retry messages
 
     # PERFORMANCE OPTIMIZATION: During cache rebuild, skip duplicate detection and timestamp checks
@@ -5560,7 +5561,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
     obj_summary = plex_retry_operation(lambda: obj.summary, context=f"{key} {ctx_title} summary", library=lib_title)
     obj_year = plex_retry_operation(lambda: getattr(obj, 'year', 0), context=f"{key} {ctx_title} year", library=lib_title)
 
-    val={ 'file':filepath, 'files':{version: filepath}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'year':obj_year, 'library':library.title,
+    val={ 'file':filepath, 'files':{version: filepath}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
           'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
           'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
           'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
@@ -10568,7 +10569,13 @@ def main():
         print(f"\n⚠  Configuration Validation Errors:", file=sys.stderr)
         for error in validation_errors:
             print(f"  - {error}", file=sys.stderr)
-        print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
+
+        # Check if this is a missing config file issue
+        if not loaded_config and ("PLEX_URL not configured" in validation_errors or "PLEX_TOKEN not configured" in validation_errors):
+            print(f"\nNo configuration file found. Create one with:", file=sys.stderr)
+            print(f"  my-plex --create --config-file ~/.my-plex.conf", file=sys.stderr)
+        else:
+            print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
         sys.exit(1)
 
     init(args)
