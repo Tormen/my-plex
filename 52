@@ -132,9 +132,8 @@ CONFIG_DEFAULTS = {
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
 }
 
-# Example configuration file template
-# Placeholders will be filled in by generate_default_config()
-EXAMPLE_CONF = """# my-plex configuration file
+# Example configuration file template using f-string with CONFIG_DEFAULTS
+EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # IMPORTANT: All values below are commented out and show the built-in defaults.
 # Uncomment and modify only the values you want to change.
@@ -152,11 +151,11 @@ EXAMPLE_CONF = """# my-plex configuration file
 ###############################################################################
 
 # Option 1: Set PLEX_URL and PLEX_TOKEN separately
-# PLEX_URL = {PLEX_URL}
-# PLEX_TOKEN = {PLEX_TOKEN}
+# PLEX_URL = {CONFIG_DEFAULTS['PLEX_URL']!r}
+# PLEX_TOKEN = {CONFIG_DEFAULTS['PLEX_TOKEN']!r}
 
 # Option 2: Use PLEX_XML_URL (from "View XML" in Plex)
-# PLEX_XML_URL = {PLEX_XML_URL}
+# PLEX_XML_URL = {CONFIG_DEFAULTS['PLEX_XML_URL']!r}
 
 # Example with real values (uncomment and customize):
 # PLEX_URL = 'https://192-168-1-100.abc123.plex.direct:32400'
@@ -172,59 +171,59 @@ EXAMPLE_CONF = """# my-plex configuration file
 ###############################################################################
 
 # Alternative root paths for symlinks or different mount points
-# ALTERNATIVE_ROOTPATHS = {ALTERNATIVE_ROOTPATHS}
+# ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}
 
 ###############################################################################
 # Output Configuration
 ###############################################################################
 
-# FORMAT = {FORMAT}
-# LIST_MEDIA_DEFAULT_TSV_FORMAT = {LIST_MEDIA_DEFAULT_TSV_FORMAT}
-# DUPLICATE_FILE = {DUPLICATE_FILE}
-# DBGPFX = {DBGPFX}
-# PRINTPFX = {PRINTPFX}
-# VRBPFX = {VRBPFX}
+# FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}
+# LIST_MEDIA_DEFAULT_TSV_FORMAT = {CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']!r}
+# DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}
+# DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}
+# PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}
+# VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}
 
 ###############################################################################
 # Cache Configuration
 ###############################################################################
 
-# CACHE_FILE = {CACHE_FILE}
-# LOCK_FILE = {LOCK_FILE}
-# CACHE_CHECKPOINT_INTERVAL = {CACHE_CHECKPOINT_INTERVAL}
+# CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}
+# LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}
+# CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}
 
 ###############################################################################
 # Performance Configuration
 ###############################################################################
 
-# MAX_PARALLEL_WORKERS = {MAX_PARALLEL_WORKERS}
-# RATE_LIMIT_DELAY_RANGE = {RATE_LIMIT_DELAY_RANGE}
-# LIBRARY_START_DELAY = {LIBRARY_START_DELAY}
+# MAX_PARALLEL_WORKERS = {CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']}
+# RATE_LIMIT_DELAY_RANGE = {CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']!r}
+# LIBRARY_START_DELAY = {CONFIG_DEFAULTS['LIBRARY_START_DELAY']}
 
 ###############################################################################
 # Retry Configuration
 ###############################################################################
 
-# PLEX_RETRY_DELAYS = {PLEX_RETRY_DELAYS}
-# PLEX_TIMEOUT = {PLEX_TIMEOUT}
+# PLEX_RETRY_DELAYS = {CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']!r}
+# PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}
 
 ###############################################################################
 # Debug/Verbose Flags
 ###############################################################################
 
-# DBG = {DBG}
-# VRB = {VRB}
-# VERYVRB = {VERYVRB}
-# DEEPDBG = {DEEPDBG}
-# OFFLINE = {OFFLINE}
+# DBG = {CONFIG_DEFAULTS['DBG']}
+# VRB = {CONFIG_DEFAULTS['VRB']}
+# VERYVRB = {CONFIG_DEFAULTS['VERYVRB']}
+# DEEPDBG = {CONFIG_DEFAULTS['DEEPDBG']}
+# OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}
 
 ###############################################################################
 # Cache Flags
 ###############################################################################
 
-# FORCE_CACHE_UPDATE = {FORCE_CACHE_UPDATE}
-# FORCE_REBUILD = {FORCE_REBUILD}
-# READ_ONLY_MODE = {READ_ONLY_MODE}
+# FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
+# FORCE_REBUILD = {CONFIG_DEFAULTS['FORCE_REBUILD']}
+# READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}
 """
 
 def load_config_file(config_file=None):
@@ -296,36 +295,9 @@ def generate_default_config():
     """Generate a default config file content with all available options.
 
     Returns:
-        str: Config file content from the EXAMPLE_CONF template with values from CONFIG_DEFAULTS
+        str: Config file content from the EXAMPLE_CONF f-string (already populated with CONFIG_DEFAULTS)
     """
-    return EXAMPLE_CONF.format(
-        PLEX_URL=repr(CONFIG_DEFAULTS['PLEX_URL']),
-        PLEX_TOKEN=repr(CONFIG_DEFAULTS['PLEX_TOKEN']),
-        PLEX_XML_URL=repr(CONFIG_DEFAULTS['PLEX_XML_URL']),
-        ALTERNATIVE_ROOTPATHS=repr(CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']),
-        FORMAT=repr(CONFIG_DEFAULTS['FORMAT']),
-        LIST_MEDIA_DEFAULT_TSV_FORMAT=repr(CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']),
-        DUPLICATE_FILE=repr(CONFIG_DEFAULTS['DUPLICATE_FILE']),
-        DBGPFX=repr(CONFIG_DEFAULTS['DBGPFX']),
-        PRINTPFX=repr(CONFIG_DEFAULTS['PRINTPFX']),
-        VRBPFX=repr(CONFIG_DEFAULTS['VRBPFX']),
-        CACHE_FILE=repr(CONFIG_DEFAULTS['CACHE_FILE']),
-        LOCK_FILE=repr(CONFIG_DEFAULTS['LOCK_FILE']),
-        CACHE_CHECKPOINT_INTERVAL=CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL'],
-        MAX_PARALLEL_WORKERS=CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS'],
-        RATE_LIMIT_DELAY_RANGE=repr(CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']),
-        LIBRARY_START_DELAY=CONFIG_DEFAULTS['LIBRARY_START_DELAY'],
-        PLEX_RETRY_DELAYS=repr(CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']),
-        PLEX_TIMEOUT=CONFIG_DEFAULTS['PLEX_TIMEOUT'],
-        DBG=CONFIG_DEFAULTS['DBG'],
-        VRB=CONFIG_DEFAULTS['VRB'],
-        VERYVRB=CONFIG_DEFAULTS['VERYVRB'],
-        DEEPDBG=CONFIG_DEFAULTS['DEEPDBG'],
-        OFFLINE=CONFIG_DEFAULTS['OFFLINE'],
-        FORCE_CACHE_UPDATE=CONFIG_DEFAULTS['FORCE_CACHE_UPDATE'],
-        FORCE_REBUILD=CONFIG_DEFAULTS['FORCE_REBUILD'],
-        READ_ONLY_MODE=CONFIG_DEFAULTS['READ_ONLY_MODE'],
-    )
+    return EXAMPLE_CONF
 
 ###########################################################################################
 #### GLOBAL VARIABLES FROM CONFIG FILE
