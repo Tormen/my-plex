@@ -1,135 +1,93 @@
 # my-plex configuration file
-# Copy this file to ~/.my-plex.conf (or /etc/my-plex.conf, /usr/local/etc/my-plex.conf)
-# and customize the values below.
 #
-# All variables are optional except PLEX_URL/PLEX_TOKEN or PLEX_XML_URL
-# Values here override the built-in defaults
-# Command-line arguments override config file values
+# IMPORTANT: All values below are commented out and show the built-in defaults.
+# Uncomment and modify only the values you want to change.
+#
+# Copy this file to ~/.my-plex.conf (or /etc/my-plex.conf, /usr/local/etc/my-plex.conf)
+#
+# Configuration priority (highest to lowest):
+#   1. Command-line arguments (--plex-url, --debug, etc.)
+#   2. This config file (uncommented values)
+#   3. Built-in defaults (shown below as comments)
+#
+# Only PLEX_URL/PLEX_TOKEN or PLEX_XML_URL must be configured.
+# All other variables are optional and use sensible defaults.
 
 ###############################################################################
-# Plex Server Configuration (REQUIRED)
+# Plex Server Configuration (REQUIRED - uncomment and configure)
 ###############################################################################
 
 # Option 1: Set PLEX_URL and PLEX_TOKEN separately
-PLEX_URL = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
-PLEX_TOKEN = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
+# PLEX_URL = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
+# PLEX_TOKEN = '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >'
 
 # Option 2: Use PLEX_XML_URL (from "View XML" in Plex)
-PLEX_XML_URL = '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >'
+# PLEX_XML_URL = '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >'
 
-# Examples (uncomment and customize):
-# PLEX_URL = 'https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400'
-# PLEX_TOKEN = 'zzBNn3VjLar1-mpzkQR4'
-# PLEX_XML_URL = 'https://192-168-192-252.ad306dcb6f424ce79b8a2c5d9fc34193.plex.direct:32400/library/metadata/23317?X-Plex-Token=zzBNn3VjLar1-mpzkQR4'
+# Example with real values (uncomment and customize):
+# PLEX_URL = 'https://192-168-1-100.abc123.plex.direct:32400'
+# PLEX_TOKEN = 'your-token-here'
+# Or:
+# PLEX_XML_URL = 'https://192-168-1-100.abc123.plex.direct:32400/library/metadata/12345?X-Plex-Token=your-token-here'
 
-# HOW TO GET THE TOKEN?
-# FROM: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
-# https://app.plex.tv/desktop/#!/server/SERVER_ID/details?key=%2Flibrary%2Fmetadata%2FITEM_ID&context=home%3Ahub.continueWatching~0~1
-# You can also set PLEX_XML_URL to the full URL from "View XML" and it will automatically extract the server URL and token
+# How to get the token:
+# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
 
 ###############################################################################
 # Path Configuration
 ###############################################################################
 
-# Alternative root paths for file path translations (useful for symlinks/mounts)
-# Format: list of tuples (original_path, alternative_path)
-# Paths work bidirectionally - either can be swapped for the other
-ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
-
-###############################################################################
-# Cache Configuration
-###############################################################################
-
-# Cache file location (relative to home directory or absolute path)
-CACHE_FILE = '.plex_media_cache.pkl'
-LOCK_FILE = '.plex_media_cache.lock'
-
-# Save cache checkpoint every N items during rebuild (0 = only save at end)
-CACHE_CHECKPOINT_INTERVAL = 100
-
-###############################################################################
-# Performance Configuration
-###############################################################################
-
-# Maximum number of libraries to process in parallel during --update-cache
-# Lower = more stable but slower, Higher = faster but may trigger Plex throttling
-# Recommended: 1 for remote servers, 2 for normal servers, 4 for fast local servers
-MAX_PARALLEL_WORKERS = 4
-
-# Random delay range (min, max) in seconds between processing each item
-# Prevents Plex server throttling during cache rebuilds
-# Format: (min_seconds, max_seconds)
-RATE_LIMIT_DELAY_RANGE = (0.1, 0.7)
-
-# Delay in seconds between starting each library worker
-# Prevents all workers from hitting Plex server simultaneously
-LIBRARY_START_DELAY = 1.0
-
-###############################################################################
-# Retry Configuration
-###############################################################################
-
-# Retry delays (in seconds) for failed Plex API operations (exponential backoff)
-# Total attempts = len(list) + 1
-PLEX_RETRY_DELAYS = [5, 30, 60, 120, 240, 480]
-
-# Plex API timeout in seconds
-PLEX_TIMEOUT = 42
+# Alternative root paths for symlinks or different mount points
+# ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
 
 ###############################################################################
 # Output Configuration
 ###############################################################################
 
-# Default output format for --list-media
-FORMAT = 'tsv_labeled'
-
-# Default TSV format string for --list-media
-LIST_MEDIA_DEFAULT_TSV_FORMAT = '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}'
-
-# File to write duplicate list during cache scanning
-DUPLICATE_FILE = '/tmp/duplicates'
+# FORMAT = 'tsv_labeled'
+# LIST_MEDIA_DEFAULT_TSV_FORMAT = '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}'
+# DUPLICATE_FILE = '/tmp/duplicates'
+# DBGPFX = ' ~~~ '
+# PRINTPFX = ' >>> '
+# VRBPFX = '  >> '
 
 ###############################################################################
-# Output Prefixes
+# Cache Configuration
 ###############################################################################
 
-# Prefix for debug output
-DBGPFX = ' ~~~ '
+# CACHE_FILE = '.plex_media_cache.pkl'
+# LOCK_FILE = '.plex_media_cache.lock'
+# CACHE_CHECKPOINT_INTERVAL = 100
 
-# Prefix for print output
-PRINTPFX = ' >>> '
+###############################################################################
+# Performance Configuration
+###############################################################################
 
-# Prefix for verbose output
-VRBPFX = '  >> '
+# MAX_PARALLEL_WORKERS = 4
+# RATE_LIMIT_DELAY_RANGE = (0.1, 0.7)
+# LIBRARY_START_DELAY = 1.0
+
+###############################################################################
+# Retry Configuration
+###############################################################################
+
+# PLEX_RETRY_DELAYS = [5, 30, 60, 120, 240, 480]
+# PLEX_TIMEOUT = 42
 
 ###############################################################################
 # Debug/Verbose Flags
 ###############################################################################
 
-# Debug mode - enables detailed debug output
-DBG = False
-
-# Verbose mode - enables verbose output
-VRB = False
-
-# Very verbose mode - enables very detailed output
-VERYVRB = False
-
-# Deep debug mode - enables extremely detailed debug output
-DEEPDBG = False
-
-# Offline mode - don't connect to Plex server
-OFFLINE = False
+# DBG = False
+# VRB = False
+# VERYVRB = False
+# DEEPDBG = False
+# OFFLINE = False
 
 ###############################################################################
 # Cache Flags
 ###############################################################################
 
-# Force cache update even if cache is fresh
-FORCE_CACHE_UPDATE = False
-
-# Force complete cache rebuild
-FORCE_REBUILD = False
-
-# Read-only mode - don't update cache
-READ_ONLY_MODE = False
+# FORCE_CACHE_UPDATE = False
+# FORCE_REBUILD = False
+# READ_ONLY_MODE = False
