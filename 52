@@ -97,9 +97,7 @@ CONFIG_FILE_PATHS = [
 CONFIG_DEFAULTS = {
     # Plex Server Configuration
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
-    'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
-    'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
-    'PLEX_XML_URL': '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >',
+
     'PLEX_TIMEOUT': 42,
 
     # Output Configuration
