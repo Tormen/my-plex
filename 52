@@ -132,6 +132,101 @@ CONFIG_DEFAULTS = {
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
 }
 
+# Example configuration file template
+# Placeholders will be filled in by generate_default_config()
+EXAMPLE_CONF = """# my-plex configuration file
+#
+# IMPORTANT: All values below are commented out and show the built-in defaults.
+# Uncomment and modify only the values you want to change.
+#
+# Configuration priority (highest to lowest):
+#   1. Command-line arguments (--plex-url, --debug, etc.)
+#   2. This config file (uncommented values)
+#   3. Built-in defaults (shown below as comments)
+#
+# Only PLEX_URL/PLEX_TOKEN or PLEX_XML_URL must be configured.
+# All other variables are optional and use sensible defaults.
+
+###############################################################################
+# Plex Server Configuration (REQUIRED - uncomment and configure)
+###############################################################################
+
+# Option 1: Set PLEX_URL and PLEX_TOKEN separately
+# PLEX_URL = {PLEX_URL}
+# PLEX_TOKEN = {PLEX_TOKEN}
+
+# Option 2: Use PLEX_XML_URL (from "View XML" in Plex)
+# PLEX_XML_URL = {PLEX_XML_URL}
+
+# Example with real values (uncomment and customize):
+# PLEX_URL = 'https://192-168-1-100.abc123.plex.direct:32400'
+# PLEX_TOKEN = 'your-token-here'
+# Or:
+# PLEX_XML_URL = 'https://192-168-1-100.abc123.plex.direct:32400/library/metadata/12345?X-Plex-Token=your-token-here'
+
+# How to get the token:
+# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+
+###############################################################################
+# Path Configuration
+###############################################################################
+
+# Alternative root paths for symlinks or different mount points
+# ALTERNATIVE_ROOTPATHS = {ALTERNATIVE_ROOTPATHS}
+
+###############################################################################
+# Output Configuration
+###############################################################################
+
+# FORMAT = {FORMAT}
+# LIST_MEDIA_DEFAULT_TSV_FORMAT = {LIST_MEDIA_DEFAULT_TSV_FORMAT}
+# DUPLICATE_FILE = {DUPLICATE_FILE}
+# DBGPFX = {DBGPFX}
+# PRINTPFX = {PRINTPFX}
+# VRBPFX = {VRBPFX}
+
+###############################################################################
+# Cache Configuration
+###############################################################################
+
+# CACHE_FILE = {CACHE_FILE}
+# LOCK_FILE = {LOCK_FILE}
+# CACHE_CHECKPOINT_INTERVAL = {CACHE_CHECKPOINT_INTERVAL}
+
+###############################################################################
+# Performance Configuration
+###############################################################################
+
+# MAX_PARALLEL_WORKERS = {MAX_PARALLEL_WORKERS}
+# RATE_LIMIT_DELAY_RANGE = {RATE_LIMIT_DELAY_RANGE}
+# LIBRARY_START_DELAY = {LIBRARY_START_DELAY}
+
+###############################################################################
+# Retry Configuration
+###############################################################################
+
+# PLEX_RETRY_DELAYS = {PLEX_RETRY_DELAYS}
+# PLEX_TIMEOUT = {PLEX_TIMEOUT}
+
+###############################################################################
+# Debug/Verbose Flags
+###############################################################################
+
+# DBG = {DBG}
+# VRB = {VRB}
+# VERYVRB = {VERYVRB}
+# DEEPDBG = {DEEPDBG}
+# OFFLINE = {OFFLINE}
+
+###############################################################################
+# Cache Flags
+###############################################################################
+
+# FORCE_CACHE_UPDATE = {FORCE_CACHE_UPDATE}
+# FORCE_REBUILD = {FORCE_REBUILD}
+# READ_ONLY_MODE = {READ_ONLY_MODE}
+"""
+
 def load_config_file(config_file=None):
     """Load configuration from file if it exists.
 
@@ -201,103 +296,36 @@ def generate_default_config():
     """Generate a default config file content with all available options.
 
     Returns:
-        str: Config file content
+        str: Config file content from the EXAMPLE_CONF template with values from CONFIG_DEFAULTS
     """
-    config_lines = [
-        "# my-plex configuration file",
-        "#",
-        "# IMPORTANT: All values below are commented out and show the built-in defaults.",
-        "# Uncomment and modify only the values you want to change.",
-        "#",
-        "# Configuration priority (highest to lowest):",
-        "#   1. Command-line arguments (--plex-url, --debug, etc.)",
-        "#   2. This config file (uncommented values)",
-        "#   3. Built-in defaults (shown below as comments)",
-        "#",
-        "# Only PLEX_URL/PLEX_TOKEN or PLEX_XML_URL must be configured.",
-        "# All other variables are optional and use sensible defaults.",
-        "",
-        "###############################################################################",
-        "# Plex Server Configuration (REQUIRED - uncomment and configure)",
-        "###############################################################################",
-        "",
-        "# Option 1: Set PLEX_URL and PLEX_TOKEN separately",
-        f"# PLEX_URL = {CONFIG_DEFAULTS['PLEX_URL']!r}",
-        f"# PLEX_TOKEN = {CONFIG_DEFAULTS['PLEX_TOKEN']!r}",
-        "",
-        "# Option 2: Use PLEX_XML_URL (from \"View XML\" in Plex)",
-        f"# PLEX_XML_URL = {CONFIG_DEFAULTS['PLEX_XML_URL']!r}",
-        "",
-        "# Example with real values (uncomment and customize):",
-        "# PLEX_URL = 'https://192-168-1-100.abc123.plex.direct:32400'",
-        "# PLEX_TOKEN = 'your-token-here'",
-        "# Or:",
-        "# PLEX_XML_URL = 'https://192-168-1-100.abc123.plex.direct:32400/library/metadata/12345?X-Plex-Token=your-token-here'",
-        "",
-        "# How to get the token:",
-        "# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/",
-        "",
-        "###############################################################################",
-        "# Path Configuration",
-        "###############################################################################",
-        "",
-        "# Alternative root paths for symlinks or different mount points",
-        f"# ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}",
-        "",
-        "###############################################################################",
-        "# Output Configuration",
-        "###############################################################################",
-        "",
-        f"# FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}",
-        f"# LIST_MEDIA_DEFAULT_TSV_FORMAT = {CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']!r}",
-        f"# DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}",
-        f"# DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}",
-        f"# PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}",
-        f"# VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}",
-        "",
-        "###############################################################################",
-        "# Cache Configuration",
-        "###############################################################################",
-        "",
-        f"# CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}",
-        f"# LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}",
-        f"# CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}",
-        "",
-        "###############################################################################",
-        "# Performance Configuration",
-        "###############################################################################",
-        "",
-        f"# MAX_PARALLEL_WORKERS = {CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']}",
-        f"# RATE_LIMIT_DELAY_RANGE = {CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']!r}",
-        f"# LIBRARY_START_DELAY = {CONFIG_DEFAULTS['LIBRARY_START_DELAY']}",
-        "",
-        "###############################################################################",
-        "# Retry Configuration",
-        "###############################################################################",
-        "",
-        f"# PLEX_RETRY_DELAYS = {CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']!r}",
-        f"# PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}",
-        "",
-        "###############################################################################",
-        "# Debug/Verbose Flags",
-        "###############################################################################",
-        "",
-        f"# DBG = {CONFIG_DEFAULTS['DBG']}",
-        f"# VRB = {CONFIG_DEFAULTS['VRB']}",
-        f"# VERYVRB = {CONFIG_DEFAULTS['VERYVRB']}",
-        f"# DEEPDBG = {CONFIG_DEFAULTS['DEEPDBG']}",
-        f"# OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}",
-        "",
-        "###############################################################################",
-        "# Cache Flags",
-        "###############################################################################",
-        "",
-        f"# FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}",
-        f"# FORCE_REBUILD = {CONFIG_DEFAULTS['FORCE_REBUILD']}",
-        f"# READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}",
-        ""
-    ]
-    return '\n'.join(config_lines)
+    return EXAMPLE_CONF.format(
+        PLEX_URL=repr(CONFIG_DEFAULTS['PLEX_URL']),
+        PLEX_TOKEN=repr(CONFIG_DEFAULTS['PLEX_TOKEN']),
+        PLEX_XML_URL=repr(CONFIG_DEFAULTS['PLEX_XML_URL']),
+        ALTERNATIVE_ROOTPATHS=repr(CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']),
+        FORMAT=repr(CONFIG_DEFAULTS['FORMAT']),
+        LIST_MEDIA_DEFAULT_TSV_FORMAT=repr(CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']),
+        DUPLICATE_FILE=repr(CONFIG_DEFAULTS['DUPLICATE_FILE']),
+        DBGPFX=repr(CONFIG_DEFAULTS['DBGPFX']),
+        PRINTPFX=repr(CONFIG_DEFAULTS['PRINTPFX']),
+        VRBPFX=repr(CONFIG_DEFAULTS['VRBPFX']),
+        CACHE_FILE=repr(CONFIG_DEFAULTS['CACHE_FILE']),
+        LOCK_FILE=repr(CONFIG_DEFAULTS['LOCK_FILE']),
+        CACHE_CHECKPOINT_INTERVAL=CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL'],
+        MAX_PARALLEL_WORKERS=CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS'],
+        RATE_LIMIT_DELAY_RANGE=repr(CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']),
+        LIBRARY_START_DELAY=CONFIG_DEFAULTS['LIBRARY_START_DELAY'],
+        PLEX_RETRY_DELAYS=repr(CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']),
+        PLEX_TIMEOUT=CONFIG_DEFAULTS['PLEX_TIMEOUT'],
+        DBG=CONFIG_DEFAULTS['DBG'],
+        VRB=CONFIG_DEFAULTS['VRB'],
+        VERYVRB=CONFIG_DEFAULTS['VERYVRB'],
+        DEEPDBG=CONFIG_DEFAULTS['DEEPDBG'],
+        OFFLINE=CONFIG_DEFAULTS['OFFLINE'],
+        FORCE_CACHE_UPDATE=CONFIG_DEFAULTS['FORCE_CACHE_UPDATE'],
+        FORCE_REBUILD=CONFIG_DEFAULTS['FORCE_REBUILD'],
+        READ_ONLY_MODE=CONFIG_DEFAULTS['READ_ONLY_MODE'],
+    )
 
 ###########################################################################################
 #### GLOBAL VARIABLES FROM CONFIG FILE
@@ -10345,16 +10373,8 @@ def main():
 
         # Create config file with defaults
         try:
-            # Read the example config file from the same directory as the script
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            example_file = os.path.join(script_dir, 'my-plex.conf.example')
-
-            if os.path.exists(example_file):
-                with open(example_file, 'r') as f:
-                    config_content = f.read()
-            else:
-                # Fallback: generate config content from defaults
-                config_content = generate_default_config()
+            # Generate config content from defaults
+            config_content = generate_default_config()
 
             # Write to specified file
             with open(config_args.config_file, 'w') as f:
