@@ -97,7 +97,9 @@ CONFIG_FILE_PATHS = [
 CONFIG_DEFAULTS = {
     # Plex Server Configuration
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
-
+    'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_XML_URL': '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >',
     'PLEX_TIMEOUT': 42,
 
     # Output Configuration
@@ -10305,6 +10307,21 @@ def main():
     global ALTERNATIVE_ROOTPATHS, PLEX_TIMEOUT, DUPLICATE_FILE, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX
 
+    # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
+    # This allows us to use DBG/DEEPDBG during config file loading
+    import sys
+    for arg in sys.argv[1:]:
+        if arg in ['-D', '--debug']:
+            DBG = True
+        elif arg in ['-DD', '--deep-debug']:
+            DEEPDBG = True
+            DBG = True  # deep-debug implies debug
+        elif arg in ['-V', '--verbose']:
+            VRB = True
+        elif arg in ['-VV', '--very-verbose']:
+            VERYVRB = True
+            VRB = True  # very-verbose implies verbose
+
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)})")
@@ -10344,20 +10361,34 @@ def main():
     # Load configuration file
     loaded_config = load_config_file(config_args.config_file)
 
+    if DEEPDBG:
+        print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
+
     # Apply config values (config file overrides defaults, command-line will override config file)
     for key in CONFIG_DEFAULTS:
-        value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+        try:
+            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
 
-        # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
-        if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
-            # Check if value is the placeholder or if it's been configured
-            if value and not value.startswith('< PLEASE CONFIGURE'):
-                globals()[key] = value
+            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+                # Check if value is the placeholder or if it's been configured
+                if DEEPDBG:
+                    display_val = (value[:80] + '...') if len(value) > 80 else value
+                    print(f"{DBGPFX}Checking {key}: value={display_val!r}", file=sys.stderr)
+                if value and not value.startswith('< PLEASE CONFIGURE'):
+                    globals()[key] = value
+                    if DEEPDBG:
+                        print(f"{DBGPFX}✓ Set {key} from config file", file=sys.stderr)
+                else:
+                    # Keep the None default from the variable initialization
+                    if DEEPDBG:
+                        print(f"{DBGPFX}✗ Skipping {key} (placeholder or empty)", file=sys.stderr)
             else:
-                # Keep the None default from the variable initialization
-                pass
-        else:
-            globals()[key] = value
+                globals()[key] = value
+        except Exception as e:
+            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
     main_parser = argparse.ArgumentParser( description="Plex API Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
     main_parser.add_argument('-O', '--offline', action='store_true', help=f"Only work on cached information - defaults to '{OFFLINE}'", default=OFFLINE)
