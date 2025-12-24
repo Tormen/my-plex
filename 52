@@ -133,26 +133,46 @@ CONFIG_DEFAULTS = {
 def load_config_file(config_file=None):
     """Load configuration from file if it exists.
 
+    Supports symlinks - will follow symlinks to find and load the actual config file.
+
     Args:
         config_file: Optional path to config file. If None, searches default locations.
 
     Returns:
-        dict: Configuration dictionary
+        dict: Configuration dictionary with loaded config values
     """
     config = {}
 
     # Determine which config file to use
     if config_file:
-        config_paths = [config_file]
+        # Expand tilde and resolve symlinks for user-provided path
+        config_paths = [os.path.expanduser(config_file)]
     else:
-        config_paths = CONFIG_FILE_PATHS
+        # CONFIG_FILE_PATHS already has tilde expansion, but double-check
+        config_paths = [os.path.expanduser(p) for p in CONFIG_FILE_PATHS]
 
-    # Find first existing config file
+    # Find first existing config file (os.path.exists follows symlinks by default)
     config_file_used = None
     for path in config_paths:
+        # Check if path exists (will be False for broken symlinks)
         if os.path.exists(path):
-            config_file_used = path
-            break
+            # Resolve symlink to actual file
+            real_path = os.path.realpath(path)
+
+            # Verify the resolved path actually exists and is a file
+            if os.path.isfile(real_path):
+                config_file_used = real_path
+                if path != real_path:
+                    # Was a symlink - successfully followed it
+                    # Can't use DEEPDBG here as it's not set yet during early config loading
+                    pass
+                break
+            else:
+                print(f"Warning: Config path '{path}' resolves to '{real_path}' which is not a valid file", file=sys.stderr)
+        elif os.path.islink(path):
+            # Path is a symlink but points to non-existent target (broken symlink)
+            target = os.readlink(path)
+            print(f"Warning: Config file symlink '{path}' is broken - points to non-existent target: {target}", file=sys.stderr)
 
     if not config_file_used:
         return config
@@ -168,7 +188,8 @@ def load_config_file(config_file=None):
                 if key.isupper() and not key.startswith('_'):
                     config[key] = value
 
-        # Note: Can't use VRB here as it's not set yet during early config loading
+        # Note: Can't use VRB/DBG here as they're not set yet during early config loading
+        # Config was loaded successfully
     except Exception as e:
         print(f"Warning: Failed to load config file '{config_file_used}': {e}", file=sys.stderr)
 
