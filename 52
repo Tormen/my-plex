@@ -123,6 +123,7 @@ CONFIG_DEFAULTS = {
     'CACHE_CHECKPOINT_INTERVAL': 100,
     'FORCE_CACHE_UPDATE': False,
     'FORCE_REBUILD': False,
+    'FROM_SCRATCH': False,
     'READ_ONLY_MODE': False,
 
     # Performance Configuration
@@ -208,7 +209,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}
 
 ###############################################################################
-# Debug/Verbose Flags
+# Debug/Verbose Flags - These are defaults. They can be set via commandline.
 ###############################################################################
 
 # DBG = {CONFIG_DEFAULTS['DBG']}
@@ -218,7 +219,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}
 
 ###############################################################################
-# Cache Flags
+# Cache Flags - These are defaults. They can be set via commandline.
 ###############################################################################
 
 # FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
@@ -356,7 +357,8 @@ OFFLINE = CONFIG_DEFAULTS['OFFLINE']
 CACHE_FILE = CONFIG_DEFAULTS['CACHE_FILE']
 LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
 FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
-FORCE_REBUILD = CONFIG_DEFAULTS['FORCE_REBUILD']  # When True with --update-cache, rebuilds from scratch instead of incremental update
+FORCE_REBUILD = CONFIG_DEFAULTS['FORCE_REBUILD']  # When True with --update-cache, uses lib.refresh() to verify all files and refresh metadata
+FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 
 # Parallel processing configuration for cache rebuilds
@@ -736,8 +738,8 @@ def load_cache():
                     print(f"Please run: my-plex --update-cache")
                     CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
         else:
-            # Don't show error if we're doing a force rebuild (cache was intentionally moved aside)
-            if not FORCE_REBUILD:
+            # Don't show error if we're doing a from-scratch rebuild (cache was intentionally moved aside)
+            if not FROM_SCRATCH:
                 print(f"CACHE file '{CACHE_FILE}' is MISSING - needs to be built.")
                 print(f"Please run: my-plex --update-cache")
             CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
@@ -1403,6 +1405,8 @@ def run_regression_tests():
             if test_args.type and not has_list:
                 fails = True
             if test_args.force and not has_update_cache:
+                fails = True
+            if test_args.from_scratch and not has_update_cache:
                 fails = True
 
             if fails != should_fail:
@@ -6545,19 +6549,39 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # ONLY scan when --update-cache is explicitly used (not during --list-duplicates, etc.)
         if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}")
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT:
+            global FORCE_REBUILD
+
+            # Use lib.refresh() with --force to verify all files exist and refresh metadata
+            # Use lib.update() without --force for quick scan of new/changed files only
+            scan_type = "REFRESHING ALL METADATA" if FORCE_REBUILD else "SCANNING"
+            action_desc = "refresh all metadata and verify files" if FORCE_REBUILD else "detect filesystem changes"
+
             print(f"\n{'='*76}")
-            print(f"SCANNING {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO DETECT FILESYSTEM CHANGES")
+            print(f"{scan_type} {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO {action_desc.upper()}")
             print(f"{'='*76}")
+
+            if FORCE_REBUILD:
+                print(f"⚠  Using lib.refresh() - this will verify ALL files and refresh metadata")
+                print(f"   This is SLOWER but will detect missing files and update metadata")
+                print(f"{'='*76}")
+
             import time
 
             for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
                 try:
                     lib = PLEX_Library.OBJ_DICT[lib_name]
-                    print(f"  Scanning: {lib_name}...", end=' ', flush=True)
-                    lib.update()
+                    action = "Refreshing" if FORCE_REBUILD else "Scanning"
+                    print(f"  {action}: {lib_name}...", end=' ', flush=True)
 
-                    # Wait for scan to complete
-                    max_wait = 60  # Maximum 60 seconds
+                    # Use refresh() with --force to verify files, update() otherwise
+                    if FORCE_REBUILD:
+                        lib.refresh()  # Refresh all metadata and verify file existence
+                    else:
+                        lib.update()   # Quick scan for new/changed files only
+
+                    # Wait for operation to complete
+                    # Refresh takes much longer than update (can be 20-40 mins for large libraries)
+                    max_wait = 3600 if FORCE_REBUILD else 60  # 1 hour for refresh, 1 min for update
                     waited = 0
                     while waited < max_wait:
                         lib.reload()
@@ -7235,7 +7259,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def init():
-        global LOCK_FILE, CACHE_FILE, FORCE_REBUILD
+        global LOCK_FILE, CACHE_FILE, FROM_SCRATCH
         if PLEX_Media.init_done: return
         PLEX_Media.OBJ_BY_ID = {}
 
@@ -7243,9 +7267,37 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE:
             partial_cache_file = CACHE_FILE + '.partial'
 
+            # FROM_SCRATCH MODE: Delete existing cache files and start completely fresh
+            if FROM_SCRATCH:
+                # Move old cache aside as backup (with timestamp)
+                if os.path.exists(CACHE_FILE):
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    backup_cache_file = f"{CACHE_FILE}.old_{timestamp}"
+                    try:
+                        os.rename(CACHE_FILE, backup_cache_file)
+                        print(f"Moved old cache aside: {backup_cache_file}")
+                    except Exception as e:
+                        print(f"Warning: Could not move old cache aside: {e}")
+
+                # Delete partial cache if it exists - we want a completely fresh rebuild with --from-scratch
+                if os.path.exists(partial_cache_file):
+                    try:
+                        os.remove(partial_cache_file)
+                        if VRB: print(f"{VRBPFX}Deleted partial cache for fresh rebuild: {partial_cache_file}")
+                    except Exception as e:
+                        print(f"Warning: Could not delete partial cache: {e}")
+
+                if VRB: print(f"{VRBPFX}From-scratch rebuild mode (--from-scratch): starting with empty cache...")
+                PLEX_Media.OBJ_BY_ID = {}
+                PLEX_Media.OBJ_BY_MOVIE = {}
+                PLEX_Media.OBJ_BY_SHOW = {}
+                PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                PLEX_Media.items_processed = 0
+                PLEX_Media.completed_libraries = set()
+
             # Check if there's a partial cache from an interrupted rebuild
-            # If so, resume from it regardless of --force flag
-            if os.path.exists(partial_cache_file) and not FORCE_REBUILD:
+            # Resume from it unless --from-scratch was specified
+            elif os.path.exists(partial_cache_file):
                 print(f"Found partial cache from interrupted rebuild: {partial_cache_file}")
                 try:
                     with open(partial_cache_file, 'rb') as f:
@@ -7259,8 +7311,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     PLEX_Media.library_timings = partial_cache.get('library_timings', {})
                     completed_count = len(PLEX_Media.completed_libraries)
                     print(f"Resuming from checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects, {completed_count} libraries completed")
-                    # Important: Set FORCE_REBUILD to True so we continue in rebuild mode
-                    FORCE_REBUILD = True
                 except Exception as e:
                     print(f"Failed to load partial cache: {e}, starting fresh...")
                     PLEX_Media.OBJ_BY_ID = {}
@@ -7271,7 +7321,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     PLEX_Media.completed_libraries = set()
 
             # INCREMENTAL UPDATE MODE (default): Load existing cache and add missing items
-            elif not FORCE_REBUILD:
+            else:
                 if VRB: print(f"{VRBPFX}Incremental cache update mode: loading existing cache and adding missing items...")
                 # Load the existing cache first
                 load_cache()  # global load_cache function
@@ -7287,38 +7337,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 PLEX_Media.completed_libraries = set()
                 if VRB: print(f"{VRBPFX}Loaded {len(PLEX_Media.OBJ_BY_ID)} existing items, will add missing items from server...")
 
-            # FULL REBUILD MODE (with --force): Start from scratch - delete any partial cache and move old cache aside
-            else:
-                # Move old cache aside as backup (with timestamp)
-                if os.path.exists(CACHE_FILE):
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    backup_cache_file = f"{CACHE_FILE}.old_{timestamp}"
-                    try:
-                        os.rename(CACHE_FILE, backup_cache_file)
-                        print(f"Moved old cache aside: {backup_cache_file}")
-                    except Exception as e:
-                        print(f"Warning: Could not move old cache aside: {e}")
-
-                # Delete partial cache if it exists - we want a completely fresh rebuild with --force
-                if os.path.exists(partial_cache_file):
-                    try:
-                        os.remove(partial_cache_file)
-                        if VRB: print(f"{VRBPFX}Deleted partial cache for fresh rebuild: {partial_cache_file}")
-                    except Exception as e:
-                        print(f"Warning: Could not delete partial cache: {e}")
-
-                if VRB: print(f"{VRBPFX}Full cache rebuild mode (--force): starting with empty cache...")
-                PLEX_Media.OBJ_BY_ID = {}
-                PLEX_Media.OBJ_BY_MOVIE = {}
-                PLEX_Media.OBJ_BY_SHOW = {}
-                PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
-                PLEX_Media.items_processed = 0
-                PLEX_Media.completed_libraries = set()
-
             # Acquire and hold the lock for the entire rebuild process
             PLEX_Media.cache_rebuild_lock = CacheLock(LOCK_FILE)
             PLEX_Media.cache_rebuild_lock.__enter__()
-            mode_str = "Full rebuild" if FORCE_REBUILD else "Incremental update"
+            mode_str = "From-scratch rebuild" if FROM_SCRATCH else "Incremental update"
             PLEX_Media.cache_rebuild_lock.write_progress(f"Cache {mode_str.lower()} started - initializing...")
         else:
             # Load the previous cache
@@ -10312,7 +10334,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 #############################################################################
 
 def main():
-    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_REBUILD, FORMAT, OFFLINE, READ_ONLY_MODE
+    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_REBUILD, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
     global ALTERNATIVE_ROOTPATHS, PLEX_TIMEOUT, DUPLICATE_FILE, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX
 
@@ -10396,9 +10418,10 @@ def main():
     main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}. Example: https://SERVER:32400/library/metadata/12345?X-Plex-Token=TOKEN", default=PLEX_XML_URL)
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}.", default=PLEX_TOKEN)
-    main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --force to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server and show detailed differences", default=False)
-    main_parser.add_argument('--force', action='store_true', help="Force complete cache rebuild from scratch (use with --update-cache). Without this flag, --update-cache only adds missing items.", default=False)
+    main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata.", default=False)
+    main_parser.add_argument('--force', action='store_true', help="Refresh all Plex metadata (use with --update-cache). Uses lib.refresh() instead of lib.update() to verify ALL files exist and update metadata. This is SLOWER but detects missing files. Without --force, --update-cache only scans for new/changed files.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
     main_parser.add_argument('-DD', '--deep-debug', action='store_true', help=f"Turn on deep debugging - defaults to '{DEEPDBG}'", default=DEEPDBG)
     main_parser.add_argument('-V', '--verbose', action='store_true', help=f"Turn on verbose output - defaults to '{VRB}'", default=VRB)
@@ -10471,13 +10494,33 @@ def main():
     if args.force and not args.update_cache:
         err(1066, "--force can only be used together with --update-cache (or its synonyms --rebuild-cache, -U).\nExample: my-plex --update-cache --force")
 
-    # Confirm --force operation (complete cache rebuild)
-    if args.force and args.update_cache:
+    # Check if --from-scratch is used without --update-cache
+    if args.from_scratch and not args.update_cache:
+        err(1067, "--from-scratch can only be used together with --update-cache (or its synonyms --rebuild-cache, -U).\nExample: my-plex --update-cache --from-scratch")
+
+    # Confirm --from-scratch operation (deletes cache and rebuilds)
+    if args.from_scratch and args.update_cache:
         print("\n" + "="*80)
-        print("⚠  WARNING: COMPLETE CACHE REBUILD")
+        print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
         print("="*80)
         print("This will delete the existing cache and rebuild from scratch.")
         print("This operation may take several hours depending on your Plex library sizes!")
+        if args.force:
+            print("Additionally, --force will refresh ALL Plex metadata (slower but verifies files).")
+        print()
+        response = input("Are you sure you want to continue? (yes/no): ").strip().lower()
+        if response not in ['yes', 'y']:
+            print("\nOperation cancelled.")
+            sys.exit(0)
+        print()
+    # Confirm --force operation (refresh all metadata)
+    elif args.force and args.update_cache:
+        print("\n" + "="*80)
+        print("⚠  WARNING: REFRESH ALL PLEX METADATA")
+        print("="*80)
+        print("This will use lib.refresh() to refresh ALL Plex metadata and verify files.")
+        print("This is SLOWER but will detect missing files and update metadata.")
+        print("This operation may take 20-40+ minutes depending on your Plex library sizes!")
         print()
         response = input("Are you sure you want to continue? (yes/no): ").strip().lower()
         if response not in ['yes', 'y']:
@@ -10486,7 +10529,8 @@ def main():
         print()
 
     FORCE_CACHE_UPDATE = args.update_cache
-    FORCE_REBUILD = args.force and args.update_cache  # Only rebuild from scratch with both flags
+    FORCE_REBUILD = args.force and args.update_cache  # Only use lib.refresh() with both flags
+    FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
     FORMAT = args.format
     OFFLINE = args.offline
     READ_ONLY_MODE = (args.info is not None or args.verify_cache)  # Enable read-only mode for --info and --verify-cache
