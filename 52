@@ -6340,7 +6340,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Print progress to terminal (always, not just in verbose mode)
         if FORCE_CACHE_UPDATE:
             worker_prefix = _get_worker_prefix()
-            print(f"{worker_prefix}[{library_idx}/{total_libraries}] {title}...", flush=True)
+            print(f"{worker_prefix}{title}...", flush=True)
 
         # Differentiate between Movie and Show libraries
         completed = True  # Assume completed unless function returns False
@@ -6554,9 +6554,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             worker_prefix = _get_worker_prefix()
             if delta_parts:
                 delta_str = ", ".join(delta_parts)
-                print(f"{worker_prefix}[{library_idx}/{total_libraries}] {title}... ✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
+                print(f"{worker_prefix}{title}... ✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
             else:
-                print(f"{worker_prefix}[{library_idx}/{total_libraries}] {title}... ✓ ({format_elapsed_time(total_elapsed)}) no changes")
+                print(f"{worker_prefix}{title}... ✓ ({format_elapsed_time(total_elapsed)}) no changes")
 
         return True  # Library was updated
 
