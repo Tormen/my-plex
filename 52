@@ -7663,15 +7663,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     timestamp = library_timestamps.get(lib_name, 'N/A')
                     all_libs.append(('Other', lib_name, status, timestamp))
 
+                # Calculate dynamic width for Status column based on longest status text
+                max_status_width = max(len(status) for _, _, status, _ in all_libs) if all_libs else 11
+                # Ensure minimum width for the "Status" header
+                max_status_width = max(max_status_width, len('Status'))
+
                 # Print table header
-                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<40} | {'Updated'}")
-                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*40}-+-{'-'*19}")
+                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<{max_status_width}} | {'Updated'}")
+                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*max_status_width}-+-{'-'*19}")
 
                 # Print table rows
                 for lib_type, lib_name, status, timestamp in all_libs:
                     # Format timestamp for display
                     ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
-                    print(f"{lib_type:<12} | {lib_name:<20} | {status:<40} | {ts_str}")
+                    print(f"{lib_type:<12} | {lib_name:<20} | {status:<{max_status_width}} | {ts_str}")
 
                 # Keep these for backwards compatibility but make them empty
                 if False and show_libs:
