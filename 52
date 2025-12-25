@@ -650,13 +650,13 @@ class CacheLock:
             self.write_progress("Cache rebuild started...")
         except BlockingIOError:
             # Lock is held by another process
-            print("\n" + "="*80, flush=True)
+            print("\n" + "="*76, flush=True)
             print("CACHE IS CURRENTLY LOCKED", flush=True)
-            print("="*80, flush=True)
+            print("="*76, flush=True)
             print("Cache is currently being updated by another process.", flush=True)
             print("Waiting for lock to be released...", flush=True)
             print("\nPress 'q' + ENTER to quit", flush=True)
-            print("="*80 + "\n", flush=True)
+            print("="*76 + "\n", flush=True)
 
             # Display initial progress immediately
             last_progress = CacheLock.read_progress(self.lock_file)
@@ -687,9 +687,9 @@ class CacheLock:
                         last_progress = current_progress
                     # Continue waiting
 
-            print("\n\n" + "="*80, flush=True)
+            print("\n\n" + "="*76, flush=True)
             print("LOCK ACQUIRED - CONTINUING", flush=True)
-            print("="*80 + "\n", flush=True)
+            print("="*76 + "\n", flush=True)
 
         return self
 
@@ -848,9 +848,9 @@ def run_regression_tests():
     import pickle
     import sys
 
-    print("=" * 80)
+    print("=" * 76)
     print("REGRESSION TEST SUITE")
-    print("=" * 80)
+    print("=" * 76)
 
     passed = 0
     failed = 0
@@ -1554,9 +1554,9 @@ def run_regression_tests():
         failed += 1
 
     # Print summary
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 76)
     print("TEST SUMMARY")
-    print("=" * 80)
+    print("=" * 76)
     total = passed + failed
     print(f"Total:  {total} tests")
     print(f"Passed: {passed} tests ({100*passed//total if total > 0 else 0}%)")
@@ -3942,9 +3942,9 @@ def undo_operation(operation_log, remote_host=None):
     Returns:
         True if undo succeeded, False otherwise
     """
-    print("\n" + "="*139)
+    print("\n" + "="*76)
     print("UNDOING OPERATION")
-    print("="*139)
+    print("="*76)
 
     undo_instructions = operation_log.get("undo_instructions", [])
 
@@ -4338,7 +4338,7 @@ def undo_operation(operation_log, remote_host=None):
     update_and_save_cache(cache_dict)
 
     print("\n✓ UNDO COMPLETED SUCCESSFULLY")
-    print("="*139 + "\n")
+    print("="*76 + "\n")
     return True
 
 def generate_undo_instructions(choice, operation_log):
@@ -8096,15 +8096,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Interactive resolution mode
             if resolve_mode:
-                print("\n" + "="*139)
+                print("\n" + "="*76)
                 print("INTERACTIVE RESOLUTION MODE")
-                print("="*139)
+                print("="*76)
                 print("\nNOTE: If files are not found locally, the script will automatically attempt")
                 print("to access them via SSH on host 'my-plex'. Please ensure:")
                 print("  - SSH host 'my-plex' is configured in ~/.ssh/config")
                 print("  - You can connect without password: ssh my-plex")
                 print("  - SSH keys are properly set up")
-                print("="*139)
+                print("="*76)
 
                 # Create resolution log file (JSON format)
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -8161,9 +8161,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
 
                         # Display the duplicate pair/group
-                        print(f"\n{'='*139}")
+                        print(f"\n{'='*76}")
                         print(f"RESOLVING DUPLICATES FOR: {display_key}")
-                        print(f"{'='*139}")
+                        print(f"{'='*76}")
 
                         # For multi-version items, expand into separate virtual entries
                         # Create temporary objects for each version so the rest of the code can handle them uniformly
@@ -8351,9 +8351,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     if not pending_operations:
                                         print("No pending operations to apply.")
                                         continue
-                                    print(f"\n{'='*139}")
+                                    print(f"\n{'='*76}")
                                     print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
-                                    print(f"{'='*139}")
+                                    print(f"{'='*76}")
                                     # Apply all pending operations
                                     all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
                                     if not all_success:
@@ -8604,9 +8604,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 print(final_choice)
 
                                 if final_choice == 'A':
-                                    print(f"\n{'='*139}")
+                                    print(f"\n{'='*76}")
                                     print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
-                                    print(f"{'='*139}")
+                                    print(f"{'='*76}")
                                     # Apply all pending operations
                                     all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
                                     if not all_success:
@@ -8660,9 +8660,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         except Exception as e:
                             print(f"\n⚠ Warning: Could not write resolution log: {e}")
 
-                    print("\n" + "="*139)
+                    print("\n" + "="*76)
                     print("RESOLUTION MODE COMPLETE")
-                    print("="*139)
+                    print("="*76)
 
                     # Show summary
                     if pending_operations:
@@ -10073,9 +10073,9 @@ def show_item_info(identifier):
     # Show detailed info for the first (or only) match
     key, obj = found_items[0]
 
-    print("="*80)
+    print("="*76)
     print(f"PLEX ITEM INFORMATION")
-    print("="*80)
+    print("="*76)
 
     # Basic info
     print(f"Key:        {key}")
@@ -10150,7 +10150,7 @@ def show_item_info(identifier):
     else:
         print(f"  (Server check skipped - offline mode)")
 
-    print("="*80)
+    print("="*76)
 
 ###########################################################################################
 #### GLOBAL PLEX COMMANDS:
@@ -10522,9 +10522,9 @@ def main():
 
     # Confirm --from-scratch operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
-        print("\n" + "="*80)
+        print("\n" + "="*76)
         print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
-        print("="*80)
+        print("="*76)
         print("This will delete the existing cache and rebuild from scratch.")
         print("This operation may take several hours depending on your Plex library sizes!")
         if args.force:
@@ -10537,9 +10537,9 @@ def main():
         print()
     # Confirm --force operation (refresh all metadata)
     elif args.force and args.update_cache:
-        print("\n" + "="*80)
+        print("\n" + "="*76)
         print("⚠  WARNING: REFRESH ALL PLEX METADATA")
-        print("="*80)
+        print("="*76)
         print("This will use lib.refresh() to refresh ALL Plex metadata and verify files.")
         print("This is SLOWER but will detect missing files and update metadata.")
         print("This operation may take 20-40+ minutes depending on your Plex library sizes!")

@@ -21,9 +21,9 @@ from pathlib import Path
 # Add parent directory to path to import from main script
 sys.path.insert(0, str(Path(__file__).parent))
 
-print("=" * 80)
+print("=" * 76)
 print("Multi-Version Filesize Migration Script")
-print("=" * 80)
+print("=" * 76)
 print()
 
 # Read config from the main script
@@ -125,7 +125,7 @@ print()
 
 # Process multi-version items
 print("Migrating multi-version items...")
-print("=" * 80)
+print("=" * 76)
 print()
 
 updated_count = 0
@@ -185,7 +185,7 @@ for idx, (key, obj) in enumerate(multi_version_items, 1):
     time.sleep(0.05)
 
 print()
-print("=" * 80)
+print("=" * 76)
 print(f"Migration complete!")
 print(f"  Updated: {updated_count}")
 print(f"  Already migrated: {already_migrated_count}")
