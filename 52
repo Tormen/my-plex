@@ -2690,7 +2690,8 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 # Multi-version item: only remove the specific file version from files dict
                 # Find and remove the version that matches file1
                 version_to_remove = None
-                for version_str, filepath in list(files_dict.items()):
+                for version_str, file_info in list(files_dict.items()):
+                    filepath = file_info['filepath']
                     if filepath == removed_file:
                         version_to_remove = version_str
                         break
@@ -2702,7 +2703,8 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     # Update the main 'file' field to point to one of the remaining versions
                     if files_dict:
                         # Pick the first remaining version
-                        remaining_version, remaining_path = next(iter(files_dict.items()))
+                        remaining_version, remaining_file_info = next(iter(files_dict.items()))
+                        remaining_path = remaining_file_info['filepath']
                         obj['file'] = remaining_path
                         obj['version'] = remaining_version
 
@@ -2768,7 +2770,8 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 # Multi-version item: only remove the specific file version from files dict
                 # Find and remove the version that matches file2
                 version_to_remove = None
-                for version_str, filepath in list(files_dict.items()):
+                for version_str, file_info in list(files_dict.items()):
+                    filepath = file_info['filepath']
                     if filepath == removed_file:
                         version_to_remove = version_str
                         break
@@ -2780,7 +2783,8 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     # Update the main 'file' field to point to one of the remaining versions
                     if files_dict:
                         # Pick the first remaining version
-                        remaining_version, remaining_path = next(iter(files_dict.items()))
+                        remaining_version, remaining_file_info = next(iter(files_dict.items()))
+                        remaining_path = remaining_file_info['filepath']
                         obj['file'] = remaining_path
                         obj['version'] = remaining_version
 
@@ -5565,7 +5569,10 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
     obj_summary = plex_retry_operation(lambda: obj.summary, context=f"{key} {ctx_title} summary", library=lib_title)
     obj_year = plex_retry_operation(lambda: getattr(obj, 'year', 0), context=f"{key} {ctx_title} year", library=lib_title)
 
-    val={ 'file':filepath, 'files':{version: filepath}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
+    # Get filesize for this version
+    part_size = plex_retry_operation(lambda: part.size if hasattr(part, 'size') else None, context=f"{key} {ctx_title} part.size", library=lib_title)
+
+    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
           'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
           'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
           'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
@@ -5573,7 +5580,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
           'userRating':obj_userRating, 'criticsRating':obj_criticsRating, 'audienceRating':obj_audienceRating, 'summary':obj_summary,
           'duration':media_duration, 'video_codec':media_videoCodec, 'audio_codec':media_audioCodec, # audio_ as we also have audio_languages
           'resolution':media_videoResolution, 'resolution_full':resolution_full,
-          'filesize':plex_retry_operation(lambda: part.size if hasattr(part, 'size') else None, context=f"{key} {ctx_title} part.size", library=lib_title),  # Get filesize from Plex API
+          'filesize':part_size,  # Store filesize for primary version
           'collections'         : plex_retry_operation(lambda: [c.tag for c in obj.collections], context=f"{key} {ctx_title} collections", library=lib_title),
           'labels'              : plex_retry_operation(lambda: [l.tag for l in obj.labels], context=f"{key} {ctx_title} labels", library=lib_title),
           'audio_languages'     : plex_retry_operation(lambda: [ audio.languageCode for audio in part.audioStreams() ], context=f"{key} {ctx_title} audioStreams", library=lib_title),            # of this MediaPart (file)
@@ -5615,7 +5622,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             if DBG: print(f"{DBGPFX}add_media_obj(): SKIPPING already processed key '{key}' version '{version}'")
             return
         # New version of existing object - merge files dict
-        existing_files[version] = filepath
+        existing_files[version] = {'filepath': filepath, 'filesize': part_size}
         val['files'] = existing_files
         if DBG: print(f"{DBGPFX}add_media_obj(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
 
@@ -8038,15 +8045,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         # For regular duplicates (multiple Plex entries), show the single file
                         if len(files_dict) > 1 and key in multi_version_keys:
                             # Multi-version item: display each version from obj['files'] dict
-                            for version_str in files_dict.keys():
+                            for version_str, file_info in files_dict.items():
                                 nr += 1
                                 what = get_media_description(obj)
                                 plex_id = obj.get('id')
                                 if plex_id is None:
                                     err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
 
-                                # Get filepath for this specific version from files dict
-                                filepath = files_dict.get(version_str, obj.get('file', 'N/A'))
+                                # Get filepath and filesize for this specific version from files dict
+                                filepath = file_info.get('filepath', 'N/A')
+                                size_bytes = file_info.get('filesize', None)
 
                                 # Parse version string for codec/resolution (format: "120.5min 1920x1080 (h264 aac)")
                                 resolution = 'N/A'
@@ -8060,7 +8068,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     if codec_match:
                                         codec = codec_match.group(1)
 
-                                size_bytes = obj.get('filesize', None)
                                 filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
                                 filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
 
@@ -8138,7 +8145,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             if len(files_dict) > 1:
                                 is_multi_version = True
                                 # Store (version_str, filepath) for each version
-                                multi_version_files = [(ver, path) for ver, path in files_dict.items()]
+                                multi_version_files = [(ver, file_info['filepath']) for ver, file_info in files_dict.items()]
                                 print(f"[DEBUG] This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
                         # Skip only if we have less than 2 keys AND it's not a multi-version item
@@ -8178,6 +8185,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 synthetic_obj = dict(original_obj)
                                 synthetic_obj['file'] = filepath
                                 synthetic_obj['version'] = version_str
+
+                                # Get filesize for this specific version from files dict
+                                files_dict = original_obj.get('files', {})
+                                if version_str in files_dict:
+                                    file_info = files_dict[version_str]
+                                    synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+
                                 synthetic_obj['_is_synthetic'] = True
                                 synthetic_obj['_original_key'] = original_key
                                 synthetic_obj['_version_index'] = idx
