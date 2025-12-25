@@ -3915,6 +3915,17 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         # Don't fetch from Plex immediately - database may still be processing
         # User can run --update-cache manually to sync new items after Plex finishes indexing
 
+        # Update library timestamps for successfully scanned libraries
+        # This prevents next run from seeing stale timestamps and triggering unnecessary updates
+        if successfully_scanned_libraries and 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+            from datetime import datetime
+            current_time = datetime.now().replace(microsecond=0)
+            for lib_name in successfully_scanned_libraries:
+                if lib_name in CACHE['library_stats']['updatedAt']:
+                    CACHE['library_stats']['updatedAt'][lib_name] = current_time
+                    if VRB:
+                        print(f"{VRBPFX}Updated timestamp for library '{lib_name}' to {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
         # Save cache with inline updates
         try:
             cache_dict = {
