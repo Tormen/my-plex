@@ -2690,15 +2690,23 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 # Multi-version item: only remove the specific file version from files dict
                 # Find and remove the version that matches file1
                 version_to_remove = None
+                removed_filesize = None
                 for version_str, file_info in list(files_dict.items()):
                     filepath = file_info['filepath']
                     if filepath == removed_file:
                         version_to_remove = version_str
+                        removed_filesize = file_info.get('filesize')
                         break
 
                 if version_to_remove:
                     del files_dict[version_str]
-                    print(f"Cache updated: removed version '{version_to_remove}' from multi-version entry")
+                    # Format file size for display
+                    if removed_filesize:
+                        size_mb = removed_filesize / (1024 * 1024)
+                        size_str = f" ({size_mb:.0f} MB)" if size_mb >= 1 else f" ({removed_filesize} bytes)"
+                    else:
+                        size_str = ""
+                    print(f"Cache updated: removed version '{version_to_remove}'{size_str} from multi-version entry")
 
                     # Update the main 'file' field to point to one of the remaining versions
                     if files_dict:
@@ -2770,15 +2778,23 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 # Multi-version item: only remove the specific file version from files dict
                 # Find and remove the version that matches file2
                 version_to_remove = None
+                removed_filesize = None
                 for version_str, file_info in list(files_dict.items()):
                     filepath = file_info['filepath']
                     if filepath == removed_file:
                         version_to_remove = version_str
+                        removed_filesize = file_info.get('filesize')
                         break
 
                 if version_to_remove:
                     del files_dict[version_str]
-                    print(f"Cache updated: removed version '{version_to_remove}' from multi-version entry")
+                    # Format file size for display
+                    if removed_filesize:
+                        size_mb = removed_filesize / (1024 * 1024)
+                        size_str = f" ({size_mb:.0f} MB)" if size_mb >= 1 else f" ({removed_filesize} bytes)"
+                    else:
+                        size_str = ""
+                    print(f"Cache updated: removed version '{version_to_remove}'{size_str} from multi-version entry")
 
                     # Update the main 'file' field to point to one of the remaining versions
                     if files_dict:
