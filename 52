@@ -6472,8 +6472,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             # Capture file path NOW before object is deleted
                             detail_info = {
                                 'title': obj.get('title', obj.get('name', 'Unknown')),
+                                'year': obj.get('year'),
                                 'file': obj.get('file'),
-                                'id': key
+                                'id': key,
+                                'type': obj.get('type')
                             }
                             removal_details.append(detail_info)
 
@@ -7792,13 +7794,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     items = details[action][obj_type]
                                     if len(items) > 0:
                                         for item in sorted(items, key=lambda x: x['title']):
-                                            # -V: Show title only
-                                            # -VV: Show full details (title, file path, ID)
+                                            # Build display title with year for movies
+                                            title = item['title']
+                                            if item.get('type') == 'Movie' and item.get('year'):
+                                                title = f"{title} ({item['year']})"
+
+                                            # -V: Show title with year and file path
+                                            # -VV: Show full details (title, year, file path, ID)
                                             if VERYVRB:
                                                 file_str = f" [{item['file']}]" if item['file'] else ""
-                                                print(f"  [Local Cache] {symbol} {item['title']}{file_str} (ID: {item['id']})")
+                                                print(f"  [Local Cache] {symbol} {title}{file_str} (ID: {item['id']})")
                                             else:
-                                                print(f"  [Local Cache] {symbol} {item['title']}")
+                                                # For -V mode, always show file path for context
+                                                file_str = f" [{item['file']}]" if item['file'] else ""
+                                                print(f"  [Local Cache] {symbol} {title}{file_str}")
 
                         print(f"{'='*76}\n")
 
