@@ -6354,7 +6354,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries}: Processing '{title}'...")
 
         # Print progress to terminal (always, not just in verbose mode)
-        if FORCE_CACHE_UPDATE:
+        # Skip basic progress line in verbose mode since detailed partition/processing lines are printed
+        if FORCE_CACHE_UPDATE and not VRB:
             worker_prefix = _get_worker_prefix()
             print(f"{worker_prefix}{title}...", flush=True)
 
