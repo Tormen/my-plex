@@ -2703,10 +2703,17 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 version_to_remove = None
                 removed_filesize = None
                 for version_str, file_info in list(files_dict.items()):
-                    filepath = file_info['filepath']
+                    # BUG FIX: Handle both old and new cache formats
+                    if isinstance(file_info, str):
+                        filepath = file_info
+                        filesize = None
+                    else:
+                        filepath = file_info['filepath']
+                        filesize = file_info.get('filesize')
+
                     if filepath == removed_file:
                         version_to_remove = version_str
-                        removed_filesize = file_info.get('filesize')
+                        removed_filesize = filesize
                         break
 
                 if version_to_remove:
@@ -2723,7 +2730,11 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     if files_dict:
                         # Pick the first remaining version
                         remaining_version, remaining_file_info = next(iter(files_dict.items()))
-                        remaining_path = remaining_file_info['filepath']
+                        # BUG FIX: Handle both old and new cache formats
+                        if isinstance(remaining_file_info, str):
+                            remaining_path = remaining_file_info
+                        else:
+                            remaining_path = remaining_file_info['filepath']
                         obj['file'] = remaining_path
                         obj['version'] = remaining_version
 
@@ -2791,10 +2802,17 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                 version_to_remove = None
                 removed_filesize = None
                 for version_str, file_info in list(files_dict.items()):
-                    filepath = file_info['filepath']
+                    # BUG FIX: Handle both old and new cache formats
+                    if isinstance(file_info, str):
+                        filepath = file_info
+                        filesize = None
+                    else:
+                        filepath = file_info['filepath']
+                        filesize = file_info.get('filesize')
+
                     if filepath == removed_file:
                         version_to_remove = version_str
-                        removed_filesize = file_info.get('filesize')
+                        removed_filesize = filesize
                         break
 
                 if version_to_remove:
@@ -2811,7 +2829,11 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     if files_dict:
                         # Pick the first remaining version
                         remaining_version, remaining_file_info = next(iter(files_dict.items()))
-                        remaining_path = remaining_file_info['filepath']
+                        # BUG FIX: Handle both old and new cache formats
+                        if isinstance(remaining_file_info, str):
+                            remaining_path = remaining_file_info
+                        else:
+                            remaining_path = remaining_file_info['filepath']
                         obj['file'] = remaining_path
                         obj['version'] = remaining_version
 
@@ -8195,9 +8217,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if plex_id is None:
                                     err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
 
-                                # Get filepath and filesize for this specific version from files dict
-                                filepath = file_info.get('filepath', 'N/A')
-                                size_bytes = file_info.get('filesize', None)
+                                # BUG FIX: Handle both old and new cache formats
+                                # Old format: files_dict[version] = filepath_string
+                                # New format: files_dict[version] = {'filepath': ..., 'filesize': ...}
+                                if isinstance(file_info, str):
+                                    # Old cache format: file_info is just a filepath string
+                                    filepath = file_info
+                                    size_bytes = None
+                                elif isinstance(file_info, dict):
+                                    # New cache format: file_info is a dict with filepath and filesize
+                                    filepath = file_info.get('filepath', 'N/A')
+                                    size_bytes = file_info.get('filesize', None)
+                                else:
+                                    # Unexpected format
+                                    filepath = 'N/A'
+                                    size_bytes = None
+                                    if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}")
 
                                 # Parse version string for codec/resolution (format: "120.5min 1920x1080 (h264 aac)")
                                 resolution = 'N/A'
@@ -8288,7 +8323,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             if len(files_dict) > 1:
                                 is_multi_version = True
                                 # Store (version_str, filepath) for each version
-                                multi_version_files = [(ver, file_info['filepath']) for ver, file_info in files_dict.items()]
+                                # BUG FIX: Handle both old and new cache formats
+                                multi_version_files = []
+                                for ver, file_info in files_dict.items():
+                                    if isinstance(file_info, str):
+                                        filepath = file_info
+                                    else:
+                                        filepath = file_info['filepath']
+                                    multi_version_files.append((ver, filepath))
                                 print(f"[DEBUG] This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
                         # Skip only if we have less than 2 keys AND it's not a multi-version item
@@ -8333,7 +8375,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 files_dict = original_obj.get('files', {})
                                 if version_str in files_dict:
                                     file_info = files_dict[version_str]
-                                    synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+                                    # BUG FIX: Handle both old and new cache formats
+                                    if isinstance(file_info, dict):
+                                        synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+                                    else:
+                                        # Old format: file_info is just a filepath string, no filesize available
+                                        synthetic_obj['filesize'] = original_obj.get('filesize')
 
                                 synthetic_obj['_is_synthetic'] = True
                                 synthetic_obj['_original_key'] = original_key
