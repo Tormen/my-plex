@@ -7012,18 +7012,74 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if FORCE_CACHE_UPDATE:
                 print(f"{'='*76}")
         else:
-            # Sequential processing (original behavior for non-rebuild or single library)
-            library_idx = 0
+            # Incremental update mode (not full rebuild)
+            # Check if any libraries need updating and prompt user
+            libraries_to_update = []
             for title, library in PLEX_Library.OBJ_DICT_SUPPORTED.items():
-                if _shutdown_requested:
-                    break  # Stop processing new libraries
-                library_idx += 1
-                was_updated = PLEX_Library.process_single_library(
-                    title, library, library_idx, total_libraries,
-                    current_library_stats, old_library_stats, old_itemsCount_from_cache
-                )
-                if was_updated:
-                    cache_needs_save = True
+                old_timestamp = old_library_stats.get('updatedAt', {}).get(title)
+                current_timestamp = current_library_stats['updatedAt'].get(title)
+
+                # Check if library needs updating
+                if old_timestamp != current_timestamp:
+                    libraries_to_update.append((title, library, old_timestamp, current_timestamp))
+
+            # If libraries need updating, prompt user
+            if libraries_to_update:
+                print(f"\nCache update available for {len(libraries_to_update)} librar{'y' if len(libraries_to_update) == 1 else 'ies'}:")
+                for title, _, old_ts, new_ts in libraries_to_update:
+                    print(f"  - {title}")
+                    print(f"      Cache: {old_ts}")
+                    print(f"      Plex:  {new_ts}")
+
+                response = input(f"\nUpdate cache now? (yes/no): ").strip().lower()
+                if response not in ['yes', 'y']:
+                    print("Skipping cache update.")
+                    libraries_to_update = []
+
+            # Process libraries to update (in parallel if multiple)
+            if libraries_to_update:
+                num_to_update = len(libraries_to_update)
+                max_workers = min(MAX_PARALLEL_WORKERS, num_to_update) if num_to_update > 1 else 1
+
+                if max_workers > 1:
+                    # Parallel processing
+                    print(f"\nProcessing {num_to_update} libraries in parallel with {max_workers} workers...")
+                    print(f"{'='*76}")
+
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        _active_executor = executor
+                        futures = {}
+
+                        for idx, (title, library, _, _) in enumerate(libraries_to_update, 1):
+                            future = executor.submit(
+                                PLEX_Library.process_single_library,
+                                title, library, idx, num_to_update,
+                                current_library_stats, old_library_stats, old_itemsCount_from_cache
+                            )
+                            futures[future] = title
+
+                        # Wait for all to complete
+                        for future in as_completed(futures):
+                            title = futures[future]
+                            try:
+                                was_updated = future.result()
+                                if was_updated:
+                                    cache_needs_save = True
+                            except Exception as e:
+                                print(f"Error processing {title}: {e}")
+
+                        _active_executor = None
+
+                    print(f"{'='*76}")
+                else:
+                    # Sequential processing for single library
+                    for idx, (title, library, _, _) in enumerate(libraries_to_update, 1):
+                        was_updated = PLEX_Library.process_single_library(
+                            title, library, idx, num_to_update,
+                            current_library_stats, old_library_stats, old_itemsCount_from_cache
+                        )
+                        if was_updated:
+                            cache_needs_save = True
 
             # Handle graceful shutdown if requested (sequential mode)
             if _shutdown_requested:
