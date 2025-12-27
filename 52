@@ -7445,6 +7445,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 except: PLEX_Media.OBJ_BY_SHOW = {}
                 try:    PLEX_Media.OBJ_BY_SHOW_EPISODES = CACHE['obj_by_show_episodes']
                 except: PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                # CRITICAL FIX: Also load OBJ_BY_FILEPATH and OBJ_BY_LIBRARY from cache
+                # This prevents asymmetry where some structures point to CACHE while others don't
+                try:    PLEX_Media.OBJ_BY_FILEPATH = CACHE['obj_by_filepath']
+                except: PLEX_Media.OBJ_BY_FILEPATH = {}
+                try:    PLEX_Media.OBJ_BY_LIBRARY = CACHE['obj_by_library']
+                except: PLEX_Media.OBJ_BY_LIBRARY = {}
                 PLEX_Media.items_processed = 0
                 PLEX_Media.completed_libraries = set()
                 if VRB: print(f"{VRBPFX}Loaded {len(PLEX_Media.OBJ_BY_ID)} existing items, will add missing items from server...")
@@ -7465,6 +7471,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             except: PLEX_Media.OBJ_BY_SHOW = {}
             try:    PLEX_Media.OBJ_BY_SHOW_EPISODES = CACHE['obj_by_show_episodes']
             except: PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+            # CRITICAL FIX: Also load OBJ_BY_FILEPATH and OBJ_BY_LIBRARY from cache
+            # This prevents asymmetry where some structures point to CACHE while others don't
+            try:    PLEX_Media.OBJ_BY_FILEPATH = CACHE['obj_by_filepath']
+            except: PLEX_Media.OBJ_BY_FILEPATH = {}
+            try:    PLEX_Media.OBJ_BY_LIBRARY = CACHE['obj_by_library']
+            except: PLEX_Media.OBJ_BY_LIBRARY = {}
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -7532,19 +7544,38 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'obj_by_show_episodes': PLEX_Media.OBJ_BY_SHOW_EPISODES
             })
 
-        PLEX_Media.OBJ_BY_LIBRARY = { x:{} for x in PLEX_Library.OBJ_DICT.keys() }
+        # CRITICAL FIX: Only rebuild OBJ_BY_FILEPATH and OBJ_BY_LIBRARY if they're empty
+        # They should be loaded from cache now, so rebuilding is only needed for:
+        # 1. First-time cache creation
+        # 2. Old cache format that doesn't have these fields
+        need_rebuild_filepath = len(PLEX_Media.OBJ_BY_FILEPATH) == 0
+        need_rebuild_library = len(PLEX_Media.OBJ_BY_LIBRARY) == 0
+
+        if need_rebuild_filepath or need_rebuild_library:
+            if DBG and (need_rebuild_filepath or need_rebuild_library):
+                print(f"{DBGPFX}PLEX_Media.init(): Rebuilding index structures (filepath={need_rebuild_filepath}, library={need_rebuild_library})")
+
+            if need_rebuild_library:
+                PLEX_Media.OBJ_BY_LIBRARY = { x:{} for x in PLEX_Library.OBJ_DICT.keys() }
+
+        # Process all objects to rebuild indexes if needed and collect metadata
         for (key, obj) in PLEX_Media.OBJ_BY_ID.items():
             if DEEPDBG: print(f"{DBGPFX}PLEX_Media.init(): key='{key}, obj='{obj}'")
-            if obj['file'] in PLEX_Media.OBJ_BY_FILEPATH: PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ].append(key)
-            else:                                          PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ] = [ key ]
 
-            # Skip if library no longer exists (defensive check, should already be cleaned up above)
-            if obj['library'] not in PLEX_Media.OBJ_BY_LIBRARY:
-                if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping object for non-existent library '{obj['library']}': key='{key}'")
-                continue
+            # Rebuild OBJ_BY_FILEPATH if needed
+            if need_rebuild_filepath:
+                if obj['file'] in PLEX_Media.OBJ_BY_FILEPATH: PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ].append(key)
+                else:                                          PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ] = [ key ]
 
-            if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ]: PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ].append( key )
-            else:                                                          PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
+            # Rebuild OBJ_BY_LIBRARY if needed
+            if need_rebuild_library:
+                # Skip if library no longer exists (defensive check, should already be cleaned up above)
+                if obj['library'] not in PLEX_Media.OBJ_BY_LIBRARY:
+                    if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping object for non-existent library '{obj['library']}': key='{key}'")
+                    continue
+
+                if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ]: PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ].append( key )
+                else:                                                          PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
 
             # collect data ...
             match obj['type']:
