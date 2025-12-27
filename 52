@@ -1685,7 +1685,9 @@ def get_alternative_paths(path, including_path=False, path_2nd=None):
         elif path.startswith(rootpath2):
             new_path = path.replace(rootpath2, rootpath1, 1) # max 1 replacement
         if path_2nd is None:
-            res.append(new_path)
+            # BUG FIX: Only append new_path if it's not None (path matched a rootpath pattern)
+            if new_path is not None:
+                res.append(new_path)
             continue
         new_path_2nd = None
         if path_2nd.startswith(rootpath1):
@@ -7028,8 +7030,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 old_timestamp = old_library_stats.get('updatedAt', {}).get(title)
                 current_timestamp = current_library_stats['updatedAt'].get(title)
 
-                # Check if library needs updating
-                if old_timestamp != current_timestamp:
+                # BUG FIX: Only update if Plex timestamp is NEWER than cache timestamp
+                # If cache is newer (or equal), it means cache is already up-to-date
+                if current_timestamp and old_timestamp and current_timestamp > old_timestamp:
                     libraries_to_update.append((title, library, old_timestamp, current_timestamp))
 
             # If libraries need updating, prompt user
