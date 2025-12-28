@@ -887,6 +887,15 @@ def update_and_save_cache(obj_dict):
         with open(CACHE_FILE, 'wb') as f:
             pickle.dump(CACHE, f)
         if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
+
+        # Create special backup copy for --update-cache --force runs (reliable cache version)
+        if FORCE_REBUILD:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_file = f"{CACHE_FILE}.force_backup_{timestamp}"
+            import shutil
+            shutil.copy2(CACHE_FILE, backup_file)
+            print(f"Created force-rebuild backup: {backup_file}")
     else:
         # Normal save - acquire lock
         if DBG: print_obj(CACHE, "CACHE (BEFORE pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): About to save cache to '{CACHE_FILE}'\n", depth=1)
