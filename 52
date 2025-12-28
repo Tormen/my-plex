@@ -779,6 +779,58 @@ def load_cache():
                         CACHE = res
                         if DEEPDBG: print_var(CACHE, f"CACHE (pickle.load( {CACHE_FILE} )", DBGPFX, intro=f"{DBGPFX}load_cache(): CACHE_FILE='{CACHE_FILE}'\n", depth=1)
 
+                        # Check for old cache format and reject it
+                        # Old format: files = {version: filepath_string}
+                        # New format: files = {version: {'filepath': ..., 'filesize': ...}}
+                        # my-plex ONLY works with new cache format
+                        obj_by_id = CACHE.get('obj_by_id', {})
+                        old_format_detected = False
+                        old_format_examples = []
+
+                        for obj in obj_by_id.values():
+                            files_dict = obj.get('files', {})
+                            if files_dict:
+                                for ver, file_info in files_dict.items():
+                                    if isinstance(file_info, str):
+                                        # Old format detected!
+                                        old_format_detected = True
+                                        if len(old_format_examples) < 3:
+                                            old_format_examples.append(f"{obj.get('title', 'Unknown')} ({obj.get('year', 'N/A')})")
+                                        break
+                            if old_format_detected and len(old_format_examples) >= 3:
+                                break
+
+                        if old_format_detected:
+                            # Allow --update-cache --force to proceed (it will rebuild the cache)
+                            if FORCE_REBUILD and FORCE_CACHE_UPDATE:
+                                print()
+                                print("=" * 76)
+                                print("CACHE FORMAT WARNING: Outdated cache format detected")
+                                print("=" * 76)
+                                print(f"Found {len(old_format_examples)} entries with old format.")
+                                print("Proceeding with cache rebuild (--update-cache --force)...")
+                                print("=" * 76)
+                                print()
+                            else:
+                                print()
+                                print("=" * 76)
+                                print("CACHE FORMAT ERROR: Outdated cache format detected")
+                                print("=" * 76)
+                                print()
+                                print(f"Your cache file uses an OLD format that is no longer supported.")
+                                print(f"Found {len(old_format_examples)} entries with old format (showing up to 3 examples):")
+                                for example in old_format_examples:
+                                    print(f"  - {example}")
+                                print()
+                                print("The cache needs to be rebuilt to use the new format with file size tracking.")
+                                print()
+                                print("To fix this issue, run:")
+                                print("  my-plex --update-cache --force")
+                                print()
+                                print("This will rebuild the cache with proper file size information.")
+                                print("=" * 76)
+                                sys.exit(1)
+
                         # Print cache stats
                         num_items = len(CACHE.get('obj_by_id', {}))
                         cache_size_mb = file_size / (1024 * 1024)
@@ -8513,10 +8565,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     file_info = files_dict[version_str]
                                     # BUG FIX: Handle both old and new cache formats
                                     if isinstance(file_info, dict):
+                                        # New format: filesize is stored in the dict
                                         synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
                                     else:
-                                        # Old format: file_info is just a filepath string, no filesize available
-                                        synthetic_obj['filesize'] = original_obj.get('filesize')
+                                        # Old format: file_info is just a filepath string, no filesize stored per version
+                                        # Need to get actual filesize from Plex server for accurate display
+                                        # For now, use None to indicate filesize is unknown (will show "N/A")
+                                        # This will be corrected when cache is updated with --update-cache
+                                        synthetic_obj['filesize'] = None
 
                                 synthetic_obj['_is_synthetic'] = True
                                 synthetic_obj['_original_key'] = original_key
