@@ -8456,7 +8456,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             if len(files_dict) > 1:
                                 is_multi_version = True
                                 # Store (version_str, filepath) for each version
-                                multi_version_files = [(ver, file_info['filepath']) for ver, file_info in files_dict.items()]
+                                # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
+                                multi_version_files = []
+                                for ver, file_info in files_dict.items():
+                                    if isinstance(file_info, str):
+                                        # Old cache format: files_dict = {ver: filepath_string}
+                                        multi_version_files.append((ver, file_info))
+                                    elif isinstance(file_info, dict):
+                                        # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
+                                        multi_version_files.append((ver, file_info['filepath']))
+                                    else:
+                                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}")
                                 print(f"[DEBUG] This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
                         # Skip only if we have less than 2 keys AND it's not a multi-version item
