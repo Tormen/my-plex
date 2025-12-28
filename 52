@@ -7,6 +7,34 @@
 # 1070 == highest used errCode
 # 1001 == lowest used errCode
 
+################################################################################
+# ⚠️  CRITICAL CODING GUIDELINE FOR ALL FUTURE MODIFICATIONS ⚠️
+################################################################################
+#
+# SSH AND FILE OPERATION CENTRALIZATION:
+# =======================================
+# ALL SSH operations and file system operations MUST use the centralized function:
+#
+#   my_plex_file_operation(operation, filepath, remote_host, **kwargs)
+#
+# NEVER create direct SSH calls using subprocess.run(['ssh', ...])
+# NEVER use os.path.exists(), shutil.move(), os.remove() directly
+#
+# If you need a new operation type:
+#   1. ADD IT to my_plex_file_operation() function
+#   2. Implement both remote (SSH) and local versions
+#   3. Use print_ssh_error() for error handling
+#
+# This ensures:
+#   - Consistent error handling across all operations
+#   - Automatic alternative path resolution (ALTERNATIVE_ROOTPATHS)
+#   - Single source of truth for all file operations
+#   - Easy maintenance and debugging
+#
+# Supported operations: 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE', 'LIST_DIR'
+#
+################################################################################
+
 from abc import ABC, abstractmethod
 import argparse
 import fcntl
@@ -2082,24 +2110,35 @@ def escape_path_for_ssh(filepath):
 def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
     """Central function for all file operations - executes check + action in ONE SSH call
 
+    ⚠️  CRITICAL: ALL SSH/FILE OPERATIONS MUST USE THIS FUNCTION ⚠️
+
+    This is the SINGLE SOURCE OF TRUTH for all file system operations in my-plex.
+    NEVER use subprocess.run(['ssh', ...]) or direct SSH commands elsewhere in the code.
+    NEVER use os.path.exists(), shutil.move(), etc. directly - use this function instead.
+
+    If you need a new operation type, ADD IT HERE rather than creating direct SSH calls.
+    This ensures consistent error handling, path resolution, and maintainability.
+
     This function automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
     For example, if /j2/watch.v/file.mp4 doesn't exist but /Volumes/2/watch.v/file.mp4 does,
     it will automatically use the existing alternative path.
 
     Args:
-        operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE'
-        filepath: Full path to source file
+        operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE', 'LIST_DIR'
+        filepath: Full path to source file or directory (for LIST_DIR)
         remote_host: SSH host for remote operations, None for local
         **kwargs: Additional arguments depending on operation:
             - trash_dir: For TRASH operation
             - new_filename: For RENAME operation
             - dest_path: For MOVE operation
             - skip_alternatives: Set to True to skip alternative path resolution (default: False)
+            - maxdepth: For LIST_DIR operation (default: 10)
 
     Returns:
         For CHECK: (exists: bool, resolved_filepath or None)
         For TRASH/RENAME/MOVE: (success: bool, result_path: str or None)
         For REMOVE: (success: bool, None)
+        For LIST_DIR: (success: bool, list_of_files: list or None)
     """
     # Resolve filepath using alternative paths (unless explicitly disabled)
     skip_alternatives = kwargs.get('skip_alternatives', False)
@@ -2228,6 +2267,21 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                                extra_context={'file': filepath})
                 return (False, None)
 
+        elif operation == 'LIST_DIR':
+            # List all files in directory recursively
+            maxdepth = kwargs.get('maxdepth', 10)
+            cmd = ["ssh", remote_host, f"find \"{escaped_src}\" -maxdepth {maxdepth} -type f"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
+                return (True, files)
+            else:
+                if VRB:
+                    print_ssh_error(remote_host, "list directory contents", cmd=cmd, stderr=result.stderr,
+                                   extra_context={'directory': filepath})
+                return (False, None)
+
         else:
             print(f"ERROR: Unknown operation '{operation}'")
             return (False, None)
@@ -2288,6 +2342,19 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"ERROR: Failed to remove file: {e}")
                 return (False, None)
 
+        elif operation == 'LIST_DIR':
+            # List all files in directory recursively
+            try:
+                files = []
+                for root, dirs, filenames in os.walk(filepath):
+                    for filename in filenames:
+                        files.append(os.path.join(root, filename))
+                return (True, files)
+            except Exception as e:
+                if VRB:
+                    print(f"{VRBPFX}Warning: Could not access directory {filepath}: {e}")
+                return (False, None)
+
         else:
             print(f"ERROR: Unknown operation '{operation}'")
             return (False, None)
@@ -2334,18 +2401,55 @@ def check_file_exists_with_path(filepath, remote_host=None):
     return my_plex_file_operation('CHECK', filepath, remote_host)
 
 
+def has_other_video_files_in_dir(directory, exclude_file, remote_host=None):
+    """Check if a directory contains other video files besides the excluded one
+
+    ⚠️  NOTE: This function demonstrates proper use of the centralized my_plex_file_operation()
+    Uses my_plex_file_operation('LIST_DIR', ...) instead of direct SSH calls.
+    This is the CORRECT way to implement file system operations in my-plex.
+
+    Args:
+        directory: Directory path to check
+        exclude_file: File to exclude from the check (the one we're about to trash)
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        bool: True if there are other video files, False if this is the only one
+    """
+    # Common video extensions
+    video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.m2ts', '.ts'}
+
+    # Use the global file operation function to list directory contents
+    success, files = my_plex_file_operation('LIST_DIR', directory, remote_host, maxdepth=10)
+
+    if not success:
+        # If we can't list the directory, assume there might be other files (safer)
+        return True
+
+    # Check each file to see if it's a video file (and not the excluded file)
+    for file in files:
+        # Skip the file we're about to trash
+        if file == exclude_file:
+            continue
+        # Check if it's a video file
+        _, ext = os.path.splitext(file)
+        if ext.lower() in video_extensions:
+            return True
+
+    return False
+
 def move_to_trash(filepath, remote_host=None):
-    """Move file to trash directory
+    """Move file or directory to trash
 
     Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
     If filepath doesn't exist but an alternative path does, uses the alternative.
 
     Args:
-        filepath: Full path to file to trash
+        filepath: Full path to file or directory to trash
         remote_host: SSH host for remote operations, None for local
 
     Returns:
-        Tuple (success: bool, trash_path: str or None) - trash_path is where file was moved to
+        Tuple (success: bool, trash_path: str or None) - trash_path is where file/dir was moved to
     """
     return my_plex_file_operation('TRASH', filepath, remote_host)
 
@@ -3610,6 +3714,9 @@ def get_movie_dir_from_path(filepath, library_name):
 def undo_resolution_action(undo_info, remote_host):
     """Undo a previously performed resolution action
 
+    ⚠️  NOTE: This function demonstrates proper use of my_plex_file_operation()
+    All file moves use my_plex_file_operation('MOVE', ...) instead of direct SSH/shutil calls.
+
     Args:
         undo_info: Dictionary containing information about the action to undo
         remote_host: SSH host for remote operations, None for local
@@ -3632,21 +3739,11 @@ def undo_resolution_action(undo_info, remote_host):
 
         print(f"Restoring from trash: {trashed_path} -> {original_path}")
 
-        # Move back from trash to original location
-        if remote_host:
-            escaped_src = escape_path_for_ssh(trashed_path)
-            escaped_dst = escape_path_for_ssh(original_path)
-            result = subprocess.run(['ssh', remote_host, f"mv \"{escaped_src}\" \"{escaped_dst}\""],
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"✗ Failed to restore from trash: {result.stderr}")
-                return False
-        else:
-            try:
-                shutil.move(trashed_path, original_path)
-            except Exception as e:
-                print(f"✗ Failed to restore from trash: {e}")
-                return False
+        # Move back from trash to original location using the global file operation function
+        success, _ = my_plex_file_operation('MOVE', trashed_path, remote_host, dest_path=original_path)
+        if not success:
+            print(f"✗ Failed to restore from trash")
+            return False
 
         print(f"✓ Restored from trash successfully")
 
@@ -3687,41 +3784,21 @@ def undo_resolution_action(undo_info, remote_host):
 
         print(f"Moving back: {moved_to} -> {moved_from}")
 
-        # Move file back to original location
-        if remote_host:
-            escaped_src = escape_path_for_ssh(moved_to)
-            escaped_dst = escape_path_for_ssh(moved_from)
-            result = subprocess.run(['ssh', remote_host, f"mv \"{escaped_src}\" \"{escaped_dst}\""],
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"✗ Failed to move file back: {result.stderr}")
-                return False
-        else:
-            try:
-                shutil.move(moved_to, moved_from)
-            except Exception as e:
-                print(f"✗ Failed to move file back: {e}")
-                return False
+        # Move file back to original location using the global file operation function
+        success, _ = my_plex_file_operation('MOVE', moved_to, remote_host, dest_path=moved_from)
+        if not success:
+            print(f"✗ Failed to move file back")
+            return False
 
         print(f"✓ Moved back successfully")
 
         # Restore from trash
         print(f"Restoring from trash: {trashed_path} -> {trashed_original}")
 
-        if remote_host:
-            escaped_src = escape_path_for_ssh(trashed_path)
-            escaped_dst = escape_path_for_ssh(trashed_original)
-            result = subprocess.run(['ssh', remote_host, f"mv \"{escaped_src}\" \"{escaped_dst}\""],
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"✗ Failed to restore from trash: {result.stderr}")
-                return False
-        else:
-            try:
-                shutil.move(trashed_path, trashed_original)
-            except Exception as e:
-                print(f"✗ Failed to restore from trash: {e}")
-                return False
+        success, _ = my_plex_file_operation('MOVE', trashed_path, remote_host, dest_path=trashed_original)
+        if not success:
+            print(f"✗ Failed to restore from trash")
+            return False
 
         print(f"✓ Restored from trash successfully")
 
@@ -3813,23 +3890,13 @@ def undo_resolution_action(undo_info, remote_host):
 
         all_success = True
         for new_path, old_path in zip(renamed_files, original_files):
-            if remote_host:
-                escaped_src = escape_path_for_ssh(new_path)
-                escaped_dst = escape_path_for_ssh(old_path)
-                result = subprocess.run(['ssh', remote_host, f"mv \"{escaped_src}\" \"{escaped_dst}\""],
-                                      capture_output=True, text=True)
-                if result.returncode != 0:
-                    print(f"✗ Failed to rename back: {new_path}")
-                    all_success = False
-                else:
-                    print(f"✓ Renamed back: {os.path.basename(new_path)} -> {os.path.basename(old_path)}")
+            # Use the global file operation function for renaming
+            success, _ = my_plex_file_operation('MOVE', new_path, remote_host, dest_path=old_path)
+            if not success:
+                print(f"✗ Failed to rename back: {new_path}")
+                all_success = False
             else:
-                try:
-                    shutil.move(new_path, old_path)
-                    print(f"✓ Renamed back: {os.path.basename(new_path)} -> {os.path.basename(old_path)}")
-                except Exception as e:
-                    print(f"✗ Failed to rename back: {new_path}: {e}")
-                    all_success = False
+                print(f"✓ Renamed back: {os.path.basename(new_path)} -> {os.path.basename(old_path)}")
 
         # Restore cache paths
         updated_keys = undo_info.get('updated_keys', [])
@@ -4642,18 +4709,24 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         return play_media_file(file2, remote_host)
 
     elif choice == '3':
-        # For multi-version items: trash only the FILE (not the directory)
-        # For regular items: trash the entire movie directory
+        # Determine whether to trash just the file or the entire directory
+        # Strategy: Always prefer to trash the directory, but check if there are other video files first
         lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
 
-        if is_multi_version:
-            # Multi-version: trash only the specific file
+        # Get the movie directory
+        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
+
+        # Check if there are other video files in the directory
+        has_other_videos = has_other_video_files_in_dir(movie_dir1, file1, remote_host)
+
+        if has_other_videos:
+            # There are other video files - only trash the specific file
             target_to_trash = file1
-            print(f"[DEBUG] Multi-version item: will trash FILE only (not directory): {file1}")
+            if VRB: print(f"{VRBPFX}Other video files detected in directory - will trash FILE only: {os.path.basename(file1)}")
         else:
-            # Regular item: trash the entire movie directory
-            target_to_trash = get_movie_dir_from_path(file1, lib1) if lib1 else file1
-            movie_dir1 = target_to_trash
+            # No other video files - trash the entire directory to avoid leaving orphaned files
+            target_to_trash = movie_dir1
+            if VRB: print(f"{VRBPFX}No other video files in directory - will trash ENTIRE DIRECTORY: {os.path.basename(movie_dir1)}")
 
         # Capture cache entry before deletion (for undo)
         deleted_cache_entry = None
@@ -4799,8 +4872,8 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                 return False
 
     elif choice == '4':
-        # For multi-version items: trash only the FILE (not the directory)
-        # For regular items: trash the entire movie directory
+        # Determine whether to trash just the file or the entire directory
+        # Strategy: Always prefer to trash the directory, but check if there are other video files first
 
         # For multi-version items, both files belong to the same Plex entry (keys[0])
         # For regular items, file2 belongs to keys[1]
@@ -4811,14 +4884,20 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
 
         lib2 = PLEX_Media.OBJ_BY_ID[cache_key]['library'] if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
 
-        if is_multi_version:
-            # Multi-version: trash only the specific file
+        # Get the movie directory
+        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
+
+        # Check if there are other video files in the directory
+        has_other_videos = has_other_video_files_in_dir(movie_dir2, file2, remote_host)
+
+        if has_other_videos:
+            # There are other video files - only trash the specific file
             target_to_trash = file2
-            print(f"[DEBUG] Multi-version item: will trash FILE only (not directory): {file2}")
+            if VRB: print(f"{VRBPFX}Other video files detected in directory - will trash FILE only: {os.path.basename(file2)}")
         else:
-            # Regular item: trash the entire movie directory
-            target_to_trash = get_movie_dir_from_path(file2, lib2) if lib2 else file2
-            movie_dir2 = target_to_trash
+            # No other video files - trash the entire directory to avoid leaving orphaned files
+            target_to_trash = movie_dir2
+            if VRB: print(f"{VRBPFX}No other video files in directory - will trash ENTIRE DIRECTORY: {os.path.basename(movie_dir2)}")
 
         # Capture cache entry before deletion (for undo)
         deleted_cache_entry = None
