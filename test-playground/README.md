@@ -15,7 +15,7 @@ Automated test script that monitors library timestamps throughout the full resol
 5. Verify no cache update is needed
 
 #### `test_timestamps_auto.py`
-Similar to `test_with_timestamps.py` but with enhanced automation and timestamp monitoring. Verifies that cache timestamps are correctly set to `datetime.now() + 30s` after resolution operations.
+Similar to `test_with_timestamps.py` but with enhanced automation and timestamp monitoring. Verifies that cache timestamps are correctly set to `datetime.now() + 60s` after resolution operations.
 
 #### `test_full_with_waits.py` (NEW - Dec 29, 2025)
 **Comprehensive timestamp verification test with explicit wait periods.** This is the definitive test that monitors BOTH CACHE and PLEX timestamps throughout the entire workflow:
@@ -41,8 +41,31 @@ Similar to `test_with_timestamps.py` but with enhanced automation and timestamp 
 
 **Total Runtime**: ~8-10 minutes (includes pre-test sync + wait periods)
 
+#### `test_comprehensive_timestamps.py` (LATEST - Dec 29, 2025)
+**Comprehensive timestamp monitoring test with regex extraction.** This test uses grep-style regex pattern matching to extract ALL timestamps from ALL libraries throughout a complete resolution cycle:
+
+**Test Steps**:
+1. Resolve duplicate (choice 4: keep [1], trash [2])
+2. Wait 30s, then verify NO cache update needed
+3. Undo resolution by restoring from trash
+4. Run `--update-cache` to sync DISK/PLEX/CACHE
+5. Wait 5 minutes, then verify NO cache update needed
+
+**Key Features**:
+- Uses regex pattern (`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`) to extract ALL timestamps from command output
+- Monitors ALL libraries (not just modified ones) throughout all steps
+- Runs `--info` and `--list-duplicates` at each verification point
+- Comprehensive timestamp extraction shows both CACHE and PLEX timestamps
+- Verifies 60-second safety margin is sufficient for 5+ minute wait periods
+
+**Usage**: `./test_comprehensive_timestamps.py`
+
+**Output**: Saves to `test_60s_margin_v2.log` in test-playground
+
+**Total Runtime**: ~7-8 minutes (resolution + 30s wait + 5min wait)
+
 #### `test_timestamp_margin.py`
-Tests the 30-second safety margin for cache timestamps. Verifies that cache timestamps remain ahead of Plex timestamps after library scans.
+Tests the timestamp safety margin for cache timestamps. Originally tested 30s margin, now tests 60s margin. Verifies that cache timestamps remain ahead of Plex timestamps after library scans.
 
 #### `restore_cache_from_log.py`
 Utility script to restore cache library timestamps from a previous log file. Useful for recovering from failed tests or reverting timestamp changes.
@@ -272,7 +295,7 @@ Tests for particular movies that exhibited issues:
 
 **Root Cause**: Using Plex timestamps which continue to drift after scan operations complete. Plex continues updating timestamps asynchronously even after library.update() returns.
 
-**Solution**: Use `datetime.now() + timedelta(seconds=30)` RIGHT BEFORE saving cache, not Plex timestamp + 30s.
+**Solution**: Use `datetime.now() + timedelta(seconds=60)` RIGHT BEFORE saving cache, not Plex timestamp + buffer.
 
 **Evolution of the Fix** (from chat history):
 1. **First attempt (Commit 9eeda3e)**: Fetch Plex timestamp after scan and save to cache
@@ -286,13 +309,20 @@ Tests for particular movies that exhibited issues:
    - Problem: Violated principle that `get_library_stats()` should return TRUTH
    - User feedback: "get_library_stats() should NEVER change values but display the TRUTH from the library"
 
-4. **Final correct fix (Commit 781c047)**:
+4. **Correct fix (Commit 781c047)**: Use `datetime.now() + timedelta(seconds=30)`
    - Reverted `get_library_stats()` to return actual Plex values (no modifications)
    - Changed resolution code to use `datetime.now() + timedelta(seconds=30)`
    - User guidance: "take the REAL time before quitting + 30s and set the cache timestamp to this value"
    - Matched existing correct implementation in `--update-cache` at lines 869-880
 
-**Key Insight**: The 30-second buffer must be based on CURRENT TIME when saving cache, not on Plex's timestamp. This ensures cache timestamp is always ahead of any Plex timestamp drift.
+5. **Safety margin increase (Commit 0d99c44)**: Increased buffer from 30s to 60s
+   - Testing revealed 30s buffer insufficient for 5+ minute periods
+   - Plex timestamp drift can exceed 30s over longer time periods
+   - User feedback: "datetime.now can only be NEWER than PLEX timestamp"
+   - Changed to `datetime.now() + timedelta(seconds=60)` throughout codebase
+   - Updated `--verify-cache` validation logic to use 60s threshold
+
+**Key Insight**: The safety buffer must be based on CURRENT TIME when saving cache, not on Plex's timestamp. This ensures cache timestamp is always ahead of any Plex timestamp drift. The 60-second buffer provides adequate headroom for Plex's asynchronous timestamp updates that continue after scan completion.
 
 **Evidence**:
 - Before fix: `test_timestamp.log` showing false cache update prompts
@@ -311,12 +341,13 @@ All steps verified successfully with `test_timestamps_auto.py` and `test_with_ti
 
 ### Code Locations
 - Resolution timestamp fix: [52:4191-4197](../52#L4191-L4197)
-- **CRITICAL FIX** - update_and_save_cache() timestamp logic: [52:855-880](../52#L855-L880)
+- **CRITICAL FIX** - update_and_save_cache() timestamp logic: [52:855-886](../52#L855-L886)
   - Bug fixed (1st): Previously only updated timestamps when `FORCE_CACHE_UPDATE=True` (--update-cache)
   - Bug fixed (2nd): Timestamp update must happen BEFORE merging obj_dict into CACHE (moved before line 890)
   - Now updates timestamps in obj_dict FIRST, then merges into CACHE
-  - Uses heuristic: any timestamp updated in last 2 minutes gets refreshed to `datetime.now() + 30s`
+  - Uses heuristic: any timestamp updated in last 2 minutes gets refreshed to `datetime.now() + 60s`
   - Applies to both `--update-cache` (all libraries) and resolution (recently modified libraries)
+  - Safety margin increased from 30s to 60s (Commit 0d99c44) to handle longer time periods
 - get_library_stats() (returns TRUTH): [52:1876-1898](../52#L1876-L1898)
 - Modified libraries tracking: [52:4001-4036](../52#L4001-L4036)
 - Selective library scanning: [52:4086-4091](../52#L4086-L4091)
