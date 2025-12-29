@@ -10401,11 +10401,12 @@ def verify_cache():
     max_name = max(len(name) for name in PLEX_Library.OBJ_DICT.keys()) if PLEX_Library.OBJ_DICT else 12
     name_width = min(max(max_name, 12), 40)
 
-    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>20}  {'PLEX Server':>20}  {'Updated':<19}  {'Status'}")
-    print(f"{'-'*name_width}  {'-'*8}  {'-'*20}  {'-'*20}  {'-'*19}  {'-'*10}")
+    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>20}  {'PLEX Server':>20}  {'CACHE Timestamp':<19}  {'PLEX Timestamp':<19}  {'Status'}")
+    print(f"{'-'*name_width}  {'-'*8}  {'-'*20}  {'-'*20}  {'-'*19}  {'-'*19}  {'-'*10}")
 
     # Track inconsistencies for detailed reporting
     inconsistencies = []
+    timestamp_mismatches = []  # Track libraries with timestamp differences
 
     # Get library timestamps from cache
     library_timestamps = CACHE.get('library_stats', {}).get('updatedAt', {})
@@ -10516,21 +10517,58 @@ def verify_cache():
             else:
                 server_str = f"{server_items:,}" if server_items is not None else "-"
 
+            # Get timestamps for this library - CACHE and PLEX
+            cache_timestamp = library_timestamps.get(lib_name, 'N/A')
+            plex_timestamp = 'N/A'
+
+            # Fetch current PLEX timestamp from server
+            try:
+                if hasattr(lib, 'updatedAt') and lib.updatedAt:
+                    plex_timestamp = lib.updatedAt
+            except Exception:
+                pass  # Silently ignore if can't get timestamp
+
+            # Format timestamps for display
+            if cache_timestamp != 'N/A':
+                cache_ts_str = cache_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(cache_timestamp, 'strftime') else str(cache_timestamp)
+            else:
+                cache_ts_str = 'N/A'
+
+            if plex_timestamp != 'N/A':
+                plex_ts_str = plex_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(plex_timestamp, 'strftime') else str(plex_timestamp)
+            else:
+                plex_ts_str = 'N/A'
+
+            # Check for timestamp mismatch
+            # CACHE timestamp should be ahead of PLEX by at most 30 seconds (safety margin)
+            # ERROR conditions:
+            #   1. PLEX > CACHE: Timestamp drift - PLEX updated but CACHE didn't
+            #   2. CACHE > PLEX by more than 30s: Over-advanced cache timestamp
+            timestamp_mismatch = False
+            if cache_timestamp != 'N/A' and plex_timestamp != 'N/A':
+                try:
+                    from datetime import timedelta
+                    # Check if PLEX is newer than CACHE (timestamp drift - this is an error)
+                    if plex_timestamp > cache_timestamp:
+                        timestamp_mismatch = True
+                        timestamp_mismatches.append(lib_name)
+                    # Also check if CACHE is more than 30s ahead of PLEX (unusual)
+                    elif (cache_timestamp - plex_timestamp) > timedelta(seconds=30):
+                        timestamp_mismatch = True
+                        timestamp_mismatches.append(lib_name)
+                except Exception:
+                    pass  # Can't compare - different types or invalid
+
             # Status indicator
             if lib_name in inconsistencies:
                 status = "⚠ MISMATCH"
+            elif timestamp_mismatch:
+                status = "⚠ TS DRIFT"
             else:
                 status = "✓ OK"
 
-            # Get timestamp for this library
-            timestamp = library_timestamps.get(lib_name, 'N/A')
-            if timestamp != 'N/A':
-                timestamp_str = str(timestamp)
-            else:
-                timestamp_str = 'N/A'
-
             # Print line immediately as we process each library
-            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>20}  {server_str:>20}  {timestamp_str:<19}  {status}", flush=True)
+            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>20}  {server_str:>20}  {cache_ts_str:<19}  {plex_ts_str:<19}  {status}", flush=True)
 
             # In -V mode: immediately show differences inline after the library row
             if VRB and not VERYVRB and lib_name in inconsistencies:
@@ -10569,15 +10607,48 @@ def verify_cache():
                     _print_library_differences(lib_name, lib_type, diffs, show_details=True)
 
         # Show final summary
-        if inconsistencies:
+        if inconsistencies or timestamp_mismatches:
             if not VRB:
                 # Non-verbose mode: show detailed summary
                 print(f"\n{'='*76}")
                 print(f"⚠ INCONSISTENCY DETECTED")
                 print(f"{'='*76}")
-                print(f"\n{len(inconsistencies)} libraries have mismatches between cache and server:")
-                for lib_name in inconsistencies:
-                    print(f"  • {lib_name}")
+
+                if inconsistencies:
+                    print(f"\n{len(inconsistencies)} libraries have item count mismatches between cache and server:")
+                    for lib_name in inconsistencies:
+                        print(f"  • {lib_name}")
+
+                if timestamp_mismatches:
+                    print(f"\n{len(timestamp_mismatches)} libraries have timestamp issues:")
+                    for lib_name in timestamp_mismatches:
+                        cache_ts = library_timestamps.get(lib_name, 'N/A')
+                        # Re-fetch PLEX timestamp for display
+                        lib = PLEX_Library.OBJ_DICT.get(lib_name)
+                        plex_ts = 'N/A'
+                        if lib:
+                            try:
+                                if hasattr(lib, 'updatedAt') and lib.updatedAt:
+                                    plex_ts = lib.updatedAt
+                            except Exception:
+                                pass
+
+                        cache_str = cache_ts.strftime('%Y-%m-%d %H:%M:%S') if cache_ts != 'N/A' and hasattr(cache_ts, 'strftime') else str(cache_ts)
+                        plex_str = plex_ts.strftime('%Y-%m-%d %H:%M:%S') if plex_ts != 'N/A' and hasattr(plex_ts, 'strftime') else str(plex_ts)
+
+                        # Determine the issue type
+                        from datetime import timedelta
+                        issue_type = "unknown"
+                        if cache_ts != 'N/A' and plex_ts != 'N/A':
+                            if plex_ts > cache_ts:
+                                issue_type = "PLEX is newer (timestamp drift)"
+                            elif (cache_ts - plex_ts) > timedelta(seconds=30):
+                                diff_seconds = int((cache_ts - plex_ts).total_seconds())
+                                issue_type = f"CACHE is {diff_seconds}s ahead (expected ≤30s)"
+
+                        print(f"  • {lib_name}: {issue_type}")
+                        print(f"      CACHE: {cache_str}")
+                        print(f"      PLEX:  {plex_str}")
 
                 print(f"\n{'='*76}")
                 print(f"RECOMMENDED ACTION")
@@ -10591,6 +10662,7 @@ def verify_cache():
             print(f"{'='*76}")
             print(f"  All libraries are in sync with the server.")
             print(f"  Cache is consistent and up to date.")
+            print(f"  All timestamps are properly synchronized (CACHE >= PLEX).")
 
     except (KeyboardInterrupt, BrokenPipeError):
         # User pressed Ctrl+C - exit gracefully without showing inconsistency summary
@@ -11034,7 +11106,7 @@ def main():
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}.", default=PLEX_TOKEN)
     main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
-    main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server and show detailed differences", default=False)
+    main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤30s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata.", default=False)
     main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files. Detects additions, changes, and deletions. SLOWER but comprehensive.", default=False)
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
