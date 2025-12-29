@@ -5854,8 +5854,9 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
     # Track delta for library/partition completion summary (ADDED/UPDATED)
     if FORCE_CACHE_UPDATE:
-        # Use library.title directly instead of global current_library to avoid race conditions in parallel processing
-        lib_key = library.title
+        # Use display_title (which includes partition suffix like '[0:314]') if available, otherwise library.title
+        # This ensures delta counters match the partition-specific counters initialized in process_single_library
+        lib_key = display_title if display_title else library.title
         if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
             obj_type = val.get('type', '')
             type_map = {'Show': 'shows', 'Season': 'seasons', 'Episode': 'episodes', 'Movie': 'movies'}
@@ -6008,7 +6009,7 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
             media_parts = media.parts
             part_cnt = len(media_parts)
             for part_idx, part in enumerate(media_parts):
-                add_media_obj( item, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part )
+                add_media_obj( item, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part, display_title=display_title )
 
 
 def update_show_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
