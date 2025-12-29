@@ -322,7 +322,18 @@ Tests for particular movies that exhibited issues:
    - Changed to `datetime.now() + timedelta(seconds=60)` throughout codebase
    - Updated `--verify-cache` validation logic to use 60s threshold
 
-**Key Insight**: The safety buffer must be based on CURRENT TIME when saving cache, not on Plex's timestamp. This ensures cache timestamp is always ahead of any Plex timestamp drift. The 60-second buffer provides adequate headroom for Plex's asynchronous timestamp updates that continue after scan completion.
+6. **FINAL FIX - Timestamp preservation (Commit 459ea9b)**: Preserve cached timestamps during resolution
+   - **Root Cause Discovered**: After --update-cache set all timestamps to current+60s, subsequent resolution operations were checking if PLEX timestamps were recent (< 2 min), then overwriting the buffered cache timestamps with fresh unbuffered Plex timestamps
+   - **The Bug**: In `update_and_save_cache()` else branch (line 876-885), code was checking `obj_dict` timestamps (fresh from Plex) instead of CACHED timestamps to decide which to update
+   - **User Observation**: "There MUST be another problem!! More than 60s should NOT be needed."
+   - **Fix**: Changed logic to check CACHED timestamps (not incoming Plex timestamps):
+     - If cached timestamp is recent (< 2 min old): refresh to current+60s
+     - If cached timestamp is old (≥ 2 min old): **preserve it** (keep the +60s buffer)
+     - If no cached timestamp: use current+60s (first-time setup)
+   - **Result**: The +60s safety margin now persists across all operations, preventing false cache update prompts
+   - **Verification**: Manual testing confirmed cache stays "up-to-date" even after resolution operations and multiple minutes of wait time
+
+**Key Insight**: The safety buffer must be based on CURRENT TIME when saving cache, not on Plex's timestamp. This ensures cache timestamp is always ahead of any Plex timestamp drift. The 60-second buffer provides adequate headroom for Plex's asynchronous timestamp updates that continue after scan completion. **CRITICAL**: Once set, buffered timestamps must be PRESERVED across operations - they should only be refreshed if they were recently modified (< 2 min), otherwise the +60s buffer gets lost.
 
 **Evidence**:
 - Before fix: `test_timestamp.log` showing false cache update prompts
