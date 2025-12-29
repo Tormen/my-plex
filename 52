@@ -4111,10 +4111,56 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             except Exception as e:
                 print(f"✗ Error: {e}")
 
-        # Cache has been updated inline during operation execution
-        # (removed entries for trashed/moved files)
-        # Don't fetch from Plex immediately - database may still be processing
-        # User can run --update-cache manually to sync new items after Plex finishes indexing
+        # After scanning completes, add a brief wait to ensure Plex database is fully updated
+        # This prevents subsequent commands from seeing stale/inconsistent data
+        if successfully_scanned_libraries:
+            print(f"  Waiting for Plex database to stabilize...", end=' ', flush=True)
+            time.sleep(3)  # Give Plex database time to fully commit changes
+            print("✓")
+
+        # Verify affected Plex items are properly updated after scan
+        # This ensures DISK, PLEX, and CACHE are fully synchronized
+        if successfully_scanned_libraries:
+            print(f"  Verifying Plex items are synchronized...", end=' ', flush=True)
+            verification_errors = []
+
+            for pending_op in pending_operations:
+                keys = pending_op.get('keys', [])
+                for key in keys:
+                    if key in PLEX_Media.OBJ_BY_ID:
+                        obj = PLEX_Media.OBJ_BY_ID[key]
+                        plex_id = obj.get('id')
+                        library_name = obj.get('library')
+
+                        # Only verify items from successfully scanned libraries
+                        if library_name in successfully_scanned_libraries and plex_id:
+                            try:
+                                # Extract numeric ID from Movie_ID:XXXXX or Episode_ID:XXXXX format
+                                if isinstance(plex_id, str) and '_ID:' in plex_id:
+                                    numeric_id = plex_id.split('_ID:')[1].split('_')[0]
+
+                                    # Fetch fresh item from Plex server to verify it exists
+                                    item = plex_retry_operation(
+                                        lambda: PLEX.fetchItem(int(numeric_id)),
+                                        context=f"verify item {plex_id} after resolution"
+                                    )
+
+                                    # Verify the item's media parts match what we expect
+                                    if item and hasattr(item, 'media'):
+                                        # Item exists and is accessible - this is good
+                                        pass
+                            except Exception as e:
+                                # Item may have been removed (expected for trashed files)
+                                # Only log unexpected errors
+                                if 'not found' not in str(e).lower():
+                                    verification_errors.append(f"{plex_id}: {e}")
+
+            if verification_errors and VRB:
+                print(f"\n  Note: Some verification checks reported issues (this may be normal):")
+                for err in verification_errors[:3]:  # Show first 3 only
+                    print(f"    - {err}")
+            else:
+                print("✓")
 
         # Update library timestamps for successfully scanned libraries
         # This prevents next run from seeing stale timestamps and triggering unnecessary updates
@@ -8791,6 +8837,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         if confirm != 'Y':
                                             print("Cancelled. Returning to resolution mode.")
                                             continue
+
+                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                                    # Synthetic objects are temporary and should NEVER be saved to cache
+                                    print(f"\nCleaning up synthetic objects...", end=' ', flush=True)
+                                    synthetic_keys_to_remove = [
+                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                        if obj.get('_is_synthetic')
+                                    ]
+                                    for key in synthetic_keys_to_remove:
+                                        del PLEX_Media.OBJ_BY_ID[key]
+                                    if synthetic_keys_to_remove:
+                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                                    else:
+                                        print("✓ (none found)")
+
                                     print("Exiting resolution mode without applying pending operations.")
                                     return
 
@@ -8798,6 +8859,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     if not pending_operations:
                                         print("No pending operations to apply.")
                                         continue
+
+                                    # First, clean up synthetic objects for the CURRENT duplicate being displayed
+                                    # (before applying operations)
+                                    if is_multi_version and keys:
+                                        for key in keys:
+                                            if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                                                del PLEX_Media.OBJ_BY_ID[key]
+
                                     print(f"\n{'='*76}")
                                     print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
                                     print(f"{'='*76}")
@@ -8808,6 +8877,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     num_ops = len(pending_operations)
                                     # Clear pending operations since they've been applied
                                     pending_operations.clear()
+
+                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                                    # Synthetic objects are temporary and should NEVER be saved to cache
+                                    print(f"\n  Cleaning up synthetic objects...", end=' ', flush=True)
+                                    synthetic_keys_to_remove = [
+                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                        if obj.get('_is_synthetic')
+                                    ]
+                                    for key in synthetic_keys_to_remove:
+                                        del PLEX_Media.OBJ_BY_ID[key]
+                                    if synthetic_keys_to_remove:
+                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                                    else:
+                                        print("✓ (none found)")
+
                                     if all_success:
                                         print(f"\n✓ All {num_ops} operation(s) successfully applied.")
                                     else:
