@@ -1874,9 +1874,14 @@ def resolve_filepath_with_alternatives(filepath, remote_host=None):
 
 
 def get_library_stats(supported=True):
-    """Collect statical information about libraries: 'updatedAt' --> lastUpdated timestamp
+    """Collect statistical information about libraries from Plex server
+
+       IMPORTANT: Returns ACTUAL UNMODIFIED values from Plex server.
+       This function must return the TRUTH - no modifications or safety margins.
+       Any adjustments should be applied when SAVING to cache, not here.
+
        RETURNS dict: {
-            'updatedAt':{},         key = library.title, value = library.updatedAt
+            'updatedAt':{},         key = library.title, value = library.updatedAt (ACTUAL Plex timestamp)
             'itemsCount':{},        key = library.title, value = library.totalSize == number of items in library
             'totalDuration':{},     key = library.title, value = library.totalDuration
             'totalStorage':{}       key = library.title, value = library.totalStorage
@@ -1889,11 +1894,8 @@ def get_library_stats(supported=True):
     library_stats = copy.deepcopy(EMPTY_LIBRARY_STATS)
     libraries = PLEX_Library.OBJ_DICT_SUPPORTED.items() if supported else PLEX_Library.OBJ_DICT.items()
     for title,library in libraries:
-        # Add 30-second safety margin to prevent false cache update prompts
-        # Plex may continue updating its timestamp after operations complete
-        plex_timestamp = library.updatedAt.replace(microsecond=0)
-        cache_timestamp = plex_timestamp + timedelta(seconds=30)
-        library_stats['updatedAt'][title] = cache_timestamp
+        # Store ACTUAL Plex timestamp without any modification
+        library_stats['updatedAt'][title] = library.updatedAt
         # totalSize requires an API call - use retry logic
         try:
             library_stats['itemsCount'][title] = plex_retry_operation(
@@ -4167,28 +4169,15 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                 print("✓")
 
         # Update library timestamps for successfully scanned libraries
-        # Fetch the ACTUAL timestamp from Plex server to prevent cache update prompts
+        # Use CURRENT TIME + 30s buffer (same approach as --update-cache)
+        # This ensures cache timestamp is ahead of Plex's final timestamp
         if successfully_scanned_libraries and 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
             for lib_name in successfully_scanned_libraries:
-                if lib_name in PLEX_Library.OBJ_DICT:
-                    lib = PLEX_Library.OBJ_DICT[lib_name]
-                    try:
-                        # Reload library to get fresh timestamp from Plex server
-                        lib.reload()
-                        plex_timestamp = lib.updatedAt.replace(microsecond=0)
-
-                        # Add 30 seconds safety margin to prevent false cache update prompts
-                        # Plex may continue updating its internal timestamp after scan completes
-                        cache_timestamp = plex_timestamp + timedelta(seconds=30)
-
-                        # Update cache with adjusted timestamp
-                        if lib_name in CACHE['library_stats']['updatedAt']:
-                            CACHE['library_stats']['updatedAt'][lib_name] = cache_timestamp
-                            if VRB:
-                                print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}': Plex={plex_timestamp.strftime('%Y-%m-%d %H:%M:%S')}, Cache={cache_timestamp.strftime('%Y-%m-%d %H:%M:%S')} (+30s safety margin)")
-                    except Exception as e:
-                        if VRB:
-                            print(f"{VRBPFX}Warning: Could not update timestamp for library '{lib_name}': {e}")
+                if lib_name in CACHE['library_stats']['updatedAt']:
+                    CACHE['library_stats']['updatedAt'][lib_name] = current_time
+                    if VRB:
+                        print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}' to current time +30s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Save cache with inline updates including updated library_stats timestamps
         try:
