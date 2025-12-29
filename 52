@@ -2133,8 +2133,8 @@ def get_trash_dir(remote_host=None, file_path=None):
                     volume_trash = f"/Volumes/{path_parts[2]}/.Trashes/{uid}"
 
                     # Create the trash directory if it doesn't exist
-                    cmd = f"ssh {remote_host} sh -c 'mkdir -p \"{volume_trash}\" 2>/dev/null && echo \"{volume_trash}\" || echo FAILED'"
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    cmd = ['ssh', remote_host, 'sh', '-c', f'mkdir -p "{volume_trash}" 2>/dev/null && echo "{volume_trash}" || echo FAILED']
+                    result = subprocess.run(cmd, capture_output=True, text=True)
 
                     if result.returncode == 0 and result.stdout.strip() != 'FAILED':
                         trash_path = result.stdout.strip()
