@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/me/.python.venv/my-plex/bin/python3
 """
 Test script for --list-duplicates --resolve functionality.
 
