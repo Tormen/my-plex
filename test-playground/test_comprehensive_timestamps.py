@@ -104,27 +104,43 @@ print("STEP 1: Resolve duplicate (first one, choice 4 - keep [1], trash [2])")
 print("="*80)
 
 import pexpect
+print("[DEBUG] Spawning my-plex --list-duplicates --resolve...")
 child = pexpect.spawn('my-plex', ['--list-duplicates', '--resolve'],
                        encoding='utf-8', timeout=240)
 child.logfile = sys.stdout
+print("[DEBUG] Process spawned successfully")
 
 try:
+    print("[DEBUG] Waiting for initial prompt...")
     idx = child.expect(["Update cache now\\? \\(yes/no\\):", "Your choice:"], timeout=180)
+    print(f"[DEBUG] Got prompt, idx={idx}")
     if idx == 0:
         print("\n⚠ WARNING: Cache update prompt before resolution!")
         print("[Answering: no]")
         child.send('no\n')
+        print("[DEBUG] Sent 'no', waiting for Your choice...")
         child.expect("Your choice:", timeout=180)
+        print("[DEBUG] Got Your choice after cache prompt")
 
     print("\n[Sending: 4 (keep file [1], trash file [2])]")
     child.send('4')
+    print("[DEBUG] Sent '4', waiting for Your choice...")
     child.expect("Your choice:", timeout=30)
+    print("[DEBUG] Got Your choice after sending 4")
     print("[Sending: A (apply)]")
     child.send('A')
-    child.expect(pexpect.EOF, timeout=120)
+    print("[DEBUG] Sent 'A', waiting for RESOLUTION MODE COMPLETE...")
+    child.expect("RESOLUTION MODE COMPLETE", timeout=120)
+    print("[DEBUG] Got RESOLUTION MODE COMPLETE, waiting for completion message...")
+    child.expect("successfully applied", timeout=30)
+    print("[DEBUG] Got completion message, closing child process...")
+    child.close()
     print("\n✓ Resolution completed")
 except Exception as e:
     print(f"\n✗ Error during resolution: {e}")
+    print(f"[DEBUG] Exception type: {type(e).__name__}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 print(f"\nStep 1 completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
