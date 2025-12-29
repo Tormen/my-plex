@@ -10220,6 +10220,7 @@ def show_system_info():
         # Reload timestamps from disk file to show what's actually saved
         import pickle
         cache_file_path = os.path.expanduser(CACHE_FILE)
+        if DBG: print(f"{DBGPFX}--info: Reading timestamps from disk cache file: {cache_file_path}")
         if os.path.exists(cache_file_path):
             try:
                 with open(cache_file_path, 'rb') as f:
@@ -10228,12 +10229,19 @@ def show_system_info():
                         cache_timestamps = disk_cache['library_stats']['updatedAt']
                         # Show same in both columns - this is what's saved on disk
                         plex_timestamps = cache_timestamps.copy()
-            except Exception:
+                        if DEEPDBG:
+                            print(f"{DBGPFX}--info: Successfully loaded {len(cache_timestamps)} timestamps from DISK cache")
+                            for lib_name, ts in sorted(cache_timestamps.items()):
+                                ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
+                                print(f"{DBGPFX}  {lib_name}: {ts_str}")
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}--info: Failed to reload from disk: {e}, falling back to in-memory cache")
                 # If reload fails, fall back to in-memory cache
                 if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
                     cache_timestamps = CACHE['library_stats']['updatedAt']
                     plex_timestamps = cache_timestamps.copy()
         else:
+            if DBG: print(f"{DBGPFX}--info: No disk cache found, using in-memory cache")
             # No disk cache, use in-memory
             if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
                 cache_timestamps = CACHE['library_stats']['updatedAt']
@@ -10432,8 +10440,38 @@ def verify_cache():
     inconsistencies = []
     timestamp_mismatches = []  # Track libraries with timestamp differences
 
-    # Get library timestamps from cache
-    library_timestamps = CACHE.get('library_stats', {}).get('updatedAt', {})
+    # Get library timestamps from DISK CACHE (not in-memory)
+    # IMPORTANT: Like --info, we should show what's SAVED ON DISK, not what's in memory
+    # During init, CACHE dict may have been updated with fresh Plex timestamps
+    # but if user declined cache update, those new timestamps were NOT saved to disk
+    # Therefore, we RELOAD from disk to show the actual saved state
+    library_timestamps_disk = {}
+
+    import pickle
+    cache_file_path = os.path.expanduser(CACHE_FILE)
+    if DBG: print(f"{DBGPFX}--verify-cache: Reading timestamps from disk cache file: {cache_file_path}")
+    if os.path.exists(cache_file_path):
+        try:
+            with open(cache_file_path, 'rb') as f:
+                disk_cache = pickle.load(f)
+                if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
+                    library_timestamps_disk = disk_cache['library_stats']['updatedAt']
+                    if DEEPDBG:
+                        print(f"{DBGPFX}--verify-cache: Successfully loaded {len(library_timestamps_disk)} timestamps from DISK cache")
+                        for lib_name, ts in sorted(library_timestamps_disk.items()):
+                            ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
+                            print(f"{DBGPFX}  {lib_name}: {ts_str}")
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}--verify-cache: Failed to reload from disk: {e}, falling back to in-memory cache")
+            # If reload fails, fall back to in-memory cache
+            library_timestamps_disk = CACHE.get('library_stats', {}).get('updatedAt', {})
+    else:
+        if DBG: print(f"{DBGPFX}--verify-cache: No disk cache found, using in-memory cache")
+        # No disk cache, use in-memory
+        library_timestamps_disk = CACHE.get('library_stats', {}).get('updatedAt', {})
+
+    # Use the disk timestamps for display
+    library_timestamps = library_timestamps_disk
 
     try:
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
@@ -10541,16 +10579,15 @@ def verify_cache():
             else:
                 server_str = f"{server_items:,}" if server_items is not None else "-"
 
-            # Get timestamps for this library - CACHE and PLEX
+            # Get timestamps for this library - BOTH from DISK CACHE (not from server)
+            # IMPORTANT: Show what's SAVED ON DISK, not fresh server values
+            # Both columns should show the SAME timestamp from disk cache
             cache_timestamp = library_timestamps.get(lib_name, 'N/A')
-            plex_timestamp = 'N/A'
+            plex_timestamp = cache_timestamp  # Show SAME timestamp in both columns (from disk)
 
-            # Fetch current PLEX timestamp from server
-            try:
-                if hasattr(lib, 'updatedAt') and lib.updatedAt:
-                    plex_timestamp = lib.updatedAt
-            except Exception:
-                pass  # Silently ignore if can't get timestamp
+            if DEEPDBG and lib_name in list(PLEX_Library.OBJ_DICT.keys())[:3]:  # Show first 3 libraries
+                ts_str = cache_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(cache_timestamp, 'strftime') else str(cache_timestamp)
+                print(f"{DBGPFX}--verify-cache: Library '{lib_name}' CACHE timestamp (from disk): {ts_str}")
 
             # Format timestamps for display
             if cache_timestamp != 'N/A':
