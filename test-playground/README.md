@@ -421,3 +421,48 @@ Added Cache and Plex timestamps to the LIBRARIES table in `my-plex --info` outpu
 ```
 
 This enhancement supports the timestamp verification workflow by providing an easy way to check library sync status.
+
+### Enhanced `--verify-cache` Command with Timestamp Comparison (Dec 29, 2025)
+Added explicit timestamp comparison between PLEX server and CACHE to the `--verify-cache` command:
+
+- **Code Location**: [52:10382-10611](../52#L10382-L10611)
+- **Feature**: Displays BOTH "CACHE Timestamp" and "PLEX Timestamp" columns side-by-side
+- **Validation Logic**:
+  - **ERROR if PLEX > CACHE**: Timestamp drift - PLEX was updated but CACHE wasn't
+  - **ERROR if CACHE > PLEX by more than 30s**: CACHE timestamp is over-advanced beyond safety margin
+  - **OK if CACHE is 0-30s ahead of PLEX**: Expected behavior due to 30-second safety buffer
+- **Status Indicators**:
+  - `✓ OK`: Item counts match AND timestamps properly synchronized
+  - `⚠ MISMATCH`: Item count discrepancies between cache and server
+  - `⚠ TS DRIFT`: Timestamp issues (PLEX newer than CACHE, or CACHE too far ahead)
+- **Updated Help Text**: [52:11098](../52#L11098)
+  - Documents that CACHE should be ≤30s ahead of PLEX
+  - Explains that errors are flagged when PLEX is newer than CACHE
+
+**Purpose**: Makes timestamp synchronization issues immediately visible during cache verification. The command now shows the TRUE timestamps from both PLEX server and CACHE without any modifications (READ_ONLY_MODE prevents timestamp updates during verification).
+
+**Example Output**:
+```
+Library            Type      Local Cache          PLEX Server          CACHE Timestamp      PLEX Timestamp       Status
+--------------     --------  -------------------  -------------------  -------------------  -------------------  ----------
+,unsorted          Movie     1,257                1,257                2025-12-29 12:10:36  2025-12-29 12:10:06  ✓ OK
+series.de          Series    73                   73                   2025-12-29 12:04:54  2025-12-29 12:05:10  ⚠ TS DRIFT
+```
+
+#### `test_comprehensive_timestamps.py` (NEW - Dec 29, 2025)
+**Complete 5-step timestamp monitoring test** that uses grep with regex to capture ALL library timestamps throughout the resolution cycle:
+
+**Test Steps**:
+1. Resolve a duplicate (automated choice 4: keep [1], trash [2])
+2. **Wait 30s**, run --info and --list-duplicates, grep for all timestamps, verify NO cache update needed
+3. Undo resolution by restoring file from trash
+4. Run --update-cache to sync DISK/PLEX/CACHE
+5. **Wait 5min**, run --info and --list-duplicates, grep for all timestamps, verify NO cache update needed
+
+**Key Features**:
+- Uses regex pattern `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}` to extract ALL timestamps from output
+- Runs BOTH `--info` and `--list-duplicates` at each verification step
+- Captures timestamps from ALL libraries, not just modified ones
+- Comprehensive pass/fail reporting with detailed diagnostics
+
+**Usage**: `./test_comprehensive_timestamps.py`
