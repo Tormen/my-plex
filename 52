@@ -852,32 +852,37 @@ def load_cache():
 def update_and_save_cache(obj_dict):
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
 
-    # CRITICAL: Update timestamps to current time + 30s buffer BEFORE merging into CACHE
+    # CRITICAL: Update timestamps to current time + 60s buffer BEFORE merging into CACHE
     # This applies to BOTH --update-cache AND --list-duplicates --resolve
-    # The 30s buffer accounts for Plex's asynchronous timestamp updates
+    # The 60s buffer accounts for Plex's asynchronous timestamp updates
     # We do this BEFORE the merge so timestamps don't get overwritten
+    if DBG: print(f"{DBGPFX}update_and_save_cache(): OFFLINE={OFFLINE}, READ_ONLY_MODE={READ_ONLY_MODE}, has_library_stats={'library_stats' in obj_dict}")
     if not OFFLINE and not READ_ONLY_MODE and 'library_stats' in obj_dict:
         # Only update if we actually have timestamp data to work with
+        if DBG: print(f"{DBGPFX}update_and_save_cache(): has_updatedAt={'updatedAt' in obj_dict['library_stats']}, updatedAt_len={len(obj_dict['library_stats'].get('updatedAt', {}))}")
         if 'updatedAt' in obj_dict['library_stats'] and len(obj_dict['library_stats']['updatedAt']) > 0:
             from datetime import datetime, timedelta
-            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
+            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=60)
+            if DBG: print(f"{DBGPFX}update_and_save_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, current_time={current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
             if FORCE_CACHE_UPDATE:
                 # --update-cache: Update ALL library timestamps
+                updated_count = 0
                 for lib_name in obj_dict['library_stats']['updatedAt'].keys():
                     obj_dict['library_stats']['updatedAt'][lib_name] = current_time
-                if VRB:
-                    print(f"{VRBPFX}Updated ALL library timestamps to current time +30s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    updated_count += 1
+                if DBG or VRB:
+                    print(f"{VRBPFX if VRB else DBGPFX}Updated {updated_count} library timestamps to current time +60s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
             else:
                 # Resolution or other operations: Update timestamps that were modified
                 # Check which timestamps were recently updated (within last 2 minutes)
                 two_min_ago = datetime.now() - timedelta(minutes=2)
                 for lib_name, ts in obj_dict['library_stats']['updatedAt'].items():
-                    # If timestamp is recent (updated in last 2 min), refresh it to current + 30s
+                    # If timestamp is recent (updated in last 2 min), refresh it to current + 60s
                     if ts and hasattr(ts, 'replace') and ts > two_min_ago:
                         obj_dict['library_stats']['updatedAt'][lib_name] = current_time
                         if VRB:
-                            print(f"{VRBPFX}Updated timestamp for '{lib_name}' to current time +30s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                            print(f"{VRBPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Update global CACHE
     # CRITICAL FIX: Only update keys that have non-empty values to prevent overwriting
@@ -10540,10 +10545,10 @@ def verify_cache():
                 plex_ts_str = 'N/A'
 
             # Check for timestamp mismatch
-            # CACHE timestamp should be ahead of PLEX by at most 30 seconds (safety margin)
+            # CACHE timestamp should be ahead of PLEX by at most 60 seconds (safety margin)
             # ERROR conditions:
             #   1. PLEX > CACHE: Timestamp drift - PLEX updated but CACHE didn't
-            #   2. CACHE > PLEX by more than 30s: Over-advanced cache timestamp
+            #   2. CACHE > PLEX by more than 60s: Over-advanced cache timestamp
             timestamp_mismatch = False
             if cache_timestamp != 'N/A' and plex_timestamp != 'N/A':
                 try:
@@ -10552,8 +10557,8 @@ def verify_cache():
                     if plex_timestamp > cache_timestamp:
                         timestamp_mismatch = True
                         timestamp_mismatches.append(lib_name)
-                    # Also check if CACHE is more than 30s ahead of PLEX (unusual)
-                    elif (cache_timestamp - plex_timestamp) > timedelta(seconds=30):
+                    # Also check if CACHE is more than 60s ahead of PLEX (unusual)
+                    elif (cache_timestamp - plex_timestamp) > timedelta(seconds=60):
                         timestamp_mismatch = True
                         timestamp_mismatches.append(lib_name)
                 except Exception:
@@ -11106,7 +11111,7 @@ def main():
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}.", default=PLEX_TOKEN)
     main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
-    main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤30s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
+    main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata.", default=False)
     main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files. Detects additions, changes, and deletions. SLOWER but comprehensive.", default=False)
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
