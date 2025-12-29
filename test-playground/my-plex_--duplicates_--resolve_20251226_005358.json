@@ -1,0 +1,332 @@
+{
+  "session": {
+    "started": "2025-12-26 00:53:58",
+    "command": "/LINKS/src/,py/prj/my-plex/my-plex.py --list-duplicates --resolve",
+    "timestamp": "20251226_005358",
+    "log_format_version": "1.0",
+    "ended": "2025-12-26 00:54:38",
+    "total_operations": 1
+  },
+  "operations": [
+    {
+      "operation_number": 1,
+      "timestamp": "2025-12-26 00:54:32",
+      "choice": "4",
+      "choice_description": "Trash file [2]",
+      "files": {
+        "file2": {
+          "path": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+          "movie_directory": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]",
+          "library": ",unsorted",
+          "plex_id": 101207,
+          "cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+            "files": {
+              "93.26min 1280x720 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/appleseed alpha (2014)/Appleseed.Alpha.2014.720p.BluRay.x264.YIFY.mp4",
+                "filesize": 787316382
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 101207,
+            "title": "Appleseed Alpha",
+            "year": 2014,
+            "library": ",unsorted",
+            "item_id": 101207,
+            "media_id": 137196,
+            "part_id": 146520,
+            "version": "93.26min 1276x720 (h264 aac)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-10 03:55:09",
+            "addedAt": "2025-04-27 12:00:39",
+            "lastViewedAt": null,
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Based on the comic book by the creator of Ghost in the Shell, a young female soldier Deunan and her cyborg partner Briareos survive through the post World War 3 apocalyptic New York in search of human's future hope, the legendary city of Olympus.",
+            "duration": 5595638,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "resolution": "720",
+            "resolution_full": "1276x720",
+            "filesize": 1114748310,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Yuka Komatsu",
+              "Junichi Suwabe",
+              "Aoi Yuuki",
+              "Hiroki Takahashi",
+              "Hiroki Touchi",
+              "Kaori Nazuka",
+              "Tessyo Genda",
+              "Katsunosuke Hori",
+              "Hisanori Yoshida",
+              "Shinichiro Kamio",
+              "Yoshiki Nakajima",
+              "Yuki Yonai",
+              "Mao Satonaka"
+            ],
+            "countries": [
+              "Japan",
+              "United States of America"
+            ],
+            "directors": [
+              "Shinji Aramaki"
+            ],
+            "writers": [
+              "Marianne Krawczyk",
+              "Shirow Masamune"
+            ],
+            "genres": [
+              "Animation",
+              "Science Fiction",
+              "Action",
+              "Adventure",
+              "Fantasy"
+            ],
+            "contentRating": "R",
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Stage 6 Films",
+            "versions": [
+              "93.26min 1280x720 (h264 aac)",
+              "93.26min 1276x720 (h264 aac)"
+            ],
+            "originalTitle": null
+          },
+          "is_multi_version": true
+        }
+      },
+      "actions": [
+        {
+          "action": "trash",
+          "target": "file_2",
+          "original_path": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+          "trash_path": "/Volumes/2/.Trashes/1001/20251226_005434_Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+          "deleted_cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+            "files": {
+              "93.26min 1280x720 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/appleseed alpha (2014)/Appleseed.Alpha.2014.720p.BluRay.x264.YIFY.mp4",
+                "filesize": 787316382
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 101207,
+            "title": "Appleseed Alpha",
+            "year": 2014,
+            "library": ",unsorted",
+            "item_id": 101207,
+            "media_id": 137196,
+            "part_id": 146520,
+            "version": "93.26min 1276x720 (h264 aac)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-10 03:55:09",
+            "addedAt": "2025-04-27 12:00:39",
+            "lastViewedAt": null,
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Based on the comic book by the creator of Ghost in the Shell, a young female soldier Deunan and her cyborg partner Briareos survive through the post World War 3 apocalyptic New York in search of human's future hope, the legendary city of Olympus.",
+            "duration": 5595638,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "resolution": "720",
+            "resolution_full": "1276x720",
+            "filesize": 1114748310,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Yuka Komatsu",
+              "Junichi Suwabe",
+              "Aoi Yuuki",
+              "Hiroki Takahashi",
+              "Hiroki Touchi",
+              "Kaori Nazuka",
+              "Tessyo Genda",
+              "Katsunosuke Hori",
+              "Hisanori Yoshida",
+              "Shinichiro Kamio",
+              "Yoshiki Nakajima",
+              "Yuki Yonai",
+              "Mao Satonaka"
+            ],
+            "countries": [
+              "Japan",
+              "United States of America"
+            ],
+            "directors": [
+              "Shinji Aramaki"
+            ],
+            "writers": [
+              "Marianne Krawczyk",
+              "Shirow Masamune"
+            ],
+            "genres": [
+              "Animation",
+              "Science Fiction",
+              "Action",
+              "Adventure",
+              "Fantasy"
+            ],
+            "contentRating": "R",
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Stage 6 Films",
+            "versions": [
+              "93.26min 1280x720 (h264 aac)",
+              "93.26min 1276x720 (h264 aac)"
+            ],
+            "originalTitle": null
+          },
+          "deleted_cache_key": "Movie_ID:101207",
+          "status": "success"
+        }
+      ],
+      "result": "success",
+      "undo_instructions": [
+        {
+          "step": 1,
+          "action": "restore_from_trash",
+          "description": "Move /Volumes/2/.Trashes/1001/20251226_005434_Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv back to /Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv (remote via SSH)",
+          "trash_path": "/Volumes/2/.Trashes/1001/20251226_005434_Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+          "original_path": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv"
+        },
+        {
+          "step": 2,
+          "action": "plex_library_scan",
+          "description": "Scan Plex library ',unsorted' to detect the restored file",
+          "library_name": ",unsorted",
+          "restored_file_path": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv"
+        },
+        {
+          "step": 3,
+          "action": "restore_cache_entry",
+          "description": "Update cache with restored file (new Plex ID will be assigned)",
+          "cache_key": "Movie_ID:101207",
+          "cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv",
+            "files": {
+              "93.26min 1280x720 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/appleseed alpha (2014)/Appleseed.Alpha.2014.720p.BluRay.x264.YIFY.mp4",
+                "filesize": 787316382
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 101207,
+            "title": "Appleseed Alpha",
+            "year": 2014,
+            "library": ",unsorted",
+            "item_id": 101207,
+            "media_id": 137196,
+            "part_id": 146520,
+            "version": "93.26min 1276x720 (h264 aac)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-10 03:55:09",
+            "addedAt": "2025-04-27 12:00:39",
+            "lastViewedAt": null,
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Based on the comic book by the creator of Ghost in the Shell, a young female soldier Deunan and her cyborg partner Briareos survive through the post World War 3 apocalyptic New York in search of human's future hope, the legendary city of Olympus.",
+            "duration": 5595638,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "resolution": "720",
+            "resolution_full": "1276x720",
+            "filesize": 1114748310,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Yuka Komatsu",
+              "Junichi Suwabe",
+              "Aoi Yuuki",
+              "Hiroki Takahashi",
+              "Hiroki Touchi",
+              "Kaori Nazuka",
+              "Tessyo Genda",
+              "Katsunosuke Hori",
+              "Hisanori Yoshida",
+              "Shinichiro Kamio",
+              "Yoshiki Nakajima",
+              "Yuki Yonai",
+              "Mao Satonaka"
+            ],
+            "countries": [
+              "Japan",
+              "United States of America"
+            ],
+            "directors": [
+              "Shinji Aramaki"
+            ],
+            "writers": [
+              "Marianne Krawczyk",
+              "Shirow Masamune"
+            ],
+            "genres": [
+              "Animation",
+              "Science Fiction",
+              "Action",
+              "Adventure",
+              "Fantasy"
+            ],
+            "contentRating": "R",
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Stage 6 Films",
+            "versions": [
+              "93.26min 1280x720 (h264 aac)",
+              "93.26min 1276x720 (h264 aac)"
+            ],
+            "originalTitle": null
+          },
+          "library_name": ",unsorted",
+          "restored_file_path": "/Volumes/2/watch.v/,unsorted/appleseed.alpha.2014.720p.bluray.800mb.x264-galaxyrg[tgx]/Appleseed.Alpha.2014.720p.BluRay.800MB.x264-GalaxyRG.mkv"
+        }
+      ]
+    }
+  ]
+}
