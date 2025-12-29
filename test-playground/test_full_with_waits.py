@@ -200,7 +200,7 @@ print("-"*80)
 
 # Find most recent .json in plex trash (contains metadata)
 result = subprocess.run(
-    ['ssh', 'my-plex', 'ls -t ~/.plex_trash/*.json 2>/dev/null | head -1'],
+    ['ssh', 'my-plex', 'sh', '-c', 'ls -t ~/.plex_trash/*.json 2>/dev/null | head -1'],
     capture_output=True,
     text=True
 )
