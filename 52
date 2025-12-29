@@ -6587,8 +6587,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Print progress to terminal (always, not just in verbose mode)
         # Skip basic progress line in verbose mode since detailed partition/processing lines are printed
         if FORCE_CACHE_UPDATE and not VRB:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
             worker_prefix = _get_worker_prefix()
-            print(f"{worker_prefix}{display_title}...", flush=True)
+            print(f"{timestamp} {worker_prefix}{display_title}...", flush=True)
 
         # Differentiate between Movie and Show libraries
         completed = True  # Assume completed unless function returns False
@@ -6801,12 +6803,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         delta_parts.append(f"{'/'.join(parts)} movies")
 
             # Print completion message with delta (always show status)
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
             worker_prefix = _get_worker_prefix()
             if delta_parts:
                 delta_str = ", ".join(delta_parts)
-                print(f"{worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
+                print(f"{timestamp} {worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
             else:
-                print(f"{worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) no changes")
+                print(f"{timestamp} {worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) no changes")
 
         return True  # Library was updated
 
