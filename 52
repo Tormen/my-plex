@@ -1889,7 +1889,11 @@ def get_library_stats(supported=True):
     library_stats = copy.deepcopy(EMPTY_LIBRARY_STATS)
     libraries = PLEX_Library.OBJ_DICT_SUPPORTED.items() if supported else PLEX_Library.OBJ_DICT.items()
     for title,library in libraries:
-        library_stats['updatedAt'][title] = library.updatedAt
+        # Add 30-second safety margin to prevent false cache update prompts
+        # Plex may continue updating its timestamp after operations complete
+        plex_timestamp = library.updatedAt.replace(microsecond=0)
+        cache_timestamp = plex_timestamp + timedelta(seconds=30)
+        library_stats['updatedAt'][title] = cache_timestamp
         # totalSize requires an API call - use retry logic
         try:
             library_stats['itemsCount'][title] = plex_retry_operation(
