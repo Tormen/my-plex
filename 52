@@ -4163,17 +4163,26 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                 print("✓")
 
         # Update library timestamps for successfully scanned libraries
-        # This prevents next run from seeing stale timestamps and triggering unnecessary updates
+        # Fetch the ACTUAL timestamp from Plex server to prevent cache update prompts
         if successfully_scanned_libraries and 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
-            from datetime import datetime
-            current_time = datetime.now().replace(microsecond=0)
             for lib_name in successfully_scanned_libraries:
-                if lib_name in CACHE['library_stats']['updatedAt']:
-                    CACHE['library_stats']['updatedAt'][lib_name] = current_time
-                    if VRB:
-                        print(f"{VRBPFX}Updated timestamp for library '{lib_name}' to {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                if lib_name in PLEX_Library.OBJ_DICT:
+                    lib = PLEX_Library.OBJ_DICT[lib_name]
+                    try:
+                        # Reload library to get fresh timestamp from Plex server
+                        lib.reload()
+                        plex_timestamp = lib.updatedAt.replace(microsecond=0)
 
-        # Save cache with inline updates
+                        # Update cache with Plex's actual timestamp
+                        if lib_name in CACHE['library_stats']['updatedAt']:
+                            CACHE['library_stats']['updatedAt'][lib_name] = plex_timestamp
+                            if VRB:
+                                print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}' to match Plex: {plex_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    except Exception as e:
+                        if VRB:
+                            print(f"{VRBPFX}Warning: Could not update timestamp for library '{lib_name}': {e}")
+
+        # Save cache with inline updates including updated library_stats timestamps
         try:
             cache_dict = {
                 'obj_by_id': PLEX_Media.OBJ_BY_ID,
@@ -4181,7 +4190,11 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                 'obj_by_library': PLEX_Media.OBJ_BY_LIBRARY,
                 'obj_by_movie': PLEX_Media.OBJ_BY_MOVIE,
                 'obj_by_show': PLEX_Media.OBJ_BY_SHOW,
-                'obj_by_show_episodes': PLEX_Media.OBJ_BY_SHOW_EPISODES
+                'obj_by_show_episodes': PLEX_Media.OBJ_BY_SHOW_EPISODES,
+                'library_stats': CACHE.get('library_stats', {}),
+                'library_object_counts': CACHE.get('library_object_counts', {}),
+                'labels_index': CACHE.get('labels_index', {}),
+                'media_objs': CACHE.get('media_objs', {})
             }
             update_and_save_cache(cache_dict)
             print(f"  ✓ Cache saved successfully")
