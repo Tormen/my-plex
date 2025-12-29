@@ -5904,11 +5904,31 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             PLEX_Media.save_checkpoint(checkpoint_lib_name)
 
 
-def update_movie_library_objs(library, library_idx=0, total_libraries=0):
-    """Retrieve MediaPart IDs and file paths for a Movie library"""
+def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """Retrieve MediaPart IDs and file paths for a Movie library
+    If start_idx and end_idx are provided, only process movies in that index range (virtual partitioning).
+    """
     global FORCE_CACHE_UPDATE
+    if DBG: print( f"{DBGPFX}update_movie_library_objs(library:'{library}')" )
+
+    # PERFORMANCE OPTIMIZATION: When rebuilding cache, skip timestamp checks
+    # This eliminates cache lookups and timestamp comparisons
+    rebuild_mode = FORCE_CACHE_UPDATE
+
     all_movies = plex_get_all_items(library)
     total_movies = len(all_movies)
+
+    # VIRTUAL PARTITIONING: If start/end indices are provided, slice the movies list
+    # Create display title for partition-aware messages
+    display_title = library.title
+    if start_idx is not None and end_idx is not None:
+        all_movies = all_movies[start_idx:end_idx]
+        display_title = f"{library.title}[{start_idx}:{end_idx}]"
+        if VRB:
+            lib_label = f"library '{display_title}'"
+            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing partition [{start_idx}:{end_idx}] = {len(all_movies)} movies")
+        # Update total for progress display
+        total_movies = len(all_movies)
 
     # Store server IDs for removal detection (to detect items in cache but not on server)
     # Accumulate IDs across all partitions of the same base library
@@ -5917,22 +5937,36 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0):
     base_library_name = library.title
     if base_library_name not in PLEX_Media.library_server_ids:
         PLEX_Media.library_server_ids[base_library_name] = set()
-    # Add IDs from this batch to the accumulated set
-    PLEX_Media.library_server_ids[base_library_name].update({get_fullID(item) for item in all_movies})
+
+    # Collect IDs from this partition
+    partition_ids = {get_fullID(item) for item in all_movies}
+
+    # Add to accumulated set for the base library
+    PLEX_Media.library_server_ids[base_library_name].update(partition_ids)
 
     # In rebuild mode with resume, calculate how many movies are left to process
-    if FORCE_CACHE_UPDATE:
+    if rebuild_mode and FORCE_CACHE_UPDATE:
         movies_already_cached = sum(1 for item in all_movies if get_fullID(item) in PLEX_Media.OBJ_BY_ID)
         movies_to_process = total_movies - movies_already_cached
         if VERYVRB:
-            lib_label = f"library '{library.title}'"
-            if movies_already_cached > 0:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} movies ({movies_already_cached} already cached)...", flush=True)
+            lib_label = f"library '{display_title}'"
+            if movies_already_cached > 0 and movies_to_process > 0:
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} new movies, checking {movies_already_cached} cached movies...", flush=True)
+            elif movies_already_cached > 0:
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: checking {movies_already_cached} cached movies...", flush=True)
             else:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {total_movies} movies...", flush=True)
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} movies...", flush=True)
         # Track progress for checkpoint messages
-        PLEX_Media.current_library = library.title
+        PLEX_Media.current_library = display_title
         PLEX_Media.current_item_total = movies_to_process
+        PLEX_Media.current_item_type = 'movies'
+    elif FORCE_CACHE_UPDATE:
+        if VERYVRB:
+            lib_label = f"library '{display_title}'"
+            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {total_movies} movies...", flush=True)
+        # Track progress for checkpoint messages
+        PLEX_Media.current_library = display_title
+        PLEX_Media.current_item_total = total_movies
         PLEX_Media.current_item_type = 'movies'
     # Track number of movies actually processed (excluding skipped ones from resume)
     processed_count = 0
@@ -6560,7 +6594,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         completed = True  # Assume completed unless function returns False
         try:
             match library.type:  # ATTENTION the library.type is LOWERCASE
-                case 'movie':   result = update_movie_library_objs(library, library_idx, total_libraries)
+                case 'movie':   result = update_movie_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
                 case 'show':    result = update_show_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
                 case 'artist':  pass
                 case _:         err(1012, f"UNSUPPORTED library.type '{library.type}'. Please check your parameters. If you believe this is a bug, please reach out to maintainer of this software.")
@@ -6984,10 +7018,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 # When resuming, filter out already-completed libraries first
                 all_libraries = list(PLEX_Library.OBJ_DICT_SUPPORTED.items())
 
-                # PERFORMANCE OPTIMIZATION: Always partition large Show libraries
+                # PERFORMANCE OPTIMIZATION: Always partition large Show and Movie libraries
                 # This allows workers that finish early to pick up partitions from large libraries
                 # that are still being processed, achieving better load balancing
-                PARTITION_MIN_SHOWS = 30  # Only partition libraries with > 30 shows
+                PARTITION_MIN_SHOWS = 30  # Only partition Show libraries with > 30 shows
+                PARTITION_MIN_MOVIES = 50  # Only partition Movie libraries with > 50 movies
                 MAX_PARTITIONS_PER_LIBRARY = 4  # Maximum number of partitions per library
 
                 # Filter out completed libraries when resuming
@@ -7016,8 +7051,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             # Check if we have all expected partitions completed
                             completed_parts = library_partitions[title]
                             # Extract partition indices to see if we have all partitions
-                            # If library has enough shows to be partitioned, check if all partitions are done
+                            # If library has enough shows/movies to be partitioned, check if all partitions are done
+                            should_partition = False
                             if lib.type == 'show' and lib.totalSize > PARTITION_MIN_SHOWS:
+                                should_partition = True
+                            elif lib.type == 'movie' and lib.totalSize > PARTITION_MIN_MOVIES:
+                                should_partition = True
+
+                            if should_partition:
                                 expected_partitions = min(MAX_PARTITIONS_PER_LIBRARY, max_workers)
                                 partition_size = (lib.totalSize + expected_partitions - 1) // expected_partitions
 
@@ -7052,7 +7093,17 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                 for title, library in libraries_to_process:
                     try:
+                        # Check if library should be partitioned (large Show or Movie libraries)
+                        should_partition = False
+                        lib_type_name = None
                         if library.type == 'show' and library.totalSize > PARTITION_MIN_SHOWS:
+                            should_partition = True
+                            lib_type_name = 'shows'
+                        elif library.type == 'movie' and library.totalSize > PARTITION_MIN_MOVIES:
+                            should_partition = True
+                            lib_type_name = 'movies'
+
+                        if should_partition:
                             # Calculate how many partitions to create (max 4 per library)
                             num_partitions = min(MAX_PARTITIONS_PER_LIBRARY, max_workers)
                             partition_size = (library.totalSize + num_partitions - 1) // num_partitions
@@ -7088,12 +7139,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                             if VRB:
                                 if partitions_added > 0:
-                                    print(f"{VRBPFX}Partitioning '{title}' ({library.totalSize} shows) into {num_partitions} chunks for parallel processing")
+                                    print(f"{VRBPFX}Partitioning '{title}' ({library.totalSize} {lib_type_name}) into {num_partitions} chunks for parallel processing")
                                 else:
                                     # All partitions already completed
                                     print(f"{VRBPFX}Library '{title}': all {num_partitions} partitions already completed, skipping")
                         else:
-                            # Not a Show library or too small - keep as-is
+                            # Not a large Show/Movie library or too small - keep as-is
                             # Use None for partition info to indicate no partitioning
                             partitioned_libraries.append((title, library, None, None, None, None))
                     except:
