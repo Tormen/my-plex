@@ -851,6 +851,34 @@ def load_cache():
 
 def update_and_save_cache(obj_dict):
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
+
+    # CRITICAL: Update timestamps to current time + 30s buffer BEFORE merging into CACHE
+    # This applies to BOTH --update-cache AND --list-duplicates --resolve
+    # The 30s buffer accounts for Plex's asynchronous timestamp updates
+    # We do this BEFORE the merge so timestamps don't get overwritten
+    if not OFFLINE and not READ_ONLY_MODE and 'library_stats' in obj_dict:
+        # Only update if we actually have timestamp data to work with
+        if 'updatedAt' in obj_dict['library_stats'] and len(obj_dict['library_stats']['updatedAt']) > 0:
+            from datetime import datetime, timedelta
+            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
+
+            if FORCE_CACHE_UPDATE:
+                # --update-cache: Update ALL library timestamps
+                for lib_name in obj_dict['library_stats']['updatedAt'].keys():
+                    obj_dict['library_stats']['updatedAt'][lib_name] = current_time
+                if VRB:
+                    print(f"{VRBPFX}Updated ALL library timestamps to current time +30s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                # Resolution or other operations: Update timestamps that were modified
+                # Check which timestamps were recently updated (within last 2 minutes)
+                two_min_ago = datetime.now() - timedelta(minutes=2)
+                for lib_name, ts in obj_dict['library_stats']['updatedAt'].items():
+                    # If timestamp is recent (updated in last 2 min), refresh it to current + 30s
+                    if ts and hasattr(ts, 'replace') and ts > two_min_ago:
+                        obj_dict['library_stats']['updatedAt'][lib_name] = current_time
+                        if VRB:
+                            print(f"{VRBPFX}Updated timestamp for '{lib_name}' to current time +30s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
     # Update global CACHE
     # CRITICAL FIX: Only update keys that have non-empty values to prevent overwriting
     # good data with empty dicts if PLEX_Media structures get unexpectedly cleared
@@ -865,19 +893,6 @@ def update_and_save_cache(obj_dict):
     if READ_ONLY_MODE:
         if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
         return
-
-    # If we triggered library scans (via --update-cache), update timestamps to current time + 30s buffer
-    # RIGHT BEFORE saving to disk - this ensures timestamps match when cache is actually saved
-    # The 30s buffer accounts for Plex's asynchronous timestamp updates
-    if FORCE_CACHE_UPDATE and not OFFLINE and 'library_stats' in CACHE:
-        from datetime import datetime, timedelta
-        current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
-        # Update all library timestamps to current time + buffer
-        if 'updatedAt' in CACHE['library_stats']:
-            for lib_name in CACHE['library_stats']['updatedAt'].keys():
-                CACHE['library_stats']['updatedAt'][lib_name] = current_time
-            if VRB:
-                print(f"{VRBPFX}Updated library timestamps to current time +30s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Save the current cache to file
     # During cache rebuild, we already hold the lock, so don't try to acquire it again
@@ -10170,9 +10185,39 @@ def show_system_info():
                 # Each library gets its proportional share of obj_by_id AND supporting structures
                 library_cache_sizes[lib_name] = int((obj_by_id_total_size + supporting_structures_total_size) * proportion)
 
+        # Get timestamps for display
+        # IMPORTANT: Show what's SAVED ON DISK, not what's in memory
+        # During init, CACHE dict may have been updated with fresh Plex timestamps
+        # but if user declined cache update, those new timestamps were NOT saved to disk
+        # Therefore, we RELOAD from disk to show the actual saved state
+        cache_timestamps = {}
+        plex_timestamps = {}
+
+        # Reload timestamps from disk file to show what's actually saved
+        import pickle
+        cache_file_path = os.path.expanduser(CACHE_FILE)
+        if os.path.exists(cache_file_path):
+            try:
+                with open(cache_file_path, 'rb') as f:
+                    disk_cache = pickle.load(f)
+                    if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
+                        cache_timestamps = disk_cache['library_stats']['updatedAt']
+                        # Show same in both columns - this is what's saved on disk
+                        plex_timestamps = cache_timestamps.copy()
+            except Exception:
+                # If reload fails, fall back to in-memory cache
+                if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                    cache_timestamps = CACHE['library_stats']['updatedAt']
+                    plex_timestamps = cache_timestamps.copy()
+        else:
+            # No disk cache, use in-memory
+            if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                cache_timestamps = CACHE['library_stats']['updatedAt']
+                plex_timestamps = cache_timestamps.copy()
+
         # Print table header
-        print(f"  {'Type':<8}  {'Name':<{name_width}}  {'Items':>10}  {'Cache Size':>12}")
-        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}")
+        print(f"  {'Type':<8}  {'Name':<{name_width}}  {'Items':>10}  {'Cache Size':>12}  {'Cache Timestamp':<20}  {'Plex Timestamp':<20}")
+        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
 
         # Print all libraries (display "Series/Show" instead of "Show")
         total_items = 0
@@ -10197,12 +10242,19 @@ def show_system_info():
             if server_items is not None:
                 total_items += server_items
 
-            print(f"  {display_type:<8}  {truncated_name:<{name_width}}  {items_str:>10}  {cache_size_str:>12}")
+            # Format timestamps
+            cache_ts = cache_timestamps.get(lib_name)
+            plex_ts = plex_timestamps.get(lib_name)
+
+            cache_ts_str = cache_ts.strftime('%Y-%m-%d %H:%M:%S') if cache_ts and hasattr(cache_ts, 'strftime') else '-'
+            plex_ts_str = plex_ts.strftime('%Y-%m-%d %H:%M:%S') if plex_ts and hasattr(plex_ts, 'strftime') else '-'
+
+            print(f"  {display_type:<8}  {truncated_name:<{name_width}}  {items_str:>10}  {cache_size_str:>12}  {cache_ts_str:<20}  {plex_ts_str:<20}")
 
         # Print total row (MB value aligned in Cache Size column)
-        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}")
+        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
         total_cache_mb = total_cache_bytes / (1024*1024)
-        print(f"  {'TOTAL':<8}  {'':<{name_width}}  {total_items:>10,}  {total_cache_mb:>9.2f} MB")
+        print(f"  {'TOTAL':<8}  {'':<{name_width}}  {total_items:>10,}  {total_cache_mb:>9.2f} MB  {'':<20}  {'':<20}")
 
         # Calculate overhead from non-library structures (structures not distributed to libraries)
         # This includes: media_objs, library_stats, labels_index, library_object_counts
@@ -10213,10 +10265,10 @@ def show_system_info():
                 overhead_mb += len(pickle.dumps(CACHE[struct_name])) / (1024*1024)
 
         if overhead_mb > 0.01:  # Only show if significant
-            print(f"  {'Overhead':<8}  {'(metadata & stats)':<{name_width}}  {'':<10}  {overhead_mb:>9.2f} MB")
-            print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}")
+            print(f"  {'Overhead':<8}  {'(metadata & stats)':<{name_width}}  {'':<10}  {overhead_mb:>9.2f} MB  {'':<20}  {'':<20}")
+            print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
             cache_total_with_overhead = total_cache_mb + overhead_mb
-            print(f"  {'CACHE':<8}  {'':<{name_width}}  {'':<10}  {cache_total_with_overhead:>9.2f} MB")
+            print(f"  {'CACHE':<8}  {'':<{name_width}}  {'':<10}  {cache_total_with_overhead:>9.2f} MB  {'':<20}  {'':<20}")
     else:
         print("  No libraries loaded")
         if OFFLINE:

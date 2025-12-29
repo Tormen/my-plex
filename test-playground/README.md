@@ -17,6 +17,30 @@ Automated test script that monitors library timestamps throughout the full resol
 #### `test_timestamps_auto.py`
 Similar to `test_with_timestamps.py` but with enhanced automation and timestamp monitoring. Verifies that cache timestamps are correctly set to `datetime.now() + 30s` after resolution operations.
 
+#### `test_full_with_waits.py` (NEW - Dec 29, 2025)
+**Comprehensive timestamp verification test with explicit wait periods.** This is the definitive test that monitors BOTH CACHE and PLEX timestamps throughout the entire workflow:
+
+0. **Pre-test**: Ensure all libraries are in sync (runs `--update-cache` if needed)
+1. Resolve a duplicate (choice 4: keep [1], trash [2])
+2. **Wait 30 seconds**, then verify NO cache update is needed
+3. Undo the resolution by restoring file from trash
+4. Run `--update-cache` to sync DISK/PLEX/CACHE
+5. **Wait 5 minutes**, then verify NO cache update is needed
+
+**Key Features**:
+- **Pre-test sync**: Ensures all libraries start in sync before testing
+- Displays timestamps from BOTH CACHE and PLEX at each step
+- Uses explicit wait periods (30s, 5min) to verify timestamp stability
+- Tests the complete undo/redo cycle to ensure sync
+- Comprehensive pass/fail reporting with detailed diagnostics
+- Saves full output to `test_full_with_waits.log`
+
+**Important**: The pre-test sync step is critical because Plex timestamps can drift naturally even on unmodified libraries. Starting with all libraries in sync ensures the test accurately verifies that ONLY modified libraries need cache updates.
+
+**Usage**: `./test_full_with_waits.py`
+
+**Total Runtime**: ~8-10 minutes (includes pre-test sync + wait periods)
+
 #### `test_timestamp_margin.py`
 Tests the 30-second safety margin for cache timestamps. Verifies that cache timestamps remain ahead of Plex timestamps after library scans.
 
@@ -286,8 +310,13 @@ Tests for particular movies that exhibited issues:
 All steps verified successfully with `test_timestamps_auto.py` and `test_with_timestamps.py`.
 
 ### Code Locations
-- Resolution timestamp fix: [52:4171-4180](../52#L4171-L4180)
-- Update-cache timestamp fix: [52:869-880](../52#L869-L880) (this was already correct!)
+- Resolution timestamp fix: [52:4191-4197](../52#L4191-L4197)
+- **CRITICAL FIX** - update_and_save_cache() timestamp logic: [52:855-880](../52#L855-L880)
+  - Bug fixed (1st): Previously only updated timestamps when `FORCE_CACHE_UPDATE=True` (--update-cache)
+  - Bug fixed (2nd): Timestamp update must happen BEFORE merging obj_dict into CACHE (moved before line 890)
+  - Now updates timestamps in obj_dict FIRST, then merges into CACHE
+  - Uses heuristic: any timestamp updated in last 2 minutes gets refreshed to `datetime.now() + 30s`
+  - Applies to both `--update-cache` (all libraries) and resolution (recently modified libraries)
 - get_library_stats() (returns TRUTH): [52:1876-1898](../52#L1876-L1898)
 - Modified libraries tracking: [52:4001-4036](../52#L4001-L4036)
 - Selective library scanning: [52:4086-4091](../52#L4086-L4091)
@@ -364,4 +393,31 @@ Per user request:
 
 All test artifacts moved from `/tmp` to this organized test-playground directory on Dec 29, 2025.
 
-This README was created and will be maintained going forward to document all test artifacts and their purpose.
+This README is maintained going forward to document all test artifacts and their purpose.
+
+## Recent Enhancements (Dec 29, 2025)
+
+### Enhanced `--info` Command with Timestamps
+Added Cache and Plex timestamps to the LIBRARIES table in `my-plex --info` output:
+- **Code Location**: [52:10173-10240](../52#L10173-L10240)
+- **Feature**: Shows both Cache timestamp and Plex timestamp for each library in the table
+- **Purpose**: Makes it easy to spot timestamp discrepancies at a glance without needing to run `--list-duplicates`
+- **Display Format**: `YYYY-MM-DD HH:MM:SS` in aligned columns
+
+**Important Fix** (Dec 29, 2025): The timestamps now show what's actually SAVED ON DISK, not what's in memory. Previously, if you declined a cache update prompt, the table would still show the fresh Plex timestamps that were fetched during the check but not saved. Now the code reloads timestamps from the disk cache file to ensure accuracy.
+
+**Before**:
+```
+  Type      Name               Items    Cache Size
+  --------  ------------  ----------  ------------
+  Movie     ,unsorted          1,257       1.81 MB
+```
+
+**After**:
+```
+  Type      Name               Items    Cache Size  Cache Timestamp       Plex Timestamp
+  --------  ------------  ----------  ------------  --------------------  --------------------
+  Movie     ,unsorted          1,257       1.81 MB  2025-12-29 11:49:37   2025-12-29 11:49:37
+```
+
+This enhancement supports the timestamp verification workflow by providing an easy way to check library sync status.
