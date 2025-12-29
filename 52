@@ -56,7 +56,7 @@ import time
 # Force unbuffered output for all print statements (important when redirecting to file)
 print = functools.partial(print, flush=True)
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import reduce
 from pathlib import Path
 from pprint import pprint, pformat
@@ -4173,11 +4173,15 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                         lib.reload()
                         plex_timestamp = lib.updatedAt.replace(microsecond=0)
 
-                        # Update cache with Plex's actual timestamp
+                        # Add 30 seconds safety margin to prevent false cache update prompts
+                        # Plex may continue updating its internal timestamp after scan completes
+                        cache_timestamp = plex_timestamp + timedelta(seconds=30)
+
+                        # Update cache with adjusted timestamp
                         if lib_name in CACHE['library_stats']['updatedAt']:
-                            CACHE['library_stats']['updatedAt'][lib_name] = plex_timestamp
+                            CACHE['library_stats']['updatedAt'][lib_name] = cache_timestamp
                             if VRB:
-                                print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}' to match Plex: {plex_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                                print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}': Plex={plex_timestamp.strftime('%Y-%m-%d %H:%M:%S')}, Cache={cache_timestamp.strftime('%Y-%m-%d %H:%M:%S')} (+30s safety margin)")
                     except Exception as e:
                         if VRB:
                             print(f"{VRBPFX}Warning: Could not update timestamp for library '{lib_name}': {e}")
