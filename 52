@@ -7469,6 +7469,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         if was_updated:
                             cache_needs_save = True
 
+                # CRITICAL FIX: Update timestamps for libraries that were just scanned
+                # Set to datetime.now() + 60s to prevent false cache update prompts
+                from datetime import datetime, timedelta
+                current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=60)
+                for title, _, _, _ in libraries_to_update:
+                    current_library_stats['updatedAt'][title] = current_time
+                    if DBG:
+                        print(f"{DBGPFX}Updated timestamp for '{title}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
             # Handle graceful shutdown if requested (sequential mode)
             if _shutdown_requested:
                 print("Saving checkpoint...")
