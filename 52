@@ -7469,14 +7469,19 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         if was_updated:
                             cache_needs_save = True
 
-                # CRITICAL FIX: Update timestamps for libraries that were just scanned
-                # Set to datetime.now() + 60s to prevent false cache update prompts
-                from datetime import datetime, timedelta
-                current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=60)
-                for title, _, _, _ in libraries_to_update:
-                    current_library_stats['updatedAt'][title] = current_time
-                    if DBG:
-                        print(f"{DBGPFX}Updated timestamp for '{title}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                # CRITICAL FIX: Mark scanned libraries as "recently modified" so update_and_save_cache()
+                # will refresh their timestamps instead of preserving old ones
+                # Set cached timestamps to current time so the "< 2 min old" check passes
+                from datetime import datetime
+                if libraries_to_update:
+                    current_marker = datetime.now().replace(microsecond=0)
+                    for title, _, _, _ in libraries_to_update:
+                        # Update the IN-MEMORY cached timestamp to mark this library as "just scanned"
+                        # This ensures update_and_save_cache() will refresh it to current+60s
+                        if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                            CACHE['library_stats']['updatedAt'][title] = current_marker
+                            if DBG:
+                                print(f"{DBGPFX}Marked '{title}' as recently scanned (cache timestamp set to {current_marker.strftime('%Y-%m-%d %H:%M:%S')})")
 
             # Handle graceful shutdown if requested (sequential mode)
             if _shutdown_requested:
