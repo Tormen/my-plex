@@ -2989,7 +2989,6 @@ def play_media_file(filepath, remote_host=None):
         print(f"Playing remote file via SSH: {filepath}")
 
         # Find mpv binary dynamically
-        import shutil
         mpv_path = shutil.which('mpv')
         if not mpv_path:
             print("✗ mpv not found in PATH")
@@ -8906,11 +8905,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                 # DEBUG: Show how many duplicates we're going to process
                 total_duplicates = len(sorted_duplicates)
-                print(f"\n[DEBUG] Total duplicate groups to process: {total_duplicates}")
+                if DBG:
+                    print(f"{DBGPFX}Total duplicate groups to process: {total_duplicates}")
 
                 try:
                     for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
-                        print(f"\n[DEBUG] Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
+                        if DBG:
+                            print(f"{DBGPFX}Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
 
                         # Check if this is a multi-version item (single Plex entry with multiple file versions)
                         is_multi_version = False
@@ -8931,11 +8932,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         multi_version_files.append((ver, file_info['filepath']))
                                     else:
                                         print(f"[WARNING] Unexpected file_info type: {type(file_info)}")
-                                print(f"[DEBUG] This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
+                                if DBG:
+                                    print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
                         # Skip only if we have less than 2 keys AND it's not a multi-version item
                         if len(keys) < 2 and not is_multi_version:
-                            print(f"[DEBUG] Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
+                            if DBG:
+                                print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
                             continue  # Skip if not actually duplicates
 
                         # Format the duplicate key for display (add parentheses around year for movies)
@@ -9409,14 +9412,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 break
 
                         # DEBUG: Confirm we finished processing this duplicate
-                        print(f"[DEBUG] Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
+                        if DBG:
+                            print(f"{DBGPFX}Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
 
                         # Cleanup: Remove synthetic objects from OBJ_BY_ID to prevent them from being saved to cache
                         if is_multi_version:
                             for key in keys:
                                 if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
                                     del PLEX_Media.OBJ_BY_ID[key]
-                            print(f"[DEBUG] Cleaned up {len(keys)} synthetic objects for multi-version item")
+                            if DBG:
+                                print(f"{DBGPFX}Cleaned up {len(keys)} synthetic objects for multi-version item")
 
                     # After processing all duplicates, prompt user for final action if there are pending operations
                     # Also check if no duplicates were actually processed (all skipped)
