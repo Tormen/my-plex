@@ -5344,9 +5344,9 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
             # Different files - trash file [2]
             if is_multi_version:
                 # For multi-version: only trash the specific file, no [vu] marker transfer needed
-                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
-                print(f"Moving FILE [2] to trash: {target_to_trash}{remote_note}")
-                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                remote_note = " (remote via SSH)" if file2.startswith("/Volumes/") else ""
+                print(f"Moving FILE [2] to trash: {file2}{remote_note}")
+                success, trash_path = move_to_trash(file2, remote_host)
                 if success:
                     print("✓ File [2] moved to trash successfully.")
             else:
@@ -5404,7 +5404,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     operation_log["actions"].append({
                         "action": "trash",
                         "target": "file_2" if is_multi_version else "movie_directory_2",
-                        "original_path": target_to_trash,
+                        "original_path": file2 if is_multi_version else target_to_trash,
                         "trash_path": trash_path,
                         "deleted_cache_entry": deleted_cache_entry,
                         "deleted_cache_key": cache_key,
@@ -5426,7 +5426,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     operation_log["actions"].append({
                         "action": "trash",
                         "target": "file_2" if is_multi_version else "movie_directory_2",
-                        "original_path": target_to_trash,
+                        "original_path": file2 if is_multi_version else target_to_trash,
                         "status": "failed",
                         "error": "Could not move to trash"
                     })
