@@ -882,6 +882,14 @@ def update_and_save_cache(obj_dict):
                     # Get the current cached timestamp (may have +60s buffer from previous operations)
                     cached_ts = CACHE.get('library_stats', {}).get('updatedAt', {}).get(lib_name)
 
+                    # Format timestamps for debug output
+                    if DEEPDBG:
+                        fresh_plex_str = fresh_plex_ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(fresh_plex_ts, 'strftime') else str(fresh_plex_ts)
+                        cached_str = cached_ts.strftime('%Y-%m-%d %H:%M:%S') if cached_ts and hasattr(cached_ts, 'strftime') else 'N/A'
+                        print(f"{DBGPFX}Library '{lib_name}':")
+                        print(f"{DBGPFX}  Fresh PLEX timestamp: {fresh_plex_str}")
+                        print(f"{DBGPFX}  Cached timestamp:     {cached_str}")
+
                     # Decide whether to update this library's timestamp:
                     # 1. If cached timestamp exists and is recent (< 2 min old), refresh to current + 60s
                     # 2. If cached timestamp exists but is old (≥ 2 min old), keep it (preserve the +60s buffer)
@@ -890,12 +898,12 @@ def update_and_save_cache(obj_dict):
                         if cached_ts > two_min_ago:
                             # Cached timestamp is recent - refresh it
                             obj_dict['library_stats']['updatedAt'][lib_name] = current_time
-                            if VRB:
-                                print(f"{VRBPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                            if VRB or DEEPDBG:
+                                print(f"{VRBPFX if VRB else DBGPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
                         else:
                             # Cached timestamp is old but valid - preserve it (don't overwrite with fresh Plex value)
                             obj_dict['library_stats']['updatedAt'][lib_name] = cached_ts
-                            if DBG:
+                            if DBG or DEEPDBG:
                                 print(f"{DBGPFX}Preserved cached timestamp for '{lib_name}': {cached_ts.strftime('%Y-%m-%d %H:%M:%S')} (not replacing with Plex value)")
                     else:
                         # No cached timestamp - this is first-time setup, use current + 60s
@@ -6664,9 +6672,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # if current_timestamp != old_timestamp or old_totalItemsCount != current_totalItemsCount:
         if not FORCE_CACHE_UPDATE:
             # Show the actual timestamps so user can see the difference
+            # Include library name in each line to avoid confusion when multiple threads print in parallel
             print(f"Updating cache for library '{title}' (newer timestamp found on Plex server)")
-            print(f"  Cache timestamp: {old_timestamp}")
-            print(f"  Plex timestamp:  {current_timestamp}")
+            print(f"  [{title}] Cache timestamp: {old_timestamp}")
+            print(f"  [{title}] Plex timestamp:  {current_timestamp}")
         if DBG:
             if current_timestamp != old_timestamp:
                 print(f"{DBGPFX}Library '{title}': Different last-updated timestamp (cache:{old_timestamp}, plex:{current_timestamp}).")
