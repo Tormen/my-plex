@@ -34,6 +34,94 @@
 # Supported operations: 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE', 'LIST_DIR'
 #
 ################################################################################
+#
+# DEBUG OUTPUT LEVELS PRINCIPLE:
+# ===============================
+# Use DBG and DEEPDBG flags consistently throughout the codebase:
+#
+# DBG (Debug Mode - enabled with -D or --debug):
+#   - Provides OVERVIEW of what's happening with SOME DETAILS
+#   - Shows high-level flow: which functions are called, major decision points
+#   - Shows key values: function parameters, important return values
+#   - Shows step-by-step progress through complex operations
+#   - Example: "Step 1: Checking if file exists LOCALLY... result: True"
+#
+# DEEPDBG (Deep Debug Mode - enabled with -DD or --deep-debug):
+#   - Provides ALL DETAILS including exact commands being executed
+#   - Shows exact shell commands before execution (SSH, subprocess, etc.)
+#   - Shows all intermediate values and transformations
+#   - Shows detailed path resolution (original → escaped → final)
+#   - Shows all alternative paths being checked
+#   - Example: "Original filepath: /path/file.mkv"
+#            "Escaped filepath:  /path/file.mkv"
+#            "Full command: ssh host 'cat \"/path/file.mkv\"' | mpv -"
+#
+# USAGE PATTERN:
+#   if DBG:
+#       print(f"{DBGPFX}Function called with param={value}")
+#
+#   if DEEPDBG:
+#       print(f"{DBGPFX}  Original value: {original}")
+#       print(f"{DBGPFX}  Transformed:    {transformed}")
+#       print(f"{DBGPFX}  Command: {cmd}")
+#
+# GUIDELINES:
+#   - Always use DBGPFX prefix for debug output
+#   - Use 2-space indentation for DEEPDBG details under DBG overview
+#   - Show commands BEFORE execution (helps with troubleshooting)
+#   - DBG should be readable by users, DEEPDBG for developers
+#
+################################################################################
+# TESTING AND REGRESSION PREVENTION PRINCIPLE:
+# ============================================
+# Whenever a bug is fixed in my-plex, a regression test MUST be added to the
+# test suite (run_regression_tests function) to prevent the bug from reoccurring.
+#
+# POLICY:
+#   - Every bug fix MUST include a corresponding test
+#   - Run the test suite regularly during development: my-plex --test
+#   - Tests should be run before committing significant changes
+#   - The test suite should be continuously expanded to improve coverage
+#
+# TEST REQUIREMENTS:
+#   - Have a descriptive name and number (e.g., "Test 13: File Path Resolution")
+#   - Include detailed comments explaining which bug it tests for
+#   - Show clear PASS/FAIL/SKIP status with helpful output
+#   - Increment passed/failed counters appropriately
+#   - Include the root cause and fix description in comments
+#
+# EXAMPLE TEST STRUCTURE:
+#   # Test N: Feature/Bug Description
+#   print("\n[TEST N] Feature/Bug Description")
+#   print("-" * 80)
+#   try:
+#       # Bug fixed: <description of the bug>
+#       # Root cause: <what was causing the issue>
+#       # The fix: <what was changed to fix it>
+#
+#       # Test implementation here
+#       if <test condition>:
+#           print(f"✓ PASS: <what passed>")
+#           passed += 1
+#       else:
+#           print(f"✗ FAIL: <what failed>")
+#           failed += 1
+#   except Exception as e:
+#       print(f"✗ FAIL: Exception during test: {e}")
+#       failed += 1
+#
+# REGRESSION TEST EXAMPLES:
+#   - Test 13: File Path Resolution with ALTERNATIVE_ROOTPATHS
+#     Prevents regression where remote files with commas in path were incorrectly
+#     identified as local due to using os.path.exists() instead of os.path.isfile()
+#
+# WHY THIS MATTERS:
+#   - Prevents fixed bugs from reappearing in future changes
+#   - Documents the fix for future developers
+#   - Builds confidence in code changes
+#   - Serves as executable documentation of expected behavior
+#
+################################################################################
 
 from abc import ABC, abstractmethod
 import argparse
@@ -1722,6 +1810,81 @@ def run_regression_tests():
         print(f"✗ FAIL: Exception during test: {e}")
         failed += 1
 
+    # Test 13: File path resolution with ALTERNATIVE_ROOTPATHS
+    print("\n[TEST 13] File Path Resolution with ALTERNATIVE_ROOTPATHS")
+    print("-" * 80)
+    try:
+        # Bug fixed: determine_remote_host() was using os.path.exists() which returns True for directories,
+        # causing false positives when a directory exists locally but the specific file doesn't.
+        # This led to remote files being incorrectly identified as local, causing "ERROR: File not found"
+        # when trying to play them.
+        #
+        # The fix:
+        # 1. Changed os.path.exists() to os.path.isfile() in resolve_filepath_with_alternatives()
+        # 2. Modified determine_remote_host() to return (remote_host, exists, resolved_filepath) tuple
+        # 3. Updated all callers to use the resolved filepath instead of the original path
+
+        # Test that determine_remote_host returns a 3-tuple
+        import inspect
+        if 'determine_remote_host' in globals():
+            sig = inspect.signature(determine_remote_host)
+            params = list(sig.parameters.keys())
+
+            # Check function signature
+            if 'filepath' in params:
+                print(f"✓ PASS: determine_remote_host function exists with filepath parameter")
+
+                # Test with a non-existent file to verify the 3-tuple return
+                test_filepath = "/nonexistent/test/file.mkv"
+                result = determine_remote_host(test_filepath)
+
+                if isinstance(result, tuple) and len(result) == 3:
+                    remote_host, exists, resolved_path = result
+                    print(f"✓ PASS: determine_remote_host returns 3-tuple (remote_host, exists, resolved_filepath)")
+                    print(f"  Sample return for non-existent file: ({remote_host}, {exists}, {resolved_path})")
+                    passed += 1
+                else:
+                    print(f"✗ FAIL: determine_remote_host should return 3-tuple, got: {type(result).__name__} with {len(result) if isinstance(result, tuple) else 'N/A'} elements")
+                    print(f"  This regression would cause 'ERROR: File not found' for remote files with commas in path")
+                    failed += 1
+            else:
+                print(f"✗ FAIL: determine_remote_host missing filepath parameter")
+                print(f"  Got parameters: {params}")
+                failed += 1
+        else:
+            print(f"✗ FAIL: determine_remote_host function not found")
+            failed += 1
+
+        # Test that resolve_filepath_with_alternatives uses os.path.isfile() not os.path.exists()
+        if 'resolve_filepath_with_alternatives' in globals():
+            import inspect
+            source = inspect.getsource(resolve_filepath_with_alternatives)
+
+            # Check that we're using os.path.isfile() for file checks
+            uses_isfile = 'os.path.isfile(' in source
+            uses_exists_incorrectly = 'os.path.exists(check_path)' in source
+
+            if uses_isfile and not uses_exists_incorrectly:
+                print(f"✓ PASS: resolve_filepath_with_alternatives correctly uses os.path.isfile()")
+                print(f"  This prevents false positives when directory exists but file doesn't")
+                passed += 1
+            else:
+                if uses_exists_incorrectly:
+                    print(f"✗ FAIL: resolve_filepath_with_alternatives still uses os.path.exists(check_path)")
+                    print(f"  REGRESSION: This causes remote files to be incorrectly detected as local")
+                    failed += 1
+                elif not uses_isfile:
+                    print(f"✗ FAIL: resolve_filepath_with_alternatives doesn't use os.path.isfile()")
+                    failed += 1
+        else:
+            print(f"✗ FAIL: resolve_filepath_with_alternatives function not found")
+            failed += 1
+    except Exception as e:
+        print(f"✗ FAIL: Exception during test: {e}")
+        import traceback
+        traceback.print_exc()
+        failed += 1
+
     # Print summary
     print("\n" + "=" * 76)
     print("TEST SUMMARY")
@@ -1907,7 +2070,10 @@ def resolve_filepath_with_alternatives(filepath, remote_host=None):
                 print(f"{DBGPFX}  -> not found on remote {remote_host}: {check_path}")
         else:
             # Local check
-            if os.path.exists(check_path):
+            # IMPORTANT: Use os.path.isfile() instead of os.path.exists() to ensure we're checking for FILES only
+            # os.path.exists() returns True for directories too, which can cause issues when the directory exists
+            # but the specific file doesn't (leading to false positives)
+            if os.path.isfile(check_path):
                 if DEEPDBG:
                     print(f"{DBGPFX}  -> FOUND locally: {check_path}")
                 return (check_path, True)
@@ -2488,7 +2654,14 @@ def check_file_exists(filepath, remote_host=None):
     Returns:
         True if file exists (in original or any alternative path), False otherwise
     """
-    exists, _ = my_plex_file_operation('CHECK', filepath, remote_host)
+    if DEEPDBG:
+        print(f"{DBGPFX}check_file_exists: filepath={filepath}, remote_host={remote_host}")
+
+    exists, resolved_path = my_plex_file_operation('CHECK', filepath, remote_host)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}check_file_exists: result: exists={exists}, resolved_path={resolved_path}")
+
     return exists
 
 
@@ -2752,20 +2925,47 @@ def determine_remote_host(filepath):
         filepath: Full path to file
 
     Returns:
-        Tuple (remote_host, exists) where remote_host is None for local files or 'my-plex' for remote,
-        and exists is True if file was found, False otherwise
+        Tuple (remote_host, exists, resolved_filepath) where:
+            - remote_host is None for local files or 'my-plex' for remote
+            - exists is True if file was found, False otherwise
+            - resolved_filepath is the actual path where file was found (may differ from input due to ALTERNATIVE_ROOTPATHS)
     """
-    # Check local first
-    if check_file_exists(filepath, None):
-        return (None, True)
+    if DBG:
+        print(f"{DBGPFX}determine_remote_host: Checking filepath: {filepath}")
+
+    # Check local first - use check_file_exists_with_path to get resolved path
+    if DBG:
+        print(f"{DBGPFX}  Step 1: Checking if file exists LOCALLY...")
+    local_exists, local_resolved_path = check_file_exists_with_path(filepath, None)
+    if DBG:
+        print(f"{DBGPFX}  Step 1 result: local_exists = {local_exists}")
+        if local_resolved_path and DEEPDBG:
+            print(f"{DBGPFX}    resolved_path = {local_resolved_path}")
+
+    if local_exists:
+        if DBG:
+            print(f"{DBGPFX}  -> Returning (None, True, '{local_resolved_path}') - file found LOCALLY")
+        return (None, True, local_resolved_path)
 
     # Try SSH
     remote_host = 'my-plex'
-    if check_file_exists(filepath, remote_host):
-        return (remote_host, True)
+    if DBG:
+        print(f"{DBGPFX}  Step 2: File not local, checking REMOTE host '{remote_host}'...")
+    remote_exists, remote_resolved_path = check_file_exists_with_path(filepath, remote_host)
+    if DBG:
+        print(f"{DBGPFX}  Step 2 result: remote_exists = {remote_exists}")
+        if remote_resolved_path and DEEPDBG:
+            print(f"{DBGPFX}    resolved_path = {remote_resolved_path}")
+
+    if remote_exists:
+        if DBG:
+            print(f"{DBGPFX}  -> Returning ('{remote_host}', True, '{remote_resolved_path}') - file found on REMOTE")
+        return (remote_host, True, remote_resolved_path)
 
     # Not found anywhere
-    return (None, False)
+    if DBG:
+        print(f"{DBGPFX}  -> Returning (None, False, None) - file NOT FOUND anywhere")
+    return (None, False, None)
 
 def play_media_file(filepath, remote_host=None):
     """Play a media file using available players (mpv, Plex, or Infuse)
@@ -2777,8 +2977,15 @@ def play_media_file(filepath, remote_host=None):
     Returns:
         True if player was launched, False otherwise
     """
+    if DBG:
+        print(f"{DBGPFX}play_media_file called:")
+        print(f"{DBGPFX}  filepath = {filepath}")
+        print(f"{DBGPFX}  remote_host = {remote_host}")
+
     # For remote files, try to use SSH streaming with mpv
     if remote_host:
+        if DBG:
+            print(f"{DBGPFX}  -> Taking REMOTE path (remote_host is not None)")
         print(f"Playing remote file via SSH: {filepath}")
 
         # Find mpv binary dynamically
@@ -2791,12 +2998,22 @@ def play_media_file(filepath, remote_host=None):
 
         # Use SSH to stream the file to mpv
         escaped_path = escape_path_for_ssh(filepath)
+        if DEEPDBG:
+            print(f"{DBGPFX}  Original filepath: {filepath}")
+            print(f"{DBGPFX}  Escaped filepath:  {escaped_path}")
+
         # Use double quotes for the path since we're escaping for double quotes
         cmd = f'ssh {remote_host} "cat \\"{escaped_path}\\"" | {mpv_path} --force-seekable=yes --title="{os.path.basename(filepath)}" -'
 
+        if DEEPDBG:
+            print(f"{DBGPFX}  Full command to execute:")
+            print(f"{DBGPFX}    {cmd}")
+
         # Try mpv with SSH streaming
         try:
-            print(f"Executing: {cmd}")
+            if not DEEPDBG:
+                # Only print the command if not already printed by DEEPDBG
+                print(f"Executing: {cmd}")
             # Don't suppress stderr so we can see mpv errors
             subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL)
             print("✓ mpv command launched (check terminal for any mpv error messages)")
@@ -2810,10 +3027,22 @@ def play_media_file(filepath, remote_host=None):
         return False
 
     # Local file handling
-    if not os.path.isfile(filepath):
+    if DBG:
+        print(f"{DBGPFX}  -> Taking LOCAL path (remote_host is None)")
+        print(f"{DBGPFX}  Checking if file exists locally with os.path.isfile()...")
+
+    file_exists_local = os.path.isfile(filepath)
+    if DBG:
+        print(f"{DBGPFX}  os.path.isfile('{filepath}') = {file_exists_local}")
+
+    if not file_exists_local:
+        if DBG:
+            print(f"{DBGPFX}  -> File does NOT exist locally, returning error")
         print(f"ERROR: File not found: {filepath}")
         return False
 
+    if DBG:
+        print(f"{DBGPFX}  -> File EXISTS locally, attempting to play")
     print(f"Playing local file: {filepath}")
 
     # Try mpv first (command line)
@@ -9079,10 +9308,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if num_files == 3 and choice == '3':
                                     # This is "Play file [3]"
                                     file_to_play = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')
-                                    remote_host_play, exists_play = determine_remote_host(file_to_play)
+                                    remote_host_play, exists_play, resolved_file_to_play = determine_remote_host(file_to_play)
                                     if exists_play:
                                         print(f"Playing file [3]: {file_to_play}")
-                                        play_media_file(file_to_play, remote_host_play)
+                                        play_media_file(resolved_file_to_play, remote_host_play)
                                         print("\nFile player launched. You can continue with other actions on this pair.")
                                     else:
                                         print(f"ERROR: Cannot find file: {file_to_play}")
@@ -9101,20 +9330,30 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if choice == '7' and len(keys) > 2:
                                     all_files = [PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A') for key in keys]
     
-                                # Determine if files are local or remote
-                                remote_host, exists = determine_remote_host(file1)
+                                # Determine if files are local or remote, and resolve file paths
+                                remote_host, exists, resolved_file1 = determine_remote_host(file1)
                                 if not exists:
                                     print(f"ERROR: Cannot find file locally or on remote host: {file1}")
                                     print("Skipping this pair.")
                                     break
-    
+
+                                # For play actions with file2, resolve file2 as well
+                                resolved_file2 = file2
+                                if choice == '2' and file2 != 'N/A':
+                                    _, exists2, resolved_file2 = determine_remote_host(file2)
+                                    if not exists2:
+                                        print(f"ERROR: Cannot find file locally or on remote host: {file2}")
+                                        print("Skipping this pair.")
+                                        break
+
                                 # Handle the chosen action
                                 # Play actions: 1, 2 (and 3 for 3-file case, but handled above)
                                 is_play_action = choice in ['1', '2']
 
                                 if is_play_action:
                                     # Execute play actions immediately (not recorded)
-                                    success = execute_resolution_action(choice, file1, file2, remote_host, all_files, keys, None, None, same_file)
+                                    # Use resolved paths for play actions
+                                    success = execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
                                     print("\nFile player launched. You can continue with other actions on this pair.")
                                     # Continue loop to allow more choices
                                 else:
