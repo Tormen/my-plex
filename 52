@@ -5505,6 +5505,49 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         subdir_name = os.path.basename(file1_dir)
                         print(f"File [1] is in subdirectory '{subdir_name}' - moving up to parent directory...")
 
+                        # Check if there are other video files in parent directory
+                        # (excluding file [2] which was just trashed)
+                        has_other_videos = has_other_video_files_in_dir(file2_dir, file2, remote_host)
+
+                        if not has_other_videos:
+                            # No other video files - clean parent directory before moving subdirectory contents
+                            print(f"No other video files in parent - cleaning orphaned files before moving subdirectory contents...")
+                            list_success, parent_files = my_plex_file_operation('LIST_DIR', file2_dir, remote_host, maxdepth=1)
+
+                            if list_success and parent_files:
+                                orphaned_count = 0
+                                for parent_file in parent_files:
+                                    # Skip if it's file2 (already trashed)
+                                    if parent_file == file2:
+                                        continue
+
+                                    # LIST_DIR with maxdepth=1 returns files only (uses find -type f)
+                                    # So we only get files, not directories - no need to check
+
+                                    basename = os.path.basename(parent_file)
+                                    # Trash orphaned file
+                                    orphan_success, orphan_trash = move_to_trash(parent_file, remote_host)
+                                    if orphan_success:
+                                        orphaned_count += 1
+                                        if VRB: print(f"{VRBPFX}Removed orphaned file: {basename}")
+                                        if operation_log:
+                                            operation_log["actions"].append({
+                                                "action": "trash_orphaned_file",
+                                                "target": "parent_directory",
+                                                "file": parent_file,
+                                                "trash_path": orphan_trash,
+                                                "status": "success"
+                                            })
+                                    else:
+                                        print(f"⚠ Warning: Could not trash orphaned file: {basename}")
+
+                                if orphaned_count > 0:
+                                    print(f"✓ Cleaned {orphaned_count} orphaned file(s) from parent directory")
+                            else:
+                                if VRB: print(f"{VRBPFX}No additional files to clean in parent directory")
+                        else:
+                            print(f"Other video files exist in parent - keeping existing files")
+
                         # Check for [vu] markers on both parent and subdirectory
                         # Get the movie directory (parent's parent directory)
                         lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
