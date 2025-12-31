@@ -58,10 +58,10 @@ def get_mkv_header_duration(filepath):
         return None
 
 def get_mp4_duration(filepath):
-    """Read duration from MP4 file using ffprobe
+    """Read duration from video file using ffprobe
 
     Returns:
-        Duration in minutes (float) or None if unable to read
+        Duration in milliseconds (float) or None if unable to read
     """
     try:
         # Try full path first (for SSH sessions where PATH may not include /usr/local/bin)
@@ -76,7 +76,7 @@ def get_mp4_duration(filepath):
         )
         if result.returncode == 0 and result.stdout.strip():
             duration_sec = float(result.stdout.strip())
-            return duration_sec / 60.0
+            return duration_sec * 1000  # Convert to milliseconds (same unit as Plex)
         return None
     except Exception:
         return None
