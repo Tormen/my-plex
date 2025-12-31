@@ -475,6 +475,7 @@ LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
 FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
 FORCE_REBUILD = CONFIG_DEFAULTS['FORCE_REBUILD']  # When True with --update-cache, uses lib.refresh() to verify all files and refresh metadata
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
+FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
 AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
@@ -6457,6 +6458,37 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
         val['files'] = existing_files
         if DBG: print(f"{DBGPFX}add_media_obj(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
 
+    # Collect video file metadata during cache rebuild
+    # This runs during --update-cache and collects container duration for broken file detection
+    if FORCE_CACHE_UPDATE and filepath and part_size:
+        file_info = val['files'][version]
+
+        # Check if metadata collection is needed
+        need_metadata = False
+
+        if FORCE_METADATA:
+            # --force-metadata: Always collect regardless of existing metadata
+            need_metadata = True
+        elif 'file_metadata' not in file_info:
+            # No metadata yet: collect it
+            need_metadata = True
+        elif file_info.get('file_metadata', {}).get('filesize') != part_size:
+            # Filesize changed: re-collect metadata
+            need_metadata = True
+
+        if need_metadata:
+            # Collect metadata from video file
+            # Determine if file is remote (checking for remote_host in filepath or library config)
+            remote_host = getattr(library, 'remote_host', None) if hasattr(library, 'remote_host') else None
+
+            file_metadata = get_video_file_metadata(filepath, part_size, remote_host)
+
+            if file_metadata:
+                file_info['file_metadata'] = file_metadata
+                if VERYVRB:
+                    duration_min = file_metadata.get('container_duration', 0)
+                    print(f"{VRBPFX}Collected metadata for {filepath}: {duration_min:.1f} min")
+
     PLEX_Media.OBJ_BY_ID[key] = val
 
     # Track delta for library/partition completion summary (ADDED/UPDATED)
@@ -10304,6 +10336,251 @@ def main_print_help(args, remaining_args, main_parser):
 #### LABEL MANAGEMENT FUNCTIONS:
 ###########################################################################################
 
+def get_video_file_metadata(filepath, filesize, remote_host=None):
+    """Collect metadata from video file (container duration)
+
+    Reads MKV/MP4/AVI container metadata to get duration information.
+    Used during --update-cache for incremental metadata collection.
+
+    Args:
+        filepath: Path to video file
+        filesize: File size in bytes (for validation)
+        remote_host: Optional remote host (if file is on remote server)
+
+    Returns:
+        dict with metadata or None if unable to read:
+        {
+            'container_duration': 103.56,  # minutes
+            'filesize': 725000000,
+            'scanned_at': '2025-12-31T10:30:00',
+            'file_type': 'mkv'
+        }
+    """
+    import struct
+    import subprocess
+    from datetime import datetime
+    from pathlib import Path
+
+    try:
+        # Determine file extension
+        ext = Path(filepath).suffix.lower()
+
+        if ext == '.mkv':
+            # Read MKV header duration using EBML structure
+            # For remote files, would need to fetch header via SSH
+            if remote_host:
+                # For now, skip remote files - would need SSH implementation
+                return None
+
+            # Read first 4096 bytes of MKV file
+            with open(filepath, 'rb') as f:
+                header_data = f.read(4096)
+
+            # Search for duration element (EBML ID 0x4489)
+            duration_id = b'\x44\x89'
+            pos = header_data.find(duration_id)
+
+            if pos == -1:
+                return None
+
+            # Parse EBML structure
+            pos += 2  # Skip ID
+            size_byte = header_data[pos]
+            pos += 1  # Skip size byte
+
+            # Read float64 duration (in milliseconds)
+            if size_byte == 0x88 and pos + 8 <= len(header_data):
+                duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
+                duration_min = duration_ms / 1000.0 / 60.0
+
+                return {
+                    'container_duration': duration_min,
+                    'filesize': filesize,
+                    'scanned_at': datetime.now().isoformat(),
+                    'file_type': 'mkv'
+                }
+
+        elif ext in ['.mp4', '.m4v', '.avi']:
+            # Use ffprobe for MP4/AVI files
+            if remote_host:
+                # For remote files, would need SSH ffprobe
+                return None
+
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries',
+                 'format=duration', '-of',
+                 'default=noprint_wrappers=1:nokey=1', filepath],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                duration_sec = float(result.stdout.strip())
+                duration_min = duration_sec / 60.0
+
+                return {
+                    'container_duration': duration_min,
+                    'filesize': filesize,
+                    'scanned_at': datetime.now().isoformat(),
+                    'file_type': ext[1:]  # Remove leading dot
+                }
+
+    except Exception as e:
+        if VRB:
+            print(f"{VRBPFX}Warning: Could not read metadata for {filepath}: {e}")
+        return None
+
+    return None
+
+def integrate_metadata_from_json(json_file):
+    """Integrate video metadata from JSON file into cache
+
+    Loads metadata collected on Plex server and merges it into cache objects.
+    Validates filesize matches to ensure data integrity.
+
+    Args:
+        json_file: Path to JSON file created by collect_video_metadata.py
+    """
+    if not os.path.exists(json_file):
+        print(f"✗ Error: Metadata file not found: {json_file}")
+        sys.exit(1)
+
+    # Load cache
+    load_cache()
+
+    if not PLEX_Media.OBJ_BY_ID:
+        print("✗ Error: No media found in cache. Run --update-cache first.")
+        sys.exit(1)
+
+    # Load metadata JSON
+    try:
+        with open(json_file, 'r') as f:
+            metadata_by_filepath = json.load(f)
+    except Exception as e:
+        print(f"✗ Error loading metadata JSON: {e}")
+        sys.exit(1)
+
+    print(f"Loaded metadata for {len(metadata_by_filepath)} files from {json_file}")
+
+    # Integrate metadata into cache objects
+    integrated_count = 0
+    filesize_mismatch_count = 0
+    not_in_cache_count = 0
+    already_has_metadata_count = 0
+
+    for filepath, file_metadata in metadata_by_filepath.items():
+        # Find the object(s) that contain this filepath
+        found_in_cache = False
+
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            files_dict = obj.get('files', {})
+
+            # Check if this filepath is in any version of this object
+            for file_info in files_dict.values():
+                if file_info.get('filepath') == filepath:
+                    found_in_cache = True
+
+                    # Validate filesize matches
+                    cache_filesize = file_info.get('filesize')
+                    metadata_filesize = file_metadata.get('filesize')
+
+                    if cache_filesize != metadata_filesize:
+                        filesize_mismatch_count += 1
+                        if VRB:
+                            print(f"⚠ Filesize mismatch for {filepath}")
+                            print(f"  Cache: {cache_filesize:,} bytes, Metadata: {metadata_filesize:,} bytes")
+                        continue
+
+                    # Check if metadata already exists for this version
+                    if 'file_metadata' in file_info and file_info['file_metadata'].get('filesize') == metadata_filesize:
+                        already_has_metadata_count += 1
+                        continue
+
+                    # Add metadata to this file version
+                    file_info['file_metadata'] = file_metadata
+                    integrated_count += 1
+
+                    if VERYVRB:
+                        duration_min = file_metadata.get('container_duration', 0)
+                        print(f"  ✓ {filepath}: {duration_min:.1f} min")
+
+        if not found_in_cache:
+            not_in_cache_count += 1
+            if VERYVRB:
+                print(f"⚠ File not in cache: {filepath}")
+
+    # Save updated cache
+    update_and_save_cache(CACHE)
+
+    print(f"\n{'='*80}")
+    print(f"METADATA INTEGRATION COMPLETE")
+    print(f"{'='*80}")
+    print(f"✓ Integrated metadata:    {integrated_count:>6} files")
+    if already_has_metadata_count > 0:
+        print(f"  Already had metadata:   {already_has_metadata_count:>6} files")
+    if filesize_mismatch_count > 0:
+        print(f"⚠ Filesize mismatches:    {filesize_mismatch_count:>6} files (skipped)")
+    if not_in_cache_count > 0:
+        print(f"⚠ Not in cache:           {not_in_cache_count:>6} files (skipped)")
+    print(f"\nCache updated: {CACHE_FILE}")
+
+    if filesize_mismatch_count > 0 or not_in_cache_count > 0:
+        print(f"\n⚠ Some files were skipped. Consider running --update-cache to refresh the cache.")
+
+def generate_metadata_filelist(output_file):
+    """Generate file list for metadata collection on Plex server
+
+    Extracts all video file paths from cache and writes them to a text file.
+    This file can be transferred to the Plex server for metadata collection.
+
+    Args:
+        output_file: Path to output text file
+    """
+    load_cache()
+
+    if not PLEX_Media.OBJ_BY_ID:
+        print("✗ Error: No media found in cache. Run --update-cache first.")
+        sys.exit(1)
+
+    # Collect all unique file paths from all objects and all versions
+    all_filepaths = set()
+
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        # Get all file versions
+        files_dict = obj.get('files', {})
+        for file_info in files_dict.values():
+            filepath = file_info.get('filepath')
+            if filepath:
+                all_filepaths.add(filepath)
+
+    if not all_filepaths:
+        print("✗ Error: No video files found in cache.")
+        sys.exit(1)
+
+    # Sort for consistent output
+    sorted_filepaths = sorted(all_filepaths)
+
+    # Write to output file
+    try:
+        with open(output_file, 'w') as f:
+            for filepath in sorted_filepaths:
+                f.write(f"{filepath}\n")
+
+        print(f"✓ Generated metadata file list: {output_file}")
+        print(f"  Total files: {len(sorted_filepaths)}")
+        print(f"  File size: {os.path.getsize(output_file):,} bytes")
+        print(f"\nNext steps:")
+        print(f"  1. Deploy collector: ./test-playground/deploy_metadata_collector.sh")
+        print(f"  2. Copy file list to server: scp {output_file} home:/tmp/video_files.txt")
+        print(f"  3. Run on server: ssh home 'python3 /tmp/collect_video_metadata.py --file-list /tmp/video_files.txt --output /tmp/video_metadata.json'")
+        print(f"  4. Copy results back: scp home:/tmp/video_metadata.json /tmp/")
+        print(f"  5. Integrate into cache: my-plex --integrate-metadata /tmp/video_metadata.json")
+
+    except Exception as e:
+        print(f"✗ Error writing file list: {e}")
+        sys.exit(1)
+
 def list_all_labels():
     """List all labels and the count of media items for each"""
     global CACHE
@@ -11749,6 +12026,7 @@ def main():
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata.", default=False)
     main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files. Detects additions, changes, and deletions. SLOWER but comprehensive.", default=False)
+    main_parser.add_argument('--force-metadata', action='store_true', help="Use with --update-cache. Force recollection of all video file metadata (container durations) even if already cached. Useful for rebuilding metadata from scratch.", default=False)
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
     main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
@@ -11859,6 +12137,7 @@ def main():
     FORCE_CACHE_UPDATE = args.update_cache
     FORCE_REBUILD = args.force and args.update_cache  # Only use lib.refresh() with both flags
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
+    FORCE_METADATA = args.force_metadata and args.update_cache  # Only force metadata recollection with both flags
     AUTO_YES = args.yes
     AUTO_NO = args.no
     FORMAT = args.format
