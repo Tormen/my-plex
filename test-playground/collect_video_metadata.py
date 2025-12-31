@@ -64,8 +64,10 @@ def get_mp4_duration(filepath):
         Duration in minutes (float) or None if unable to read
     """
     try:
+        # Try full path first (for SSH sessions where PATH may not include /usr/local/bin)
+        ffprobe_cmd = '/usr/local/bin/ffprobe'
         result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries',
+            [ffprobe_cmd, '-v', 'error', '-show_entries',
              'format=duration', '-of',
              'default=noprint_wrappers=1:nokey=1', filepath],
             capture_output=True,
