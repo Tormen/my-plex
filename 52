@@ -247,6 +247,9 @@ CONFIG_DEFAULTS = {
     'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
     'LIBRARY_START_DELAY': 1.0,
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
+
+    # Broken File Detection Configuration
+    'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
 }
 
 # Example configuration file template using f-string with CONFIG_DEFAULTS
@@ -323,6 +326,16 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # PLEX_RETRY_DELAYS = {CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']!r}
 # PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}
+
+###############################################################################
+# Broken File Detection Configuration
+###############################################################################
+
+# Threshold for detecting potentially truncated files (percentage)
+# Files are flagged if container duration is more than this percentage shorter than Plex duration
+# Default: 0.5% - catches meaningful truncation while avoiding false positives
+# Analysis: 80.72% of files are within ±0.1% (normal encoding variance)
+# TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
 
 ###############################################################################
 # Debug/Verbose Flags - These are defaults. They can be set via commandline.
@@ -479,6 +492,12 @@ FORCE_METADATA = False  # When True with --update-cache, forces recollection of 
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
 AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
+
+# Broken file detection threshold (percentage)
+# Files are flagged as potentially truncated if container duration is more than this percentage shorter than Plex duration
+# Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
+# Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
+TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
