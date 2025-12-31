@@ -27,9 +27,9 @@ def get_mkv_header_duration(filepath):
         Duration in minutes (float) or None if unable to read
     """
     try:
-        # Read first 4096 bytes of file
+        # Read first 16384 bytes of file (increased from 4096 to capture duration elements further in header)
         with open(filepath, 'rb') as f:
-            header_data = f.read(4096)
+            header_data = f.read(16384)
 
         # Search for duration element in MKV header
         # MKV duration is stored as a float64 in milliseconds
@@ -98,10 +98,8 @@ def get_video_metadata(filepath):
 
     if ext == '.mkv':
         container_duration = get_mkv_header_duration(filepath)
-    elif ext in ['.mp4', '.m4v']:
-        container_duration = get_mp4_duration(filepath)
-    elif ext == '.avi':
-        # AVI duration can also be read via ffprobe
+    elif ext in ['.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv']:
+        # Use ffprobe for these formats
         container_duration = get_mp4_duration(filepath)
 
     if container_duration is None:
