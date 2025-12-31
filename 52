@@ -6467,14 +6467,22 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
         need_metadata = False
 
         if FORCE_METADATA:
-            # --force-metadata: Always collect regardless of existing metadata
+            # --force-metadata: Always collect regardless of existing metadata (including broken)
             need_metadata = True
         elif 'file_metadata' not in file_info:
             # No metadata yet: collect it
             need_metadata = True
-        elif file_info.get('file_metadata', {}).get('filesize') != part_size:
-            # Filesize changed: re-collect metadata
-            need_metadata = True
+        elif isinstance(file_info.get('file_metadata'), dict):
+            # Check if marked as broken
+            if file_info['file_metadata'].get('broken'):
+                # Skip broken files unless filesize changed
+                if file_info['file_metadata'].get('filesize') != part_size:
+                    # Filesize changed: retry collection
+                    need_metadata = True
+                # else: skip - already marked as broken and filesize unchanged
+            elif file_info['file_metadata'].get('filesize') != part_size:
+                # Normal metadata but filesize changed: re-collect
+                need_metadata = True
 
         if need_metadata:
             # Collect metadata from video file
@@ -6485,7 +6493,15 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
             if file_metadata:
                 file_info['file_metadata'] = file_metadata
-                # Verbose logging removed to avoid global declaration issue
+            else:
+                # Failed to collect metadata - mark as broken
+                from datetime import datetime
+                file_info['file_metadata'] = {
+                    'broken': True,
+                    'filesize': part_size,
+                    'marked_at': datetime.now().isoformat(),
+                    'reason': 'ffprobe_failed'
+                }
 
     PLEX_Media.OBJ_BY_ID[key] = val
 
