@@ -2776,6 +2776,45 @@ def extract_vu_marker(filename):
         return match.group(0)
     return None
 
+def compare_vu_markers(marker1, marker2):
+    """Compare two [vu] markers and return the newer one
+
+    Args:
+        marker1: First vu marker (e.g., '[vu]' or '[vu@2025-12-26]')
+        marker2: Second vu marker (e.g., '[vu]' or '[vu@2025-12-26_1123]')
+
+    Returns:
+        The newer marker, or marker1 if both are equal or comparison not possible
+    """
+    if not marker1:
+        return marker2
+    if not marker2:
+        return marker1
+
+    # Extract timestamps from markers
+    import re
+    ts1_match = re.search(r'\[vu@([^\]]+)\]', marker1)
+    ts2_match = re.search(r'\[vu@([^\]]+)\]', marker2)
+
+    # If one has timestamp and other doesn't, prefer the one with timestamp
+    if ts1_match and not ts2_match:
+        return marker1
+    if ts2_match and not ts1_match:
+        return marker2
+
+    # If both have timestamps, compare them
+    if ts1_match and ts2_match:
+        ts1 = ts1_match.group(1)
+        ts2 = ts2_match.group(1)
+        # Simple string comparison works for YYYY-MM-DD and YYYY-MM-DD_HHMM formats
+        if ts1 >= ts2:
+            return marker1
+        else:
+            return marker2
+
+    # Both are plain [vu] or comparison not possible - return first one
+    return marker1
+
 def add_vu_marker_to_file(file_path, vu_marker, remote_host=None):
     """Add vu marker to a video file's filename
 
@@ -5465,6 +5504,45 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     if file1_is_in_subdir:
                         subdir_name = os.path.basename(file1_dir)
                         print(f"File [1] is in subdirectory '{subdir_name}' - moving up to parent directory...")
+
+                        # Check for [vu] markers on both parent and subdirectory
+                        # Get the movie directory (parent's parent directory)
+                        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
+                        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file2_dir)
+                        parent_dirname = os.path.basename(movie_dir1)
+
+                        parent_vu_marker = extract_vu_marker(parent_dirname)
+                        subdir_vu_marker = extract_vu_marker(subdir_name)
+
+                        # Determine which [vu] marker to keep (the newer one)
+                        vu_marker_to_apply = compare_vu_markers(subdir_vu_marker, parent_vu_marker)
+
+                        if vu_marker_to_apply and vu_marker_to_apply != parent_vu_marker:
+                            # Need to update parent directory with newer [vu] marker
+                            print(f"Subdirectory has newer [vu] marker: {vu_marker_to_apply}")
+                            # Remove old marker from parent dirname if it exists
+                            new_parent_name = parent_dirname
+                            if parent_vu_marker:
+                                new_parent_name = parent_dirname.replace(parent_vu_marker, '').strip()
+                            # Add new marker
+                            new_parent_name = new_parent_name.rstrip() + ' ' + vu_marker_to_apply
+
+                            # Rename parent directory
+                            vu_success, new_movie_dir = rename_file(movie_dir1, new_parent_name, remote_host)
+                            if vu_success:
+                                print(f"✓ Updated parent directory with marker {vu_marker_to_apply}")
+                                movie_dir1 = new_movie_dir
+                                file2_dir = new_movie_dir  # Update file2_dir since it's now in renamed parent
+                                if operation_log:
+                                    operation_log["actions"].append({
+                                        "action": "update_vu_marker",
+                                        "target": "parent_directory",
+                                        "old_marker": parent_vu_marker,
+                                        "new_marker": vu_marker_to_apply,
+                                        "old_path": movie_dir1,
+                                        "new_path": new_movie_dir,
+                                        "status": "success"
+                                    })
 
                         # List all files in the subdirectory to move them all up
                         list_success, subdir_files = my_plex_file_operation('LIST_DIR', file1_dir, remote_host, maxdepth=1)
