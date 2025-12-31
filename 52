@@ -197,7 +197,7 @@ import requests.exceptions
 # - Path configuration (ALTERNATIVE_ROOTPATHS, CACHE_FILE, LOCK_FILE, DUPLICATE_FILE)
 # - Output configuration (FORMAT, LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX)
 # - Debug/verbose flags (DBG, VRB, VERYVRB, DEEPDBG, OFFLINE)
-# - Cache configuration (FORCE_CACHE_UPDATE, FORCE_REBUILD, READ_ONLY_MODE, CACHE_CHECKPOINT_INTERVAL)
+# - Cache configuration (FORCE_CACHE_UPDATE, FORCE_PLEXDATA, READ_ONLY_MODE, CACHE_CHECKPOINT_INTERVAL)
 # - Performance tuning (MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS)
 #
 ###########################################################################################
@@ -238,7 +238,7 @@ CONFIG_DEFAULTS = {
     'LOCK_FILE': '.plex_media_cache.lock',
     'CACHE_CHECKPOINT_INTERVAL': 100,
     'FORCE_CACHE_UPDATE': False,
-    'FORCE_REBUILD': False,
+    'FORCE_PLEXDATA': False,
     'FROM_SCRATCH': False,
     'READ_ONLY_MODE': False,
 
@@ -339,7 +339,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 ###############################################################################
 
 # FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
-# FORCE_REBUILD = {CONFIG_DEFAULTS['FORCE_REBUILD']}
+# FORCE_PLEXDATA = {CONFIG_DEFAULTS['FORCE_PLEXDATA']}
 # READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}
 """
 
@@ -473,7 +473,7 @@ OFFLINE = CONFIG_DEFAULTS['OFFLINE']
 CACHE_FILE = CONFIG_DEFAULTS['CACHE_FILE']
 LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
 FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
-FORCE_REBUILD = CONFIG_DEFAULTS['FORCE_REBUILD']  # When True with --update-cache, uses lib.refresh() to verify all files and refresh metadata
+FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
 FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
@@ -891,7 +891,7 @@ def load_cache():
 
                         if old_format_detected:
                             # Allow --update-cache --force to proceed (it will rebuild the cache)
-                            if FORCE_REBUILD and FORCE_CACHE_UPDATE:
+                            if FORCE_PLEXDATA and FORCE_CACHE_UPDATE:
                                 print()
                                 print("=" * 76)
                                 print("CACHE FORMAT WARNING: Outdated cache format detected")
@@ -1025,7 +1025,7 @@ def update_and_save_cache(obj_dict):
         if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
 
         # Create special backup copy for --update-cache --force runs (reliable cache version)
-        if FORCE_REBUILD:
+        if FORCE_PLEXDATA:
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_file = f"{CACHE_FILE}.force_backup_{timestamp}"
@@ -6485,9 +6485,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
             if file_metadata:
                 file_info['file_metadata'] = file_metadata
-                if VERYVRB:
-                    duration_min = file_metadata.get('container_duration', 0)
-                    print(f"{VRBPFX}Collected metadata for {filepath}: {duration_min:.1f} min")
+                # Verbose logging removed to avoid global declaration issue
 
     PLEX_Media.OBJ_BY_ID[key] = val
 
@@ -6735,7 +6733,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
         # We need to process all seasons/episodes even if the show object is cached
         # The season/episode level filtering (lines 4092-4111) will skip already-cached items
         # This ensures we don't miss new seasons/episodes added to existing shows
-        if rebuild_mode and not FORCE_REBUILD:
+        if rebuild_mode and not FORCE_PLEXDATA:
             # INCREMENTAL UPDATE MODE ONLY: check if this show needs updating
             # NOTE: ID mismatches (from re-scanned libraries) should be handled with --force flag
             show_key = get_fullID(item)
@@ -6778,7 +6776,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
                 if not obj_needs_updating(season, None, season_key):
                     if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING SEASON {season_key} as updatedAt same same (and NOT --update-cache parameter)" )
                     continue
-            elif not FORCE_REBUILD:
+            elif not FORCE_PLEXDATA:
                 # Incremental update mode: Don't skip seasons just because season object is cached
                 # We need to check individual episodes - some may be missing from cache
                 # Only skip if we're in force rebuild mode (which rebuilds from scratch)
@@ -6793,7 +6791,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
                     return False  # Library not completed due to shutdown
 
                 # Skip episodes that are already in cache (incremental update mode only)
-                if not rebuild_mode or not FORCE_REBUILD:
+                if not rebuild_mode or not FORCE_PLEXDATA:
                     episode_key = get_fullID(episode)
                     if episode_key in PLEX_Media.OBJ_BY_ID:
                         if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING EPISODE {episode_key} - already in cache")
@@ -7467,18 +7465,18 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # ONLY scan when --update-cache is explicitly used (not during --duplicates, etc.)
         if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}")
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT:
-            global FORCE_REBUILD
+            global FORCE_PLEXDATA
 
             # Use lib.refresh() with --force to verify all files exist and refresh metadata
             # Use lib.update() without --force for quick scan of new/changed files only
-            scan_type = "REFRESHING ALL METADATA" if FORCE_REBUILD else "SCANNING"
-            action_desc = "refresh all metadata and verify files" if FORCE_REBUILD else "detect filesystem changes"
+            scan_type = "REFRESHING ALL METADATA" if FORCE_PLEXDATA else "SCANNING"
+            action_desc = "refresh all metadata and verify files" if FORCE_PLEXDATA else "detect filesystem changes"
 
             print(f"\n{'='*76}")
             print(f"{scan_type} {len(PLEX_Library.OBJ_DICT)} LIBRARIES TO {action_desc.upper()}")
             print(f"{'='*76}")
 
-            if FORCE_REBUILD:
+            if FORCE_PLEXDATA:
                 print(f"⚠  Using lib.refresh() - this will verify ALL files and refresh metadata")
                 print(f"   This is SLOWER but will detect missing files and update metadata")
                 print(f"{'='*76}")
@@ -7493,7 +7491,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             # Phase 1: Start all library scans in parallel
             # IMPORTANT: With --force, do BOTH update (scan for new files) AND refresh (verify existing files)
             # Without --force, only do update (fast scan for new/changed files)
-            if FORCE_REBUILD:
+            if FORCE_PLEXDATA:
                 print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update + refresh)...")
             else:
                 print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update only)...")
@@ -7505,7 +7503,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     lib.update()  # Scan filesystem for new/changed files
 
                     # With --force, also do refresh() to verify existing files and update metadata
-                    if FORCE_REBUILD:
+                    if FORCE_PLEXDATA:
                         lib.refresh()  # Verify all files exist and refresh metadata
                         action = "update+refresh"
                     else:
@@ -7518,7 +7516,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Phase 2: Wait for all libraries to complete
             print(f"\n  Waiting for all libraries to complete scanning...")
-            max_wait = 3600 if FORCE_REBUILD else 60  # 1 hour for refresh, 1 min for update
+            max_wait = 3600 if FORCE_PLEXDATA else 60  # 1 hour for refresh, 1 min for update
             completed_libs = set()
             check_interval = 2  # Check every 2 seconds for better responsiveness
 
@@ -11938,7 +11936,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 #############################################################################
 
 def main():
-    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_REBUILD, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
+    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
     global ALTERNATIVE_ROOTPATHS, PLEX_TIMEOUT, DUPLICATE_FILE, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
 
@@ -12024,9 +12022,10 @@ def main():
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}.", default=PLEX_TOKEN)
     main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
-    main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata.", default=False)
-    main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files. Detects additions, changes, and deletions. SLOWER but comprehensive.", default=False)
-    main_parser.add_argument('--force-metadata', action='store_true', help="Use with --update-cache. Force recollection of all video file metadata (container durations) even if already cached. Useful for rebuilding metadata from scratch.", default=False)
+    main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata and video file metadata.", default=False)
+    main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Triggers BOTH --force-plexdata AND --force-metadata for complete rebuild. Most comprehensive but SLOWEST option.", default=False)
+    main_parser.add_argument('--force-plexdata', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files in Plex. Detects additions, changes, and deletions. Triggered automatically by --force.", default=False)
+    main_parser.add_argument('--force-metadata', action='store_true', help="Use with --update-cache. Force recollection of all video file metadata (container durations) even if already cached. Useful for rebuilding metadata from scratch. Triggered automatically by --force.", default=False)
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
     main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
@@ -12135,9 +12134,13 @@ def main():
         print()
 
     FORCE_CACHE_UPDATE = args.update_cache
-    FORCE_REBUILD = args.force and args.update_cache  # Only use lib.refresh() with both flags
+
+    # --force triggers both --force-plexdata AND --force-metadata
+    # Each can also be used independently
+    FORCE_PLEXDATA = (args.force or args.force_plexdata) and args.update_cache
+    FORCE_METADATA = (args.force or args.force_metadata) and args.update_cache
+
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
-    FORCE_METADATA = args.force_metadata and args.update_cache  # Only force metadata recollection with both flags
     AUTO_YES = args.yes
     AUTO_NO = args.no
     FORMAT = args.format
