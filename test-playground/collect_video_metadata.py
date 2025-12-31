@@ -96,10 +96,8 @@ def get_video_metadata(filepath):
 
     container_duration = None
 
-    if ext == '.mkv':
-        container_duration = get_mkv_header_duration(filepath)
-    elif ext in ['.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv']:
-        # Use ffprobe for these formats
+    # Use ffprobe for all video formats for consistency and reliability
+    if ext in ['.mkv', '.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv']:
         container_duration = get_mp4_duration(filepath)
 
     if container_duration is None:
