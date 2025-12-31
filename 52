@@ -941,7 +941,7 @@ def update_and_save_cache(obj_dict):
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
 
     # CRITICAL: Update timestamps to current time + 60s buffer BEFORE merging into CACHE
-    # This applies to BOTH --update-cache AND --list-duplicates --resolve
+    # This applies to BOTH --update-cache AND --duplicates --resolve
     # The 60s buffer accounts for Plex's asynchronous timestamp updates
     # We do this BEFORE the merge so timestamps don't get overwritten
     if DBG: print(f"{DBGPFX}update_and_save_cache(): OFFLINE={OFFLINE}, READ_ONLY_MODE={READ_ONLY_MODE}, has_library_stats={'library_stats' in obj_dict}")
@@ -1627,7 +1627,6 @@ def run_regression_tests():
         # Create a minimal parser to test validation logic
         test_parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
         test_parser.add_argument('--list', action='store_true')
-        test_parser.add_argument('--list-duplicates', action='store_true')
         test_parser.add_argument('--duplicates', action='store_true')
         test_parser.add_argument('--resolve', action='store_true')
         test_parser.add_argument('--type', type=str)
@@ -1637,29 +1636,29 @@ def run_regression_tests():
         validation_tests = [
             # (args, should_fail, description)
             (['--resolve'], True, "--resolve without --duplicates should fail"),
-            (['--duplicates'], True, "--duplicates without --list should fail"),
-            (['--type', 'movie'], True, "--type without --list should fail"),
+            (['--type', 'movie'], True, "--type without --list or --duplicates should fail"),
             (['--force'], True, "--force without --update-cache should fail"),
-            (['--list-duplicates', '--resolve'], False, "--resolve with --list-duplicates should work"),
+            (['--duplicates', '--resolve'], False, "--resolve with --duplicates should work"),
             (['--list', '--duplicates', '--resolve'], False, "--resolve with --list --duplicates should work"),
             (['--list', '--type', 'movie'], False, "--type with --list should work"),
+            (['--duplicates', '--type', 'movie'], False, "--type with --duplicates should work"),
             (['--update-cache', '--force'], False, "--force with --update-cache should work"),
         ]
 
         validation_ok = True
         for args, should_fail, desc in validation_tests:
             test_args = test_parser.parse_args(args)
-            # Simulate the validation logic
-            has_list = test_args.list or test_args.list_duplicates
-            has_duplicates = test_args.duplicates or test_args.list_duplicates
+            # Simulate the validation logic (--duplicates automatically enables --list)
+            if test_args.duplicates and not test_args.list:
+                test_args.list = True
+            has_list = test_args.list
+            has_duplicates = test_args.duplicates
             has_update_cache = test_args.update_cache
 
             fails = False
             if test_args.resolve and not has_duplicates:
                 fails = True
-            if test_args.duplicates and not has_list:
-                fails = True
-            if test_args.type and not has_list:
+            if test_args.type and not (has_list or has_duplicates):
                 fails = True
             if test_args.force and not has_update_cache:
                 fails = True
@@ -7161,7 +7160,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
         # This makes --update-cache self-healing
-        # ONLY scan when --update-cache is explicitly used (not during --list-duplicates, etc.)
+        # ONLY scan when --update-cache is explicitly used (not during --duplicates, etc.)
         if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}")
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT:
             global FORCE_REBUILD
@@ -11185,25 +11184,20 @@ def execute_global_commands(args, cmd_args):
         label, plex_id = cmd_args.remove_label
         remove_label_from_item(label, plex_id)
 
-    # Handle --list-duplicates as synonym for --list --duplicates
-    if safe_getattr(cmd_args, 'list_duplicates', False):
+    # Handle --duplicates as standalone (automatically enable --list)
+    if safe_getattr(cmd_args, 'duplicates', False) and not safe_getattr(cmd_args, 'list', False):
         cmd_args.list = True
-        cmd_args.duplicates = True
 
     # Validate parameter dependencies BEFORE checking if commands should run
-    # Check if --type is used without --list
-    if safe_getattr(cmd_args, 'type', None) and not safe_getattr(cmd_args, 'list', False):
-        err(1065, "--type can only be used together with --list or --list-duplicates.\nExample: my-plex --list --type movie")
-
-    # Check if --duplicates is used without --list
-    if safe_getattr(cmd_args, 'duplicates', False) and not safe_getattr(cmd_args, 'list', False):
-        err(1064, "--duplicates can only be used together with --list.\nExample: my-plex --list --duplicates\nOr use the synonym: my-plex --list-duplicates")
+    # Check if --type is used without --list or --duplicates
+    if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False)):
+        err(1065, "--type can only be used together with --list or --duplicates.\nExample: my-plex --list --type movie")
 
     # Check if --resolve is used without --duplicates
     if safe_getattr(cmd_args, 'resolve', False) and not safe_getattr(cmd_args, 'duplicates', False):
-        err(1063, "--resolve can only be used together with --list-duplicates (or --list --duplicates).\nExample: my-plex --list-duplicates --resolve")
+        err(1063, "--resolve can only be used together with --duplicates.\nExample: my-plex --duplicates --resolve")
 
-    # Handle --list or --duplicates (--duplicates is a synonym for --list --duplicates)
+    # Handle --list or --duplicates (--duplicates automatically enables --list)
     if cmd_args.list or cmd_args.duplicates:
         # Handle global --list command (with optional --duplicates, --resolve, and --type)
         media_type = safe_getattr(cmd_args, 'type', None)
@@ -11464,8 +11458,7 @@ def main():
     GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
     GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
     GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates across all libraries.")
-    GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="Filter --list to show only duplicates.")
-    GLOBAL_CMD_PARSER.add_argument('--list-duplicates', action='store_true', help="Synonym for --list --duplicates. Show only duplicates across all libraries.")
+    GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="Show only duplicates across all libraries. Can be used standalone or with --list.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help="Interactive resolution mode for duplicates (use with --duplicates).")
     GLOBAL_CMD_PARSER.add_argument('--type', help="Filter --list by media type (movie or show).")
     GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
