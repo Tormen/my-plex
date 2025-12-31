@@ -5447,12 +5447,63 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         else:
             # Different files - trash file [2]
             if is_multi_version:
-                # For multi-version: only trash the specific file, no [vu] marker transfer needed
+                # For multi-version: check if file [1] is in a subdirectory relative to file [2]
+                file1_dir = os.path.dirname(file1)
+                file2_dir = os.path.dirname(file2)
+
+                # Check if file1 is in a subdirectory of file2's directory
+                file1_is_in_subdir = file1_dir.startswith(file2_dir + os.sep) and file1_dir != file2_dir
+
+                # First, trash file [2]
                 remote_note = " (remote via SSH)" if file2.startswith("/Volumes/") else ""
                 print(f"Moving FILE [2] to trash: {file2}{remote_note}")
                 success, trash_path = move_to_trash(file2, remote_host)
                 if success:
                     print("✓ File [2] moved to trash successfully.")
+
+                    # If file [1] is in a subdirectory, move it up to parent and remove subdirectory
+                    if file1_is_in_subdir:
+                        subdir_name = os.path.basename(file1_dir)
+                        print(f"File [1] is in subdirectory '{subdir_name}' - moving up to parent directory...")
+
+                        # List all files in the subdirectory to move them all up
+                        list_success, subdir_files = my_plex_file_operation('LIST_DIR', file1_dir, remote_host, maxdepth=1)
+
+                        if list_success and subdir_files:
+                            # Move each file from subdirectory to parent
+                            move_errors = []
+                            for subfile in subdir_files:
+                                src_path = subfile
+                                dst_path = os.path.join(file2_dir, os.path.basename(subfile))
+                                move_success, moved_path = my_plex_file_operation('MOVE', src_path, remote_host, dest_path=dst_path)
+                                if move_success:
+                                    if VRB: print(f"{VRBPFX}Moved: {os.path.basename(subfile)}")
+                                    # Update file1 path if this is the file we're keeping
+                                    if subfile == file1:
+                                        file1 = dst_path
+                                else:
+                                    move_errors.append(os.path.basename(subfile))
+
+                            if not move_errors:
+                                print(f"✓ Moved all files from subdirectory '{subdir_name}' to parent directory")
+
+                                # Now remove the empty subdirectory
+                                remove_success, _ = my_plex_file_operation('REMOVE', file1_dir, remote_host)
+                                if remove_success:
+                                    print(f"✓ Removed empty subdirectory '{subdir_name}'")
+                                    if operation_log:
+                                        operation_log["actions"].append({
+                                            "action": "remove_subdirectory",
+                                            "target": "subdirectory_of_file1",
+                                            "path": file1_dir,
+                                            "status": "success"
+                                        })
+                                else:
+                                    print(f"⚠ Warning: Could not remove subdirectory '{subdir_name}'")
+                            else:
+                                print(f"⚠ Warning: Failed to move some files: {', '.join(move_errors)}")
+                        else:
+                            print(f"⚠ Warning: Could not list subdirectory contents")
             else:
                 # For regular items: trash entire directory and handle [vu] markers
                 # Check if [vu] marker exists on directory or file [2]
@@ -9181,7 +9232,45 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     if same_file:
                                         print(f"  {option_num} = Remove Plex entry [{i+1}] (database only - file will NOT be trashed)")
                                     else:
-                                        print(f"  {option_num} = Trash file [{i+1}]")
+                                        # Get file path and directory info for this file
+                                        file_key = keys[i]
+                                        file_obj = PLEX_Media.OBJ_BY_ID[file_key]
+                                        file_path = file_obj.get('file', 'N/A')
+                                        lib_name = file_obj.get('library', '')
+                                        movie_dir = get_movie_dir_from_path(file_path, lib_name) if file_path != 'N/A' and lib_name else os.path.dirname(file_path)
+
+                                        # Check if file is in a subdirectory (movie_dir != file's parent dir)
+                                        file_parent = os.path.dirname(file_path)
+                                        is_in_subdir = (movie_dir != file_parent) if file_path != 'N/A' else False
+
+                                        # For multi-version items with 2 files, check the relationship
+                                        other_file_in_subdir = False
+                                        subdir_name = ""
+                                        if is_multi_version and num_files == 2:
+                                            other_idx = 1 - i  # Get the other file index (0->1, 1->0)
+                                            other_key = keys[other_idx]
+                                            other_obj = PLEX_Media.OBJ_BY_ID[other_key]
+                                            other_path = other_obj.get('file', 'N/A')
+                                            other_parent = os.path.dirname(other_path)
+
+                                            # Check if other file is in a subdirectory relative to this file
+                                            if i == 1:  # This is file [2]
+                                                # Check if file [1] is in subdirectory of file [2]'s directory
+                                                file1_parent = os.path.dirname(file1_path)
+                                                file2_parent = os.path.dirname(file2_path)
+                                                if file1_parent.startswith(file2_parent + os.sep) and file1_parent != file2_parent:
+                                                    other_file_in_subdir = True
+                                                    subdir_name = os.path.basename(file1_parent)
+
+                                        if is_in_subdir:
+                                            # This file is in a subdirectory - will be trashed with subdirectory
+                                            subdir_name = os.path.basename(file_parent)
+                                            print(f"  {option_num} = Trash file [{i+1}] (including subdirectory '{subdir_name}')")
+                                        elif other_file_in_subdir:
+                                            # Other file is in subdirectory - trashing this will move other file up
+                                            print(f"  {option_num} = Trash file [{i+1}] and move file [{1-i+1}] from subdirectory '{subdir_name}' to parent (then remove subdirectory)")
+                                        else:
+                                            print(f"  {option_num} = Trash file [{i+1}]")
                             else:
                                 # For 4+ files, only offer trash via two-stage menu
                                 print(f"  2 = Trash file (select from {num_files} files)")
