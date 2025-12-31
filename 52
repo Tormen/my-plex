@@ -2901,6 +2901,83 @@ def get_media_description(obj):
         what = f"{obj_type}: {obj['title']}"
     return what
 
+def get_mkv_header_duration(filepath):
+    """Read duration from MKV file header
+
+    Parses the MKV EBML header to extract the duration metadata.
+    This represents the duration claimed in the container header,
+    which may differ from actual playable duration if file is truncated.
+
+    Args:
+        filepath: Full path to MKV file (local or remote)
+
+    Returns:
+        Duration in minutes (float) or None if unable to read
+    """
+    try:
+        import struct
+
+        # Determine if file is local or remote
+        remote_host, exists, resolved_path = determine_remote_host(filepath)
+        if not exists:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: File not found: {filepath}")
+            return None
+
+        # Use resolved path if available
+        if resolved_path:
+            filepath = resolved_path
+
+        # Read first 4096 bytes of file (sufficient for MKV header)
+        if remote_host:
+            # Remote file: use SSH to read header bytes
+            escaped_path = escape_path_for_ssh(filepath)
+            cmd = f'ssh {remote_host} "dd if=\\"{escaped_path}\\" bs=4096 count=1 2>/dev/null"'
+            result = subprocess.run(cmd, shell=True, capture_output=True)
+            if result.returncode != 0:
+                if DEEPDBG:
+                    print(f"{DBGPFX}get_mkv_header_duration: Failed to read remote file header")
+                return None
+            header_data = result.stdout
+        else:
+            # Local file: read directly
+            with open(filepath, 'rb') as f:
+                header_data = f.read(4096)
+
+        # Search for duration element in MKV header
+        # MKV duration is stored as a float64 in milliseconds
+        # The EBML ID for Duration is 0x4489 (2 bytes: 0x44, 0x89)
+        duration_id = b'\x44\x89'
+        pos = header_data.find(duration_id)
+
+        if pos == -1:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: Duration element not found in header")
+            return None
+
+        # Skip ID (2 bytes) and size byte(s)
+        # MKV uses variable-length encoding for element sizes
+        # For duration (8-byte float), size is usually 0x88 (meaning 8 bytes)
+        pos += 2  # Skip ID
+        size_byte = header_data[pos]
+        pos += 1  # Skip size byte
+
+        # If size indicates 8 bytes (0x88), read the float64 value
+        if size_byte == 0x88 and pos + 8 <= len(header_data):
+            # Read 8 bytes as big-endian float64
+            duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
+            duration_min = duration_ms / 1000.0 / 60.0  # Convert ms to minutes
+            return duration_min
+        else:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: Unexpected size byte {hex(size_byte)}")
+            return None
+
+    except Exception as e:
+        if DEEPDBG:
+            print(f"{DBGPFX}get_mkv_header_duration: Exception reading MKV header: {e}")
+        return None
+
 def display_duplicate_details(nr, obj):
     """Display detailed information about a duplicate media file
 
@@ -2921,6 +2998,29 @@ def display_duplicate_details(nr, obj):
     print(f"    Type:    {filetype}")
     print(f"    Version: {version}")
     print(f"    Size:    {filesize}")
+
+    # Check for potential file truncation/corruption in MKV files
+    if filetype == 'MKV' and version != 'N/A' and filepath != 'N/A':
+        import re
+        # Parse duration from version string (e.g., "85.89min 1280x684 (hevc ac3)")
+        duration_match = re.search(r'(\d+\.?\d*)min', version)
+        if duration_match:
+            plex_duration_min = float(duration_match.group(1))
+
+            # Try to read MKV header duration
+            mkv_header_duration = get_mkv_header_duration(filepath)
+
+            if mkv_header_duration is not None:
+                # Compare header duration vs Plex scanned duration
+                diff_min = abs(mkv_header_duration - plex_duration_min)
+                diff_percent = (diff_min / mkv_header_duration * 100) if mkv_header_duration > 0 else 0
+
+                # If difference is > 5%, warn about potential truncation
+                if diff_percent > 5.0:
+                    print(f"    ⚠ WARNING: File may be truncated/corrupted")
+                    print(f"       Header claims:    {mkv_header_duration:.2f} min")
+                    print(f"       Actual playable:  {plex_duration_min:.2f} min")
+                    print(f"       Missing:          {diff_min:.2f} min ({diff_percent:.1f}%)")
 
 def determine_remote_host(filepath):
     """Determine if file is local or on remote SSH host
@@ -8810,7 +8910,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         # For regular duplicates (multiple Plex entries), show the single file
                         if len(files_dict) > 1 and key in multi_version_keys:
                             # Multi-version item: display each version from obj['files'] dict
-                            for version_str, file_info in files_dict.items():
+                            # Sort alphabetically by filepath to match --duplicates --resolve ordering (line 8972)
+                            sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath') if isinstance(x[1], dict) else x[1])
+                            for version_str, file_info in sorted_files:
                                 nr += 1
                                 what = get_media_description(obj)
                                 plex_id = obj.get('id')
