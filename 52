@@ -7532,7 +7532,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         """
         Update PLEX_Library cache objects.
         """
-        global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE
+        global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE, READ_ONLY_MODE
 
         # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
         # This makes --update-cache self-healing
@@ -8034,6 +8034,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Process libraries to update (in parallel if multiple)
             if libraries_to_update:
+                # Temporarily disable READ_ONLY_MODE since user explicitly approved cache update
+                old_read_only = READ_ONLY_MODE
+                READ_ONLY_MODE = False
+
                 num_to_update = len(libraries_to_update)
                 max_workers = min(MAX_PARALLEL_WORKERS, num_to_update) if num_to_update > 1 else 1
 
@@ -8156,6 +8160,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             'library_stats': current_library_stats,
             'library_object_counts': updated_library_object_counts  # Cache this to avoid recalculation
         })
+
+        # Restore READ_ONLY_MODE if it was temporarily disabled for user-approved incremental update
+        if 'old_read_only' in locals():
+            READ_ONLY_MODE = old_read_only
 
         # Store current_library_stats (now with updated timestamps) for SUMMARY display
         # The timestamps in CACHE['library_stats'] were just updated to current time
