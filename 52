@@ -9006,8 +9006,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False):
-        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode} )")
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False):
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only} )")
 
         # Normalize media type
         if media_type == "Series":
@@ -9022,19 +9022,32 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
 
         # Make --list without library a synonym for --list-libraries
-        if library_name is None and not duplicates_only:
+        if library_name is None and not duplicates_only and not broken_only:
             print("\nAvailable Libraries:")
             PLEX_Library.print()
             return
 
         # Print appropriate header
         if library_name is None:
-            if media_type is None:
-                print(f"\nSearching for duplicates in all libraries:")
+            if broken_only:
+                print(f"\nSearching for potentially truncated/broken files in all libraries:")
+            elif duplicates_only:
+                if media_type is None:
+                    print(f"\nSearching for duplicates in all libraries:")
+                else:
+                    print(f"\nMedia of type '{media_type}' (duplicates only):")
             else:
-                print(f"\nMedia of type '{media_type}'{'(duplicates only)' if duplicates_only else ''}:")
+                if media_type is None:
+                    print(f"\nAll media:")
+                else:
+                    print(f"\nMedia of type '{media_type}':")
         else:
-            if duplicates_only:
+            if broken_only:
+                if media_type is None:
+                    print(f"\nSearching for potentially truncated/broken files in library '{library_name}':")
+                else:
+                    print(f"\nSearching for potentially truncated/broken files of type '{media_type}' in library '{library_name}':")
+            elif duplicates_only:
                 if media_type is None:
                     print(f"\nSearching for duplicates in library '{library_name}':")
                 else:
@@ -9046,16 +9059,99 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"\nMedia in '{library_name}' ({media_type}):")
 
         # Collect keys
-        # When checking duplicates, always collect from ALL libraries so we can filter properly
-        if duplicates_only:
+        # When checking duplicates or broken files, always collect from ALL libraries so we can filter properly
+        if duplicates_only or broken_only:
             obj_keys = collect_library_keys(library_name=None, media_type=media_type)
         else:
             obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
 
         if DBG: print(f"{DBGPFX}PLEX_Media.list(): obj_keys = {obj_keys}")
 
+        # Filter for broken files if requested
+        if broken_only:
+            broken_files = []
+            for key in obj_keys:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+
+                # Only check Episode and Movie types
+                if obj.get('type') not in ['Episode', 'Movie']:
+                    continue
+
+                # Filter by library if specified
+                if library_name and obj.get('library') != library_name:
+                    continue
+
+                plex_duration = obj.get('duration')
+                if not plex_duration:
+                    continue
+
+                files_dict = obj.get('files', {})
+                for file_info in files_dict.values():
+                    file_metadata = file_info.get('file_metadata')
+
+                    # Include files marked as broken OR potentially truncated
+                    is_broken = False
+                    diff_pct = None
+                    severity = None
+
+                    if file_metadata:
+                        if file_metadata.get('broken'):
+                            is_broken = True
+                        else:
+                            container_duration = file_metadata.get('container_duration')
+                            if container_duration:
+                                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+
+                                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                                    is_broken = True
+
+                                    # Classify severity
+                                    if diff_pct < -10:
+                                        severity = 'severe'
+                                    elif diff_pct < -5:
+                                        severity = 'moderate'
+                                    elif diff_pct < -1:
+                                        severity = 'mild'
+                                    else:
+                                        severity = 'borderline'
+
+                    if is_broken:
+                        broken_files.append((key, diff_pct, severity))
+                        break  # Only add the key once even if multiple files
+
+            if not broken_files:
+                if library_name:
+                    print(f"No broken/truncated files in '{library_name}' found.")
+                else:
+                    print(f"No broken/truncated files found.")
+                return
+
+            # Sort by severity (severe first), then by diff_pct (worst first)
+            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, None: 4}
+            broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
+
+            # Print broken files with details
+            print(f"\n{'SEVERITY':<12} | {'DIFF%':<8} | {'PLEX-ID':<10} | {'TITLE':<60} | {'LIBRARY':<15} | {'DURATION':<10}")
+            print("-" * 150)
+
+            for key, diff_pct, severity in broken_files:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                title = obj.get('title', 'Unknown')[:60]
+                library = obj.get('library', 'Unknown')[:15]
+                plex_duration = obj.get('duration', 0) / 60000  # Convert to minutes
+
+                severity_str = severity.upper() if severity else 'BROKEN'
+                diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
+                plex_id = obj.get('id', 'N/A')
+
+                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {title:<60} | {library:<15} | {plex_duration:>7.1f} min")
+
+            print(f"\nTotal: {len(broken_files)} broken/truncated files found")
+            print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+            return
+
         # Filter for duplicates if requested
-        if duplicates_only:
+        elif duplicates_only:
             # Group keys by content identity to find duplicate items
             items_with_duplicates = {}
             for key in obj_keys:
@@ -11040,6 +11136,90 @@ def show_system_info():
         print("  " + "-"*70)
         print(f"    {'TOTAL':25s}: {'':15s}{total_size:>8.2f} MB")
 
+    # Enhanced statistics: Metadata and broken files
+    if cache_path.exists() and len(PLEX_Media.OBJ_BY_ID) > 0:
+        print("\nMETADATA & FILE HEALTH:")
+        print("  " + "-"*70)
+
+        # Count files by metadata status
+        total_video_files = 0
+        files_with_metadata = 0
+        files_marked_broken = 0
+        files_potentially_truncated = 0
+        truncation_severity = {'severe': 0, 'moderate': 0, 'mild': 0, 'borderline': 0}
+
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            if obj.get('type') not in ['Episode', 'Movie']:
+                continue
+
+            plex_duration = obj.get('duration')
+            files_dict = obj.get('files', {})
+
+            for file_info in files_dict.values():
+                total_video_files += 1
+
+                file_metadata = file_info.get('file_metadata')
+                if not file_metadata:
+                    continue
+
+                if file_metadata.get('broken'):
+                    files_marked_broken += 1
+                else:
+                    files_with_metadata += 1
+
+                    # Check for truncation using threshold
+                    container_duration = file_metadata.get('container_duration')
+                    if plex_duration and container_duration:
+                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+
+                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                            files_potentially_truncated += 1
+
+                            # Classify severity
+                            if diff_pct < -10:
+                                truncation_severity['severe'] += 1
+                            elif diff_pct < -5:
+                                truncation_severity['moderate'] += 1
+                            elif diff_pct < -1:
+                                truncation_severity['mild'] += 1
+                            else:
+                                truncation_severity['borderline'] += 1
+
+        # Print statistics
+        print(f"    {'Total video files':30s}: {total_video_files:>6,}")
+        print(f"    {'Files with metadata':30s}: {files_with_metadata:>6,} ({files_with_metadata/total_video_files*100:.1f}%)" if total_video_files > 0 else f"    {'Files with metadata':30s}: {files_with_metadata:>6,}")
+        print(f"    {'Files marked broken':30s}: {files_marked_broken:>6,}" + (f" ({files_marked_broken/total_video_files*100:.1f}%)" if total_video_files > 0 and files_marked_broken > 0 else ""))
+
+        if files_potentially_truncated > 0:
+            print(f"    {'Potentially truncated':30s}: {files_potentially_truncated:>6,} ({files_potentially_truncated/total_video_files*100:.1f}%)")
+
+            # Show severity breakdown
+            if truncation_severity['severe'] > 0:
+                print(f"      {'- Severe (>10% shorter)':28s}: {truncation_severity['severe']:>6,}")
+            if truncation_severity['moderate'] > 0:
+                print(f"      {'- Moderate (5-10% shorter)':28s}: {truncation_severity['moderate']:>6,}")
+            if truncation_severity['mild'] > 0:
+                print(f"      {'- Mild (1-5% shorter)':28s}: {truncation_severity['mild']:>6,}")
+            if truncation_severity['borderline'] > 0:
+                print(f"      {'- Borderline (0.5-1% shorter)':28s}: {truncation_severity['borderline']:>6,}")
+
+            print(f"    {'Detection threshold':30s}: {TRUNCATION_THRESHOLD_PCT}%")
+
+        # Count duplicates
+        from collections import Counter
+        title_counts = Counter()
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            if obj.get('type') in ['Episode', 'Movie']:
+                title = obj.get('title', '')
+                if title:
+                    title_counts[title] += 1
+
+        duplicates_total = sum(1 for count in title_counts.values() if count > 1)
+        duplicate_files_count = sum(count for count in title_counts.values() if count > 1)
+
+        if duplicates_total > 0:
+            print(f"    {'Duplicate titles':30s}: {duplicates_total:>6,} ({duplicate_files_count:,} total files)")
+
     # Libraries information (table with Type column)
     print("\nLIBRARIES:")
     if len(PLEX_Library.OBJ_DICT) > 0:
@@ -11810,26 +11990,31 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'duplicates', False) and not safe_getattr(cmd_args, 'list', False):
         cmd_args.list = True
 
+    # Handle --broken as standalone (automatically enable --list)
+    if safe_getattr(cmd_args, 'broken', False) and not safe_getattr(cmd_args, 'list', False):
+        cmd_args.list = True
+
     # Validate parameter dependencies BEFORE checking if commands should run
-    # Check if --type is used without --list or --duplicates
-    if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False)):
-        err(1065, "--type can only be used together with --list or --duplicates.\nExample: my-plex --list --type movie")
+    # Check if --type is used without --list, --duplicates, or --broken
+    if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
+        err(1065, "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
 
     # Check if --resolve is used without --duplicates
     if safe_getattr(cmd_args, 'resolve', False) and not safe_getattr(cmd_args, 'duplicates', False):
         err(1063, "--resolve can only be used together with --duplicates.\nExample: my-plex --duplicates --resolve")
 
-    # Handle --list or --duplicates (--duplicates automatically enables --list)
-    if cmd_args.list or cmd_args.duplicates:
-        # Handle global --list command (with optional --duplicates, --resolve, and --type)
+    # Handle --list, --duplicates, or --broken (both --duplicates and --broken automatically enable --list)
+    if cmd_args.list or cmd_args.duplicates or safe_getattr(cmd_args, 'broken', False):
+        # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
         media_type = safe_getattr(cmd_args, 'type', None)
         duplicates_only = safe_getattr(cmd_args, 'duplicates', False)
+        broken_only = safe_getattr(cmd_args, 'broken', False)
         resolve_mode = safe_getattr(cmd_args, 'resolve', False)
 
-        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, resolve_mode={resolve_mode}")
+        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}")
 
         # Call PLEX_Media.list() with library_name=None to search all libraries
-        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode)
+        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only)
 
 ###########################################################################################
 #### DO IT
@@ -12083,6 +12268,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
     GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates across all libraries.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="Show only duplicates across all libraries. Can be used standalone or with --list.")
+    GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="Show only potentially truncated/broken files. Can be used standalone or with --list. Files are flagged when container duration is >0.5%% shorter than Plex duration.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help="Interactive resolution mode for duplicates (use with --duplicates).")
     GLOBAL_CMD_PARSER.add_argument('--type', help="Filter --list by media type (movie or show).")
     GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
