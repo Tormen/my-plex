@@ -12335,12 +12335,12 @@ def main():
     # Add --type to main_parser so it knows to consume the value instead of treating it as CMD_OR_PLEXOBJECT
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
-    main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch, --force for complete rebuild, --force-plexdata for Plex verification, or --force-metadata for video metadata recollection - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
-    main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata and video file metadata.", default=False)
-    main_parser.add_argument('--force', action='store_true', help="Use with --update-cache. Triggers BOTH --force-plexdata AND --force-metadata for complete rebuild. Most comprehensive but SLOWEST option.", default=False)
-    main_parser.add_argument('--force-plexdata', action='store_true', help="Use with --update-cache. Runs BOTH lib.update() AND lib.refresh() - scans for new files AND verifies all existing files in Plex. Detects additions, changes, and deletions. Triggered automatically by --force.", default=False)
-    main_parser.add_argument('--force-metadata', action='store_true', help="Use with --update-cache. Force recollection of all video file metadata (container durations) even if already cached. Useful for rebuilding metadata from scratch. Triggered automatically by --force.", default=False)
+    main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force-plexdata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force-metadata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
     main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
@@ -12360,11 +12360,11 @@ def main():
     GLOBAL_CMD_PARSER._positionals.title = ''
     GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
     GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
-    GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates across all libraries.")
-    GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="Show only duplicates across all libraries. Can be used standalone or with --list.")
-    GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="Show only potentially truncated/broken files. Can be used standalone or with --list. Files are flagged when container duration is >0.5%% shorter than Plex duration.")
-    GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help="Interactive resolution mode for duplicates (use with --duplicates).")
-    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help="Filter --list by media type (movie or show). Choices: movie, show.")
+    GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates, --broken to show broken files, --type to filter by media type (movie/show), or --resolve for interactive duplicate resolution.")
+    GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --list
+    GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --list
+    GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --list
+    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
