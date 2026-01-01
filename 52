@@ -12047,13 +12047,8 @@ def execute_global_commands(args, cmd_args):
         label, plex_id = cmd_args.remove_label
         remove_label_from_item(label, plex_id)
 
-    # Handle --duplicates as standalone (automatically enable --list)
-    if safe_getattr(cmd_args, 'duplicates', False) and not safe_getattr(cmd_args, 'list', False):
-        cmd_args.list = True
-
-    # Handle --broken as standalone (automatically enable --list)
-    if safe_getattr(cmd_args, 'broken', False) and not safe_getattr(cmd_args, 'list', False):
-        cmd_args.list = True
+    # Note: --duplicates and --broken auto-enable --list via argument normalization in main()
+    # No need to check and modify cmd_args.list here
 
     # Validate parameter dependencies BEFORE checking if commands should run
     # Check if --type is used without --list, --duplicates, or --broken
@@ -12241,6 +12236,29 @@ def main():
     # Debug: print sys.argv to see what arguments were actually passed
     if DBG or DEEPDBG:
         print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
+
+    # Normalize arguments: inject --list before --duplicates or --broken if --list not present
+    # This simplifies argparse by ensuring canonical form (--list --duplicates or --list --broken)
+    has_list = '--list' in sys.argv or '--list-duplicates' in sys.argv
+    has_duplicates = '--duplicates' in sys.argv
+    has_broken = '--broken' in sys.argv
+
+    if (has_duplicates or has_broken) and not has_list:
+        # Find position of --duplicates or --broken and inject --list before it
+        normalized_argv = [sys.argv[0]]  # Keep script name
+        for arg in sys.argv[1:]:
+            if arg == '--duplicates' or arg == '--broken':
+                # Inject --list before --duplicates or --broken
+                normalized_argv.append('--list')
+                normalized_argv.append(arg)
+                # Mark that we've added --list
+                has_list = True
+            else:
+                normalized_argv.append(arg)
+
+        sys.argv = normalized_argv
+        if DBG or DEEPDBG:
+            print(f" ~~~ Normalized sys.argv = {sys.argv}", file=sys.stderr)
 
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
