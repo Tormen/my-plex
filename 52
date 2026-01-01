@@ -9353,11 +9353,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             plex_id = obj.get('id')
                             if plex_id is None:
                                 err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
-                            filepath = obj.get('file', 'N/A')
-                            codec = obj.get('video_codec', 'N/A')
-                            resolution = obj.get('resolution_full', 'N/A')
+                            filepath = obj.get('file') or 'N/A'
+                            codec = obj.get('video_codec') or 'N/A'
+                            resolution = obj.get('resolution_full') or 'N/A'
                             size_bytes = obj.get('filesize', None)
-                            filesize = format_filesize(size_bytes, force_unit='MB')
+                            filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
                             filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
 
                             if len(what) > 60:
