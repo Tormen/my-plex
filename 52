@@ -9068,12 +9068,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only} )")
 
         # Normalize media type
-        if media_type == "Series":
-            media_type = "Show"  # "Show" = official PLEX type for a TV series
+        if media_type is not None:
+            # Capitalize first letter for case-insensitive matching
+            media_type = media_type.capitalize()
+            # Map user-friendly names to Plex types
+            if media_type == "Series":
+                media_type = "Show"  # "Show" = official PLEX type for a TV series
 
         # Validate media type
         if media_type is not None and media_type not in ["Show", "Movie"]:
-            err(1043, f"UNSUPPORTED media_type '{media_type}'.")
+            err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
 
         # Validate library_name
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
@@ -12063,7 +12067,9 @@ def execute_global_commands(args, cmd_args):
     # Handle --list, --duplicates, or --broken (both --duplicates and --broken automatically enable --list)
     if cmd_args.list or cmd_args.duplicates or safe_getattr(cmd_args, 'broken', False):
         # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
-        media_type = safe_getattr(cmd_args, 'type', None)
+        # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
+        # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         duplicates_only = safe_getattr(cmd_args, 'duplicates', False)
         broken_only = safe_getattr(cmd_args, 'broken', False)
         resolve_mode = safe_getattr(cmd_args, 'resolve', False)
@@ -12232,6 +12238,10 @@ def main():
             VERYVRB = True
             VRB = True  # very-verbose implies verbose
 
+    # Debug: print sys.argv to see what arguments were actually passed
+    if DBG or DEEPDBG:
+        print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
+
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)})")
@@ -12297,6 +12307,9 @@ def main():
     main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}. Example: https://SERVER:32400/library/metadata/12345?X-Plex-Token=TOKEN", default=PLEX_XML_URL)
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}.", default=PLEX_TOKEN)
+    # Add --type to main_parser so it knows to consume the value instead of treating it as CMD_OR_PLEXOBJECT
+    # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
+    main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
     main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help="Delete existing cache and partial cache files before rebuilding (use with --update-cache). Starts completely fresh. Use --force separately to also refresh all Plex metadata and video file metadata.", default=False)
@@ -12327,7 +12340,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="Show only duplicates across all libraries. Can be used standalone or with --list.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="Show only potentially truncated/broken files. Can be used standalone or with --list. Files are flagged when container duration is >0.5%% shorter than Plex duration.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help="Interactive resolution mode for duplicates (use with --duplicates).")
-    GLOBAL_CMD_PARSER.add_argument('--type', help="Filter --list by media type (movie or show).")
+    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help="Filter --list by media type (movie or show). Choices: movie, show.")
     GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
