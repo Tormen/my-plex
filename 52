@@ -3058,28 +3058,64 @@ def display_duplicate_details(nr, obj):
     print(f"    Version: {version}")
     print(f"    Size:    {filesize}")
 
-    # Check for potential file truncation/corruption in MKV files
-    if filetype == 'MKV' and version != 'N/A' and filepath != 'N/A':
-        import re
-        # Parse duration from version string (e.g., "85.89min 1280x684 (hevc ac3)")
-        duration_match = re.search(r'(\d+\.?\d*)min', version)
-        if duration_match:
-            plex_duration_min = float(duration_match.group(1))
+    # Check for potential file truncation/corruption using cached metadata
+    # First try the new cached metadata (works for all file types, not just MKV)
+    plex_duration = obj.get('duration')  # Duration in milliseconds
+    files_dict = obj.get('files', {})
 
-            # Try to read MKV header duration
-            mkv_header_duration = get_mkv_header_duration(filepath)
+    # Get file_metadata from the appropriate version
+    file_metadata = None
+    if files_dict:
+        # If this is a synthetic multi-version object, use the specific version
+        if obj.get('_is_synthetic') and version != 'N/A':
+            file_info = files_dict.get(version)
+            if isinstance(file_info, dict):
+                file_metadata = file_info.get('file_metadata')
+        else:
+            # For regular objects, check all file versions
+            for file_info in files_dict.values():
+                if isinstance(file_info, dict):
+                    file_metadata = file_info.get('file_metadata')
+                    if file_metadata:
+                        break
 
-            if mkv_header_duration is not None:
-                # Compare header duration vs Plex scanned duration
-                diff_min = abs(mkv_header_duration - plex_duration_min)
-                diff_percent = (diff_min / mkv_header_duration * 100) if mkv_header_duration > 0 else 0
+    # Check if file is marked as broken or potentially truncated
+    if file_metadata and plex_duration:
+        if file_metadata.get('broken'):
+            print(f"    ⚠ WARNING: File marked as BROKEN (metadata collection failed)")
+            if file_metadata.get('reason'):
+                print(f"       Reason: {file_metadata['reason']}")
+        else:
+            container_duration = file_metadata.get('container_duration')
+            if container_duration:
+                # Both durations are in milliseconds
+                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
 
-                # If difference is > 5%, warn about potential truncation
-                if diff_percent > 5.0:
-                    print(f"    ⚠ WARNING: File may be truncated/corrupted")
-                    print(f"       Header claims:    {mkv_header_duration:.2f} min")
-                    print(f"       Actual playable:  {plex_duration_min:.2f} min")
-                    print(f"       Missing:          {diff_min:.2f} min ({diff_percent:.1f}%)")
+                # Check against threshold
+                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                    # Classify severity
+                    if diff_pct < -10:
+                        severity = 'SEVERE'
+                        emoji = '🔴'
+                    elif diff_pct < -5:
+                        severity = 'MODERATE'
+                        emoji = '🟠'
+                    elif diff_pct < -1:
+                        severity = 'MILD'
+                        emoji = '🟡'
+                    else:
+                        severity = 'BORDERLINE'
+                        emoji = '⚠️'
+
+                    plex_min = plex_duration / 60000
+                    container_min = container_duration / 60000
+                    missing_min = (plex_duration - container_duration) / 60000
+
+                    print(f"    {emoji} WARNING: File appears TRUNCATED ({severity})")
+                    print(f"       Plex expects:     {plex_min:.2f} min")
+                    print(f"       Container has:    {container_min:.2f} min")
+                    print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
+                    print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
 
 def determine_remote_host(filepath):
     """Determine if file is local or on remote SSH host
