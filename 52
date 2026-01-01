@@ -177,7 +177,7 @@ import requests.exceptions
 #      - Loaded from ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
 #      - Values in config file override CONFIG_DEFAULTS
 #      - Use --config-file | -C to specify a custom config file path
-#      - Use --create-config with --config-file to generate a config file with default values
+#      - Use --create with --config-file to generate a config file with default values
 #
 #   3. COMMAND-LINE (highest priority)
 #      - Command-line arguments override both CONFIG_FILE and CONFIG_DEFAULTS
@@ -12269,14 +12269,14 @@ def main():
 
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)})")
-    config_parser.add_argument('--create-config', action='store_true', help="Create config file with default values (requires --config-file)")
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)}). Use with --create to generate a new config file with default values.")
+    config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden option, documented in --config-file help
     config_args, _ = config_parser.parse_known_args()
 
-    # Handle --create-config option
-    if config_args.create_config:
+    # Handle --create option
+    if config_args.create:
         if not config_args.config_file:
-            print("Error: --create-config requires --config-file <path> to be specified", file=sys.stderr)
+            print("Error: --create requires --config-file <path> to be specified", file=sys.stderr)
             sys.exit(1)
 
         # Create config file with defaults
@@ -12536,7 +12536,7 @@ def main():
         # Check if this is a missing config file issue
         if not loaded_config and ("PLEX_URL not configured" in validation_errors or "PLEX_TOKEN not configured" in validation_errors):
             print(f"\nNo configuration file found. Create one with:", file=sys.stderr)
-            print(f"  my-plex --create-config --config-file ~/.my-plex.conf", file=sys.stderr)
+            print(f"  my-plex --create --config-file ~/.my-plex.conf", file=sys.stderr)
         else:
             print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
         sys.exit(1)
