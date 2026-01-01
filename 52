@@ -6181,9 +6181,11 @@ def collect_library_keys(library_name=None, media_type=None):
         for lib_name in PLEX_Media.OBJ_BY_LIBRARY.keys():
             lib_dict = PLEX_Media.OBJ_BY_LIBRARY[lib_name]
             if media_type is None:
-                # Collect both Show and Movie
+                # Collect both Show/Episode and Movie
                 if "Show" in lib_dict:
                     obj_keys.extend(lib_dict["Show"])
+                if "Episode" in lib_dict:
+                    obj_keys.extend(lib_dict["Episode"])
                 if "Movie" in lib_dict:
                     obj_keys.extend(lib_dict["Movie"])
             else:
@@ -6198,11 +6200,13 @@ def collect_library_keys(library_name=None, media_type=None):
         lib_dict = PLEX_Media.OBJ_BY_LIBRARY[library_name]
 
         if media_type is None:
-            # Need to determine what's in this library
+            # Collect all content from this library (Show, Episode, Movie)
             if "Show" in lib_dict:
-                obj_keys = lib_dict["Show"]
-            elif "Movie" in lib_dict:
-                obj_keys = lib_dict["Movie"]
+                obj_keys.extend(lib_dict["Show"])
+            if "Episode" in lib_dict:
+                obj_keys.extend(lib_dict["Episode"])
+            if "Movie" in lib_dict:
+                obj_keys.extend(lib_dict["Movie"])
         else:
             # Get specific media type from this library
             if media_type in lib_dict:
