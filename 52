@@ -177,7 +177,7 @@ import requests.exceptions
 #      - Loaded from ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
 #      - Values in config file override CONFIG_DEFAULTS
 #      - Use --config-file | -C to specify a custom config file path
-#      - Use --create with --config-file to generate a config file with default values
+#      - Use --create-config with --config-file to generate a config file with default values
 #
 #   3. COMMAND-LINE (highest priority)
 #      - Command-line arguments override both CONFIG_FILE and CONFIG_DEFAULTS
@@ -10478,8 +10478,9 @@ def main_print_help_of_subparsers(parser):
 def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
-    # Don't show help if --update-cache, --info, or --verify-cache is provided (allow standalone commands)
-    if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0 and not FORCE_CACHE_UPDATE and args.info is None and not args.verify_cache):
+    # Don't show help if --update-cache or --verify-cache is provided (allow standalone commands)
+    # Note: --info is now in GLOBAL_CMD_PARSER, so it's in remaining_args
+    if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0 and not FORCE_CACHE_UPDATE and not args.verify_cache):
         if DBG: print( f"{DBGPFX}main_print_help(): standard help output..." )
         main_parser.print_help() #(sys.stderr)
         print()
@@ -12020,6 +12021,12 @@ def show_item_info(identifier):
 def execute_global_commands(args, cmd_args):
     if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
     #init_plex(args, all=False, server=True, library=True)
+
+    # Handle --info command (shows system info or item info)
+    if safe_getattr(cmd_args, 'info', None) is not None:
+        show_item_info(cmd_args.info)
+        sys.exit(0)
+
     # Handle --test command
     if cmd_args.test:
         run_regression_tests()
@@ -12263,13 +12270,13 @@ def main():
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)})")
-    config_parser.add_argument('--create', action='store_true', help="Create config file with default values (requires --config-file)")
+    config_parser.add_argument('--create-config', action='store_true', help="Create config file with default values (requires --config-file)")
     config_args, _ = config_parser.parse_known_args()
 
-    # Handle --create option
-    if config_args.create:
+    # Handle --create-config option
+    if config_args.create_config:
         if not config_args.config_file:
-            print("Error: --create requires --config-file <path> to be specified", file=sys.stderr)
+            print("Error: --create-config requires --config-file <path> to be specified", file=sys.stderr)
             sys.exit(1)
 
         # Create config file with defaults
@@ -12341,7 +12348,6 @@ def main():
     main_parser.add_argument('-V', '--verbose', action='store_true', help=f"Turn on verbose output - defaults to '{VRB}'", default=VRB)
     main_parser.add_argument('-VV', '--very-verbose', action='store_true', help=f"Turn on very verbose output - defaults to '{VERYVRB}'", default=VERYVRB)
     main_parser.add_argument('-f', '--format', metavar="FORMATSTR", help=f"Define format of output, overwriting the default. FORMATSTR can be 'pretty', 'tsv' or format string containing variables in Python f-string format - defaults to '{FORMAT}'", default=FORMAT)
-    main_parser.add_argument('--info', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: shows specific Plex item info. Example: --info (system) or --info 2579 (item)")
     main_parser.add_argument('--help', nargs='?', metavar="WHAT", help="Without WHAT, print this help. --help 'global' prints help on available <GLOBAL_COMMAND>s. --help <OBJECT_TYPE> prints available commands for this OBJECT_TYPE. --help 'all' will print all available --help texts.", default=None, const="default") # default + const necessary in order to be able to detect a simple '--help' without parameter!
     main_parser.add_argument('CMD_OR_PLEXOBJECT', nargs='?', help="can be a <GLOBAL_COMMAND> or a <PLEX_OBJECT>. For <PLEX_OBJECT> the OBJECT_TYPE will be auto-detected. Or you can force the type of the <PLEX_OBJECT>. For possible choices see below 'available <GLOBAL_COMMAND>s' and 'supported <OBJECT_TYPE>s'.")
     #main_parser.add_argument('GLOBAL_COMMAND', nargs='?', help="Global command. For possible choices see below 'available <GLOBAL_COMMAND>s'. For more info: --help 'global'")
@@ -12454,7 +12460,7 @@ def main():
     AUTO_NO = args.no
     FORMAT = args.format
     OFFLINE = args.offline
-    READ_ONLY_MODE = (args.info is not None or args.verify_cache)  # Enable read-only mode for --info and --verify-cache
+    READ_ONLY_MODE = args.verify_cache  # Enable read-only mode for --verify-cache (--info is handled in execute_global_commands)
     if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
     # ensuring remaining_args has ALL the potential [GLOBAL_CMDs] + [PLEXOBJECTs] + [PLEXOBJ_CMDS]:
     if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
@@ -12530,7 +12536,7 @@ def main():
         # Check if this is a missing config file issue
         if not loaded_config and ("PLEX_URL not configured" in validation_errors or "PLEX_TOKEN not configured" in validation_errors):
             print(f"\nNo configuration file found. Create one with:", file=sys.stderr)
-            print(f"  my-plex --create --config-file ~/.my-plex.conf", file=sys.stderr)
+            print(f"  my-plex --create-config --config-file ~/.my-plex.conf", file=sys.stderr)
         else:
             print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
         sys.exit(1)
@@ -12543,10 +12549,7 @@ def main():
     #init_plex(args, all=False, server=True, library=True)
     #if DBG: print_obj(brute_force_search("Episode:2579"), "res", DBGPFX, depth=0)
 
-    # Handle --info command (must be done after init_plex so cache is loaded)
-    if args.info is not None:
-        show_item_info(args.info)
-        sys.exit(0)
+    # Note: --info is now handled in execute_global_commands()
 
     # Handle --verify-cache command (must be done after init_plex so cache is loaded)
     if args.verify_cache:
