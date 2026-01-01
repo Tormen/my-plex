@@ -3080,9 +3080,12 @@ def display_duplicate_details(nr, obj):
                         break
 
     # Check if file is marked as broken or potentially truncated
-    if file_metadata and plex_duration:
+    if not file_metadata:
+        # No cached metadata available - ask user to run --update-cache
+        print(f"    ℹ️  No file metadata cached. Run with --update-cache to collect metadata.")
+    elif plex_duration:
         if file_metadata.get('broken'):
-            print(f"    ⚠ WARNING: File marked as BROKEN (metadata collection failed)")
+            print(f"    ⚠️  WARNING: File marked as BROKEN (metadata collection failed)")
             if file_metadata.get('reason'):
                 print(f"       Reason: {file_metadata['reason']}")
         else:
