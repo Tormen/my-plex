@@ -12245,12 +12245,34 @@ def main():
         print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
-    # This simplifies argparse by ensuring canonical form (--list --duplicates or --list --broken)
+    # Normalize --resolve to --list --duplicates --resolve for canonical form
+    # This simplifies argparse by ensuring canonical form
     has_list = '--list' in sys.argv or '--list-duplicates' in sys.argv
     has_duplicates = '--duplicates' in sys.argv
     has_broken = '--broken' in sys.argv
+    has_resolve = '--resolve' in sys.argv
 
-    if (has_duplicates or has_broken) and not has_list:
+    if has_resolve and not (has_list and has_duplicates):
+        # --resolve requires --list --duplicates, inject them if not present
+        normalized_argv = [sys.argv[0]]  # Keep script name
+        for arg in sys.argv[1:]:
+            if arg == '--resolve':
+                # Inject --list --duplicates before --resolve
+                if not has_list:
+                    normalized_argv.append('--list')
+                if not has_duplicates:
+                    normalized_argv.append('--duplicates')
+                normalized_argv.append(arg)
+                # Mark that we've added them
+                has_list = True
+                has_duplicates = True
+            else:
+                normalized_argv.append(arg)
+
+        sys.argv = normalized_argv
+        if DBG or DEEPDBG:
+            print(f" ~~~ Normalized sys.argv (--resolve) = {sys.argv}", file=sys.stderr)
+    elif (has_duplicates or has_broken) and not has_list:
         # Find position of --duplicates or --broken and inject --list before it
         normalized_argv = [sys.argv[0]]  # Keep script name
         for arg in sys.argv[1:]:
