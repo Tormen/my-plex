@@ -12132,13 +12132,9 @@ def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
     if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
     #init_plex(args)
 
-    # OPTIMIZATION: If obj looks like a library name (starts with comma) but doesn't exist,
-    # fail fast with a helpful error instead of querying the server for playlists/media
-    if obj.startswith(','):
-        if obj not in PLEX_Library.OBJ_DICT.keys():
-            available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-            err(1066, f"Library '{obj}' not found.\nAvailable libraries: {available_libs}\nUse 'my-plex --list-libraries' to see all libraries.")
-
+    # OPTIMIZATION: Check library first since it's fast (local dict lookup).
+    # If library check fails, continue to check other slower types (playlists, media via server).
+    # Priority: library (fast) → media (slow) → playlist (slow)
     for obj_type in PLEXOBJ[DETECT]:
         if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: Trying object type '{obj_type}'..." )
         if PLEXOBJ[DETECT][obj_type](args,obj):
@@ -12235,7 +12231,9 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
             match state:
                 case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
                     if obj is None: err(1002, f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
-                    err(1035, f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\nPlease call with --help and correct.")
+                    # Show helpful error with available libraries
+                    available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+                    err(1035, f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
                 case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
                     obj_args_list.append(arg)
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
