@@ -8619,6 +8619,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if obj['show_key'] not in PLEX_Media.OBJ_BY_SHOW:
                         if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned episode - parent show '{obj['show_key']}' not found: key='{key}'")
                         continue
+                    # Defensive check: skip if season/episode structure is missing (orphaned episode)
+                    if (obj['S_str'] not in PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']] or
+                        obj['E_str'] not in PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']]):
+                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned episode - season/episode '{obj['S_str']}/{obj['E_str']}' not found in show '{obj['show_key']}': key='{key}'")
+                        continue
                     versions = list(PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']][obj['E_str']].keys()) # different VERSIONS of this episode
                     S_count = len( PLEX_Media.OBJ_BY_SHOW[obj['show_key']].keys() )
                     E_count = len( PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']].keys() )
