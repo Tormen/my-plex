@@ -12132,6 +12132,13 @@ def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
     if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
     #init_plex(args)
 
+    # OPTIMIZATION: If obj looks like a library name (starts with comma) but doesn't exist,
+    # fail fast with a helpful error instead of querying the server for playlists/media
+    if obj.startswith(','):
+        if obj not in PLEX_Library.OBJ_DICT.keys():
+            available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+            err(1066, f"Library '{obj}' not found.\nAvailable libraries: {available_libs}\nUse 'my-plex --list-libraries' to see all libraries.")
+
     for obj_type in PLEXOBJ[DETECT]:
         if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: Trying object type '{obj_type}'..." )
         if PLEXOBJ[DETECT][obj_type](args,obj):
