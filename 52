@@ -7120,10 +7120,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
     argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched to show only watched, --unwatched for unwatched, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
     argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
-    argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates
+    argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates (auto-enables --list)
     argparser.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS) # Interactive resolution mode for duplicates
-    argparser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only watched items
-    argparser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only unwatched items
+    argparser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS) # Show only watched items (auto-enables --list)
+    argparser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS) # Show only unwatched items (auto-enables --list)
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
@@ -8232,13 +8232,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
-        # Handle --list or --duplicates (--duplicates is a synonym for --list --duplicates)
-        if obj_args.list or safe_getattr(obj_args, 'duplicates', False):
+        # Auto-enable --list if --duplicates, --watched, or --unwatched is used
+        watched_only = safe_getattr(obj_args, 'watched', False)
+        unwatched_only = safe_getattr(obj_args, 'unwatched', False)
+        duplicates_only = safe_getattr(obj_args, 'duplicates', False)
+
+        # Handle --list or --duplicates or --watched or --unwatched
+        if obj_args.list or duplicates_only or watched_only or unwatched_only:
                                         media_type = safe_getattr(obj_args, 'type', None)
-                                        duplicates_only = safe_getattr(obj_args, 'duplicates', False)
                                         resolve_mode = safe_getattr(obj_args, 'resolve', False)
-                                        watched_only = safe_getattr(obj_args, 'watched', False)
-                                        unwatched_only = safe_getattr(obj_args, 'unwatched', False)
                                         PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only)
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
