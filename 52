@@ -7118,10 +7118,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
     #library_parser = subparsers.add_parser('library',      help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library", add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.")
     argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
-    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Example: --media [--type <movie|show>] [--duplicates]")
+    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched to show only watched, --unwatched for unwatched, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
     argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
     argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates
     argparser.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS) # Interactive resolution mode for duplicates
+    argparser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only watched items
+    argparser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only unwatched items
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
@@ -8225,7 +8227,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                         media_type = safe_getattr(obj_args, 'type', None)
                                         duplicates_only = safe_getattr(obj_args, 'duplicates', False)
                                         resolve_mode = safe_getattr(obj_args, 'resolve', False)
-                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode)
+                                        watched_only = safe_getattr(obj_args, 'watched', False)
+                                        unwatched_only = safe_getattr(obj_args, 'unwatched', False)
+                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only)
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -9069,8 +9073,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False):
-        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only} )")
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False):
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only} )")
 
         # Normalize media type
         if media_type is not None:
@@ -9120,10 +9124,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 else:
                     print(f"\nSearching for duplicates of type '{media_type}' in library '{library_name}':")
             else:
-                if media_type is None:
+                # Build header with optional filters
+                filters = []
+                if media_type:
+                    filters.append(media_type)
+                if watched_only:
+                    filters.append("watched")
+                elif unwatched_only:
+                    filters.append("unwatched")
+
+                filter_str = ", ".join(filters) if filters else "all"
+                if media_type is None and not watched_only and not unwatched_only:
                     print(f"\nMedia in '{library_name}':")
                 else:
-                    print(f"\nMedia in '{library_name}' ({media_type}):")
+                    print(f"\nMedia in '{library_name}' ({filter_str}):")
 
         # Collect keys
         # When checking duplicates or broken files, always collect from ALL libraries so we can filter properly
@@ -10068,6 +10082,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         print(f"\n   No operations were performed.")
         else:
+            # Filter by watched/unwatched status if requested
+            if watched_only or unwatched_only:
+                filtered_keys = []
+                for key in obj_keys:
+                    obj = PLEX_Media.OBJ_BY_ID[key]
+                    view_count = obj.get('viewCount', 0)
+
+                    if watched_only and view_count > 0:
+                        filtered_keys.append(key)
+                    elif unwatched_only and view_count == 0:
+                        filtered_keys.append(key)
+
+                if not filtered_keys:
+                    status_str = "watched" if watched_only else "unwatched"
+                    if library_name:
+                        print(f"No {status_str} items found in library '{library_name}'.")
+                    else:
+                        print(f"No {status_str} items found.")
+                    return
+
+                obj_keys = filtered_keys
+
             for key in obj_keys: PLEX_Media.print_OBJ_BY_ID( key )
 
     @staticmethod
@@ -10114,6 +10150,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'AUDIO_LANGUAGES':     label = 'AUDIO-LANG:' if labeled else ''
                     case 'SUBTITLE_LANGUAGES':  label = 'SUBTITLE-LANG:' if labeled else ''
                     case 'WRITERS':             label = 'WRITER:' if labeled else ''
+                    case 'VERSIONS':            label = 'VERSION:' if labeled else ''
                     case _:                     err(1058, f"Unknown list type (k={k})")
                 v = (label if len(v)>0 else'') + (','+label).join(v) # + ('#' if len(v)>0 else '')
             else:
