@@ -8218,6 +8218,16 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
         for title in PLEX_Library.OBJ_DICT.keys():
             if title == obj: return True
+
+        # Check if this looks like a library name typo (similar to existing library)
+        # If obj is similar to an existing library name, fail fast with helpful error
+        from difflib import get_close_matches
+        close_matches = get_close_matches(obj, PLEX_Library.OBJ_DICT.keys(), n=3, cutoff=0.6)
+        if close_matches:
+            suggestions = ', '.join(f"'{lib}'" for lib in close_matches)
+            available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+            err(1067, f"Library '{obj}' not found. Did you mean: {suggestions}?\n\nAvailable libraries: {available_libs}")
+
         return False
 
     @staticmethod
