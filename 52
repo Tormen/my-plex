@@ -7310,13 +7310,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries}: Processing '{title}'...")
 
-        # Print progress to terminal (always, not just in verbose mode)
-        # Skip basic progress line in verbose mode since detailed partition/processing lines are printed
-        if FORCE_CACHE_UPDATE and not VRB:
+        # Print progress to terminal
+        # In incremental mode (not FORCE_CACHE_UPDATE): always show
+        # In FORCE mode: show basic progress unless VERYVRB (which has detailed per-show output)
+        if not FORCE_CACHE_UPDATE or not VERYVRB:
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
             worker_prefix = _get_worker_prefix()
-            print(f"{timestamp} {worker_prefix}{display_title}...", flush=True)
+            print(f"{timestamp} {worker_prefix}Processing '{display_title}'...", flush=True)
 
         # Differentiate between Movie and Show libraries
         completed = True  # Assume completed unless function returns False
