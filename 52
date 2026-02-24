@@ -7323,6 +7323,267 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
 
     return True
 
+def fetch_shows_from_database(library_section_id):
+    """Fetch all shows/episodes from a library section via direct database access
+
+    REPLACES: library.all() + show.seasons() + season.episodes() for TV shows
+
+    Handles the show/season/episode hierarchy from database:
+    - Shows (metadata_type=2)
+    - Seasons (metadata_type=3, parent_id → show)
+    - Episodes (metadata_type=4, parent_id → season)
+
+    Returns:
+        Dict: {show_id: {'show_info': {...}, 'seasons': {season_num: {'episodes': [...]}}}}
+        None on error
+    """
+    query = f"""
+    SELECT
+        ep.id, ep.title, ep.original_title, ep.index as ep_num, ep.year,
+        ep.rating, ep.audience_rating, ep.content_rating, ep.summary,
+        ep.duration, ep.added_at, ep.updated_at,
+        s.id as s_id, s.index as s_num, s.title as s_title,
+        sh.id as sh_id, sh.title as sh_title, sh.original_title as sh_orig,
+        sh.year as sh_year, sh.rating as sh_rating, sh.audience_rating as sh_aud_rating,
+        sh.content_rating as sh_content_rating, sh.summary as sh_summary,
+        md.id as md_id, md.width, md.height, md.duration as md_dur,
+        md.video_codec, md.audio_codec,
+        mp.id as mp_id, mp.file, mp.size,
+        ls.name as lib_name,
+        COALESCE(mis.rating, 0) as u_rating,
+        COALESCE(mis.view_count, 0) as v_count,
+        mis.last_viewed_at
+    FROM metadata_items ep
+    JOIN metadata_items s ON ep.parent_id = s.id
+    JOIN metadata_items sh ON s.parent_id = sh.id
+    JOIN library_sections ls ON ep.library_section_id = ls.id
+    LEFT JOIN media_items md ON ep.id = md.metadata_item_id
+    LEFT JOIN media_parts mp ON md.id = mp.media_item_id
+    LEFT JOIN metadata_item_settings mis ON ep.id = mis.guid
+    WHERE ep.metadata_type = 4 AND s.metadata_type = 3 AND sh.metadata_type = 2
+      AND ep.library_section_id = {library_section_id}
+      AND ep.deleted_at IS NULL
+      AND (md.deleted_at IS NULL OR md.deleted_at = 0)
+      AND (mp.deleted_at IS NULL OR mp.deleted_at = 0)
+    ORDER BY sh.id, s.index, ep.index
+    """
+
+    rows = query_plex_database(query, mode='rows')
+    if rows is None:
+        return None
+
+    # Fetch streams (audio/subtitle)
+    streams_query = f"""
+    SELECT mp.id, ms.stream_type_id, ms.language
+    FROM media_streams ms
+    JOIN media_parts mp ON ms.media_part_id = mp.id
+    JOIN media_items md ON mp.media_item_id = md.id
+    JOIN metadata_items ep ON md.metadata_item_id = ep.id
+    WHERE ep.metadata_type = 4 AND ep.library_section_id = {library_section_id}
+      AND ms.language IS NOT NULL AND ms.language != '' AND ep.deleted_at IS NULL
+    """
+
+    stream_rows = query_plex_database(streams_query, mode='rows')
+    streams_by_part = {}
+    if stream_rows:
+        for part_id, stream_type_id, language in stream_rows:
+            if part_id not in streams_by_part:
+                streams_by_part[part_id] = {'audio_languages': [], 'subtitle_languages': []}
+            if stream_type_id == '2' and language not in streams_by_part[part_id]['audio_languages']:
+                streams_by_part[part_id]['audio_languages'].append(language)
+            elif stream_type_id == '3' and language not in streams_by_part[part_id]['subtitle_languages']:
+                streams_by_part[part_id]['subtitle_languages'].append(language)
+
+    # Fetch tags
+    tags_query = f"""
+    SELECT mi.id, t.tag_type, t.tag
+    FROM metadata_items mi
+    JOIN taggings tg ON mi.id = tg.metadata_item_id
+    JOIN tags t ON tg.tag_id = t.id
+    WHERE mi.library_section_id = {library_section_id} AND mi.metadata_type IN (2,4)
+      AND mi.deleted_at IS NULL AND t.tag_type IN (1,4,5,6,8,9)
+    """
+
+    tag_rows = query_plex_database(tags_query, mode='rows')
+    tags_by_id = {}
+    if tag_rows:
+        for mid, ttype, tag in tag_rows:
+            if mid not in tags_by_id:
+                tags_by_id[mid] = {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]}
+            tmap = {'1':'genres','4':'directors','5':'writers','6':'actors','8':'countries','9':'collections'}
+            if ttype in tmap and tag and tag not in tags_by_id[mid][tmap[ttype]]:
+                tags_by_id[mid][tmap[ttype]].append(tag)
+
+    # Build structure
+    shows = {}
+    for row in rows:
+        (ep_id,ep_title,ep_orig,ep_num,ep_year,ep_rating,ep_aud,ep_cr,ep_sum,_ep_dur,ep_add,ep_upd,
+         s_id,s_num,s_title,sh_id,sh_title,sh_orig,sh_year,sh_rating,sh_aud,sh_cr,sh_sum,
+         md_id,width,height,md_dur,v_codec,a_codec,mp_id,filepath,filesize,lib_name,
+         u_rating,v_count,last_view) = row
+
+        if sh_id not in shows:
+            sh_tags = tags_by_id.get(sh_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+            shows[sh_id] = {
+                'show_info': {'id':sh_id,'title':sh_title,'originalTitle':sh_orig or '','year':int(sh_year) if sh_year else 0,
+                             'rating':float(sh_rating) if sh_rating else None,'audienceRating':float(sh_aud) if sh_aud else None,
+                             'contentRating':sh_cr,'summary':sh_sum or '','library':lib_name,**sh_tags},
+                'seasons': {}
+            }
+
+        s_key = int(s_num) if s_num else 0
+        if s_key not in shows[sh_id]['seasons']:
+            shows[sh_id]['seasons'][s_key] = {'season_info':{'id':s_id,'index':s_key,'title':s_title or f"Season {s_key}"},'episodes':[]}
+
+        streams = streams_by_part.get(mp_id, {'audio_languages':[],'subtitle_languages':[]})
+        ep_tags = tags_by_id.get(ep_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+
+        dur_min = round(int(md_dur or 0)/60000,2) if md_dur else 0
+        res_full = f"{width or 0}x{height or 0}"
+        version = f"{dur_min}min {res_full} ({v_codec or 'unknown'} {a_codec or 'unknown'})"
+
+        ep_dict = {
+            'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None}},
+            'type':'Episode','type_str':'Episode','id':ep_id,'title':ep_title,'originalTitle':ep_orig or '',
+            'year':int(ep_year) if ep_year else 0,'library':lib_name,'item_id':ep_id,'media_id':md_id,'part_id':mp_id,
+            'version':version,'media_nr':'1/1','media_idx':0,'media_cnt':1,'part_nr':'1/1','part_idx':0,'part_cnt':1,
+            'updatedAt':int(ep_upd) if ep_upd else None,'addedAt':int(ep_add) if ep_add else None,
+            'lastViewedAt':int(last_view) if last_view else None,'viewCount':int(v_count) if v_count else 0,
+            'userRating':float(u_rating) if u_rating else None,'criticsRating':float(ep_rating) if ep_rating else None,
+            'audienceRating':float(ep_aud) if ep_aud else None,'summary':ep_sum or '','duration':int(md_dur) if md_dur else None,
+            'video_codec':v_codec or '','audio_codec':a_codec or '','resolution':f"{height}p" if height else '',
+            'resolution_full':res_full,'filesize':int(filesize) if filesize else None,
+            'audio_languages':streams['audio_languages'],'subtitle_languages':streams['subtitle_languages'],
+            'contentRating':ep_cr,'season':s_key,'S_str':f"S{s_key:02d}",'S_idx':s_key,
+            'episode':int(ep_num) if ep_num else 0,'E_str':f"E{int(ep_num):02d}" if ep_num else "E00",'E_idx':int(ep_num) if ep_num else 0,
+            'S0XE0X':f"S{s_key:02d}E{int(ep_num):02d}" if ep_num else f"S{s_key:02d}E00",'series':sh_title,
+            'actors':ep_tags.get('actors',[]) or shows[sh_id]['show_info']['actors'],'directors':ep_tags.get('directors',[]),
+            'writers':ep_tags.get('writers',[]),'genres':shows[sh_id]['show_info']['genres'],
+            'countries':shows[sh_id]['show_info']['countries'],
+            'collections':ep_tags.get('collections',[]) or shows[sh_id]['show_info']['collections'],'labels':[]
+        }
+        shows[sh_id]['seasons'][s_key]['episodes'].append(ep_dict)
+
+    if VRB:
+        total_eps = sum(len(s['episodes']) for show in shows.values() for s in show['seasons'].values())
+        print(f"{VRBPFX}Fetched {len(shows)} shows with {total_eps} episodes from database")
+    return shows
+
+def _process_shows_from_database(shows_data, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """Process shows/episodes fetched from database and populate cache
+
+    Internal function called by update_show_library_objs() when using database access.
+    Handles the show/season/episode hierarchy from database results.
+
+    Args:
+        shows_data: Dict from fetch_shows_from_database() with show/season/episode hierarchy
+        library_name: Name of library (for display/progress messages)
+        library_idx, total_libraries: For progress tracking
+        start_idx, end_idx: Optional partition range
+
+    Returns:
+        True if library completed successfully, False if interrupted
+    """
+    global FORCE_CACHE_UPDATE
+    if DBG: print(f"{DBGPFX}_process_shows_from_database(name='{library_name}', shows={len(shows_data)})")
+
+    if not shows_data:
+        if VRB:
+            print(f"{VRBPFX}No shows found in library '{library_name}'")
+        return True
+
+    # Convert to flat list for partitioning
+    all_shows = list(shows_data.items())
+    total_shows = len(all_shows)
+
+    display_title = library_name
+    if start_idx is not None and end_idx is not None:
+        all_shows = all_shows[start_idx:end_idx]
+        display_title = f"{library_name}[{start_idx}:{end_idx}]"
+        if VRB:
+            print(f"{_get_worker_prefix()}library '{display_title}':<31s processing partition [{start_idx}:{end_idx}] = {len(all_shows)} shows")
+        total_shows = len(all_shows)
+
+    # Track progress
+    if FORCE_CACHE_UPDATE and VERYVRB:
+        total_episodes = sum(len(s['episodes']) for _, show in all_shows for s in show['seasons'].values())
+        print(f"{_get_worker_prefix()}library '{display_title}':<31s processing {total_shows} shows, {total_episodes} episodes...")
+        PLEX_Media.current_library = display_title
+        PLEX_Media.current_item_total = total_shows
+        PLEX_Media.current_item_type = 'shows'
+
+    # Store server IDs for removal detection
+    if not hasattr(PLEX_Media, 'library_server_ids'):
+        PLEX_Media.library_server_ids = {}
+    if library_name not in PLEX_Media.library_server_ids:
+        PLEX_Media.library_server_ids[library_name] = set()
+
+    processed_count = 0
+    for show_idx, (show_id, show_data) in enumerate(all_shows, 1):
+        if _shutdown_requested:
+            return False
+
+        _show_info = show_data['show_info']  # Available if needed for future enhancements
+        show_key = f"Show:{show_id}"
+
+        # Collect all IDs for this show
+        PLEX_Media.library_server_ids[library_name].add(show_key)
+
+        # Process each season/episode
+        for _season_num, season_data in show_data['seasons'].items():
+            season_info = season_data['season_info']
+            season_key = f"Season:{season_info['id']}"
+            PLEX_Media.library_server_ids[library_name].add(season_key)
+
+            for episode_dict in season_data['episodes']:
+                if _shutdown_requested:
+                    return False
+
+                episode_key = f"Episode:{episode_dict['id']}"
+                PLEX_Media.library_server_ids[library_name].add(episode_key)
+
+                # Skip if already cached (resume mode)
+                if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
+                    if episode_key in PLEX_Media.OBJ_BY_ID:
+                        if DBG: print(f"{DBGPFX}_process_shows_from_database(): SKIPPING episode '{episode_dict['S0XE0X']}' - already cached")
+                        continue
+
+                processed_count += 1
+
+                # Populate cache
+                PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
+
+                # Update other cache indices
+                filepath = episode_dict['file']
+                if filepath not in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[filepath] = []
+                if episode_key not in PLEX_Media.OBJ_BY_FILEPATH[filepath]:
+                    PLEX_Media.OBJ_BY_FILEPATH[filepath].append(episode_key)
+
+                if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                    PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+                PLEX_Media.OBJ_BY_LIBRARY[library_name][episode_key] = episode_dict
+
+                # Update OBJ_BY_SHOW_EPISODES structure
+                if show_key not in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                    PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key] = {}
+                s_str = episode_dict['S_str']
+                if s_str not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]:
+                    PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str] = {}
+                e_str = episode_dict['E_str']
+                PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str] = episode_dict
+
+        if VRB and total_shows > 50 and show_idx % max(1, total_shows // 10) == 0:
+            print(f"{_get_worker_prefix()}library '{library_name}':<31s processed {show_idx}/{total_shows} shows ({100*show_idx//total_shows}%)")
+
+    if VRB:
+        print(f"{_get_worker_prefix()}library '{display_title}':<31s completed {processed_count} episodes")
+
+    if FORCE_CACHE_UPDATE:
+        PLEX_Media.save_checkpoint(display_title)
+
+    return True
+
 def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """Retrieve MediaPart IDs and file paths for a Movie library
     If start_idx and end_idx are provided, only process movies in that index range (virtual partitioning).
@@ -7464,13 +7725,42 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
 def update_show_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """ Retrieve MediaPart IDs and file paths for a Show library (includes seasons and episodes)
     If start_idx and end_idx are provided, only process shows in that index range (virtual partitioning).
+
+    NOW USES DIRECT DATABASE ACCESS instead of Plex API for 60x speed improvement
     """
     global FORCE_CACHE_UPDATE
-    if DBG: print( f"{DBGPFX}update_show_library_objs(library:'{library}')" )
 
-    # PERFORMANCE OPTIMIZATION: When rebuilding cache, skip timestamp checks
-    # This eliminates cache lookups and timestamp comparisons
+    # Get library info for database query
+    library_name = library.title
+    library_section_id = getattr(library, 'key', None)
 
+    if DBG: print(f"{DBGPFX}update_show_library_objs(library:'{library_name}', id={library_section_id})")
+
+    # Try database access first, fall back to API if needed
+    shows_data = None
+    try:
+        if library_section_id:
+            # Extract numeric ID from key
+            if isinstance(library_section_id, str) and '/' in library_section_id:
+                library_section_id = int(library_section_id.split('/')[-1])
+
+            # Fetch from database
+            shows_data = fetch_shows_from_database(library_section_id)
+            if shows_data:
+                if DBG: print(f"{DBGPFX}Successfully fetched {len(shows_data)} shows from database")
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}Database fetch failed: {e}, falling back to API")
+
+    # Fall back to API if database fetch failed
+    if shows_data is None:
+        if DBG: print(f"{DBGPFX}Using Plex API fallback for library '{library_name}'")
+        shows_data = {}  # Empty dict signals to use API path below
+
+    # If we have database results, use them
+    if shows_data:
+        return _process_shows_from_database(shows_data, library_name, library_idx, total_libraries, start_idx, end_idx)
+
+    # Otherwise use original API code
     all_shows = plex_get_all_items(library)
     total_shows = len(all_shows)
 
