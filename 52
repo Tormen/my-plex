@@ -8143,29 +8143,65 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         _active_executor = executor
                         futures = {}
 
-                        for idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) in enumerate(partitioned_libraries, 1):
-                            if start_idx is not None:
-                                display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
-                            else:
-                                display_title = title
+                        # PERFORMANCE: Use dynamic work redistribution
+                        # As workers finish, they immediately pick up remaining work
+                        # This ensures all workers stay busy and minimizes idle time
+                        libraries_iter = iter(enumerate(partitioned_libraries, 1))
 
-                            future = executor.submit(
-                                PLEX_Library.process_single_library,
-                                title, library, idx, len(partitioned_libraries),
-                                current_library_stats, old_library_stats, old_itemsCount_from_cache,
-                                start_idx, end_idx  # Pass partition info
-                            )
-                            futures[future] = display_title
-
-                        # Wait for all to complete
-                        for future in as_completed(futures):
-                            display_title = futures[future]
+                        # Submit initial batch of work (up to max_workers)
+                        for _ in range(max_workers):
                             try:
-                                was_updated = future.result()
-                                if was_updated:
-                                    cache_needs_save = True
-                            except Exception as e:
-                                print(f"Error processing {display_title}: {e}")
+                                idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) = next(libraries_iter)
+
+                                if start_idx is not None:
+                                    display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                                else:
+                                    display_title = title
+
+                                future = executor.submit(
+                                    PLEX_Library.process_single_library,
+                                    title, library, idx, len(partitioned_libraries),
+                                    current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                    start_idx, end_idx  # Pass partition info
+                                )
+                                futures[future] = display_title
+                            except StopIteration:
+                                break  # No more work to submit
+
+                        # Wait for tasks to complete and dynamically submit new work as workers become available
+                        while futures:
+                            try:
+                                for future in as_completed(futures.keys(), timeout=0.5):
+                                    display_title = futures.pop(future)
+                                    try:
+                                        was_updated = future.result()
+                                        if was_updated:
+                                            cache_needs_save = True
+                                    except Exception as e:
+                                        print(f"Error processing {display_title}: {e}")
+
+                                    # Submit next task if available
+                                    try:
+                                        idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) = next(libraries_iter)
+
+                                        if start_idx is not None:
+                                            display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                                        else:
+                                            display_title = title
+
+                                        future = executor.submit(
+                                            PLEX_Library.process_single_library,
+                                            title, library, idx, len(partitioned_libraries),
+                                            current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                            start_idx, end_idx  # Pass partition info
+                                        )
+                                        futures[future] = display_title
+                                    except StopIteration:
+                                        pass  # No more work to submit
+                                    break  # Process one future at a time
+                            except (TimeoutError, FuturesTimeoutError):
+                                # No futures completed in timeout, continue waiting
+                                pass
 
                         _active_executor = None
 
