@@ -6351,6 +6351,7 @@ def plex_rate_limit_delay():
 
 
 def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
+    global FORCE_PLEXDATA
     if DBG: print( f"{DBGPFX}add_media_obj(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath})" )
 
     # PLEX RATE LIMITING: Add random delay during cache rebuilds to avoid throttling
@@ -6516,8 +6517,8 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
           'filesize':part_size,  # Store filesize for primary version
           'collections'         : plex_retry_operation(lambda: [c.tag for c in obj.collections], context=f"{key} {ctx_title} collections", library=lib_title),
           'labels'              : plex_retry_operation(lambda: [l.tag for l in obj.labels], context=f"{key} {ctx_title} labels", library=lib_title),
-          'audio_languages'     : plex_retry_operation(lambda: [ audio.languageCode for audio in part.audioStreams() ], context=f"{key} {ctx_title} audioStreams", library=lib_title),            # of this MediaPart (file)
-          'subtitle_languages'  : plex_retry_operation(lambda: [ subtitle.languageCode for subtitle in part.subtitleStreams() ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title),   # of this MediaPart (file)
+          'audio_languages'     : plex_retry_operation(lambda: [ audio.language for audio in part.audioStreams() if hasattr(audio, 'language') and audio.language ], context=f"{key} {ctx_title} audioStreams", library=lib_title),            # of this MediaPart (file)
+          'subtitle_languages'  : plex_retry_operation(lambda: [ subtitle.language for subtitle in part.subtitleStreams() if hasattr(subtitle, 'language') and subtitle.language ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title),   # of this MediaPart (file)
           # defaulting all other possible values:
           'actors'              : [],
           'countries'           : [],
@@ -6551,9 +6552,15 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
         existing_files = existing_obj.get('files', {})
         # Check if this exact version already exists (resuming from checkpoint)
         if version in existing_files:
-            # Already processed in previous run, skip
-            if DBG: print(f"{DBGPFX}add_media_obj(): SKIPPING already processed key '{key}' version '{version}'")
-            return
+            # IMPORTANT: Only skip if NOT doing --force-plexdata
+            # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
+            if not FORCE_PLEXDATA:
+                # Already processed in previous run, skip
+                if DBG: print(f"{DBGPFX}add_media_obj(): SKIPPING already processed key '{key}' version '{version}'")
+                return
+            else:
+                # Force reprocessing to update Plex metadata
+                if DBG: print(f"{DBGPFX}add_media_obj(): REPROCESSING key '{key}' version '{version}' (FORCE_PLEXDATA)")
         # New version of existing object - merge files dict
         existing_files[version] = {'filepath': filepath, 'filesize': part_size}
         val['files'] = existing_files
@@ -6668,7 +6675,6 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
 
     # PERFORMANCE OPTIMIZATION: When rebuilding cache, skip timestamp checks
     # This eliminates cache lookups and timestamp comparisons
-    rebuild_mode = FORCE_CACHE_UPDATE
 
     all_movies = plex_get_all_items(library)
     total_movies = len(all_movies)
@@ -6700,7 +6706,7 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
     PLEX_Media.library_server_ids[base_library_name].update(partition_ids)
 
     # In rebuild mode with resume, calculate how many movies are left to process
-    if rebuild_mode and FORCE_CACHE_UPDATE:
+    if FORCE_CACHE_UPDATE and FORCE_CACHE_UPDATE:
         movies_already_cached = sum(1 for item in all_movies if get_fullID(item) in PLEX_Media.OBJ_BY_ID)
         movies_to_process = total_movies - movies_already_cached
         if VERYVRB:
@@ -6731,7 +6737,9 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
             return False  # Library not completed due to shutdown
 
         # In rebuild mode with resume: check if this movie is already cached
-        if FORCE_CACHE_UPDATE:
+        # IMPORTANT: Only skip if NOT doing --force-plexdata
+        # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
+        if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
             movie_key = get_fullID(item)
             if movie_key in PLEX_Media.OBJ_BY_ID:
                 # Movie exists in cache with same ID - skip it (already processed in previous run)
@@ -6775,7 +6783,6 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
 
     # PERFORMANCE OPTIMIZATION: When rebuilding cache, skip timestamp checks
     # This eliminates cache lookups and timestamp comparisons
-    rebuild_mode = FORCE_CACHE_UPDATE
 
     all_shows = plex_get_all_items(library)
     total_shows = len(all_shows)
@@ -6815,7 +6822,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
     PLEX_Media.library_server_ids[base_library_name].update(partition_ids)
 
     # In rebuild mode with resume, calculate how many shows are left to process
-    if rebuild_mode and FORCE_CACHE_UPDATE:
+    if FORCE_CACHE_UPDATE and FORCE_CACHE_UPDATE:
         shows_already_cached = sum(1 for item in all_shows if get_fullID(item) in PLEX_Media.OBJ_BY_ID)
         shows_to_process = total_shows - shows_already_cached
         # Note: We still check cached shows for new seasons/episodes, so message reflects total work
@@ -6850,7 +6857,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
         # We need to process all seasons/episodes even if the show object is cached
         # The season/episode level filtering (lines 4092-4111) will skip already-cached items
         # This ensures we don't miss new seasons/episodes added to existing shows
-        if rebuild_mode and not FORCE_PLEXDATA:
+        if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
             # INCREMENTAL UPDATE MODE ONLY: check if this show needs updating
             # NOTE: ID mismatches (from re-scanned libraries) should be handled with --force flag
             show_key = get_fullID(item)
@@ -6874,7 +6881,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
                 else:
                     PLEX_Media.cache_rebuild_lock.write_progress(f"Processing '{display_title}': {show_idx}/{total_shows} '{item.title}'")
 
-        if not rebuild_mode:
+        if not FORCE_CACHE_UPDATE:
             key = get_fullID(item)
             if not obj_needs_updating(item, None, key):
                 if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING SHOW {key} as updatedAt same same (and NOT --update-cache parameter)" )
@@ -6888,7 +6895,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
 
             # Skip seasons that are already in cache (both in normal mode and incremental update mode)
             season_key = get_fullID(season)
-            if not rebuild_mode:
+            if not FORCE_CACHE_UPDATE:
                 # Normal mode: skip if not updated
                 if not obj_needs_updating(season, None, season_key):
                     if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING SEASON {season_key} as updatedAt same same (and NOT --update-cache parameter)" )
@@ -6908,7 +6915,9 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
                     return False  # Library not completed due to shutdown
 
                 # Skip episodes that are already in cache (incremental update mode only)
-                if not rebuild_mode or not FORCE_PLEXDATA:
+                # IMPORTANT: Only skip if NOT doing --force-plexdata
+                # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
+                if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
                     episode_key = get_fullID(episode)
                     if episode_key in PLEX_Media.OBJ_BY_ID:
                         if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING EPISODE {episode_key} - already in cache")
@@ -10733,6 +10742,70 @@ def main_print_help(args, remaining_args, main_parser):
             if DBG: print( f"{DBGPFX}main_print_help(): GLOBAL_CMD_PARSER output..." )
             GLOBAL_CMD_PARSER.print_help()
             sys.exit(0)
+        case 'update-cache' | 'update_cache' | 'cache':
+            if DBG: print( f"{DBGPFX}main_print_help(): --update-cache help..." )
+            print()
+            print("=" * 76)
+            print("CACHE UPDATE HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --update-cache [MODIFIERS]")
+            print()
+            print("Updates the cache by comparing with Plex server and adding missing items.")
+            print()
+            print("MODIFIERS:")
+            print()
+            print("  --from-scratch")
+            print("      Deletes existing cache file before rebuilding.")
+            print("      Use this for a completely fresh start.")
+            print("      Example: my-plex --update-cache --from-scratch")
+            print()
+            print("  --force")
+            print("      Complete rebuild: recollects BOTH Plex data AND file metadata.")
+            print("      This is equivalent to using --force-plexdata + --force-metadata.")
+            print("      Example: my-plex --update-cache --force")
+            print()
+            print("  --force-plexdata")
+            print("      Recollects ALL data from Plex server:")
+            print("        • Runs lib.refresh() to verify all files exist")
+            print("        • Recollects: audio_languages, subtitle_languages, collections,")
+            print("          labels, actors, directors, writers, genres, etc.")
+            print("        • Does NOT skip items already in cache")
+            print("        • Takes longer (up to 1 hour for large libraries)")
+            print("      Use this when:")
+            print("        • Cache is missing audio_languages, collections, or other Plex data")
+            print("        • You need to populate new fields added to the cache structure")
+            print("      Example: my-plex --update-cache --force-plexdata")
+            print()
+            print("  --force-metadata")
+            print("      Recollects video file metadata (duration, codecs, etc.):")
+            print("        • Runs ffprobe/mediainfo on video files")
+            print("        • Recollects: container duration, bitrate, codec info")
+            print("        • Used for broken file detection")
+            print("      Use this when:")
+            print("        • You need to rebuild metadata for broken file detection")
+            print("        • Video files have changed but Plex hasn't noticed")
+            print("      Example: my-plex --update-cache --force-metadata")
+            print()
+            print("COMBINATIONS:")
+            print()
+            print("  # Incremental update (only add missing items)")
+            print("  my-plex --update-cache")
+            print()
+            print("  # Fresh start (delete cache and rebuild everything)")
+            print("  my-plex --update-cache --from-scratch")
+            print()
+            print("  # Recollect only Plex server data")
+            print("  my-plex --update-cache --force-plexdata")
+            print()
+            print("  # Recollect only video file metadata")
+            print("  my-plex --update-cache --force-metadata")
+            print()
+            print("  # Complete rebuild (Plex data + file metadata)")
+            print("  my-plex --update-cache --force")
+            print()
+            print("=" * 76)
+            sys.exit(0)
 
     if args.help.lower() not in PLEXOBJ[PARSER]: err(1001, f"Unknown parameter of --help '{args.help}'. Call without parameter for more info.")
 
@@ -12725,6 +12798,12 @@ def main():
             print("\nOperation cancelled.")
             sys.exit(0)
         print()
+
+    # Show detailed help if --update-cache --help is used
+    if args.update_cache and args.help:
+        # Trigger the detailed cache help
+        args.help = 'update-cache'
+        main_print_help(args, [], main_parser)
 
     FORCE_CACHE_UPDATE = args.update_cache
 
