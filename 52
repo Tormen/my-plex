@@ -7816,24 +7816,77 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     init_done = False
     @staticmethod
     def init():
-        global OFFLINE
+        """Initialize library information from CACHE (normal mode) or DATABASE (update mode)
+
+        IMPORTANT: This function now uses CACHE as the source of truth for library information.
+        Only during --update-cache do we fetch from the database.
+
+        Normal operations (--list, --info, --resolve, etc.):
+            - Load cache
+            - Build OBJ_DICT from cached PLEX_Media.OBJ_BY_LIBRARY keys
+            - No API or database access!
+
+        Cache update mode (--update-cache):
+            - Will later fetch libraries from database via get_library_sections_from_database()
+            - For now, fall back to API if needed for compatibility
+        """
+        global OFFLINE, FORCE_CACHE_UPDATE
 
         if PLEX_Library.init_done: return
-        load_cache()  # Call global load_cache function
-        #
+        load_cache()  # Call global load_cache function - loads PLEX_Media.OBJ_BY_LIBRARY
+
         PLEX_Library.OBJ_DICT = {}
         PLEX_Library.OBJ_DICT_TYPE = {}
-        if not OFFLINE:
+
+        # Build library info from CACHE (preferred method)
+        if PLEX_Media.OBJ_BY_LIBRARY:
+            if DBG: print(f"{DBGPFX}PLEX_Library.init(): Building from CACHE ({len(PLEX_Media.OBJ_BY_LIBRARY)} libraries)")
+
+            # Create simple library objects from cache info
+            # OBJ_BY_LIBRARY structure: {library_name: {obj_key: obj_dict, ...}, ...}
+            for library_name in PLEX_Media.OBJ_BY_LIBRARY.keys():
+                # Determine library type from first object
+                objs = PLEX_Media.OBJ_BY_LIBRARY[library_name]
+                if objs:
+                    first_obj = next(iter(objs.values()))
+                    obj_type = first_obj.get('type', 'Unknown')
+                    # Map type: "Movie" -> "Movie", "Episode" -> "Show", etc.
+                    if obj_type in ['Show', 'Season', 'Episode']:
+                        l_type = 'Show'
+                    elif obj_type == 'Movie':
+                        l_type = 'Movie'
+                    else:
+                        l_type = obj_type
+                else:
+                    l_type = 'Unknown'
+
+                # Create a simple library object (dict-like) for compatibility
+                class SimpleLibrary:
+                    def __init__(self, title, lib_type):
+                        self.title = title
+                        self.type = lib_type.lower()  # Lowercase for match statement compatibility
+                        self.key = None  # Will be populated from DB during cache update
+
+                lib_obj = SimpleLibrary(library_name, l_type)
+                PLEX_Library.OBJ_DICT[library_name] = lib_obj
+                PLEX_Library.OBJ_DICT_TYPE[library_name] = l_type
+                if l_type in PLEX_Library.SUPPORTED_TYPES:
+                    PLEX_Library.OBJ_DICT_SUPPORTED[library_name] = lib_obj
+
+        # Fall back to API if cache is empty and not offline
+        elif not OFFLINE and PLEX_SERVER:
+            if DBG: print(f"{DBGPFX}PLEX_Library.init(): Cache empty, falling back to API")
             for l in PLEX_SERVER.library.sections():
                 l_title = l.title
                 l_type = l.type.capitalize()
-                PLEX_Library.OBJ_DICT[ l_title ] = l
-                PLEX_Library.OBJ_DICT_TYPE[ l_title ] = l_type
-                if l_type in PLEX_Library.SUPPORTED_TYPES: PLEX_Library.OBJ_DICT_SUPPORTED[ l_title ] = l
-        #
+                PLEX_Library.OBJ_DICT[l_title] = l
+                PLEX_Library.OBJ_DICT_TYPE[l_title] = l_type
+                if l_type in PLEX_Library.SUPPORTED_TYPES:
+                    PLEX_Library.OBJ_DICT_SUPPORTED[l_title] = l
+
         PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
         PLEX_Library.init_done = True
-        if DBG: print(f"{DBGPFX}PLEX_Library.init(): OBJ_DICT={PLEX_Library.OBJ_DICT}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_TYPE={PLEX_Library.OBJ_DICT_TYPE}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_SUPPORTED={PLEX_Library.OBJ_DICT_SUPPORTED}\n{DBGPFX}PLEX_Library.init(): PATHS_DICT={PLEX_Library.PATHS_DICT}")
+        if DBG: print(f"{DBGPFX}PLEX_Library.init(): OBJ_DICT={list(PLEX_Library.OBJ_DICT.keys())}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_TYPE={PLEX_Library.OBJ_DICT_TYPE}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_SUPPORTED={list(PLEX_Library.OBJ_DICT_SUPPORTED.keys())}")
 
     argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.", allow_abbrev=False, exit_on_error=False)
     # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
