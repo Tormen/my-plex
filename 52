@@ -7150,12 +7150,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
     #library_parser = subparsers.add_parser('library',      help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library", add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.")
     argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
-    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched to show only watched, --unwatched for unwatched, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
+    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched to show only watched, --unwatched for unwatched, --language/--en/--de/--fr to filter by audio language, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
     argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
     argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates (auto-enables --list)
     argparser.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS) # Interactive resolution mode for duplicates
-    argparser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS) # Show only watched items (auto-enables --list)
-    argparser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS) # Show only unwatched items (auto-enables --list)
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
@@ -8311,16 +8309,18 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
-        # Auto-enable --list if --duplicates, --watched, or --unwatched is used
-        watched_only = safe_getattr(obj_args, 'watched', False)
-        unwatched_only = safe_getattr(obj_args, 'unwatched', False)
+        # Auto-enable --list if --duplicates, --watched, --unwatched, or --language is used
+        # Note: watched/unwatched/language are global filters from main parser (args), not library-specific (obj_args)
+        watched_only = safe_getattr(args, 'watched', False)
+        unwatched_only = safe_getattr(args, 'unwatched', False)
         duplicates_only = safe_getattr(obj_args, 'duplicates', False)
+        language_filter = safe_getattr(args, 'language', None)
 
-        # Handle --list or --duplicates or --watched or --unwatched
-        if obj_args.list or duplicates_only or watched_only or unwatched_only:
+        # Handle --list or --duplicates or --watched or --unwatched or --language
+        if obj_args.list or duplicates_only or watched_only or unwatched_only or language_filter:
                                         media_type = safe_getattr(obj_args, 'type', None)
                                         resolve_mode = safe_getattr(obj_args, 'resolve', False)
-                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only)
+                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, language_filter)
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -9164,8 +9164,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False):
-        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only} )")
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, language_filter=None):
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, language_filter = {language_filter} )")
+
+        # Normalize language filter to ISO 639-1 code
+        if language_filter:
+            lang_map = {
+                'en': 'en', 'english': 'en', 'eng': 'en',
+                'de': 'de', 'german': 'de', 'deu': 'de', 'ger': 'de',
+                'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'
+            }
+            language_filter = lang_map.get(language_filter.lower(), language_filter.lower())
 
         # Normalize media type
         if media_type is not None:
@@ -9183,8 +9192,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
 
-        # Make --list without library a synonym for --list-libraries
-        if library_name is None and not duplicates_only and not broken_only:
+        # Make --list without library a synonym for --list-libraries (unless filtering is requested)
+        if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not language_filter:
             print("\nAvailable Libraries:")
             PLEX_Library.print()
             return
@@ -9199,10 +9208,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 else:
                     print(f"\nMedia of type '{media_type}' (duplicates only):")
             else:
-                if media_type is None:
+                # Build header with optional filters
+                filters = []
+                if media_type:
+                    filters.append(media_type)
+                if watched_only:
+                    filters.append("watched")
+                elif unwatched_only:
+                    filters.append("unwatched")
+                if language_filter:
+                    filters.append(f"language: {language_filter}")
+
+                filter_str = ", ".join(filters) if filters else "all"
+                if not filters:
                     print(f"\nAll media:")
                 else:
-                    print(f"\nMedia of type '{media_type}':")
+                    print(f"\nAll media ({filter_str}):")
         else:
             if broken_only:
                 if media_type is None:
@@ -9223,9 +9244,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     filters.append("watched")
                 elif unwatched_only:
                     filters.append("unwatched")
+                if language_filter:
+                    filters.append(f"language: {language_filter}")
 
                 filter_str = ", ".join(filters) if filters else "all"
-                if media_type is None and not watched_only and not unwatched_only:
+                if media_type is None and not watched_only and not unwatched_only and not language_filter:
                     print(f"\nMedia in '{library_name}':")
                 else:
                     print(f"\nMedia in '{library_name}' ({filter_str}):")
@@ -10173,24 +10196,43 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         print(f"\n   No operations were performed.")
         else:
-            # Filter by watched/unwatched status if requested
-            if watched_only or unwatched_only:
+            # Filter by watched/unwatched status and/or language if requested
+            if watched_only or unwatched_only or language_filter:
                 filtered_keys = []
                 for key in obj_keys:
                     obj = PLEX_Media.OBJ_BY_ID[key]
-                    view_count = obj.get('viewCount', 0)
 
-                    if watched_only and view_count > 0:
-                        filtered_keys.append(key)
-                    elif unwatched_only and view_count == 0:
-                        filtered_keys.append(key)
+                    # Check watched/unwatched filter
+                    if watched_only or unwatched_only:
+                        view_count = obj.get('viewCount', 0)
+                        if watched_only and view_count == 0:
+                            continue  # Skip unwatched items
+                        if unwatched_only and view_count > 0:
+                            continue  # Skip watched items
+
+                    # Check language filter
+                    if language_filter:
+                        audio_languages = obj.get('audio_languages', [])
+                        if not audio_languages or language_filter not in audio_languages:
+                            continue  # Skip items without matching language
+
+                    filtered_keys.append(key)
 
                 if not filtered_keys:
-                    status_str = "watched" if watched_only else "unwatched"
+                    # Build descriptive message
+                    filter_parts = []
+                    if watched_only:
+                        filter_parts.append("watched")
+                    elif unwatched_only:
+                        filter_parts.append("unwatched")
+                    if language_filter:
+                        filter_parts.append(f"{language_filter} audio")
+
+                    filter_desc = " ".join(filter_parts)
                     if library_name:
-                        print(f"No {status_str} items found in library '{library_name}'.")
+                        print(f"No {filter_desc} items found in library '{library_name}'.")
                     else:
-                        print(f"No {status_str} items found.")
+                        print(f"No {filter_desc} items found.")
                     return
 
                 obj_keys = filtered_keys
@@ -12384,11 +12426,15 @@ def main():
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
     # Normalize --resolve to --list --duplicates --resolve for canonical form
+    # Normalize --watched/--unwatched/--language to auto-inject --list when used with a library
     # This simplifies argparse by ensuring canonical form
     has_list = '--list' in sys.argv or '--list-duplicates' in sys.argv
     has_duplicates = '--duplicates' in sys.argv
     has_broken = '--broken' in sys.argv
     has_resolve = '--resolve' in sys.argv
+    has_watched = '--watched' in sys.argv
+    has_unwatched = '--unwatched' in sys.argv
+    has_language = any(arg.startswith('--language') or arg in ['--en', '--english', '--de', '--german', '--fr', '--french'] for arg in sys.argv)
 
     if has_resolve and not (has_list and has_duplicates):
         # --resolve requires --list --duplicates, inject them if not present
@@ -12426,6 +12472,24 @@ def main():
         sys.argv = normalized_argv
         if DBG or DEEPDBG:
             print(f" ~~~ Normalized sys.argv = {sys.argv}", file=sys.stderr)
+    elif (has_watched or has_unwatched or has_language) and not has_list:
+        # Filter flags require --list to be meaningful with a library
+        # Inject --list when using --watched, --unwatched, or language filters
+        normalized_argv = [sys.argv[0]]  # Keep script name
+        injected = False
+        for arg in sys.argv[1:]:
+            if not injected and (arg == '--watched' or arg == '--unwatched' or arg.startswith('--language') or arg in ['--en', '--english', '--de', '--german', '--fr', '--french']):
+                # Inject --list before the first filter flag
+                normalized_argv.append('--list')
+                normalized_argv.append(arg)
+                injected = True
+                has_list = True
+            else:
+                normalized_argv.append(arg)
+
+        sys.argv = normalized_argv
+        if DBG or DEEPDBG:
+            print(f" ~~~ Normalized sys.argv (filters) = {sys.argv}", file=sys.stderr)
 
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
@@ -12495,6 +12559,17 @@ def main():
     # Add --type to main_parser so it knows to consume the value instead of treating it as CMD_OR_PLEXOBJECT
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
+
+    # Language filters - work globally across all libraries
+    main_parser.add_argument('--language', metavar='LANG', help="Filter by audio language (en, de, fr, english, german, french). Combines with other filters like --watched.")
+    main_parser.add_argument('--en', '--english', action='store_const', const='en', dest='language', help="Filter for English audio language (shortcut for --language en)")
+    main_parser.add_argument('--de', '--german', action='store_const', const='de', dest='language', help="Filter for German audio language (shortcut for --language de)")
+    main_parser.add_argument('--fr', '--french', action='store_const', const='fr', dest='language', help="Filter for French audio language (shortcut for --language fr)")
+
+    # Watch status filters - work globally across all libraries
+    main_parser.add_argument('--watched', action='store_true', help="Filter for watched items only. Works globally or with specific library. Combines with other filters like --language.")
+    main_parser.add_argument('--unwatched', action='store_true', help="Filter for unwatched items only. Works globally or with specific library. Combines with other filters like --language.")
+
     main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch, --force for complete rebuild, --force-plexdata for recollection of all data from PLEX server, or --force-metadata for video metadata recollection - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
