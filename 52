@@ -638,17 +638,18 @@ def err(err_code, err_msg=""):
     sys.exit(1)
 
 def _get_worker_prefix():
-    """Get worker ID prefix for log messages. Empty string if only 1 worker."""
-    global MAX_PARALLEL_WORKERS
-    if MAX_PARALLEL_WORKERS <= 1:
-        return ""
-    # Extract worker number from thread name like 'ThreadPoolExecutor-0_1' -> 1
+    """Get worker ID prefix for log messages. Empty string if not in a worker thread."""
+    # Check if we're in a ThreadPoolExecutor worker thread
     thread_name = threading.current_thread().name
+    if not thread_name.startswith('ThreadPoolExecutor'):
+        return ""  # Not in a worker thread (main thread)
+
+    # Extract worker number from thread name like 'ThreadPoolExecutor-0_1' -> 1
     try:
         worker_num = int(thread_name.split('_')[-1])
         return f"W{worker_num:02d}| "
     except (ValueError, IndexError):
-        return "W??| "
+        return ""  # Can't parse worker number, skip prefix
 
 def plex_retry_operation(operation, *args, context=None, library=None, **kwargs):
     """
@@ -8035,6 +8036,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # If libraries need updating, prompt user
             if libraries_to_update:
+                if VRB:
+                    print(f"  >> Detected outdated libraries (Plex server has newer content)")
                 print(f"\nCache update available for {len(libraries_to_update)} librar{'y' if len(libraries_to_update) == 1 else 'ies'}:")
                 for title, _, old_ts, new_ts in libraries_to_update:
                     print(f"  - {title}")
