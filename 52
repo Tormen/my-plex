@@ -2891,23 +2891,29 @@ def validate_plex_database_schema():
     return True
 
 def get_library_sections_from_database():
-    """Get all library sections from the Plex database
+    """Get all library sections from the Plex database with timestamps
 
     REPLACES: PLEX_SERVER.library.sections()
 
     This fetches library metadata directly from the database instead of via API.
     Returns library information needed to iterate through libraries for cache updates.
 
+    Includes updated_at timestamps for intelligent cache updates:
+    - Compare cached timestamp with DB timestamp
+    - Only update libraries that changed since last cache update
+    - Preserves the +60s buffer mechanism for cache timestamps
+
     Returns:
-        List of dicts with keys: id, name, section_type, type
+        List of dicts with keys: id, name, section_type, type, updated_at
         - id: library_section_id (integer)
         - name: library name (string)
         - section_type: 1=movie, 2=show, 8=music
         - type: 'movie', 'show', or 'artist' (lowercase for compatibility)
+        - updated_at: Unix timestamp (integer) when library was last updated
         Returns None on database error
     """
     query = """
-    SELECT id, name, section_type
+    SELECT id, name, section_type, updated_at
     FROM library_sections
     ORDER BY id
     """
@@ -2918,13 +2924,14 @@ def get_library_sections_from_database():
 
     libraries = []
     for row in rows:
-        lib_id, lib_name, section_type = row
+        lib_id, lib_name, section_type, updated_at = row
         libraries.append({
             'id': int(lib_id),
             'name': lib_name,
             'section_type': int(section_type),
             # Map section_type to type string for compatibility
-            'type': 'movie' if section_type == '1' else 'show' if section_type == '2' else 'artist' if section_type == '8' else 'unknown'
+            'type': 'movie' if section_type == '1' else 'show' if section_type == '2' else 'artist' if section_type == '8' else 'unknown',
+            'updated_at': int(updated_at) if updated_at else 0
         })
 
     if VRB:
