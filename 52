@@ -8058,45 +8058,71 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 num_to_update = len(libraries_to_update)
                 max_workers = min(MAX_PARALLEL_WORKERS, num_to_update) if num_to_update > 1 else 1
 
-                if max_workers > 1:
-                    # Parallel processing
-                    print(f"\nProcessing {num_to_update} libraries in parallel with {max_workers} workers...")
+                # Always use ThreadPoolExecutor with partitioning for better performance
+                if True:  # Always use parallel processing path
+                    # Add partitioning support for large libraries (same as --update-cache)
+                    PARTITION_MIN_SHOWS = 30
+                    PARTITION_MIN_MOVIES = 50
+                    MAX_PARTITIONS_PER_LIBRARY = 4
+
+                    partitioned_libraries = []
+                    for title, library, _, _ in libraries_to_update:
+                        try:
+                            # Check if this is a large Show or Movie library that should be partitioned
+                            if library.type in ('show', 'movie') and library.totalSize > (PARTITION_MIN_SHOWS if library.type == 'show' else PARTITION_MIN_MOVIES):
+                                # Partition large libraries into chunks for parallel processing
+                                partition_size = library.totalSize // MAX_PARTITIONS_PER_LIBRARY
+                                num_partitions = min(MAX_PARTITIONS_PER_LIBRARY, (library.totalSize + partition_size - 1) // partition_size)
+
+                                for partition_idx in range(num_partitions):
+                                    start_idx = partition_idx * partition_size
+                                    end_idx = min((partition_idx + 1) * partition_size, library.totalSize)
+                                    partitioned_libraries.append((title, library, start_idx, end_idx, partition_idx, num_partitions))
+
+                                if VRB:
+                                    lib_type_name = 'shows' if library.type == 'show' else 'movies'
+                                    print(f"{VRBPFX}Partitioning '{title}' ({library.totalSize} {lib_type_name}) into {num_partitions} chunks for parallel processing")
+                            else:
+                                # Not a large library - process as a whole
+                                partitioned_libraries.append((title, library, None, None, None, None))
+                        except:
+                            # If anything fails, process as a whole
+                            partitioned_libraries.append((title, library, None, None, None, None))
+
+                    print(f"\nProcessing {len(partitioned_libraries)} task(s) with {max_workers} worker(s)...")
                     print(f"{'='*76}")
 
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         _active_executor = executor
                         futures = {}
 
-                        for idx, (title, library, _, _) in enumerate(libraries_to_update, 1):
+                        for idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) in enumerate(partitioned_libraries, 1):
+                            if start_idx is not None:
+                                display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                            else:
+                                display_title = title
+
                             future = executor.submit(
                                 PLEX_Library.process_single_library,
-                                title, library, idx, num_to_update,
-                                current_library_stats, old_library_stats, old_itemsCount_from_cache
+                                title, library, idx, len(partitioned_libraries),
+                                current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                start_idx, end_idx  # Pass partition info
                             )
-                            futures[future] = title
+                            futures[future] = display_title
 
                         # Wait for all to complete
                         for future in as_completed(futures):
-                            title = futures[future]
+                            display_title = futures[future]
                             try:
                                 was_updated = future.result()
                                 if was_updated:
                                     cache_needs_save = True
                             except Exception as e:
-                                print(f"Error processing {title}: {e}")
+                                print(f"Error processing {display_title}: {e}")
 
                         _active_executor = None
 
                     print(f"{'='*76}")
-                else:
-                    # Sequential processing for single library
-                    for idx, (title, library, _, _) in enumerate(libraries_to_update, 1):
-                        was_updated = PLEX_Library.process_single_library(
-                            title, library, idx, num_to_update,
-                            current_library_stats, old_library_stats, old_itemsCount_from_cache
-                        )
-                        if was_updated:
-                            cache_needs_save = True
 
                 # CRITICAL FIX: Mark scanned libraries as "recently modified" so update_and_save_cache()
                 # will refresh their timestamps instead of preserving old ones
