@@ -6370,12 +6370,22 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
     if not FORCE_CACHE_UPDATE and key in PLEX_Media.OBJ_BY_ID:
         val = PLEX_Media.OBJ_BY_ID[key]
 
-        # Do a sanity check to see that this is really the same item (should be):
-        if val['item_id'] == item_ratingKey and val['media_id'] == media.id and val['part_id'] == part.id and val['type'] == obj_type:
-            if DBG: print( f"{DBGPFX}add_media_obj(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath}) --> ALREADY IN PLEX_Media.OBJ_BY_ID" )
+        # Check if this is the same item (same file) or a genuine duplicate
+        current_file = os.path.normpath(part.file) if filepath is None else filepath
+        cached_file = os.path.normpath(val['file'])
+
+        # Same file → update existing entry if needed
+        if current_file == cached_file:
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} already in cache with same file, checking if update needed" )
             if not obj_needs_updating(obj, val):
-                if DBG: print( f"{DBGPFX}add_media_obj(): SKIPPING item {key} as updatedAt same same (and NOT --update-cache parameter)" )
+                if DBG: print( f"{DBGPFX}add_media_obj(): SKIPPING item {key} as updatedAt same (and NOT --update-cache parameter)" )
                 return
+            # Item needs updating (timestamp changed), fall through to update it
+        # Different file BUT same ratingKey → genuine duplicate
+        elif val['item_id'] == item_ratingKey and val['media_id'] == media.id and val['part_id'] == part.id:
+            # IDs match but different file - this shouldn't happen, just update it
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} has same IDs but different file (Plex rescanned?), updating" )
+            # Fall through to update it
         else:
             if filepath is None: filepath = os.path.normpath( part.file )
             else:                filepath = part.file
