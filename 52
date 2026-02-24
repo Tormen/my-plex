@@ -6391,7 +6391,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
                                 if DBG: print(f"{DBGPFX}DUPLICATE with uuid:'{uuid}' already found in '{DUPLICATE_FILE}'")
                                 return # entry is already in duplicate file
                 with open(DUPLICATE_FILE, 'a') as file:
-                    if VRB: print(f"{VRBPFX}DUPLICATE FOUND with key: '{key}'")
+                    if VRB: print(f"{VRBPFX}DUPLICATE FOUND: '{obj_title}' (key: '{key}') - same episode already exists in cache with different file: '{val['file']}' vs '{part.file}'")
                     file.write( f"DUPLICATE FOUND WITH key:\t'{key}'\tuuid:\t'{uuid}'\nlibrary:\t{library} | {val['library']}\nitem_id:\t{item_ratingKey} | {val['item_id']}\nmedia_idi:\t{media.id} | {val['media_id']}\npart_id:\t{part.id} | {val['part_id']}\ntitle:\t{obj_title} | {val['title']}\nfile:\t{part.file} | {val['file']})\ntype:{obj_type} | {val['type']}\n{tmpstr}============================================================================\n" )
                     if DBG: print(f"{DBGPFX}Wrote DUPLICATE with uuid:'{uuid}' to '{DUPLICATE_FILE}'")
                     return
@@ -8063,6 +8063,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     MAX_PARTITIONS_PER_LIBRARY = 4
 
                     partitioned_libraries = []
+                    # Initialize partition tracking for incremental updates
+                    if not hasattr(PLEX_Media, 'library_partition_info'):
+                        PLEX_Media.library_partition_info = {}
+
                     for title, library, _, _ in libraries_to_update:
                         try:
                             # Check if this is a large Show or Movie library that should be partitioned
@@ -8071,9 +8075,22 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                 partition_size = library.totalSize // MAX_PARTITIONS_PER_LIBRARY
                                 num_partitions = min(MAX_PARTITIONS_PER_LIBRARY, (library.totalSize + partition_size - 1) // partition_size)
 
+                                # Initialize partition info for this library
+                                if title not in PLEX_Media.library_partition_info:
+                                    PLEX_Media.library_partition_info[title] = {
+                                        'expected_partitions': set(),
+                                        'completed_partitions': set(),
+                                        'all_complete': False
+                                    }
+
                                 for partition_idx in range(num_partitions):
                                     start_idx = partition_idx * partition_size
                                     end_idx = min((partition_idx + 1) * partition_size, library.totalSize)
+                                    partition_key = f"{title}[{start_idx}:{end_idx}]"
+
+                                    # Register this partition as expected
+                                    PLEX_Media.library_partition_info[title]['expected_partitions'].add(partition_key)
+
                                     partitioned_libraries.append((title, library, start_idx, end_idx, partition_idx, num_partitions))
 
                                 if VRB:
