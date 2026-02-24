@@ -7263,8 +7263,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Validate cache format
         if old_counts and not isinstance(old_counts, dict):
-            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex.py --rebuild-cache")
-            err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --rebuild-cache to fix.")
+            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
+            err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --from-scratch to fix.")
 
         # For show libraries: compare using show count (library.totalSize = shows only)
         # But we also check total objects (shows+seasons+episodes) to detect new content
@@ -7736,8 +7736,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             for lib, counts in old_itemsCount_from_cache.items():
                 # Validate cache format - must be dict with type counts
                 if not isinstance(counts, dict):
-                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex.py --rebuild-cache")
-                    err(1058, f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --rebuild-cache to fix.")
+                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
+                    err(1058, f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --from-scratch to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
                 print(f"{DBGPFX}  Library '{lib}': {count_str}")
 
@@ -12495,7 +12495,7 @@ def main():
     # Add --type to main_parser so it knows to consume the value instead of treating it as CMD_OR_PLEXOBJECT
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
-    main_parser.add_argument('-U', '--update-cache', '--rebuild-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch, --force for complete rebuild, --force-plexdata for recollection of all data from PLEX server, or --force-metadata for video metadata recollection - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Use with --from-scratch to rebuild from scratch, --force for complete rebuild, --force-plexdata for recollection of all data from PLEX server, or --force-metadata for video metadata recollection - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
@@ -12574,11 +12574,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err(1066, "--force can only be used together with --update-cache (or its synonyms --rebuild-cache, -U).\nExample: my-plex --update-cache --force")
+        err(1066, "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --from-scratch is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err(1067, "--from-scratch can only be used together with --update-cache (or its synonyms --rebuild-cache, -U).\nExample: my-plex --update-cache --from-scratch")
+        err(1067, "--from-scratch can only be used together with --update-cache.\nExample: my-plex --update-cache --from-scratch")
 
     # Confirm --from-scratch operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
