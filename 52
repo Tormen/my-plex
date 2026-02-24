@@ -6370,22 +6370,31 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
     if not FORCE_CACHE_UPDATE and key in PLEX_Media.OBJ_BY_ID:
         val = PLEX_Media.OBJ_BY_ID[key]
 
-        # Check if this is the same item (same file) or a genuine duplicate
+        # Compare cached vs current: check both FILE and IDs
         current_file = os.path.normpath(part.file) if filepath is None else filepath
         cached_file = os.path.normpath(val['file'])
+        same_file = (current_file == cached_file)
+        same_ids = (val['item_id'] == item_ratingKey and val['media_id'] == media.id and val['part_id'] == part.id and val['type'] == obj_type)
 
-        # Same file → update existing entry if needed
-        if current_file == cached_file:
-            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} already in cache with same file, checking if update needed" )
+        # CASE 1: Same file + Same IDs → Same item, just check if needs updating
+        if same_file and same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} already in cache (same file + same IDs), checking if update needed" )
             if not obj_needs_updating(obj, val):
                 if DBG: print( f"{DBGPFX}add_media_obj(): SKIPPING item {key} as updatedAt same (and NOT --update-cache parameter)" )
                 return
-            # Item needs updating (timestamp changed), fall through to update it
-        # Different file BUT same ratingKey → genuine duplicate
-        elif val['item_id'] == item_ratingKey and val['media_id'] == media.id and val['part_id'] == part.id:
-            # IDs match but different file - this shouldn't happen, just update it
-            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} has same IDs but different file (Plex rescanned?), updating" )
+            # Timestamp changed, fall through to update it
+
+        # CASE 2: Same file + Different IDs → Plex rescanned and reassigned IDs, update the entry
+        elif same_file and not same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} has same file but different IDs (Plex rescan), updating cache entry" )
+            # Fall through to update it with new IDs
+
+        # CASE 3: Different file + Same IDs → Same episode with different file (shouldn't happen, but handle it)
+        elif not same_file and same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): WARNING - item {key} has same IDs but different file ('{cached_file}' → '{current_file}'), updating" )
             # Fall through to update it
+
+        # CASE 4: Different file + Different IDs → GENUINE DUPLICATE (same ratingKey, different content)
         else:
             if filepath is None: filepath = os.path.normpath( part.file )
             else:                filepath = part.file
