@@ -2116,10 +2116,52 @@ class TestCacheSkipLogic(unittest.TestCase):
         """Helper function for collecting missing ffprobe metadata must exist."""
         content = self._read_script()
         self.assertIn("def _collect_missing_file_metadata(", content)
-        self.assertIn("'file_metadata' in file_info", content,
-            "_collect_missing_file_metadata must skip files that already have metadata")
         self.assertIn("get_video_file_metadata(", content,
             "_collect_missing_file_metadata must call ffprobe via get_video_file_metadata")
+
+    def test_collect_missing_metadata_uses_determine_remote_host(self):
+        """_collect_missing_file_metadata must use determine_remote_host for file access."""
+        content = self._read_script()
+        # Find the function body (stop at next top-level function)
+        import re
+        match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match, "_collect_missing_file_metadata function must exist")
+        func_body = match.group(1)
+        self.assertIn("determine_remote_host(", func_body,
+            "_collect_missing_file_metadata must call determine_remote_host() to handle remote files")
+
+    def test_mkv_container_duration_in_milliseconds(self):
+        """MKV metadata must store container_duration in milliseconds (same as Plex)."""
+        content = self._read_script()
+        # The MKV return dict must use duration_ms directly (milliseconds)
+        self.assertIn("'container_duration': duration_ms,  # milliseconds", content,
+            "MKV container_duration must be stored in milliseconds")
+
+    def test_broken_detection_filesize_heuristic(self):
+        """Broken file detection must include filesize vs duration fallback heuristic."""
+        content = self._read_script()
+        self.assertIn("avg_kbps", content,
+            "Broken detection must compute average bitrate as fallback")
+        self.assertIn("avg_kbps < 10", content,
+            "Files with <10 KB/s average bitrate should be flagged as broken")
+
+    def test_broken_table_has_diff_explanation(self):
+        """--broken output must explain the DIFF% column."""
+        content = self._read_script()
+        self.assertIn("container_duration - plex_duration", content,
+            "Must explain DIFF% formula above the table")
+
+    def test_collect_missing_metadata_retries_broken(self):
+        """_collect_missing_file_metadata must retry files marked as broken."""
+        content = self._read_script()
+        # Find just the function (stop at next top-level def)
+        import re
+        match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        # Must NOT skip all entries with 'file_metadata' — must retry broken ones
+        self.assertIn("not existing_metadata.get('broken')", func_body,
+            "Must only skip entries with valid (non-broken) metadata")
 
 
 class TestCacheFormatValidation(unittest.TestCase):
@@ -9408,13 +9450,18 @@ def _collect_missing_file_metadata(cached_obj, display_title):
     for version, file_info in cached_obj.get('files', {}).items():
         if not isinstance(file_info, dict):
             continue
-        if 'file_metadata' in file_info:
-            continue  # Already has metadata (or marked broken)
+        existing_metadata = file_info.get('file_metadata')
+        if existing_metadata and not existing_metadata.get('broken'):
+            continue  # Already has valid metadata
+        # Missing metadata OR marked broken — retry broken entries
         filepath = file_info.get('filepath')
         filesize = file_info.get('filesize')
         if not filepath or not filesize:
             continue
-        file_metadata = get_video_file_metadata(filepath, filesize, remote_host=None)
+        remote_host, exists, resolved_path = determine_remote_host(filepath)
+        if not exists:
+            continue  # File not accessible — skip, don't mark as broken
+        file_metadata = get_video_file_metadata(resolved_path, filesize, remote_host=remote_host)
         if file_metadata:
             file_info['file_metadata'] = file_metadata
         else:
@@ -12939,6 +12986,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if file_metadata:
                         if file_metadata.get('broken'):
                             is_broken = True
+                            severity = 'BROKEN'
                         else:
                             container_duration = file_metadata.get('container_duration')
                             if container_duration:
@@ -12957,6 +13005,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     else:
                                         severity = 'borderline'
 
+                    # Fallback: filesize vs duration heuristic (catches truncated files
+                    # even without ffprobe metadata, e.g. 36MB for a 90min movie)
+                    if not is_broken and plex_duration > 0:
+                        filesize = file_info.get('filesize', 0)
+                        if filesize and plex_duration > 60000:  # Only for files >1min
+                            # Average bitrate in KB/s
+                            avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                            # A real video file at any quality should be >10 KB/s
+                            if avg_kbps < 10:
+                                is_broken = True
+                                severity = 'severe'
+                                diff_pct = diff_pct  # Keep whatever diff we had (may be None)
+
                     if is_broken:
                         broken_files.append((key, diff_pct, severity))
                         break  # Only add the key once even if multiple files
@@ -12973,6 +13034,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
             # Print broken files with details
+            print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
             print(f"\n{'SEVERITY':<12} | {'DIFF%':<8} | {'PLEX-ID':<10} | {'TITLE':<60} | {'LIBRARY':<15} | {'DURATION':<10}")
             print("-" * 150)
 
@@ -14838,13 +14900,12 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
             size_byte = header_data[pos]
             pos += 1  # Skip size byte
 
-            # Read float64 duration (in milliseconds)
+            # Read float64 duration (MKV stores in milliseconds natively)
             if size_byte == 0x88 and pos + 8 <= len(header_data):
                 duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
-                duration_min = duration_ms / 1000.0 / 60.0
 
                 return {
-                    'container_duration': duration_min,
+                    'container_duration': duration_ms,  # milliseconds (same unit as Plex)
                     'filesize': filesize,
                     'scanned_at': datetime.now().isoformat(),
                     'file_type': 'mkv'
