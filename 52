@@ -2019,14 +2019,6 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertGreaterEqual(content.count("new_paths == cached_paths"), 2,
             "Both movie and episode skip logic must compare file paths")
 
-    def test_tool_execution_failure_aborts(self):
-        content = self._read_script()
-        import re
-        match = re.search(r'FAILED \(exit code.*?\n(.*?)(sys\.exit\(1\))', content, re.DOTALL)
-        self.assertIsNotNone(match, "Should find FAILED exit code handling that aborts")
-        self.assertIn("Aborting", match.group(1),
-            "Tool execution failure should print abort message and exit")
-
     def test_tool_not_found_is_fatal(self):
         content = self._read_script()
         self.assertIn("if result is None:\n            sys.exit(1)", content,
@@ -2063,6 +2055,50 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("collection_count", content)
         self.assertIn("server_collections", content)
         self.assertIn("metadata_type = 18", content)
+
+    def test_delta_counters_track_metadata_probed(self):
+        content = self._read_script()
+        self.assertIn("'metadata_probed': 0", content,
+            "library_delta_counters must initialize metadata_probed counter")
+        self.assertIn("['metadata_probed'] += 1", content,
+            "metadata_probed must be incremented when ffprobe runs")
+
+    def test_metadata_probed_in_per_library_completion(self):
+        content = self._read_script()
+        self.assertIn("metadata probed", content,
+            "Per-library completion line must report metadata probed count")
+        # Verify it's shown conditionally (only when > 0)
+        self.assertIn("if probed > 0:", content,
+            "metadata probed must only be shown when count > 0")
+
+    def test_metadata_probed_in_final_summary(self):
+        content = self._read_script()
+        self.assertIn("total_metadata_probed", content,
+            "Final summary must aggregate metadata_probed across libraries")
+        self.assertIn("total_metadata_probed > 0", content,
+            "Final summary must include metadata probed in the condition check")
+
+    def test_metadata_probed_in_summary_table(self):
+        content = self._read_script()
+        # library_summaries must track metadata_probed per library
+        self.assertIn("library_summaries[base_lib]['metadata_probed']", content,
+            "Summary table must aggregate metadata_probed per base library")
+
+    def test_tool_failure_aborts_with_exit(self):
+        """External tool failure during batch apply must abort immediately."""
+        content = self._read_script()
+        self.assertIn("Aborting: external tool failed", content,
+            "Tool failure must print abort message")
+        import re
+        match = re.search(r'Aborting.*?\n\s*(sys\.exit\(1\))', content)
+        self.assertIsNotNone(match,
+            "sys.exit(1) must follow the abort message")
+
+    def test_tool_stderr_ansi_stripped(self):
+        """ANSI escape codes from external tool stderr must be stripped."""
+        content = self._read_script()
+        self.assertIn(r"\033\[", content,
+            "stderr processing must strip ANSI escape codes")
 
 
 class TestCacheFormatValidation(unittest.TestCase):
