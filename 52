@@ -2100,6 +2100,27 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn(r"\033\[", content,
             "stderr processing must strip ANSI escape codes")
 
+    def test_skip_paths_collect_missing_metadata(self):
+        """All skip paths in --update-cache must call _collect_missing_file_metadata."""
+        content = self._read_script()
+        # DB movie skip path
+        self.assertIn("SKIPPING movie", content)
+        # DB episode skip path
+        self.assertIn("SKIPPING episode", content)
+        # Count calls to _collect_missing_file_metadata (should be at least 4: 2 DB + 2 API paths)
+        count = content.count("_collect_missing_file_metadata(")
+        self.assertGreaterEqual(count, 4,
+            f"Expected at least 4 calls to _collect_missing_file_metadata (DB+API, movie+episode), found {count}")
+
+    def test_collect_missing_file_metadata_defined(self):
+        """Helper function for collecting missing ffprobe metadata must exist."""
+        content = self._read_script()
+        self.assertIn("def _collect_missing_file_metadata(", content)
+        self.assertIn("'file_metadata' in file_info", content,
+            "_collect_missing_file_metadata must skip files that already have metadata")
+        self.assertIn("get_video_file_metadata(", content,
+            "_collect_missing_file_metadata must call ffprobe via get_video_file_metadata")
+
 
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
@@ -9374,6 +9395,45 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             PLEX_Media.save_checkpoint(checkpoint_lib_name)
 
 
+def _collect_missing_file_metadata(cached_obj, display_title):
+    """Collect ffprobe metadata for cached files that are missing file_metadata.
+
+    Called during --update-cache for objects that are otherwise unchanged,
+    so that --broken can detect truncated files without --force-metadata.
+    Returns number of files probed.
+    """
+    if not FORCE_CACHE_UPDATE:
+        return 0
+    probed = 0
+    for version, file_info in cached_obj.get('files', {}).items():
+        if not isinstance(file_info, dict):
+            continue
+        if 'file_metadata' in file_info:
+            continue  # Already has metadata (or marked broken)
+        filepath = file_info.get('filepath')
+        filesize = file_info.get('filesize')
+        if not filepath or not filesize:
+            continue
+        file_metadata = get_video_file_metadata(filepath, filesize, remote_host=None)
+        if file_metadata:
+            file_info['file_metadata'] = file_metadata
+        else:
+            from datetime import datetime
+            file_info['file_metadata'] = {
+                'broken': True,
+                'filesize': filesize,
+                'marked_at': datetime.now().isoformat(),
+                'reason': 'ffprobe_failed'
+            }
+        probed += 1
+    # Track in delta counters
+    if probed > 0 and hasattr(PLEX_Media, 'library_delta_counters'):
+        lib_key = display_title
+        if lib_key in PLEX_Media.library_delta_counters:
+            PLEX_Media.library_delta_counters[lib_key]['metadata_probed'] += probed
+    return probed
+
+
 def _process_movies_from_database(all_movies, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """Process movies fetched from database and populate cache
 
@@ -9459,6 +9519,7 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
                 cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
                 if new_file_count == cached_file_count and new_paths == cached_paths:
                     if DBG: print(f"{DBGPFX}update_movie_library_objs_db(): SKIPPING movie '{movie_dict['title']}' - already in cache ({cached_file_count} files)")
+                    _collect_missing_file_metadata(cached, display_title)
                     continue
                 # File versions or paths changed — update the cached entry
                 if VRB: print(f"{VRBPFX}Updating '{movie_dict['title']}': file change detected")
@@ -9810,6 +9871,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                         cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
                         if new_file_count == cached_file_count and new_paths == cached_paths:
                             if DBG: print(f"{DBGPFX}_process_shows_from_database(): SKIPPING episode '{episode_dict['S0XE0X']}' - already cached ({cached_file_count} files)")
+                            _collect_missing_file_metadata(cached, display_title)
                             continue
                         if VRB: print(f"{VRBPFX}Updating episode '{episode_dict['S0XE0X']}': file change detected")
 
@@ -10063,6 +10125,7 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
             if movie_key in PLEX_Media.OBJ_BY_ID:
                 # Movie exists in cache with same ID - skip it (already processed in previous run)
                 if DBG: print(f"{DBGPFX}update_movie_library_objs(): SKIPPING movie '{item.title}' - already in cache from previous run")
+                _collect_missing_file_metadata(PLEX_Media.OBJ_BY_ID[movie_key], display_title)
                 continue
 
             # NOTE: ID mismatches (from re-scanned libraries) should be handled with --update-cache --force
@@ -10276,6 +10339,7 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
                     episode_key = get_fullID(episode)
                     if episode_key in PLEX_Media.OBJ_BY_ID:
                         if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING EPISODE {episode_key} - already in cache")
+                        _collect_missing_file_metadata(PLEX_Media.OBJ_BY_ID[episode_key], display_title)
                         continue
 
                 episode_media = episode.media
