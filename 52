@@ -2240,6 +2240,76 @@ class TestCacheSkipLogic(unittest.TestCase):
             "Must only skip entries with valid (non-broken) metadata")
 
 
+class TestVerifyCacheIntegrity(unittest.TestCase):
+    """verify_cache must perform comprehensive data integrity checks."""
+
+    def _read_script(self):
+        """Read script source, excluding the unittest section to avoid self-matching."""
+        with open(os.path.abspath(__file__), 'r') as f:
+            content = f.read()
+        start = content.find('\nimport unittest\n')
+        end = content.find('\ndef run_regression_tests():')
+        if start != -1 and end != -1:
+            return content[:start] + content[end:]
+        return content
+
+    def test_verify_checks_file_metadata_coverage(self):
+        content = self._read_script()
+        self.assertIn("file_metadata", content)
+        self.assertIn("missing_metadata", content,
+            "verify_cache must count files with missing file_metadata")
+
+    def test_verify_checks_obj_by_filepath(self):
+        content = self._read_script()
+        self.assertIn("OBJ_BY_FILEPATH", content)
+        self.assertIn("filepath_dangling", content,
+            "verify_cache must detect dangling OBJ_BY_FILEPATH references")
+
+    def test_verify_checks_obj_by_movie(self):
+        content = self._read_script()
+        self.assertIn("movie_dangling", content,
+            "verify_cache must detect dangling OBJ_BY_MOVIE references")
+
+    def test_verify_checks_obj_by_show(self):
+        content = self._read_script()
+        self.assertIn("show_dangling", content,
+            "verify_cache must detect dangling OBJ_BY_SHOW references")
+        self.assertIn("episode_dangling", content,
+            "verify_cache must detect dangling OBJ_BY_SHOW_EPISODES references")
+
+    def test_verify_checks_labels_index(self):
+        content = self._read_script()
+        self.assertIn("rebuilt_labels_index", content,
+            "verify_cache must rebuild labels_index to compare with cached version")
+
+    def test_verify_checks_collection_members(self):
+        content = self._read_script()
+        self.assertIn("orphaned_collections", content,
+            "verify_cache must detect orphaned collections")
+        self.assertIn("invalid_members", content,
+            "verify_cache must detect invalid collection member references")
+
+    def test_verify_checks_library_stats(self):
+        content = self._read_script()
+        self.assertIn("itemsCount", content)
+        self.assertIn("stats_mismatches", content,
+            "verify_cache must detect itemsCount mismatches")
+
+    def test_batch_metadata_handles_file_not_found(self):
+        """Batch metadata must track missing files separately from ffprobe errors."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("not_found_count", func_body,
+            "Must track file-not-found separately from ffprobe errors")
+        self.assertIn("file_not_found", func_body,
+            "Must mark missing files with reason='file_not_found' in cache")
+        self.assertIn("not found on server", func_body,
+            "Must report missing file count at end of batch collection")
+
+
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
 
@@ -2340,6 +2410,7 @@ _UNITTEST_CLASSES = [
     TestDuplicatesIgnoreLibraryCombinations, TestRunToolLocally, TestRunToolOnPLEXServer,
     TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
     TestLongHelp, TestPlexUpdatedAtTracking, TestCacheSkipLogic,
+    TestVerifyCacheIntegrity,
     TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
 ]
 
@@ -9648,6 +9719,7 @@ for line in sys.stdin:
     from datetime import datetime
     success_count = 0
     error_count = 0
+    not_found_count = 0
 
     # Build lookup: filepath -> [(obj_key, version, display_title), ...]
     filepath_lookup = {}
@@ -9666,9 +9738,31 @@ for line in sys.stdin:
 
         filepath = entry.get('path', '')
         if 'error' in entry:
-            error_count += 1
-            # Print error with full context
             error_msg = entry.get('error', 'unknown')
+
+            # Distinguish "file not found" from ffprobe errors
+            if error_msg == 'file not found':
+                not_found_count += 1
+                if VRB: print(f"  ⚠ File not found: {filepath}")
+                # Mark as file_not_found in cache (don't abort — file may have been deleted)
+                targets = filepath_lookup.get(filepath, [])
+                for obj_key, version, display_title in targets:
+                    if obj_key in PLEX_Media.OBJ_BY_ID:
+                        obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                        files_dict = obj.get('files', {})
+                        if version in files_dict:
+                            files_dict[version]['file_metadata'] = {
+                                'broken': True,
+                                'reason': 'file_not_found',
+                                'filesize': files_dict[version].get('filesize'),
+                                'marked_at': datetime.now().isoformat()
+                            }
+                    if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                        PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+                continue
+
+            # ffprobe error — print full context
+            error_count += 1
             stderr_msg = entry.get('stderr', '')
             print(f"\n✗ FAILED: {os.path.basename(filepath)}")
             print(f"    Path:  {filepath}")
@@ -9724,6 +9818,8 @@ for line in sys.stdin:
         sys.exit(1)
 
     print(f"  ✓ Metadata collected: {success_count}/{total} files")
+    if not_found_count > 0:
+        print(f"  ⚠ {not_found_count} files not found on server (may have been deleted)")
     if error_count > 0:
         print(f"  ⚠ Errors: {error_count} files")
 
@@ -16430,6 +16526,215 @@ def verify_cache():
         print("\n\n⚠ Verification interrupted - results incomplete", file=sys.stderr)
         print("(Rerun without interruption to see full results)\n")
         return
+
+    # =========================================================================
+    # DATA INTEGRITY CHECKS (cache-only, no SSH/DB needed)
+    # =========================================================================
+    integrity_issues = []
+
+    print(f"\n{'='*76}")
+    print(f"DATA INTEGRITY CHECKS")
+    print(f"{'='*76}")
+
+    # Check 1: file_metadata coverage
+    total_files = 0
+    has_metadata = 0
+    missing_metadata = 0
+    broken_metadata = 0
+    file_not_found_metadata = 0
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        obj_type = obj.get('type')
+        if obj_type not in ('Movie', 'Episode'):
+            continue
+        for _version, file_info in obj.get('files', {}).items():
+            if not isinstance(file_info, dict):
+                continue
+            total_files += 1
+            fm = file_info.get('file_metadata')
+            if fm is None:
+                missing_metadata += 1
+            elif fm.get('broken'):
+                if fm.get('reason') == 'file_not_found':
+                    file_not_found_metadata += 1
+                else:
+                    broken_metadata += 1
+            else:
+                has_metadata += 1
+
+    if total_files > 0:
+        parts = []
+        if missing_metadata > 0:
+            parts.append(f"{missing_metadata} missing")
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} broken")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} file not found")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        if missing_metadata > 0 or broken_metadata > 0:
+            print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
+            if missing_metadata > 0:
+                integrity_issues.append(f"{missing_metadata} files missing metadata — run --update-cache to collect")
+        else:
+            print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
+    else:
+        print(f"File metadata:     - no media files in cache")
+
+    # Check 2: OBJ_BY_FILEPATH cross-references
+    filepath_entries = len(PLEX_Media.OBJ_BY_FILEPATH)
+    filepath_dangling = 0
+    filepath_path_mismatch = 0
+    for fp, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
+        if not isinstance(keys, list):
+            keys = [keys]
+        for key in keys:
+            if key not in PLEX_Media.OBJ_BY_ID:
+                filepath_dangling += 1
+            else:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                obj_filepaths = set()
+                for _, fi in obj.get('files', {}).items():
+                    if isinstance(fi, dict) and fi.get('filepath'):
+                        obj_filepaths.add(fi['filepath'])
+                if fp not in obj_filepaths and obj.get('file') != fp:
+                    filepath_path_mismatch += 1
+
+    # Check 3: OBJ_BY_MOVIE cross-references
+    movie_entries = len(PLEX_Media.OBJ_BY_MOVIE)
+    movie_dangling = 0
+    for movie_key in PLEX_Media.OBJ_BY_MOVIE:
+        if movie_key not in PLEX_Media.OBJ_BY_ID:
+            movie_dangling += 1
+
+    # Check 4: OBJ_BY_SHOW / OBJ_BY_SHOW_EPISODES cross-references
+    show_entries = len(PLEX_Media.OBJ_BY_SHOW)
+    show_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW.items():
+        if show_key not in PLEX_Media.OBJ_BY_ID:
+            show_dangling += 1
+        for _, season_key in seasons.items():
+            if season_key not in PLEX_Media.OBJ_BY_ID:
+                show_dangling += 1
+
+    episode_entries = 0
+    episode_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+        for _, episodes in seasons.items():
+            for _, versions in episodes.items():
+                for _, ep_keys in versions.items():
+                    if isinstance(ep_keys, list):
+                        for ep_key in ep_keys:
+                            episode_entries += 1
+                            if ep_key not in PLEX_Media.OBJ_BY_ID:
+                                episode_dangling += 1
+
+    # Print cross-reference results
+    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling
+    if xref_total_dangling == 0:
+        print(f"Cross-references:  ✓ OBJ_BY_FILEPATH ({filepath_entries}), OBJ_BY_MOVIE ({movie_entries}),")
+        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}) — all valid")
+    else:
+        parts = []
+        if filepath_dangling > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_dangling} dangling keys")
+        if filepath_path_mismatch > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_path_mismatch} path mismatches")
+        if movie_dangling > 0:
+            parts.append(f"OBJ_BY_MOVIE: {movie_dangling} dangling keys")
+        if show_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW: {show_dangling} dangling keys")
+        if episode_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW_EPISODES: {episode_dangling} dangling keys")
+        print(f"Cross-references:  ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
+
+    # Check 5: labels_index consistency
+    cached_labels_index = CACHE.get('labels_index', {})
+    rebuilt_labels_index = {}
+    for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+        for label in (obj.get('labels', []) or []):
+            if label not in rebuilt_labels_index:
+                rebuilt_labels_index[label] = []
+            rebuilt_labels_index[label].append(obj_id)
+
+    labels_ok = True
+    labels_detail = []
+    missing_labels = set(rebuilt_labels_index.keys()) - set(cached_labels_index.keys())
+    extra_labels = set(cached_labels_index.keys()) - set(rebuilt_labels_index.keys())
+    if missing_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(missing_labels)} labels missing from index")
+    if extra_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(extra_labels)} stale labels in index")
+    # Check counts match for shared labels
+    count_mismatches = 0
+    for label in set(rebuilt_labels_index.keys()) & set(cached_labels_index.keys()):
+        if sorted(rebuilt_labels_index[label]) != sorted(cached_labels_index[label]):
+            count_mismatches += 1
+    if count_mismatches > 0:
+        labels_ok = False
+        labels_detail.append(f"{count_mismatches} labels with wrong member lists")
+
+    if labels_ok:
+        print(f"Labels index:      ✓ {len(cached_labels_index)} labels, consistent")
+    else:
+        print(f"Labels index:      ⚠ {'; '.join(labels_detail)}")
+        integrity_issues.append(f"Labels index: {'; '.join(labels_detail)}")
+
+    # Check 6: Collection member validity
+    collection_count = len(PLEX_Media.OBJ_BY_COLLECTION)
+    orphaned_collections = 0
+    invalid_members = 0
+    # Build lookup: metadata_item id -> True (for O(1) member validation)
+    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values() if obj.get('id') is not None}
+    for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
+        if col_key not in PLEX_Media.OBJ_BY_ID:
+            orphaned_collections += 1
+        for member_id in col_obj.get('member_ids', []):
+            if member_id not in all_obj_ids:
+                invalid_members += 1
+
+    if orphaned_collections == 0 and invalid_members == 0:
+        print(f"Collections:       ✓ {collection_count} collections, all members valid")
+    else:
+        parts = []
+        if orphaned_collections > 0:
+            parts.append(f"{orphaned_collections} orphaned")
+        if invalid_members > 0:
+            parts.append(f"{invalid_members} invalid member references")
+        print(f"Collections:       ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
+
+    # Check 7: library_stats itemsCount accuracy
+    cached_stats = CACHE.get('library_stats', {})
+    cached_item_counts = cached_stats.get('itemsCount', {})
+    if cached_item_counts:
+        actual_counts = {}
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            lib = obj.get('library')
+            if lib:
+                actual_counts[lib] = actual_counts.get(lib, 0) + 1
+
+        stats_mismatches = []
+        for lib_name, cached_count in cached_item_counts.items():
+            actual = actual_counts.get(lib_name, 0)
+            if cached_count != actual:
+                stats_mismatches.append(f"{lib_name}: cached={cached_count}, actual={actual}")
+
+        if not stats_mismatches:
+            print(f"Library stats:     ✓ itemsCount consistent across {len(cached_item_counts)} libraries")
+        else:
+            print(f"Library stats:     ⚠ {len(stats_mismatches)} itemsCount mismatches")
+            integrity_issues.append(f"itemsCount mismatches: {', '.join(stats_mismatches[:5])}")
+    else:
+        print(f"Library stats:     - no itemsCount data in cache")
+
+    # Summary
+    if integrity_issues:
+        print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
+        for issue in integrity_issues:
+            print(f"    • {issue}")
+        print(f"\n  Run --update-cache to fix most issues.")
 
     print("\n" + "="*76)
 
