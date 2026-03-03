@@ -2019,13 +2019,13 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertGreaterEqual(content.count("new_paths == cached_paths"), 2,
             "Both movie and episode skip logic must compare file paths")
 
-    def test_tool_execution_failure_not_fatal(self):
+    def test_tool_execution_failure_aborts(self):
         content = self._read_script()
         import re
-        match = re.search(r'FAILED \(exit code.*?\n(.*?)(continue|sys\.exit)', content, re.DOTALL)
-        self.assertIsNotNone(match, "Should find FAILED exit code handling block")
-        self.assertEqual(match.group(2), "continue",
-            "Tool execution failure should continue to next item, not exit")
+        match = re.search(r'FAILED \(exit code.*?\n(.*?)(sys\.exit\(1\))', content, re.DOTALL)
+        self.assertIsNotNone(match, "Should find FAILED exit code handling that aborts")
+        self.assertIn("Aborting", match.group(1),
+            "Tool execution failure should print abort message and exit")
 
     def test_tool_not_found_is_fatal(self):
         content = self._read_script()
@@ -7793,7 +7793,10 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
             fail_count += 1
             print(f"  FAILED (exit code {result.returncode})")
             if result.stderr:
-                for line in result.stderr.strip().split('\n')[:3]:
+                # Strip any ANSI escape codes from tool output to prevent color bleeding
+                import re as _re
+                stderr_clean = _re.sub(r'\033\[[0-9;]*m', '', result.stderr.strip())
+                for line in stderr_clean.split('\n')[:3]:
                     print(f"    {line}")
             cmd_str = f"{tool_name} {' '.join(shlex.quote(a) for a in tool_args)}"
             if remote_host:
@@ -7804,7 +7807,8 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
                 "filepath": filepath, "lang_code": lang_3, "tool": tool_name,
                 "result": f"failed_exit_{result.returncode}",
             })
-            continue
+            print(f"\nAborting: external tool failed on '{os.path.basename(filepath)}'")
+            sys.exit(1)
 
         print(f"  OK: Audio language set to '{lang_3}'")
         success_count += 1
