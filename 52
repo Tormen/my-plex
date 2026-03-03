@@ -2004,8 +2004,14 @@ class TestCacheSkipLogic(unittest.TestCase):
     """Tests for cache update skip logic — file path changes must trigger updates."""
 
     def _read_script(self):
+        """Read script source, excluding the unittest section to avoid self-matching."""
         with open(os.path.abspath(__file__), 'r') as f:
-            return f.read()
+            content = f.read()
+        start = content.find('\nimport unittest\n')
+        end = content.find('\ndef run_regression_tests():')
+        if start != -1 and end != -1:
+            return content[:start] + content[end:]
+        return content
 
     def test_episode_skip_checks_file_paths(self):
         content = self._read_script()
@@ -2112,30 +2118,100 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertGreaterEqual(count, 4,
             f"Expected at least 4 calls to _collect_missing_file_metadata (DB+API, movie+episode), found {count}")
 
-    def test_collect_missing_file_metadata_defined(self):
-        """Helper function for collecting missing ffprobe metadata must exist."""
+    def test_collect_missing_file_metadata_queues_to_batch(self):
+        """_collect_missing_file_metadata must queue files for batch collection instead of probing individually."""
         content = self._read_script()
         self.assertIn("def _collect_missing_file_metadata(", content)
-        self.assertIn("get_video_file_metadata(", content,
-            "_collect_missing_file_metadata must call ffprobe via get_video_file_metadata")
-
-    def test_collect_missing_metadata_uses_determine_remote_host(self):
-        """_collect_missing_file_metadata must use determine_remote_host for file access."""
-        content = self._read_script()
-        # Find the function body (stop at next top-level function)
         import re
         match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match, "_collect_missing_file_metadata function must exist")
         func_body = match.group(1)
+        self.assertIn("_metadata_batch_queue.append(", func_body,
+            "_collect_missing_file_metadata must queue files to _metadata_batch_queue")
+        # Must NOT call get_video_file_metadata directly (that's for single-file probing)
+        self.assertNotIn("get_video_file_metadata(", func_body,
+            "_collect_missing_file_metadata must NOT probe files individually — use batch queue")
+
+    def test_batch_metadata_collection_function_exists(self):
+        """_run_batch_metadata_collection must exist and handle batch ffprobe via SSH."""
+        content = self._read_script()
+        self.assertIn("def _run_batch_metadata_collection(", content)
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("_metadata_batch_queue", func_body,
+            "Must read from _metadata_batch_queue")
         self.assertIn("determine_remote_host(", func_body,
-            "_collect_missing_file_metadata must call determine_remote_host() to handle remote files")
+            "Must use determine_remote_host to detect remote/local")
+        self.assertIn("run_tool_on_PLEX_server('ffprobe'", func_body,
+            "Must use run_tool_on_PLEX_server for ffprobe path resolution")
+
+    def test_batch_metadata_aborts_on_failure(self):
+        """Batch metadata collection must abort on first ffprobe failure."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("sys.exit(1)", func_body,
+            "Batch collection must abort (sys.exit) on failure")
+        self.assertIn("exit code", func_body,
+            "Abort message must include exit code")
+
+    def test_batch_collection_called_from_update_cache(self):
+        """update_cache must call _run_batch_metadata_collection after library processing."""
+        content = self._read_script()
+        self.assertIn("_run_batch_metadata_collection()", content,
+            "update_cache must call _run_batch_metadata_collection")
+
+    def test_batch_collection_uses_json_lines(self):
+        """Batch collector script must output JSON-lines for streaming results."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("json.loads(line)", func_body,
+            "Must parse JSON-lines output from collector script")
+        self.assertIn("json.dumps(", func_body,
+            "Collector script must output JSON via json.dumps")
+
+    def test_add_media_obj_uses_determine_remote_host(self):
+        """add_media_obj must use determine_remote_host() not getattr(library, 'remote_host')."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def add_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match, "add_media_obj function must exist")
+        func_body = match.group(1)
+        self.assertNotIn("getattr(library, 'remote_host'", func_body,
+            "Must not use getattr(library, 'remote_host') — use determine_remote_host()")
+        self.assertIn("determine_remote_host(", func_body,
+            "Must use determine_remote_host() for proper remote detection")
+
+    def test_get_video_file_metadata_uses_run_tool(self):
+        """get_video_file_metadata must use run_tool_on_PLEX_server for ffprobe (local and remote)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def get_video_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("run_tool_on_PLEX_server('ffprobe'", func_body,
+            "Must use run_tool_on_PLEX_server for ffprobe execution")
 
     def test_mkv_container_duration_in_milliseconds(self):
         """MKV metadata must store container_duration in milliseconds (same as Plex)."""
         content = self._read_script()
-        # The MKV return dict must use duration_ms directly (milliseconds)
-        self.assertIn("'container_duration': duration_ms,  # milliseconds", content,
-            "MKV container_duration must be stored in milliseconds")
+        # The return dict must use duration_ms (milliseconds, not minutes)
+        self.assertIn("'container_duration': duration_ms,", content,
+            "container_duration must be stored in milliseconds (duration_ms)")
+        # get_video_file_metadata must NOT return duration in minutes
+        import re
+        match = re.search(r'(def get_video_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        if match:
+            func_body = match.group(1)
+            self.assertNotIn("'container_duration': duration_min", func_body,
+                "get_video_file_metadata must NOT store duration in minutes")
 
     def test_broken_detection_filesize_heuristic(self):
         """Broken file detection must include filesize vs duration fallback heuristic."""
@@ -9361,7 +9437,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
         if need_metadata:
             # Collect metadata from video file
             # Determine if file is remote (checking for remote_host in filepath or library config)
-            remote_host = getattr(library, 'remote_host', None) if hasattr(library, 'remote_host') else None
+            remote_host, _exists, _resolved = determine_remote_host(filepath)
 
             file_metadata = get_video_file_metadata(filepath, part_size, remote_host)
 
@@ -9437,48 +9513,221 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             PLEX_Media.save_checkpoint(checkpoint_lib_name)
 
 
-def _collect_missing_file_metadata(cached_obj, display_title):
-    """Collect ffprobe metadata for cached files that are missing file_metadata.
+# Batch queue for metadata collection — filled during --update-cache, processed at the end
+_metadata_batch_queue = []  # [(filepath, obj_key, version, display_title), ...]
 
-    Called during --update-cache for objects that are otherwise unchanged,
-    so that --broken can detect truncated files without --force-metadata.
-    Returns number of files probed.
+
+def _collect_missing_file_metadata(cached_obj, display_title):
+    """Queue cached files needing metadata for batch collection.
+
+    Called during --update-cache for objects that are otherwise unchanged.
+    Accumulates filepaths into _metadata_batch_queue instead of probing
+    each file individually — the actual collection happens in a single
+    SSH call at the end via _run_batch_metadata_collection().
     """
     if not FORCE_CACHE_UPDATE:
         return 0
-    probed = 0
+    queued = 0
+    obj_key = f"{cached_obj.get('type', 'Unknown')}:{cached_obj.get('id', '?')}"
     for version, file_info in cached_obj.get('files', {}).items():
         if not isinstance(file_info, dict):
             continue
         existing_metadata = file_info.get('file_metadata')
         if existing_metadata and not existing_metadata.get('broken'):
             continue  # Already has valid metadata
-        # Missing metadata OR marked broken — retry broken entries
+        # Missing metadata OR marked broken — queue for batch collection
         filepath = file_info.get('filepath')
-        filesize = file_info.get('filesize')
-        if not filepath or not filesize:
+        if not filepath:
             continue
-        remote_host, exists, resolved_path = determine_remote_host(filepath)
-        if not exists:
-            continue  # File not accessible — skip, don't mark as broken
-        file_metadata = get_video_file_metadata(resolved_path, filesize, remote_host=remote_host)
-        if file_metadata:
-            file_info['file_metadata'] = file_metadata
-        else:
-            from datetime import datetime
-            file_info['file_metadata'] = {
-                'broken': True,
-                'filesize': filesize,
-                'marked_at': datetime.now().isoformat(),
-                'reason': 'ffprobe_failed'
-            }
-        probed += 1
-    # Track in delta counters
-    if probed > 0 and hasattr(PLEX_Media, 'library_delta_counters'):
-        lib_key = display_title
-        if lib_key in PLEX_Media.library_delta_counters:
-            PLEX_Media.library_delta_counters[lib_key]['metadata_probed'] += probed
-    return probed
+        _metadata_batch_queue.append((filepath, obj_key, version, display_title))
+        queued += 1
+    return queued
+
+
+def _run_batch_metadata_collection():
+    """Batch-collect ffprobe metadata for all queued files via a single SSH call.
+
+    Uses run_tool_on_PLEX_server('ffprobe', ...) to resolve the ffprobe path
+    (respecting EXTERNAL_TOOLS['SERVER']['ffprobe'] config). Then runs a
+    lightweight Python script on the server that reads filepaths from stdin,
+    probes each with ffprobe, and outputs JSON-lines to stdout.
+
+    Aborts on first ffprobe failure with full error context.
+    """
+    global _metadata_batch_queue
+    if not _metadata_batch_queue:
+        return
+
+    total = len(_metadata_batch_queue)
+    print(f"\n{'='*76}")
+    print(f"COLLECTING FILE METADATA ({total} files)")
+    print(f"{'='*76}")
+
+    # Determine remote_host from first filepath
+    first_filepath = _metadata_batch_queue[0][0]
+    remote_host, _exists, _resolved = determine_remote_host(first_filepath)
+
+    # Resolve ffprobe path using existing tool resolution mechanism
+    # This respects EXTERNAL_TOOLS['SERVER']['ffprobe'] config
+    ffprobe_result = run_tool_on_PLEX_server('ffprobe', ['-version'], remote_host=remote_host, timeout=10)
+    if ffprobe_result is None:
+        # run_tool_on_PLEX_server already printed the error with config hint
+        print(f"\n✗ Cannot collect file metadata without ffprobe.")
+        print(f"  Skipping metadata collection — run 'my-plex --update-cache' after installing ffprobe.")
+        _metadata_batch_queue = []
+        return
+
+    # Get the resolved ffprobe path (re-resolve to get the actual path)
+    config_key = "EXTERNAL_TOOLS['SERVER']['ffprobe']"
+    configured = EXTERNAL_TOOLS.get('SERVER', {}).get('ffprobe')
+    if configured:
+        ffprobe_path = configured
+    elif remote_host:
+        cache_key = f"{remote_host}:ffprobe"
+        ffprobe_path = _remote_tool_path_cache.get(cache_key, 'ffprobe')
+    else:
+        ffprobe_path = shutil.which('ffprobe') or 'ffprobe'
+
+    location = f"on '{remote_host}'" if remote_host else "locally"
+    print(f"  Using ffprobe: {ffprobe_path} ({location})")
+    print(f"  Processing {total} files...")
+
+    # Build inline Python script for batch ffprobe collection
+    # This script reads filepaths from stdin, probes each, outputs JSON-lines
+    collector_script = f'''
+import sys, json, subprocess, os
+from datetime import datetime
+ffprobe = {repr(ffprobe_path)}
+for line in sys.stdin:
+    fp = line.strip()
+    if not fp:
+        continue
+    try:
+        if not os.path.exists(fp):
+            print(json.dumps({{"path": fp, "error": "file not found"}}), flush=True)
+            continue
+        filesize = os.path.getsize(fp)
+        ext = os.path.splitext(fp)[1].lower()
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", fp],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            print(json.dumps({{"path": fp, "error": f"ffprobe exit {{r.returncode}}", "stderr": r.stderr.strip()[:200]}}), flush=True)
+            sys.exit(1)
+        dur_s = float(r.stdout.strip())
+        dur_ms = dur_s * 1000
+        print(json.dumps({{"path": fp, "container_duration": dur_ms, "filesize": filesize,
+                          "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
+    except Exception as e:
+        print(json.dumps({{"path": fp, "error": str(e)}}), flush=True)
+        sys.exit(1)
+'''
+
+    # Build file list as input
+    filepaths_input = '\n'.join(fp for fp, _, _, _ in _metadata_batch_queue) + '\n'
+
+    # Execute: pipe file list to the collector script via SSH (or locally)
+    import subprocess as sp
+    if remote_host:
+        cmd = ['ssh', remote_host, 'python3', '-c', collector_script]
+    else:
+        cmd = [sys.executable, '-c', collector_script]
+
+    if DBG: print(f"{DBGPFX}_run_batch_metadata_collection: cmd = {cmd[:3]}... ({total} files)")
+
+    try:
+        result = sp.run(cmd, input=filepaths_input, capture_output=True, text=True,
+                        timeout=max(60, total * 2))  # ~2s per file max
+    except sp.TimeoutExpired:
+        print(f"\n✗ TIMEOUT: Batch metadata collection timed out after {max(60, total * 2)}s")
+        print(f"  This may indicate ffprobe is hanging on a file.")
+        sys.exit(1)
+
+    # Parse JSON-lines output and integrate results
+    from datetime import datetime
+    success_count = 0
+    error_count = 0
+
+    # Build lookup: filepath -> [(obj_key, version, display_title), ...]
+    filepath_lookup = {}
+    for filepath, obj_key, version, display_title in _metadata_batch_queue:
+        if filepath not in filepath_lookup:
+            filepath_lookup[filepath] = []
+        filepath_lookup[filepath].append((obj_key, version, display_title))
+
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        filepath = entry.get('path', '')
+        if 'error' in entry:
+            error_count += 1
+            # Print error with full context
+            error_msg = entry.get('error', 'unknown')
+            stderr_msg = entry.get('stderr', '')
+            print(f"\n✗ FAILED: {os.path.basename(filepath)}")
+            print(f"    Path:  {filepath}")
+            print(f"    Error: {error_msg}")
+            if stderr_msg:
+                for eline in stderr_msg.split('\n')[:3]:
+                    print(f"    {eline}")
+            if remote_host:
+                print(f"    Command: ssh {remote_host} {ffprobe_path} -v error -show_entries format=duration ... '{filepath}'")
+            else:
+                print(f"    Command: {ffprobe_path} -v error -show_entries format=duration ... '{filepath}'")
+
+            # Check if the collector script exited (abort-on-failure)
+            if result.returncode != 0:
+                print(f"\n✗ Batch metadata collection aborted (exit code {result.returncode})")
+                if result.stderr.strip():
+                    for eline in result.stderr.strip().split('\n')[:5]:
+                        print(f"    {eline}")
+                sys.exit(1)
+            continue
+
+        # Success — integrate into cache
+        targets = filepath_lookup.get(filepath, [])
+        for obj_key, version, display_title in targets:
+            if obj_key in PLEX_Media.OBJ_BY_ID:
+                obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                files_dict = obj.get('files', {})
+                if version in files_dict:
+                    file_info = files_dict[version]
+                    cache_filesize = file_info.get('filesize')
+                    meta_filesize = entry.get('filesize')
+                    if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
+                        if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, server={meta_filesize}")
+                        continue
+                    file_info['file_metadata'] = {
+                        'container_duration': entry['container_duration'],
+                        'filesize': meta_filesize,
+                        'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
+                        'file_type': entry.get('file_type', '')
+                    }
+                    success_count += 1
+
+            # Track in delta counters
+            if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+
+    # Check for overall failure
+    if result.returncode != 0 and error_count == 0:
+        print(f"\n✗ Batch metadata collection failed (exit code {result.returncode})")
+        if result.stderr.strip():
+            for line in result.stderr.strip().split('\n')[:5]:
+                print(f"    {line}")
+        sys.exit(1)
+
+    print(f"  ✓ Metadata collected: {success_count}/{total} files")
+    if error_count > 0:
+        print(f"  ⚠ Errors: {error_count} files")
+
+    _metadata_batch_queue = []
 
 
 def _process_movies_from_database(all_movies, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
@@ -12404,6 +12653,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_ID, var_name="PLEX_Media.OBJ_BY_ID", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_LIBRARY, var_name="PLEX_Media.OBJ_BY_LIBRARY", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
 
+        # Batch-collect missing file metadata (ffprobe) via single SSH call
+        if FORCE_CACHE_UPDATE and _metadata_batch_queue:
+            if PLEX_Media.cache_rebuild_lock:
+                PLEX_Media.cache_rebuild_lock.write_progress("Collecting file metadata...")
+            _run_batch_metadata_collection()
+            # Save cache after metadata collection (before labels index)
+            update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
+
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
@@ -14849,10 +15106,10 @@ def main_print_help(args, remaining_args, main_parser):
 ###########################################################################################
 
 def get_video_file_metadata(filepath, filesize, remote_host=None):
-    """Collect metadata from video file (container duration)
+    """Collect metadata from video file (container duration) using ffprobe.
 
-    Reads video container metadata to get duration information using ffprobe.
-    Used during --update-cache for incremental metadata collection.
+    Uses run_tool_on_PLEX_server() which respects EXTERNAL_TOOLS['SERVER']['ffprobe']
+    config and auto-detects ffprobe path. Works both locally and via SSH.
 
     Args:
         filepath: Path to video file
@@ -14868,74 +15125,33 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
             'file_type': 'mkv'
         }
     """
-    import struct
-    import subprocess
     from datetime import datetime
     from pathlib import Path
 
     try:
-        # Determine file extension
         ext = Path(filepath).suffix.lower()
+        if ext not in ('.mkv', '.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv'):
+            return None
 
-        if ext == '.mkv':
-            # Read MKV header duration using EBML structure
-            # For remote files, would need to fetch header via SSH
-            if remote_host:
-                # For now, skip remote files - would need SSH implementation
-                return None
+        # Use run_tool_on_PLEX_server for both local and remote ffprobe
+        result = run_tool_on_PLEX_server('ffprobe',
+            ['-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', filepath],
+            remote_host=remote_host, timeout=30)
 
-            # Read first 4096 bytes of MKV file
-            with open(filepath, 'rb') as f:
-                header_data = f.read(4096)
+        if result is None:
+            return None  # Tool not found — error already printed by run_tool_on_PLEX_server
 
-            # Search for duration element (EBML ID 0x4489)
-            duration_id = b'\x44\x89'
-            pos = header_data.find(duration_id)
+        if result.returncode == 0 and result.stdout.strip():
+            duration_sec = float(result.stdout.strip())
+            duration_ms = duration_sec * 1000  # Convert to milliseconds (same unit as Plex)
 
-            if pos == -1:
-                return None
-
-            # Parse EBML structure
-            pos += 2  # Skip ID
-            size_byte = header_data[pos]
-            pos += 1  # Skip size byte
-
-            # Read float64 duration (MKV stores in milliseconds natively)
-            if size_byte == 0x88 and pos + 8 <= len(header_data):
-                duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
-
-                return {
-                    'container_duration': duration_ms,  # milliseconds (same unit as Plex)
-                    'filesize': filesize,
-                    'scanned_at': datetime.now().isoformat(),
-                    'file_type': 'mkv'
-                }
-
-        elif ext in ['.mp4', '.m4v', '.avi']:
-            # Use ffprobe for MP4/AVI files
-            if remote_host:
-                # For remote files, would need SSH ffprobe
-                return None
-
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries',
-                 'format=duration', '-of',
-                 'default=noprint_wrappers=1:nokey=1', filepath],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                duration_sec = float(result.stdout.strip())
-                duration_ms = duration_sec * 1000  # Convert to milliseconds (same unit as Plex)
-
-                return {
-                    'container_duration': duration_ms,
-                    'filesize': filesize,
-                    'scanned_at': datetime.now().isoformat(),
-                    'file_type': ext[1:]  # Remove leading dot
-                }
+            return {
+                'container_duration': duration_ms,
+                'filesize': filesize,
+                'scanned_at': datetime.now().isoformat(),
+                'file_type': ext[1:]  # Remove leading dot
+            }
 
     except Exception as e:
         if VRB:
