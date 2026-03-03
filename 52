@@ -9278,6 +9278,11 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
                     'reason': 'ffprobe_failed'
                 }
 
+            # Track metadata probed count per library
+            lib_key = display_title if display_title else library.title
+            if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
+                PLEX_Media.library_delta_counters[lib_key]['metadata_probed'] += 1
+
     PLEX_Media.OBJ_BY_ID[key] = val
 
     # Track delta for library/partition completion summary (ADDED/UPDATED)
@@ -10615,7 +10620,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         PLEX_Media.library_delta_counters[completion_key] = {
             'added': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
             'updated': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
-            'removed': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0}
+            'removed': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+            'metadata_probed': 0,
         }
 
         # Track detailed changes for verbose output (title, file path, ID)
@@ -10944,6 +10950,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                     if parts:
                         delta_parts.append(f"{'/'.join(parts)} movies")
+
+            # Append metadata probed count if any
+            if completion_key in PLEX_Media.library_delta_counters:
+                probed = PLEX_Media.library_delta_counters[completion_key]['metadata_probed']
+                if probed > 0:
+                    delta_parts.append(f"{probed} metadata probed")
 
             # Print completion message with delta (always show status)
             from datetime import datetime
@@ -12291,6 +12303,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             total_added = 0
             total_removed = 0
             total_updated = 0
+            total_metadata_probed = 0
 
             if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
                 for lib_key, counters in PLEX_Media.library_delta_counters.items():
@@ -12298,10 +12311,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     total_added += counters['added']['movies'] + counters['added']['episodes']
                     total_removed += counters['removed']['movies'] + counters['removed']['episodes']
                     total_updated += counters['updated']['movies'] + counters['updated']['episodes']
+                    total_metadata_probed += counters.get('metadata_probed', 0)
 
             # Show detailed summary
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
-            if total_added > 0 or total_removed > 0 or total_updated > 0:
+            if total_added > 0 or total_removed > 0 or total_updated > 0 or total_metadata_probed > 0:
                 parts = []
                 if total_added > 0:
                     parts.append(f"+{total_added} added")
@@ -12309,6 +12323,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
+                if total_metadata_probed > 0:
+                    parts.append(f"{total_metadata_probed} metadata probed")
                 print(f"Cache rebuild complete: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
             else:
                 print(f"Cache rebuild complete: no changes, {total_media_files} total objects ({time_str})", flush=True)
@@ -12330,7 +12346,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         library_summaries[base_lib] = {
                             'added': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
                             'removed': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
-                            'updated': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0}
+                            'updated': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+                            'metadata_probed': 0,
                         }
 
                     # Aggregate counts
@@ -12338,6 +12355,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         library_summaries[base_lib]['added'][obj_type] += counters['added'][obj_type]
                         library_summaries[base_lib]['removed'][obj_type] += counters['removed'][obj_type]
                         library_summaries[base_lib]['updated'][obj_type] += counters['updated'][obj_type]
+                    library_summaries[base_lib]['metadata_probed'] += counters.get('metadata_probed', 0)
 
                 # Group libraries by type for organized output
                 show_libs = []
@@ -12365,7 +12383,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if updated > 0:
                                     parts.append(f"~{updated}")
                                 change_parts.append(f"{'/'.join(parts)} {obj_type}")
-                        show_libs.append((lib_name, change_parts))
                     elif lib_type == 'Movie':
                         added = summary['added']['movies']
                         removed = summary['removed']['movies']
@@ -12380,6 +12397,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             if updated > 0:
                                 parts.append(f"~{updated}")
                             change_parts.append(f"{'/'.join(parts)} movies")
+
+                    # Append metadata probed count for all library types
+                    probed = summary.get('metadata_probed', 0)
+                    if probed > 0:
+                        change_parts.append(f"{probed} metadata probed")
+
+                    if lib_type == 'Show':
+                        show_libs.append((lib_name, change_parts))
+                    elif lib_type == 'Movie':
                         movie_libs.append((lib_name, change_parts))
                     else:
                         other_libs.append((lib_name, change_parts))
