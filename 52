@@ -2402,6 +2402,30 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
         content = self._read_script()
         self.assertNotIn("getattr(lib, 'key'", content)
 
+    def test_query_plex_database_supports_local(self):
+        """query_plex_database must auto-detect and use local sqlite3 when DB exists locally."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def query_plex_database\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("os.path.exists(local_db_path)", func_body,
+            "Must check if DB file exists locally")
+        self.assertIn("use_local", func_body,
+            "Must have local/remote branching logic")
+
+    def test_query_plex_database_has_both_paths(self):
+        """query_plex_database must have both local and SSH execution paths."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def query_plex_database\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("'ssh', PLEX_DB_REMOTE_HOST", func_body,
+            "Must have SSH path for remote execution")
+        self.assertIn("'sqlite3',", func_body,
+            "Must have local sqlite3 path for direct execution")
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
@@ -4503,7 +4527,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 # DATABASE STRUCTURE:
 # - Location: /Users/me/Library/Application Support/Plex Media Server/.../com.plexapp.plugins.library.db
 # - Type: SQLite3 database
-# - Access: Via SSH to 'my-plex' remote_host (reuses existing SSH infrastructure)
+# - Access: Auto-detects local DB or SSH to 'my-plex' remote_host
 # - Key tables:
 #   * metadata_items: Core metadata (title, year, rating, summary, etc.)
 #       - metadata_type: 1=movie, 2=show, 3=season, 4=episode
@@ -4554,7 +4578,7 @@ def _parse_csv_to_rows(csv_text):
     return []
 
 def query_plex_database(query, mode='rows'):
-    """Central function for querying Plex database via SSH
+    """Central function for querying Plex database (locally or via SSH)
 
     ⚠️  CRITICAL: ALL PLEX DATABASE QUERIES MUST USE THIS FUNCTION ⚠️
 
@@ -4562,10 +4586,11 @@ def query_plex_database(query, mode='rows'):
     NEVER use subprocess.run(['ssh', ...]) with sqlite3 commands elsewhere in the code.
 
     This function:
-    - Executes SQL queries against the Plex database via SSH
+    - Auto-detects whether to use local sqlite3 or SSH to remote host
+    - If the database file exists locally → runs sqlite3 directly (no SSH)
+    - If not → uses SSH to PLEX_DB_REMOTE_HOST ('my-plex')
     - Handles query escaping and error handling consistently
     - Supports multiple output modes (rows, raw, csv)
-    - Uses PLEX_DB_REMOTE_HOST ('my-plex') and PLEX_DB_PATH globals
 
     Args:
         query: SQL query to execute (can be multi-line)
@@ -4594,28 +4619,41 @@ def query_plex_database(query, mode='rows'):
         print(f"ERROR: Empty query provided to query_plex_database()")
         return None
 
-    # Escape the query for SSH (handle quotes and special characters)
-    # Use single quotes around query, but need to escape any single quotes in the query
-    query_escaped = query.replace("'", "'\\''")
+    # Auto-detect: if DB file exists locally, use sqlite3 directly (no SSH needed)
+    local_db_path = os.path.expanduser(PLEX_DB_PATH)
+    use_local = os.path.exists(local_db_path)
 
-    # Build sqlite3 command - always use CSV for proper escaping of delimiters
-    # CSV mode properly handles commas, quotes, newlines, tabs, etc. in data
-    if mode == 'raw':
-        # Raw mode without CSV formatting
-        sqlite_cmd = f"sqlite3 '{PLEX_DB_PATH}' '{query_escaped}'"
+    if use_local:
+        # LOCAL: run sqlite3 directly on local database
+        if mode == 'raw':
+            cmd = ['sqlite3', local_db_path, query]
+        else:
+            cmd = ['sqlite3', '-header', '-csv', local_db_path, query]
+
+        if DEEPDBG:
+            print(f"{DBGPFX}Executing Plex DB query LOCALLY:")
+            print(f"{DBGPFX}  DB: {local_db_path}")
+            print(f"{DBGPFX}  Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+            print(f"{DBGPFX}  Command: {' '.join(cmd)}")
     else:
-        # Use CSV mode for both 'csv' and 'rows' modes (proper escaping)
-        sqlite_cmd = f"sqlite3 -header -csv '{PLEX_DB_PATH}' '{query_escaped}'"
+        # REMOTE: use SSH to access database on remote host
+        # Escape the query for SSH (handle quotes and special characters)
+        query_escaped = query.replace("'", "'\\''")
 
-    # Execute via SSH
-    cmd = ['ssh', PLEX_DB_REMOTE_HOST, sqlite_cmd]
+        # Build sqlite3 command for remote execution
+        if mode == 'raw':
+            sqlite_cmd = f"sqlite3 '{PLEX_DB_PATH}' '{query_escaped}'"
+        else:
+            sqlite_cmd = f"sqlite3 -header -csv '{PLEX_DB_PATH}' '{query_escaped}'"
 
-    if DEEPDBG:
-        print(f"{DBGPFX}Executing Plex DB query via SSH:")
-        print(f"{DBGPFX}  Host: {PLEX_DB_REMOTE_HOST}")
-        print(f"{DBGPFX}  DB: {PLEX_DB_PATH}")
-        print(f"{DBGPFX}  Query: {query[:100]}{'...' if len(query) > 100 else ''}")
-        print(f"{DBGPFX}  Command: {' '.join(cmd)}")
+        cmd = ['ssh', PLEX_DB_REMOTE_HOST, sqlite_cmd]
+
+        if DEEPDBG:
+            print(f"{DBGPFX}Executing Plex DB query via SSH:")
+            print(f"{DBGPFX}  Host: {PLEX_DB_REMOTE_HOST}")
+            print(f"{DBGPFX}  DB: {PLEX_DB_PATH}")
+            print(f"{DBGPFX}  Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+            print(f"{DBGPFX}  Command: {' '.join(cmd)}")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
