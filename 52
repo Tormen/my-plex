@@ -2332,6 +2332,11 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
             "Must mark ffprobe failures with reason='ffprobe_error'")
         self.assertIn("marked as BROKEN", func_body,
             "Must report broken file count at end of batch collection")
+        # Must fall back to ffmpeg -i when ffprobe fails (e.g. dvdsub 0x0 errors)
+        self.assertIn("ffmpeg", collector,
+            "Collector script must fall back to ffmpeg -i when ffprobe fails")
+        self.assertIn("Duration:", collector,
+            "Collector script must parse Duration from ffmpeg -i stderr output")
 
     def test_filepath_check_skips_show_season(self):
         """OBJ_BY_FILEPATH check must skip Show/Season directory container objects."""
@@ -9826,14 +9831,18 @@ def _run_batch_metadata_collection():
     else:
         ffprobe_path = shutil.which('ffprobe') or 'ffprobe'
 
+    # Derive ffmpeg path from ffprobe path (same directory)
+    ffmpeg_path = ffprobe_path.replace('ffprobe', 'ffmpeg') if 'ffprobe' in ffprobe_path else 'ffmpeg'
+
     location = f"on '{remote_host}'" if remote_host else "locally"
     print(f"  Using ffprobe: {ffprobe_path} ({location})")
 
     # Sequential collector script — parallelism is via multiple SSH workers
     # First stdin line = "worker_id total" (for progress reporting), rest = filepaths
-    collector_script = f'''import sys, json, subprocess, os, time
+    collector_script = f'''import sys, json, subprocess, os, time, re
 from datetime import datetime
 ffprobe = {repr(ffprobe_path)}
+ffmpeg = {repr(ffmpeg_path)}
 header = sys.stdin.readline().strip().split()
 wid, wtotal = header[0], int(header[1])
 n = 0
@@ -9855,6 +9864,13 @@ for line in sys.stdin:
         ext = os.path.splitext(fp)[1].lower()
         r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
+            # Fallback: ffmpeg -i parses container header even when ffprobe chokes (e.g. dvdsub 0x0)
+            r2 = subprocess.run([ffmpeg, "-i", fp], capture_output=True, text=True, timeout=30)
+            m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", r2.stderr)
+            if m:
+                dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
+                print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
+                continue
             print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": r.stderr.strip()[:200]}}), flush=True)
             continue
         dur_ms = float(r.stdout.strip()) * 1000
