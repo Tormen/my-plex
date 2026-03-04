@@ -10021,8 +10021,9 @@ for line in sys.stdin:
     if not_found_count > 0:
         print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
 
-    # Store for cache rebuild summary
+    # Store for cache update summary
     PLEX_Media.last_metadata_batch_processed = processed
+    PLEX_Media.last_metadata_batch_total = total
 
     _metadata_batch_queue = []
 
@@ -13010,7 +13011,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Show detailed summary (only actual changes — metadata probing reported separately)
             metadata_probed = getattr(PLEX_Media, 'last_metadata_batch_processed', 0)
+            metadata_total = getattr(PLEX_Media, 'last_metadata_batch_total', 0)
+            metadata_interrupted = metadata_probed > 0 and metadata_probed < metadata_total
 
+            action = "Cache rebuild" if FROM_SCRATCH else "Cache update"
+            status = "interrupted" if metadata_interrupted else "complete"
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
@@ -13020,11 +13025,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
-                print(f"Cache rebuild complete: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
             elif metadata_probed > 0:
-                print(f"Cache rebuild complete: no library changes, {metadata_probed} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
             else:
-                print(f"Cache rebuild complete: no changes, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: no changes, {total_media_files} total objects ({time_str})", flush=True)
 
             # Print per-library summary of changes at the end (only if there ARE actual changes)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
