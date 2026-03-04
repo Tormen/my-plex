@@ -16721,7 +16721,7 @@ def verify_cache():
         if broken_metadata > 0:
             parts.append(f"{broken_metadata} broken")
         if file_not_found_metadata > 0:
-            parts.append(f"{file_not_found_metadata} file not found")
+            parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
         detail = f" ({', '.join(parts)})" if parts else ""
         needs_update = missing_metadata + file_not_found_metadata
         if needs_update > 0 or broken_metadata > 0:
