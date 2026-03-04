@@ -12974,6 +12974,25 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_ID, var_name="PLEX_Media.OBJ_BY_ID", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_LIBRARY, var_name="PLEX_Media.OBJ_BY_LIBRARY", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
 
+        # --update-cache --broken: queue ALL broken files across all libraries
+        # This is needed because skipped libraries don't call _collect_missing_file_metadata
+        if FORCE_CACHE_UPDATE and RESCAN_BROKEN:
+            broken_queued = 0
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for version, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    fm = file_info.get('file_metadata')
+                    if fm and fm.get('broken'):
+                        filepath = file_info.get('filepath')
+                        if filepath:
+                            _metadata_batch_queue.append((filepath, key, version, obj.get('library', '')))
+                            broken_queued += 1
+            if broken_queued > 0:
+                print(f"  Queued {broken_queued} broken files for rescan")
+
         # Batch-collect missing file metadata (ffmpeg) via single SSH call
         if FORCE_CACHE_UPDATE and _metadata_batch_queue:
             if PLEX_Media.cache_rebuild_lock:
