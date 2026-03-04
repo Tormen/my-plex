@@ -16838,7 +16838,7 @@ def verify_cache():
         print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
         for issue in integrity_issues:
             print(f"    • {issue}")
-        print(f"\n  Run --update-cache to fix most issues.")
+        print(f"\n  Run --update-cache to fix all issues.")
 
     print("\n" + "="*76)
 
