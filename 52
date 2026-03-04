@@ -9867,8 +9867,13 @@ for line in sys.stdin:
             return '', 1
 
         elapsed = _time.time() - t0
-        rate = partition_size / elapsed if elapsed > 0 else 0
-        print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        # Count actual results (lines in stdout), not partition_size
+        actual_count = sum(1 for line in stdout_data.strip().split('\n') if line.strip()) if stdout_data.strip() else 0
+        rate = actual_count / elapsed if elapsed > 0 else 0
+        if actual_count < partition_size:
+            print(f"{w_prefix}| processed {actual_count}/{partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        else:
+            print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
         return stdout_data, returncode
 
     # Launch workers in parallel
