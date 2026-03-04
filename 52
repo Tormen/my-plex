@@ -10003,11 +10003,10 @@ for line in sys.stdin:
                     files_dict = obj.get('files', {})
                     if version in files_dict:
                         file_info = files_dict[version]
-                        cache_filesize = file_info.get('filesize')
                         meta_filesize = entry.get('filesize')
+                        cache_filesize = file_info.get('filesize')
                         if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
-                            if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, server={meta_filesize}")
-                            continue
+                            if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, disk={meta_filesize}")
                         file_info['file_metadata'] = {
                             'container_duration': entry['container_duration'],
                             'filesize': meta_filesize,
@@ -13018,11 +13017,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
-                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total objects", flush=True)
+                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total PLEX items", flush=True)
             elif metadata_probed > 0:
-                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total objects", flush=True)
+                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items", flush=True)
             else:
-                print(f"{action} {status}: no changes, {total_media_files} total objects", flush=True)
+                print(f"{action} {status}: no changes, {total_media_files} total PLEX items", flush=True)
 
             # Print per-library summary of changes at the end (only if there ARE actual changes)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
