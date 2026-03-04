@@ -16759,8 +16759,8 @@ def verify_cache():
         if file_not_found_metadata > 0:
             parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
         detail = f" ({', '.join(parts)})" if parts else ""
-        needs_update = missing_metadata + file_not_found_metadata
-        if needs_update > 0 or broken_metadata > 0:
+        needs_update = missing_metadata
+        if needs_update > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
             print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
             if needs_update > 0:
                 integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
@@ -16935,8 +16935,14 @@ def verify_cache():
         print(f"Library stats:     - no itemsCount data in cache")
 
     # Summary
-    if broken_metadata > 0:
-        print(f"\n  ℹ {broken_metadata} broken files (ffprobe failed) — visible in --broken")
+    total_broken = broken_metadata + file_not_found_metadata
+    if total_broken > 0:
+        parts = []
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} ffprobe failed")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} not found on disk")
+        print(f"\n  ℹ {total_broken} broken files ({', '.join(parts)}) — visible in --broken")
 
     if integrity_issues:
         print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
