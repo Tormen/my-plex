@@ -16689,10 +16689,14 @@ def verify_cache():
         if file_not_found_metadata > 0:
             parts.append(f"{file_not_found_metadata} file not found")
         detail = f" ({', '.join(parts)})" if parts else ""
-        if missing_metadata > 0 or broken_metadata > 0:
+        if missing_metadata > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
             print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
             if missing_metadata > 0:
                 integrity_issues.append(f"{missing_metadata} files missing metadata — run --update-cache to collect")
+            if broken_metadata > 0:
+                integrity_issues.append(f"{broken_metadata} broken files (ffprobe failed) — visible in --broken")
+            if file_not_found_metadata > 0:
+                integrity_issues.append(f"{file_not_found_metadata} files not found on server — may have been deleted")
         else:
             print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
     else:
