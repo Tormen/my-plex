@@ -2218,18 +2218,20 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("container_duration - plex_duration", content,
             "Must explain DIFF% formula above the table")
 
-    def test_collect_missing_metadata_retries_broken(self):
-        """_collect_missing_file_metadata must retry files marked as broken."""
+    def test_collect_missing_metadata_retries_file_not_found_but_not_ffprobe_error(self):
+        """_collect_missing_file_metadata must retry file_not_found but skip ffprobe_error."""
         content = self._read_script()
-        # Find just the function (stop at next top-level def)
         import re
         match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        # Must NOT skip all entries with 'file_metadata' — must retry broken ones
-        # (file_not_found files should be retried since Plex DB still lists them)
+        # Must skip entries with valid (non-broken) metadata
         self.assertIn("not existing_metadata.get('broken')", func_body,
-            "Must only skip entries with valid (non-broken) metadata")
+            "Must skip entries with valid (non-broken) metadata")
+        # Must skip ffprobe_error (genuinely broken, won't fix itself)
+        self.assertIn("ffprobe_error", func_body,
+            "Must skip files broken due to ffprobe_error (won't fix themselves)")
+        # file_not_found should NOT be skipped (Plex still lists them — retry is warranted)
 
 
 class TestVerifyCacheIntegrity(unittest.TestCase):
@@ -9740,8 +9742,9 @@ def _collect_missing_file_metadata(cached_obj, display_title):
         existing_metadata = file_info.get('file_metadata')
         if existing_metadata and not existing_metadata.get('broken'):
             continue  # Already has valid metadata
-        # Missing metadata OR broken (file_not_found / ffprobe_error) — queue for retry
-        # If Plex DB still lists the file, it should exist — retry is warranted
+        if existing_metadata and existing_metadata.get('reason') == 'ffprobe_error':
+            continue  # Genuinely broken file — won't fix itself, skip
+        # Missing metadata OR file_not_found — queue for (re)collection
         filepath = file_info.get('filepath')
         if not filepath:
             continue
