@@ -2305,6 +2305,26 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("PLEX_DB_REMOTE_HOST", func_body,
             "Must fall back to PLEX_DB_REMOTE_HOST when determine_remote_host fails")
 
+    def test_batch_metadata_continues_on_ffprobe_error(self):
+        """Collector script must continue on ffprobe failure, not abort."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        # Extract the inline collector script portion (between collector_script = and closing ''')
+        script_match = re.search(r"collector_script = f'''(.*?)'''", func_body, re.DOTALL)
+        self.assertIsNotNone(script_match, "Must find collector_script in function")
+        collector = script_match.group(1)
+        # Collector script must NOT sys.exit on ffprobe failure
+        self.assertNotIn("sys.exit", collector,
+            "Collector script must not abort on ffprobe failure — continue with remaining files")
+        # Must mark ffprobe errors as broken in cache
+        self.assertIn("ffprobe_error", func_body,
+            "Must mark ffprobe failures with reason='ffprobe_error'")
+        self.assertIn("marked as BROKEN", func_body,
+            "Must report broken file count at end of batch collection")
+
     def test_filepath_check_skips_show_season(self):
         """OBJ_BY_FILEPATH check must skip Show/Season directory container objects."""
         content = self._read_script()
@@ -9712,7 +9732,7 @@ def _run_batch_metadata_collection():
     lightweight Python script on the server that reads filepaths from stdin,
     probes each with ffprobe, and outputs JSON-lines to stdout.
 
-    Aborts on first ffprobe failure with full error context.
+    Continues on ffprobe failures, marking broken files for --broken output.
     """
     global _metadata_batch_queue
     if not _metadata_batch_queue:
@@ -9771,13 +9791,15 @@ def _run_batch_metadata_collection():
 import sys, json, subprocess, os
 from datetime import datetime
 ffprobe = {repr(ffprobe_path)}
+n = 0
 for line in sys.stdin:
     fp = line.strip()
     if not fp:
         continue
+    n += 1
     try:
         if not os.path.exists(fp):
-            print(json.dumps({{"path": fp, "error": "file not found"}}), flush=True)
+            print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
             continue
         filesize = os.path.getsize(fp)
         ext = os.path.splitext(fp)[1].lower()
@@ -9786,15 +9808,15 @@ for line in sys.stdin:
              "-of", "default=noprint_wrappers=1:nokey=1", fp],
             capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
-            print(json.dumps({{"path": fp, "error": f"ffprobe exit {{r.returncode}}", "stderr": r.stderr.strip()[:200]}}), flush=True)
-            sys.exit(1)
+            print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": r.stderr.strip()[:200]}}), flush=True)
+            continue
         dur_s = float(r.stdout.strip())
         dur_ms = dur_s * 1000
-        print(json.dumps({{"path": fp, "container_duration": dur_ms, "filesize": filesize,
+        print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize,
                           "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
     except Exception as e:
-        print(json.dumps({{"path": fp, "error": str(e)}}), flush=True)
-        sys.exit(1)
+        print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
+        continue
 '''
 
     # Build file list as input
@@ -9865,27 +9887,32 @@ for line in sys.stdin:
                         PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
                 continue
 
-            # ffprobe error — print full context
+            # ffprobe error — mark as broken and continue
             error_count += 1
+            file_n = entry.get('n', '?')
             stderr_msg = entry.get('stderr', '')
-            print(f"\n✗ FAILED: {os.path.basename(filepath)}")
-            print(f"    Path:  {filepath}")
-            print(f"    Error: {error_msg}")
+            print(f"\n  ✗ BROKEN [{file_n}/{total}]: {os.path.basename(filepath)}")
+            print(f"      Path:  {filepath}")
             if stderr_msg:
                 for eline in stderr_msg.split('\n')[:3]:
-                    print(f"    {eline}")
-            if remote_host:
-                print(f"    Command: ssh {remote_host} {ffprobe_path} -v error -show_entries format=duration ... '{filepath}'")
-            else:
-                print(f"    Command: {ffprobe_path} -v error -show_entries format=duration ... '{filepath}'")
+                    print(f"      {eline}")
 
-            # Check if the collector script exited (abort-on-failure)
-            if result.returncode != 0:
-                print(f"\n✗ Batch metadata collection aborted (exit code {result.returncode})")
-                if result.stderr.strip():
-                    for eline in result.stderr.strip().split('\n')[:5]:
-                        print(f"    {eline}")
-                sys.exit(1)
+            # Mark as broken in cache so --broken will show it
+            targets = filepath_lookup.get(filepath, [])
+            for obj_key, version, display_title in targets:
+                if obj_key in PLEX_Media.OBJ_BY_ID:
+                    obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                    files_dict = obj.get('files', {})
+                    if version in files_dict:
+                        files_dict[version]['file_metadata'] = {
+                            'broken': True,
+                            'reason': 'ffprobe_error',
+                            'stderr': stderr_msg[:200],
+                            'filesize': files_dict[version].get('filesize'),
+                            'marked_at': datetime.now().isoformat()
+                        }
+                if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                    PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
             continue
 
         # Success — integrate into cache
@@ -9913,19 +9940,20 @@ for line in sys.stdin:
             if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                 PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
 
-    # Check for overall failure
-    if result.returncode != 0 and error_count == 0:
+    # Check for unexpected failure (e.g. python3 not found, SSH failure)
+    if result.returncode != 0 and error_count == 0 and success_count == 0 and not_found_count == 0:
         print(f"\n✗ Batch metadata collection failed (exit code {result.returncode})")
         if result.stderr.strip():
             for line in result.stderr.strip().split('\n')[:5]:
                 print(f"    {line}")
-        sys.exit(1)
+        _metadata_batch_queue = []
+        return
 
-    print(f"  ✓ Metadata collected: {success_count}/{total} files")
+    print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
+    if error_count > 0:
+        print(f"  ⚠ {error_count} files marked as BROKEN (ffprobe failed — visible in --broken)")
     if not_found_count > 0:
         print(f"  ⚠ {not_found_count} files not found on server (may have been deleted)")
-    if error_count > 0:
-        print(f"  ⚠ Errors: {error_count} files")
 
     _metadata_batch_queue = []
 
