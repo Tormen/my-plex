@@ -9871,7 +9871,7 @@ for line in sys.stdin:
         filepaths_input = f"{w_prefix} {partition_size}\n"
         filepaths_input += '\n'.join(partition) + '\n'
         if remote_host:
-            cmd = ['ssh', '-o', 'LogLevel=ERROR', remote_host, f'python3 -c {shlex.quote(collector_script)}']
+            cmd = ['ssh', '-o', 'ControlMaster=no', remote_host, f'python3 -c {shlex.quote(collector_script)}']
         else:
             cmd = [sys.executable, '-c', collector_script]
 
