@@ -2348,6 +2348,25 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("OBJ_BY_LIBRARY", check7,
             "itemsCount check must use OBJ_BY_LIBRARY to determine library type")
 
+    def test_broken_files_not_in_integrity_issues(self):
+        """Broken files (ffprobe failed) must NOT be added to integrity_issues — they are a warning only."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(# Check 1.*?)(?=# Check 2:)', content, re.DOTALL)
+        if match is None:
+            # Fall back: search the file metadata section in verify_cache
+            match = re.search(r'(needs_update = missing_metadata.*?)(?=# Check 2:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must have file metadata check section")
+        check1 = match.group(1)
+        self.assertNotIn("integrity_issues.append", check1.split("broken_metadata")[1] if "broken_metadata" in check1 else "",
+            "Broken files must NOT be appended to integrity_issues")
+        # Verify broken is reported as info/warning outside of integrity_issues
+        summary_match = re.search(r'(# Summary.*?)(?=print.*=".*76)', content, re.DOTALL)
+        self.assertIsNotNone(summary_match, "Must have Summary section")
+        summary = summary_match.group(1)
+        self.assertIn("broken_metadata", summary,
+            "Summary must show broken files as a warning before integrity issues")
+
     def test_skip_logic_compares_episode_count(self):
         """Skip logic for show libraries must compare episode count, not just show count."""
         content = self._read_script()
@@ -16730,8 +16749,6 @@ def verify_cache():
             print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
             if needs_update > 0:
                 integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
-            if broken_metadata > 0:
-                integrity_issues.append(f"{broken_metadata} broken files (ffprobe failed) — visible in --broken")
         else:
             print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
     else:
@@ -16903,6 +16920,9 @@ def verify_cache():
         print(f"Library stats:     - no itemsCount data in cache")
 
     # Summary
+    if broken_metadata > 0:
+        print(f"\n  ℹ {broken_metadata} broken files (ffprobe failed) — visible in --broken")
+
     if integrity_issues:
         print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
         for issue in integrity_issues:
