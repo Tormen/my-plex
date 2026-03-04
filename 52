@@ -13588,7 +13588,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 diff_pct = diff_pct  # Keep whatever diff we had (may be None)
 
                     if is_broken:
-                        broken_files.append((key, diff_pct, severity))
+                        filepath = file_info.get('filepath', '')
+                        broken_files.append((key, diff_pct, severity, filepath))
                         break  # Only add the key once even if multiple files
 
             if not broken_files:
@@ -13604,12 +13605,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Print broken files with details
             print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-            print(f"\n{'SEVERITY':<12} | {'DIFF%':<8} | {'PLEX-ID':<10} | {'TITLE':<60} | {'LIBRARY':<15} | {'DURATION':<10}")
+            print(f"\n{'SEVERITY':<12} | {'DIFF%':<8} | {'PLEX-ID':<10} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
             print("-" * 150)
 
-            for key, diff_pct, severity in broken_files:
+            for key, diff_pct, severity, filepath in broken_files:
                 obj = PLEX_Media.OBJ_BY_ID[key]
-                title = obj.get('title', 'Unknown')[:60]
                 library = obj.get('library', 'Unknown')[:15]
                 plex_duration = obj.get('duration', 0) / 60000  # Convert to minutes
 
@@ -13617,7 +13617,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
                 plex_id = obj.get('id', 'N/A')
 
-                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {title:<60} | {library:<15} | {plex_duration:>7.1f} min")
+                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {library:<15} | {plex_duration:>7.1f} min | {filepath}")
 
             print(f"\nTotal: {len(broken_files)} broken/truncated files found")
             print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
