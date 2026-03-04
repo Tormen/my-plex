@@ -12961,6 +12961,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Save cache after metadata collection (before labels index)
             update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
 
+        # Rebuild OBJ_BY_FILEPATH from OBJ_BY_ID to remove stale entries
+        if FORCE_CACHE_UPDATE:
+            PLEX_Media.OBJ_BY_FILEPATH = {}
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') in ('Show', 'Season', 'Collection'):
+                    continue
+                for _ver, fi in obj.get('files', {}).items():
+                    fp = fi.get('filepath') if isinstance(fi, dict) else None
+                    if fp:
+                        if fp not in PLEX_Media.OBJ_BY_FILEPATH:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp] = []
+                        if key not in PLEX_Media.OBJ_BY_FILEPATH[fp]:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp].append(key)
+
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
