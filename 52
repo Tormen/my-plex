@@ -2398,6 +2398,19 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("metadata_type = 4", func_body,
             "get_library_stats must query metadata_type=4 (episodes) for show libraries")
 
+    def test_obj_by_filepath_rebuild_is_saved(self):
+        """OBJ_BY_FILEPATH rebuild must be persisted via update_and_save_cache AFTER the rebuild."""
+        content = self._read_script()
+        import re
+        # Find the rebuild block and verify a save follows it (not before it)
+        rebuild_pos = content.find("# Rebuild OBJ_BY_FILEPATH from OBJ_BY_ID")
+        self.assertGreater(rebuild_pos, 0, "Must have OBJ_BY_FILEPATH rebuild block")
+        # Find the next update_and_save_cache call after the rebuild
+        after_rebuild = content[rebuild_pos:]
+        save_match = re.search(r"update_and_save_cache\(\{.*?'obj_by_filepath'.*?\}\)", after_rebuild)
+        self.assertIsNotNone(save_match,
+            "Must call update_and_save_cache with 'obj_by_filepath' AFTER the rebuild block")
+
 
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
@@ -12986,8 +12999,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
 
-        # Save labels_index to cache
-        update_and_save_cache({'labels_index': labels_index})
+        # Save labels_index and rebuilt OBJ_BY_FILEPATH to cache
+        update_and_save_cache({'labels_index': labels_index, 'obj_by_filepath': PLEX_Media.OBJ_BY_FILEPATH})
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
