@@ -9803,7 +9803,9 @@ for line in sys.stdin:
     # Execute: pipe file list to the collector script via SSH (or locally)
     import subprocess as sp
     if remote_host:
-        cmd = ['ssh', remote_host, 'python3', '-c', collector_script]
+        # Shell-quote the script to prevent remote shell (zsh) from interpreting
+        # Python syntax like {} as shell metacharacters
+        cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
     else:
         cmd = [sys.executable, '-c', collector_script]
 
