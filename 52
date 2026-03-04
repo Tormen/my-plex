@@ -2078,8 +2078,8 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIsNotNone(match,
             "Summary must have a change condition based on added/removed/updated only")
         # metadata_probed must be reported separately (elif branch)
-        self.assertIn("total_metadata_probed", content,
-            "Summary must mention metadata_probed count when no library changes")
+        self.assertIn("metadata_probed", content,
+            "Summary must mention metadata probed count when no library changes")
 
     def test_tool_failure_aborts_with_exit(self):
         """External tool failure during batch apply must abort immediately."""
@@ -10011,11 +10011,18 @@ for line in sys.stdin:
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
 
-    print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
+    processed = success_count + error_count + not_found_count
+    if processed < total:
+        print(f"\n  ✓ Metadata collected: {success_count} files ({processed}/{total} processed, interrupted)")
+    else:
+        print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
     if error_count > 0:
         print(f"  ⚠ {error_count} files marked as BROKEN (ffprobe failed — visible in --broken)")
     if not_found_count > 0:
         print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
+
+    # Store for cache rebuild summary
+    PLEX_Media.last_metadata_batch_processed = processed
 
     _metadata_batch_queue = []
 
@@ -13002,10 +13009,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     total_updated += counters['updated']['movies'] + counters['updated']['episodes']
 
             # Show detailed summary (only actual changes — metadata probing reported separately)
-            total_metadata_probed = sum(
-                counters.get('metadata_probed', 0)
-                for counters in (PLEX_Media.library_delta_counters or {}).values()
-            ) if hasattr(PLEX_Media, 'library_delta_counters') else 0
+            metadata_probed = getattr(PLEX_Media, 'last_metadata_batch_processed', 0)
 
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
@@ -13017,8 +13021,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
                 print(f"Cache rebuild complete: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
-            elif total_metadata_probed > 0:
-                print(f"Cache rebuild complete: no library changes, {total_metadata_probed} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
+            elif metadata_probed > 0:
+                print(f"Cache rebuild complete: no library changes, {metadata_probed} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
             else:
                 print(f"Cache rebuild complete: no changes, {total_media_files} total objects ({time_str})", flush=True)
 
