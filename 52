@@ -2221,9 +2221,11 @@ class TestCacheSkipLogic(unittest.TestCase):
         match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        # Must NOT skip all entries with 'file_metadata' — must retry broken ones
+        # Must skip valid metadata and file_not_found, but retry ffprobe_error
         self.assertIn("not existing_metadata.get('broken')", func_body,
             "Must only skip entries with valid (non-broken) metadata")
+        self.assertIn("file_not_found", func_body,
+            "Must skip file_not_found — those files are gone, don't retry")
 
 
 class TestVerifyCacheIntegrity(unittest.TestCase):
@@ -9713,9 +9715,12 @@ def _collect_missing_file_metadata(cached_obj, display_title):
         if not isinstance(file_info, dict):
             continue
         existing_metadata = file_info.get('file_metadata')
-        if existing_metadata and not existing_metadata.get('broken'):
-            continue  # Already has valid metadata
-        # Missing metadata OR marked broken — queue for batch collection
+        if existing_metadata:
+            if not existing_metadata.get('broken'):
+                continue  # Already has valid metadata
+            if existing_metadata.get('reason') == 'file_not_found':
+                continue  # File gone from server — don't retry
+        # Missing metadata OR broken (ffprobe error) — queue for batch collection
         filepath = file_info.get('filepath')
         if not filepath:
             continue
