@@ -9727,12 +9727,12 @@ def _collect_missing_file_metadata(cached_obj, display_title):
 
 
 def _run_batch_metadata_collection():
-    """Batch-collect ffprobe metadata for all queued files via a single SSH call.
+    """Batch-collect ffprobe metadata for all queued files via parallel SSH workers.
 
     Uses run_tool_on_PLEX_server('ffprobe', ...) to resolve the ffprobe path
-    (respecting EXTERNAL_TOOLS['SERVER']['ffprobe'] config). Then runs a
-    lightweight Python script on the server that reads filepaths from stdin,
-    probes each with ffprobe, and outputs JSON-lines to stdout.
+    (respecting EXTERNAL_TOOLS['SERVER']['ffprobe'] config). Partitions files
+    across parallel workers (like --update-cache), each running a lightweight
+    Python collector script via SSH that outputs JSON-lines to stdout.
 
     Continues on ffprobe failures, marking broken files for --broken output.
     """
@@ -9741,8 +9741,9 @@ def _run_batch_metadata_collection():
         return
 
     total = len(_metadata_batch_queue)
+    num_workers = min(8, max(1, total // 100))  # 1-8 workers, at least 100 files each
     print(f"\n{'='*76}")
-    print(f"COLLECTING FILE METADATA ({total} files)")
+    print(f"COLLECTING FILE METADATA ({total} files, {num_workers} workers)")
     print(f"{'='*76}")
 
     # Determine remote_host: try first few filepaths, fall back to PLEX_DB_REMOTE_HOST
@@ -9754,25 +9755,18 @@ def _run_batch_metadata_collection():
             remote_host = rh
             break
     if remote_host is None:
-        # No file found locally or on remote — default to DB host
-        # (files may have been renamed/moved but are still on the server)
         local_db_path = os.path.expanduser(PLEX_DB_PATH)
         if not os.path.exists(local_db_path):
-            # DB is remote → files are remote too
             remote_host = PLEX_DB_REMOTE_HOST
-        # else: DB is local → files should be local too, keep remote_host=None
 
     # Resolve ffprobe path using existing tool resolution mechanism
-    # This respects EXTERNAL_TOOLS['SERVER']['ffprobe'] config
     ffprobe_result = run_tool_on_PLEX_server('ffprobe', ['-version'], remote_host=remote_host, timeout=10)
     if ffprobe_result is None:
-        # run_tool_on_PLEX_server already printed the error with config hint
         print(f"\n✗ Cannot collect file metadata without ffprobe.")
         print(f"  Skipping metadata collection — run 'my-plex --update-cache' after installing ffprobe.")
         _metadata_batch_queue = []
         return
 
-    # Get the resolved ffprobe path (re-resolve to get the actual path)
     config_key = "EXTERNAL_TOOLS['SERVER']['ffprobe']"
     configured = EXTERNAL_TOOLS.get('SERVER', {}).get('ffprobe')
     if configured:
@@ -9785,101 +9779,37 @@ def _run_batch_metadata_collection():
 
     location = f"on '{remote_host}'" if remote_host else "locally"
     print(f"  Using ffprobe: {ffprobe_path} ({location})")
-    print(f"  Processing {total} files...")
 
-    # Build inline Python script for batch ffprobe collection
-    # This script reads filepaths from stdin, probes each, outputs JSON-lines
-    collector_script = f'''
-import sys, json, subprocess, os, time
+    # Simple sequential collector script — parallelism is via multiple SSH workers
+    collector_script = f'''import sys, json, subprocess, os
 from datetime import datetime
 ffprobe = {repr(ffprobe_path)}
-total = {total}
 n = 0
-t0 = time.time()
 for line in sys.stdin:
     fp = line.strip()
-    if not fp:
-        continue
+    if not fp: continue
     n += 1
-    if n % 100 == 0:
-        elapsed = time.time() - t0
-        rate = n / elapsed if elapsed > 0 else 0
-        eta = int((total - n) / rate) if rate > 0 else 0
-        print(f"  {{n:,}}/{{total:,}} files processed ({{rate:.0f}} files/s, ~{{eta}}s remaining)", file=sys.stderr, flush=True)
     try:
         if not os.path.exists(fp):
             print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
             continue
         filesize = os.path.getsize(fp)
         ext = os.path.splitext(fp)[1].lower()
-        r = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", fp],
-            capture_output=True, text=True, timeout=30)
+        r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": r.stderr.strip()[:200]}}), flush=True)
             continue
-        dur_s = float(r.stdout.strip())
-        dur_ms = dur_s * 1000
-        print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize,
-                          "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
+        dur_ms = float(r.stdout.strip()) * 1000
+        print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
     except Exception as e:
         print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
         continue
 '''
 
-    # Build file list as input
-    filepaths_input = '\n'.join(fp for fp, _, _, _ in _metadata_batch_queue) + '\n'
-
-    # Execute: pipe file list to the collector script via SSH (or locally)
-    # Use Popen to stream stderr (progress) in real-time while collecting stdout (JSON results)
-    import subprocess as sp
-    if remote_host:
-        # Shell-quote the script to prevent remote shell (zsh) from interpreting
-        # Python syntax like {} as shell metacharacters
-        cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
-    else:
-        cmd = [sys.executable, '-c', collector_script]
-
-    if DBG: print(f"{DBGPFX}_run_batch_metadata_collection: cmd = {cmd[:3]}... ({total} files)")
-
-    try:
-        import threading
-        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
-
-        # Stream stderr (progress) in a background thread
-        stderr_lines = []
-        def read_stderr():
-            for line in proc.stderr:
-                line = line.rstrip('\n')
-                stderr_lines.append(line)
-                print(line, flush=True)
-        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-        stderr_thread.start()
-
-        # Send input and collect stdout
-        stdout_data, _ = proc.communicate(input=filepaths_input, timeout=max(60, total * 2))
-        stderr_thread.join(timeout=5)
-
-        # Build a result-like object for the parsing code below
-        class Result:
-            pass
-        result = Result()
-        result.stdout = stdout_data
-        result.stderr = '\n'.join(stderr_lines)
-        result.returncode = proc.returncode
-    except sp.TimeoutExpired:
-        proc.kill()
-        print(f"\n✗ TIMEOUT: Batch metadata collection timed out after {max(60, total * 2)}s")
-        print(f"  This may indicate ffprobe is hanging on a file.")
-        _metadata_batch_queue = []
-        return
-
-    # Parse JSON-lines output and integrate results
-    from datetime import datetime
-    success_count = 0
-    error_count = 0
-    not_found_count = 0
+    # Partition files across workers
+    partitions = [[] for _ in range(num_workers)]
+    for i, item in enumerate(_metadata_batch_queue):
+        partitions[i % num_workers].append(item)
 
     # Build lookup: filepath -> [(obj_key, version, display_title), ...]
     filepath_lookup = {}
@@ -9888,23 +9818,103 @@ for line in sys.stdin:
             filepath_lookup[filepath] = []
         filepath_lookup[filepath].append((obj_key, version, display_title))
 
-    for line in result.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
+    # Worker function: run collector script for a partition
+    import subprocess as sp
+    import time as _time
+
+    def run_worker(worker_id, partition):
+        """Run collector script for a file partition, return (stdout, returncode)."""
+        w_prefix = f"W{worker_id:02d}| "
+        partition_size = len(partition)
+        print(f"{w_prefix}processing {partition_size} files...", flush=True)
+        t0 = _time.time()
+
+        filepaths_input = '\n'.join(fp for fp, _, _, _ in partition) + '\n'
+        if remote_host:
+            cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
+        else:
+            cmd = [sys.executable, '-c', collector_script]
+
         try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+            result = sp.run(cmd, input=filepaths_input, capture_output=True, text=True,
+                            timeout=max(60, partition_size * 2))
+        except sp.TimeoutExpired:
+            print(f"{w_prefix}✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
+            return '', 1
+
+        elapsed = _time.time() - t0
+        rate = partition_size / elapsed if elapsed > 0 else 0
+        print(f"{w_prefix}completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        return result.stdout, result.returncode
+
+    # Launch workers in parallel
+    from concurrent.futures import ThreadPoolExecutor
+    worker_results = {}
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = {pool.submit(run_worker, i, partitions[i]): i for i in range(num_workers)}
+        for future in futures:
+            worker_id = futures[future]
+            try:
+                stdout, returncode = future.result()
+                worker_results[worker_id] = (stdout, returncode)
+            except Exception as e:
+                print(f"W{worker_id:02d}| ✗ Worker failed: {e}", flush=True)
+                worker_results[worker_id] = ('', 1)
+
+    # Parse JSON-lines output from all workers and integrate results
+    from datetime import datetime
+    success_count = 0
+    error_count = 0
+    not_found_count = 0
+
+    for worker_id in sorted(worker_results.keys()):
+        stdout, returncode = worker_results[worker_id]
+        if not stdout.strip():
+            if returncode != 0:
+                print(f"W{worker_id:02d}| ✗ Worker failed (exit code {returncode})")
             continue
 
-        filepath = entry.get('path', '')
-        if 'error' in entry:
-            error_msg = entry.get('error', 'unknown')
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-            # Distinguish "file not found" from ffprobe errors
-            if error_msg == 'file not found':
-                not_found_count += 1
-                if VRB: print(f"  ⚠ File not found: {filepath}")
-                # Mark as file_not_found in cache (don't abort — file may have been deleted)
+            filepath = entry.get('path', '')
+            if 'error' in entry:
+                error_msg = entry.get('error', 'unknown')
+
+                if error_msg == 'file not found':
+                    not_found_count += 1
+                    if VRB: print(f"  ⚠ File not found: {filepath}")
+                    targets = filepath_lookup.get(filepath, [])
+                    for obj_key, version, display_title in targets:
+                        if obj_key in PLEX_Media.OBJ_BY_ID:
+                            obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                            files_dict = obj.get('files', {})
+                            if version in files_dict:
+                                files_dict[version]['file_metadata'] = {
+                                    'broken': True,
+                                    'reason': 'file_not_found',
+                                    'filesize': files_dict[version].get('filesize'),
+                                    'marked_at': datetime.now().isoformat()
+                                }
+                        if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                            PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+                    continue
+
+                # ffprobe error — mark as broken
+                error_count += 1
+                file_n = entry.get('n', '?')
+                stderr_msg = entry.get('stderr', '')
+                print(f"\n  ✗ BROKEN [W{worker_id:02d} #{file_n}]: {os.path.basename(filepath)}")
+                print(f"      Path:  {filepath}")
+                if stderr_msg:
+                    for eline in stderr_msg.split('\n')[:3]:
+                        print(f"      {eline}")
+
                 targets = filepath_lookup.get(filepath, [])
                 for obj_key, version, display_title in targets:
                     if obj_key in PLEX_Media.OBJ_BY_ID:
@@ -9913,7 +9923,8 @@ for line in sys.stdin:
                         if version in files_dict:
                             files_dict[version]['file_metadata'] = {
                                 'broken': True,
-                                'reason': 'file_not_found',
+                                'reason': 'ffprobe_error',
+                                'stderr': stderr_msg[:200],
                                 'filesize': files_dict[version].get('filesize'),
                                 'marked_at': datetime.now().isoformat()
                             }
@@ -9921,73 +9932,35 @@ for line in sys.stdin:
                         PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
                 continue
 
-            # ffprobe error — mark as broken and continue
-            error_count += 1
-            file_n = entry.get('n', '?')
-            stderr_msg = entry.get('stderr', '')
-            print(f"\n  ✗ BROKEN [{file_n}/{total}]: {os.path.basename(filepath)}")
-            print(f"      Path:  {filepath}")
-            if stderr_msg:
-                for eline in stderr_msg.split('\n')[:3]:
-                    print(f"      {eline}")
-
-            # Mark as broken in cache so --broken will show it
+            # Success — integrate into cache
             targets = filepath_lookup.get(filepath, [])
             for obj_key, version, display_title in targets:
                 if obj_key in PLEX_Media.OBJ_BY_ID:
                     obj = PLEX_Media.OBJ_BY_ID[obj_key]
                     files_dict = obj.get('files', {})
                     if version in files_dict:
-                        files_dict[version]['file_metadata'] = {
-                            'broken': True,
-                            'reason': 'ffprobe_error',
-                            'stderr': stderr_msg[:200],
-                            'filesize': files_dict[version].get('filesize'),
-                            'marked_at': datetime.now().isoformat()
+                        file_info = files_dict[version]
+                        cache_filesize = file_info.get('filesize')
+                        meta_filesize = entry.get('filesize')
+                        if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
+                            if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, server={meta_filesize}")
+                            continue
+                        file_info['file_metadata'] = {
+                            'container_duration': entry['container_duration'],
+                            'filesize': meta_filesize,
+                            'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
+                            'file_type': entry.get('file_type', '')
                         }
+                        success_count += 1
+
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
-            continue
-
-        # Success — integrate into cache
-        targets = filepath_lookup.get(filepath, [])
-        for obj_key, version, display_title in targets:
-            if obj_key in PLEX_Media.OBJ_BY_ID:
-                obj = PLEX_Media.OBJ_BY_ID[obj_key]
-                files_dict = obj.get('files', {})
-                if version in files_dict:
-                    file_info = files_dict[version]
-                    cache_filesize = file_info.get('filesize')
-                    meta_filesize = entry.get('filesize')
-                    if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
-                        if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, server={meta_filesize}")
-                        continue
-                    file_info['file_metadata'] = {
-                        'container_duration': entry['container_duration'],
-                        'filesize': meta_filesize,
-                        'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
-                        'file_type': entry.get('file_type', '')
-                    }
-                    success_count += 1
-
-            # Track in delta counters
-            if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
-                PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
-
-    # Check for unexpected failure (e.g. python3 not found, SSH failure)
-    if result.returncode != 0 and error_count == 0 and success_count == 0 and not_found_count == 0:
-        print(f"\n✗ Batch metadata collection failed (exit code {result.returncode})")
-        if result.stderr.strip():
-            for line in result.stderr.strip().split('\n')[:5]:
-                print(f"    {line}")
-        _metadata_batch_queue = []
-        return
 
     print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
     if error_count > 0:
         print(f"  ⚠ {error_count} files marked as BROKEN (ffprobe failed — visible in --broken)")
     if not_found_count > 0:
-        print(f"  ⚠ {not_found_count} files not found on server (may have been deleted)")
+        print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
 
     _metadata_batch_queue = []
 
