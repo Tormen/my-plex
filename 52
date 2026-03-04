@@ -13555,7 +13555,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if file_metadata:
                         if file_metadata.get('broken'):
                             is_broken = True
-                            severity = 'BROKEN'
+                            reason = file_metadata.get('reason', '')
+                            severity = 'NOT FOUND' if reason == 'file_not_found' else 'FFPROBE ERR'
                         else:
                             container_duration = file_metadata.get('container_duration')
                             if container_duration:
@@ -13600,7 +13601,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return
 
             # Sort by severity (severe first), then by diff_pct (worst first)
-            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, None: 4}
+            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'FFPROBE ERR': 5, 'NOT FOUND': 6, None: 4}
             broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
             # Print broken files with details
