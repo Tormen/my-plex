@@ -2133,17 +2133,17 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("run_tool_on_PLEX_server('ffprobe'", func_body,
             "Must use run_tool_on_PLEX_server for ffprobe path resolution")
 
-    def test_batch_metadata_aborts_on_failure(self):
-        """Batch metadata collection must abort on first ffprobe failure."""
+    def test_batch_metadata_marks_broken_on_failure(self):
+        """Batch metadata collection must mark ffprobe failures as broken, not abort."""
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("sys.exit(1)", func_body,
-            "Batch collection must abort (sys.exit) on failure")
-        self.assertIn("exit code", func_body,
-            "Abort message must include exit code")
+        self.assertIn("ffprobe_error", func_body,
+            "Must mark ffprobe failures with reason='ffprobe_error'")
+        self.assertIn("'broken': True", func_body,
+            "Must set broken flag on failed files")
 
     def test_batch_collection_called_from_update_cache(self):
         """update_cache must call _run_batch_metadata_collection after library processing."""
@@ -9788,15 +9788,22 @@ def _run_batch_metadata_collection():
     # Build inline Python script for batch ffprobe collection
     # This script reads filepaths from stdin, probes each, outputs JSON-lines
     collector_script = f'''
-import sys, json, subprocess, os
+import sys, json, subprocess, os, time
 from datetime import datetime
 ffprobe = {repr(ffprobe_path)}
+total = {total}
 n = 0
+t0 = time.time()
 for line in sys.stdin:
     fp = line.strip()
     if not fp:
         continue
     n += 1
+    if n % 100 == 0:
+        elapsed = time.time() - t0
+        rate = n / elapsed if elapsed > 0 else 0
+        eta = int((total - n) / rate) if rate > 0 else 0
+        print(f"  {{n:,}}/{{total:,}} files processed ({{rate:.0f}} files/s, ~{{eta}}s remaining)", file=sys.stderr, flush=True)
     try:
         if not os.path.exists(fp):
             print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
@@ -9823,6 +9830,7 @@ for line in sys.stdin:
     filepaths_input = '\n'.join(fp for fp, _, _, _ in _metadata_batch_queue) + '\n'
 
     # Execute: pipe file list to the collector script via SSH (or locally)
+    # Use Popen to stream stderr (progress) in real-time while collecting stdout (JSON results)
     import subprocess as sp
     if remote_host:
         # Shell-quote the script to prevent remote shell (zsh) from interpreting
@@ -9834,12 +9842,36 @@ for line in sys.stdin:
     if DBG: print(f"{DBGPFX}_run_batch_metadata_collection: cmd = {cmd[:3]}... ({total} files)")
 
     try:
-        result = sp.run(cmd, input=filepaths_input, capture_output=True, text=True,
-                        timeout=max(60, total * 2))  # ~2s per file max
+        import threading
+        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+
+        # Stream stderr (progress) in a background thread
+        stderr_lines = []
+        def read_stderr():
+            for line in proc.stderr:
+                line = line.rstrip('\n')
+                stderr_lines.append(line)
+                print(line, flush=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
+        # Send input and collect stdout
+        stdout_data, _ = proc.communicate(input=filepaths_input, timeout=max(60, total * 2))
+        stderr_thread.join(timeout=5)
+
+        # Build a result-like object for the parsing code below
+        class Result:
+            pass
+        result = Result()
+        result.stdout = stdout_data
+        result.stderr = '\n'.join(stderr_lines)
+        result.returncode = proc.returncode
     except sp.TimeoutExpired:
+        proc.kill()
         print(f"\n✗ TIMEOUT: Batch metadata collection timed out after {max(60, total * 2)}s")
         print(f"  This may indicate ffprobe is hanging on a file.")
-        sys.exit(1)
+        _metadata_batch_queue = []
+        return
 
     # Parse JSON-lines output and integrate results
     from datetime import datetime
