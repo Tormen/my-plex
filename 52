@@ -626,7 +626,7 @@ US=os.path.basename(__file__); # "my-plex-api.py"
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'totalDuration':{}, 'totalStorage':{} }
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{} }
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
@@ -2305,6 +2305,52 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("PLEX_DB_REMOTE_HOST", func_body,
             "Must fall back to PLEX_DB_REMOTE_HOST when determine_remote_host fails")
 
+    def test_filepath_check_skips_show_season(self):
+        """OBJ_BY_FILEPATH check must skip Show/Season directory container objects."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(# Check 2: OBJ_BY_FILEPATH.*?)(?=# Check 3:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must have Check 2: OBJ_BY_FILEPATH section")
+        check2 = match.group(1)
+        self.assertIn("('Show', 'Season')", check2,
+            "OBJ_BY_FILEPATH check must skip Show/Season objects (directory containers)")
+
+    def test_itemscount_compares_primary_type_only(self):
+        """itemsCount check must compare like-for-like: primary type per library only."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(# Check 7: library_stats.*?)(?=# Summary)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must have Check 7: library_stats section")
+        check7 = match.group(1)
+        self.assertIn("primary_type_per_lib", check7,
+            "itemsCount check must determine primary type per library")
+        self.assertIn("OBJ_BY_LIBRARY", check7,
+            "itemsCount check must use OBJ_BY_LIBRARY to determine library type")
+
+    def test_skip_logic_compares_episode_count(self):
+        """Skip logic for show libraries must compare episode count, not just show count."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def process_single_library\(.*?\):\n.*?)(?=\n    def update_cache)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find process_single_library function")
+        func_body = match.group(1)
+        self.assertIn("current_episode_count", func_body,
+            "Skip logic must compare current episode count for show libraries")
+        self.assertIn("old_episode_count", func_body,
+            "Skip logic must compare old episode count from cache")
+
+    def test_get_library_stats_queries_episode_count(self):
+        """get_library_stats must query episode count for show libraries."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find get_library_stats function")
+        func_body = match.group(1)
+        self.assertIn("episodesCount", func_body,
+            "get_library_stats must store episode count in episodesCount")
+        self.assertIn("metadata_type = 4", func_body,
+            "get_library_stats must query metadata_type=4 (episodes) for show libraries")
+
 
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
@@ -3859,6 +3905,15 @@ def get_library_stats(supported=True):
             except Exception as e:
                 if DBG: print(f"{DBGPFX}get_library_stats(): API totalSize failed for '{title}': {e}")
         library_stats['itemsCount'][title] = item_count
+
+        # For show libraries, also query episode count for skip logic comparison
+        if library.type == 'show':
+            try:
+                ep_query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL"
+                ep_rows = query_plex_database(ep_query, mode='rows')
+                library_stats['episodesCount'][title] = int(ep_rows[0][0]) if ep_rows else 0
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}get_library_stats(): DB episode count failed for '{title}': {e}")
 
         #library_stats['totalDuration'][title] = library.totalDuration
         #library_stats['totalStorage'][title] = library.totalStorage
@@ -11190,12 +11245,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
             err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --from-scratch to fix.")
 
-        # For show libraries: compare using show count (library.totalSize = shows only)
-        # But we also check total objects (shows+seasons+episodes) to detect new content
+        # For show libraries: compare show count AND episode count to detect new episodes
+        # in existing shows (show count alone won't change when episodes are added)
         if lib_type == 'Show':
             old_show_count = old_counts.get('shows', 0)
+            old_episode_count = old_counts.get('episodes', 0)
             old_total_objects = old_counts.get('shows', 0) + old_counts.get('seasons', 0) + old_counts.get('episodes', 0)
-            counts_match = (current_itemsCount == old_show_count)  # Plex reports show count
+            current_episode_count = current_library_stats.get('episodesCount', {}).get(title, 0)
+            counts_match = (current_itemsCount == old_show_count) and (current_episode_count == old_episode_count or current_episode_count == 0)
         else:  # Movie library
             old_movie_count = old_counts.get('movies', 0)
             old_total_objects = old_movie_count
@@ -11232,7 +11289,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 print(f"{DBGPFX}Library '{title}': Comparing timestamps: old={old_timestamp}, current={current_timestamp}, match={current_timestamp == old_timestamp}")
                 if lib_type == 'Show':
                     print(f"{DBGPFX}Library '{title}': Cached counts: shows={old_counts.get('shows', 0)}, seasons={old_counts.get('seasons', 0)}, episodes={old_counts.get('episodes', 0)}")
-                    print(f"{DBGPFX}Library '{title}': Comparing show count: old={old_show_count}, current={current_itemsCount}, match={counts_match}")
+                    print(f"{DBGPFX}Library '{title}': Comparing show count: old={old_show_count}, current={current_itemsCount}, episodes: old={old_episode_count}, current={current_episode_count}, match={counts_match}")
                 else:
                     print(f"{DBGPFX}Library '{title}': Comparing movie count: old={old_movie_count}, current={current_itemsCount}, match={counts_match}")
 
@@ -16623,6 +16680,10 @@ def verify_cache():
                 filepath_dangling += 1
             else:
                 obj = PLEX_Media.OBJ_BY_ID[key]
+                # Show/Season objects are directory containers with file='' and files={}
+                # They are not media files — skip filepath validation for them
+                if obj.get('type') in ('Show', 'Season'):
+                    continue
                 obj_filepaths = set()
                 for _, fi in obj.get('files', {}).items():
                     if isinstance(fi, dict) and fi.get('filepath'):
@@ -16738,13 +16799,24 @@ def verify_cache():
         integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
 
     # Check 7: library_stats itemsCount accuracy
+    # get_library_stats() stores primary type count: Movie count for movie libs, Show count for show libs
+    # So we must compare like-for-like: count only the primary type per library from OBJ_BY_ID
     cached_stats = CACHE.get('library_stats', {})
     cached_item_counts = cached_stats.get('itemsCount', {})
     if cached_item_counts:
+        # Determine primary type per library from OBJ_BY_LIBRARY structure
+        primary_type_per_lib = {}
+        for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+            if 'Movie' in type_dict:
+                primary_type_per_lib[lib_name] = 'Movie'
+            elif 'Show' in type_dict:
+                primary_type_per_lib[lib_name] = 'Show'
+
+        # Count only primary-type objects per library
         actual_counts = {}
         for obj in PLEX_Media.OBJ_BY_ID.values():
             lib = obj.get('library')
-            if lib:
+            if lib and obj.get('type') == primary_type_per_lib.get(lib):
                 actual_counts[lib] = actual_counts.get(lib, 0) + 1
 
         stats_mismatches = []
