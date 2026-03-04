@@ -9886,8 +9886,12 @@ for line in sys.stdin:
             t = threading.Thread(target=relay_stderr, daemon=True)
             t.start()
 
-            stdout_data, _ = proc.communicate(input=filepaths_input,
-                                              timeout=max(60, partition_size * 2))
+            # Write stdin and read stdout separately (not communicate())
+            # communicate() races with relay_stderr for the stderr pipe
+            proc.stdin.write(filepaths_input)
+            proc.stdin.close()
+            stdout_data = proc.stdout.read()
+            proc.wait(timeout=max(60, partition_size * 2))
             t.join(timeout=5)
             returncode = proc.returncode
         except sp.TimeoutExpired:
