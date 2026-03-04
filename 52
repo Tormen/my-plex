@@ -9829,7 +9829,7 @@ for line in sys.stdin:
     fp = line.strip()
     if not fp: continue
     n += 1
-    if n % 50 == 0:
+    if n % 100 == 0:
         elapsed = time.time() - t0
         rate = n / elapsed if elapsed > 0 else 0
         eta = int((wtotal - n) / rate) if rate > 0 else 0
@@ -12990,20 +12990,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 except Exception as e:
                     if DBG: print(f"{DBGPFX}Failed to remove partial cache file: {e}")
 
-            # Always show completion during rebuild
-            # Calculate total time across all libraries
-            total_time = sum(getattr(PLEX_Media, 'library_timings', {}).values())
-            if total_time < 60:
-                time_str = f"{total_time:.1f}s"
-            elif total_time < 3600:
-                mins = int(total_time // 60)
-                secs = total_time % 60
-                time_str = f"{mins}m {secs:.0f}s"
-            else:
-                hours = int(total_time // 3600)
-                mins = int((total_time % 3600) // 60)
-                time_str = f"{hours}h {mins}m"
-
             # Calculate totals from library_delta_counters if available
             total_added = 0
             total_removed = 0
@@ -13032,11 +13018,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
-                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total objects", flush=True)
             elif metadata_probed > 0:
-                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total objects", flush=True)
             else:
-                print(f"{action} {status}: no changes, {total_media_files} total objects ({time_str})", flush=True)
+                print(f"{action} {status}: no changes, {total_media_files} total objects", flush=True)
 
             # Print per-library summary of changes at the end (only if there ARE actual changes)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
