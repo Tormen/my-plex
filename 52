@@ -578,6 +578,7 @@ FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
 FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
 FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
+RESCAN_BROKEN = False   # When True with --update-cache, re-queues broken files (ffprobe_error) for metadata collection
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
 AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
@@ -9761,8 +9762,9 @@ def _collect_missing_file_metadata(cached_obj, display_title):
         if existing_metadata and not existing_metadata.get('broken'):
             continue  # Already has valid metadata
         if existing_metadata and existing_metadata.get('reason') == 'ffprobe_error':
-            continue  # Genuinely broken file — won't fix itself, skip
-        # Missing metadata OR file_not_found — queue for (re)collection
+            if not RESCAN_BROKEN:
+                continue  # Broken file — skip unless --broken flag requests rescan
+        # Missing metadata, file_not_found, or broken rescan — queue for (re)collection
         filepath = file_info.get('filepath')
         if not filepath:
             continue
@@ -15188,6 +15190,12 @@ def main_print_help(args, remaining_args, main_parser):
             print("        • Video files have changed but Plex hasn't noticed")
             print("      Example: my-plex --update-cache --force-metadata")
             print()
+            print("  --broken")
+            print("      Rescan files previously marked as broken (ffmpeg failed):")
+            print("        • Re-queues broken files for metadata collection")
+            print("        • Useful after fixing ffmpeg issues or updating ffmpeg")
+            print("      Example: my-plex --update-cache --broken")
+            print()
             print("COMBINATIONS:")
             print()
             print("  # Incremental update (only add missing items)")
@@ -15201,6 +15209,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  # Recollect only video file metadata")
             print("  my-plex --update-cache --force-metadata")
+            print()
+            print("  # Rescan broken files only")
+            print("  my-plex --update-cache --broken")
             print()
             print("  # Complete rebuild (Plex data + file metadata)")
             print("  my-plex --update-cache --force")
@@ -17250,7 +17261,8 @@ def execute_global_commands(args, cmd_args):
         err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
 
     # Handle --list, --duplicates, or --broken (both --duplicates and --broken automatically enable --list)
-    if cmd_args.list or cmd_args.duplicates or safe_getattr(cmd_args, 'broken', False):
+    # Skip when --broken is used with --update-cache (rescan mode, not display mode)
+    if cmd_args.list or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN):
         # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
         # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
         # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
@@ -17416,7 +17428,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 #############################################################################
 
 def main():
-    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
+    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
     global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
@@ -17483,7 +17495,7 @@ def main():
         if inject_before_first_match(lambda a: a == '--resolve', inject_args, " (--resolve)"):
             has_list = True
             has_duplicates = True
-    elif (has_duplicates or has_broken) and not has_list:
+    elif (has_duplicates or (has_broken and '--update-cache' not in sys.argv and '-U' not in sys.argv)) and not has_list:
         if inject_before_first_match(lambda a: a in ('--duplicates', '--broken'), ['--list'], " (--duplicates/--broken)"):
             has_list = True
     elif (has_watched or has_unwatched or has_audio or has_no_audio_language) and not has_list:
@@ -17566,7 +17578,7 @@ def main():
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
 
-    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
@@ -17695,6 +17707,7 @@ def main():
     # Each can also be used independently
     FORCE_PLEXDATA = (args.force or args.force_plexdata) and args.update_cache
     FORCE_METADATA = (args.force or args.force_metadata) and args.update_cache
+    RESCAN_BROKEN = args.update_cache and has_broken  # --update-cache --broken: rescan broken files
 
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
     AUTO_YES = args.yes
