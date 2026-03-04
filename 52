@@ -9857,10 +9857,11 @@ for line in sys.stdin:
             continue
         filesize = os.path.getsize(fp)
         ext = os.path.splitext(fp)[1].lower()
-        r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, text=True, timeout=30)
-        m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", r.stderr)
+        r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, timeout=30)
+        stderr_text = r.stderr.decode("utf-8", errors="replace")
+        m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", stderr_text)
         if not m:
-            print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": r.stderr.strip()[:200]}}), flush=True)
+            print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": stderr_text.strip()[:200]}}), flush=True)
             continue
         dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
         print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
@@ -15453,15 +15454,17 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
             return None
 
         # Use run_tool_on_PLEX_server for both local and remote ffmpeg
+        # text=False to avoid UnicodeDecodeError on files with non-UTF-8 metadata
         result = run_tool_on_PLEX_server('ffmpeg',
             ['-i', filepath],
-            remote_host=remote_host, timeout=30)
+            remote_host=remote_host, text=False, timeout=30)
 
         if result is None:
             return None  # Tool not found — error already printed by run_tool_on_PLEX_server
 
         # ffmpeg -i prints Duration to stderr (exit code 1 is normal — no output file specified)
-        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", result.stderr)
+        stderr_text = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else result.stderr
+        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", stderr_text)
         if m:
             duration_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
 
