@@ -9829,7 +9829,7 @@ for line in sys.stdin:
     fp = line.strip()
     if not fp: continue
     n += 1
-    if n % 100 == 0:
+    if n % 50 == 0:
         elapsed = time.time() - t0
         rate = n / elapsed if elapsed > 0 else 0
         eta = int((wtotal - n) / rate) if rate > 0 else 0
@@ -9871,7 +9871,7 @@ for line in sys.stdin:
         filepaths_input = f"{w_prefix} {partition_size}\n"
         filepaths_input += '\n'.join(partition) + '\n'
         if remote_host:
-            cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
+            cmd = ['ssh', '-o', 'LogLevel=ERROR', remote_host, f'python3 -c {shlex.quote(collector_script)}']
         else:
             cmd = [sys.executable, '-c', collector_script]
 
