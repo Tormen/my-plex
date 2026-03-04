@@ -2069,12 +2069,17 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("['metadata_probed'] += 1", content,
             "metadata_probed must be incremented when ffprobe runs")
 
-    def test_summary_excludes_metadata_probed(self):
-        """Summary of changes must NOT include metadata probing — only actual changes."""
+    def test_summary_separates_metadata_from_changes(self):
+        """Summary must report metadata probing separately from library changes (added/removed/updated)."""
         content = self._read_script()
-        # The summary condition must NOT include total_metadata_probed
-        self.assertNotIn("total_metadata_probed > 0", content,
-            "Summary must not use metadata_probed to determine if changes occurred")
+        import re
+        # The primary change condition must NOT include metadata_probed
+        match = re.search(r'if total_added > 0 or total_removed > 0 or total_updated > 0:', content)
+        self.assertIsNotNone(match,
+            "Summary must have a change condition based on added/removed/updated only")
+        # metadata_probed must be reported separately (elif branch)
+        self.assertIn("total_metadata_probed", content,
+            "Summary must mention metadata_probed count when no library changes")
 
     def test_tool_failure_aborts_with_exit(self):
         """External tool failure during batch apply must abort immediately."""
@@ -9759,7 +9764,16 @@ def _run_batch_metadata_collection():
     if not _metadata_batch_queue:
         return
 
-    total = len(_metadata_batch_queue)
+    # Build lookup: filepath -> [(obj_key, version, display_title), ...]
+    filepath_lookup = {}
+    for filepath, obj_key, version, display_title in _metadata_batch_queue:
+        if filepath not in filepath_lookup:
+            filepath_lookup[filepath] = []
+        filepath_lookup[filepath].append((obj_key, version, display_title))
+
+    # Deduplicate: partition unique filepaths to workers (not queue items)
+    unique_filepaths = list(filepath_lookup.keys())
+    total = len(unique_filepaths)
     num_workers = min(8, max(1, total // 100))  # 1-8 workers, at least 100 files each
     print(f"\n{'='*76}")
     print(f"COLLECTING FILE METADATA ({total} files, {num_workers} workers)")
@@ -9834,17 +9848,10 @@ for line in sys.stdin:
         continue
 '''
 
-    # Partition files across workers
+    # Partition unique filepaths across workers
     partitions = [[] for _ in range(num_workers)]
-    for i, item in enumerate(_metadata_batch_queue):
-        partitions[i % num_workers].append(item)
-
-    # Build lookup: filepath -> [(obj_key, version, display_title), ...]
-    filepath_lookup = {}
-    for filepath, obj_key, version, display_title in _metadata_batch_queue:
-        if filepath not in filepath_lookup:
-            filepath_lookup[filepath] = []
-        filepath_lookup[filepath].append((obj_key, version, display_title))
+    for i, fp in enumerate(unique_filepaths):
+        partitions[i % num_workers].append(fp)
 
     # Worker function: run collector script for a partition
     import subprocess as sp
@@ -9859,7 +9866,7 @@ for line in sys.stdin:
 
         # First line = "W01 1936" (worker ID + partition size for progress)
         filepaths_input = f"{w_prefix} {partition_size}\n"
-        filepaths_input += '\n'.join(fp for fp, _, _, _ in partition) + '\n'
+        filepaths_input += '\n'.join(partition) + '\n'
         if remote_host:
             cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
         else:
@@ -9981,6 +9988,7 @@ for line in sys.stdin:
                 continue
 
             # Success — integrate into cache
+            success_count += 1
             targets = filepath_lookup.get(filepath, [])
             for obj_key, version, display_title in targets:
                 if obj_key in PLEX_Media.OBJ_BY_ID:
@@ -9999,7 +10007,6 @@ for line in sys.stdin:
                             'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
                             'file_type': entry.get('file_type', '')
                         }
-                        success_count += 1
 
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
@@ -12994,7 +13001,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     total_removed += counters['removed']['movies'] + counters['removed']['episodes']
                     total_updated += counters['updated']['movies'] + counters['updated']['episodes']
 
-            # Show detailed summary (only actual changes — metadata probing is not a "change")
+            # Show detailed summary (only actual changes — metadata probing reported separately)
+            total_metadata_probed = sum(
+                counters.get('metadata_probed', 0)
+                for counters in (PLEX_Media.library_delta_counters or {}).values()
+            ) if hasattr(PLEX_Media, 'library_delta_counters') else 0
+
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
@@ -13005,6 +13017,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
                 print(f"Cache rebuild complete: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
+            elif total_metadata_probed > 0:
+                print(f"Cache rebuild complete: no library changes, {total_metadata_probed} files metadata probed, {total_media_files} total objects ({time_str})", flush=True)
             else:
                 print(f"Cache rebuild complete: no changes, {total_media_files} total objects ({time_str})", flush=True)
 
@@ -16927,7 +16941,8 @@ def verify_cache():
         print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
         for issue in integrity_issues:
             print(f"    • {issue}")
-        print(f"\n  Run --update-cache to fix all issues.")
+        n = len(integrity_issues)
+        print(f"\n  Run --update-cache to fix the {n} integrity issue{'s' if n != 1 else ''}.")
 
     print("\n" + "="*76)
 
