@@ -16759,10 +16759,12 @@ def verify_cache():
     missing_metadata = 0
     broken_metadata = 0
     file_not_found_metadata = 0
+    truncated_files = 0
     for obj in PLEX_Media.OBJ_BY_ID.values():
         obj_type = obj.get('type')
         if obj_type not in ('Movie', 'Episode'):
             continue
+        plex_duration = obj.get('duration', 0)
         for _version, file_info in obj.get('files', {}).items():
             if not isinstance(file_info, dict):
                 continue
@@ -16777,6 +16779,23 @@ def verify_cache():
                     broken_metadata += 1
             else:
                 has_metadata += 1
+                # Check for truncation (container_duration significantly shorter than plex_duration)
+                is_truncated = False
+                if plex_duration > 0:
+                    container_duration = fm.get('container_duration')
+                    if container_duration:
+                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                            is_truncated = True
+                # Fallback: filesize vs duration heuristic
+                if not is_truncated and plex_duration > 60000:
+                    filesize = file_info.get('filesize', 0)
+                    if filesize:
+                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbps < 10:
+                            is_truncated = True
+                if is_truncated:
+                    truncated_files += 1
 
     if total_files > 0:
         parts = []
@@ -16963,9 +16982,11 @@ def verify_cache():
         print(f"Library stats:     - no itemsCount data in cache")
 
     # Summary
-    total_broken = broken_metadata + file_not_found_metadata
+    total_broken = broken_metadata + file_not_found_metadata + truncated_files
     if total_broken > 0:
         parts = []
+        if truncated_files > 0:
+            parts.append(f"{truncated_files} truncated")
         if broken_metadata > 0:
             parts.append(f"{broken_metadata} ffprobe failed")
         if file_not_found_metadata > 0:
