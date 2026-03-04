@@ -2069,26 +2069,12 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("['metadata_probed'] += 1", content,
             "metadata_probed must be incremented when ffprobe runs")
 
-    def test_metadata_probed_in_per_library_completion(self):
+    def test_summary_excludes_metadata_probed(self):
+        """Summary of changes must NOT include metadata probing — only actual changes."""
         content = self._read_script()
-        self.assertIn("metadata probed", content,
-            "Per-library completion line must report metadata probed count")
-        # Verify it's shown conditionally (only when > 0)
-        self.assertIn("if probed > 0:", content,
-            "metadata probed must only be shown when count > 0")
-
-    def test_metadata_probed_in_final_summary(self):
-        content = self._read_script()
-        self.assertIn("total_metadata_probed", content,
-            "Final summary must aggregate metadata_probed across libraries")
-        self.assertIn("total_metadata_probed > 0", content,
-            "Final summary must include metadata probed in the condition check")
-
-    def test_metadata_probed_in_summary_table(self):
-        content = self._read_script()
-        # library_summaries must track metadata_probed per library
-        self.assertIn("library_summaries[base_lib]['metadata_probed']", content,
-            "Summary table must aggregate metadata_probed per base library")
+        # The summary condition must NOT include total_metadata_probed
+        self.assertNotIn("total_metadata_probed > 0", content,
+            "Summary must not use metadata_probed to determine if changes occurred")
 
     def test_tool_failure_aborts_with_exit(self):
         """External tool failure during batch apply must abort immediately."""
@@ -2308,6 +2294,16 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
             "Must mark missing files with reason='file_not_found' in cache")
         self.assertIn("not found on server", func_body,
             "Must report missing file count at end of batch collection")
+
+    def test_batch_metadata_falls_back_to_db_host(self):
+        """Batch metadata must fall back to PLEX_DB_REMOTE_HOST when files not found."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("PLEX_DB_REMOTE_HOST", func_body,
+            "Must fall back to PLEX_DB_REMOTE_HOST when determine_remote_host fails")
 
 
 class TestCacheFormatValidation(unittest.TestCase):
@@ -9672,9 +9668,22 @@ def _run_batch_metadata_collection():
     print(f"COLLECTING FILE METADATA ({total} files)")
     print(f"{'='*76}")
 
-    # Determine remote_host from first filepath
-    first_filepath = _metadata_batch_queue[0][0]
-    remote_host, _exists, _resolved = determine_remote_host(first_filepath)
+    # Determine remote_host: try first few filepaths, fall back to PLEX_DB_REMOTE_HOST
+    # (files are on the same host as the Plex database)
+    remote_host = None
+    for fp, _, _, _ in _metadata_batch_queue[:5]:
+        rh, exists, _ = determine_remote_host(fp)
+        if exists:
+            remote_host = rh
+            break
+    if remote_host is None:
+        # No file found locally or on remote — default to DB host
+        # (files may have been renamed/moved but are still on the server)
+        local_db_path = os.path.expanduser(PLEX_DB_PATH)
+        if not os.path.exists(local_db_path):
+            # DB is remote → files are remote too
+            remote_host = PLEX_DB_REMOTE_HOST
+        # else: DB is local → files should be local too, keep remote_host=None
 
     # Resolve ffprobe path using existing tool resolution mechanism
     # This respects EXTERNAL_TOOLS['SERVER']['ffprobe'] config
@@ -11481,12 +11490,6 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     if parts:
                         delta_parts.append(f"{'/'.join(parts)} movies")
 
-            # Append metadata probed count if any
-            if completion_key in PLEX_Media.library_delta_counters:
-                probed = PLEX_Media.library_delta_counters[completion_key]['metadata_probed']
-                if probed > 0:
-                    delta_parts.append(f"{probed} metadata probed")
-
             # Print completion message with delta (always show status)
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
@@ -12841,7 +12844,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             total_added = 0
             total_removed = 0
             total_updated = 0
-            total_metadata_probed = 0
 
             if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
                 for lib_key, counters in PLEX_Media.library_delta_counters.items():
@@ -12849,11 +12851,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     total_added += counters['added']['movies'] + counters['added']['episodes']
                     total_removed += counters['removed']['movies'] + counters['removed']['episodes']
                     total_updated += counters['updated']['movies'] + counters['updated']['episodes']
-                    total_metadata_probed += counters.get('metadata_probed', 0)
 
-            # Show detailed summary
+            # Show detailed summary (only actual changes — metadata probing is not a "change")
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
-            if total_added > 0 or total_removed > 0 or total_updated > 0 or total_metadata_probed > 0:
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
                 if total_added > 0:
                     parts.append(f"+{total_added} added")
@@ -12861,14 +12862,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
-                if total_metadata_probed > 0:
-                    parts.append(f"{total_metadata_probed} metadata probed")
                 print(f"Cache rebuild complete: {', '.join(parts)}, {total_media_files} total objects ({time_str})", flush=True)
             else:
                 print(f"Cache rebuild complete: no changes, {total_media_files} total objects ({time_str})", flush=True)
 
-            # Print per-library summary of changes at the end
-            if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
+            # Print per-library summary of changes at the end (only if there ARE actual changes)
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
                 print(f"\n{'='*76}")
                 print(f"SUMMARY OF CHANGES")
                 print(f"{'='*76}")
@@ -12935,11 +12934,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             if updated > 0:
                                 parts.append(f"~{updated}")
                             change_parts.append(f"{'/'.join(parts)} movies")
-
-                    # Append metadata probed count for all library types
-                    probed = summary.get('metadata_probed', 0)
-                    if probed > 0:
-                        change_parts.append(f"{probed} metadata probed")
 
                     if lib_type == 'Show':
                         show_libs.append((lib_name, change_parts))
