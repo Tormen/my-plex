@@ -9780,15 +9780,24 @@ def _run_batch_metadata_collection():
     location = f"on '{remote_host}'" if remote_host else "locally"
     print(f"  Using ffprobe: {ffprobe_path} ({location})")
 
-    # Simple sequential collector script — parallelism is via multiple SSH workers
-    collector_script = f'''import sys, json, subprocess, os
+    # Sequential collector script — parallelism is via multiple SSH workers
+    # First stdin line = "worker_id total" (for progress reporting), rest = filepaths
+    collector_script = f'''import sys, json, subprocess, os, time
 from datetime import datetime
 ffprobe = {repr(ffprobe_path)}
+header = sys.stdin.readline().strip().split()
+wid, wtotal = header[0], int(header[1])
 n = 0
+t0 = time.time()
 for line in sys.stdin:
     fp = line.strip()
     if not fp: continue
     n += 1
+    if n % 100 == 0:
+        elapsed = time.time() - t0
+        rate = n / elapsed if elapsed > 0 else 0
+        eta = int((wtotal - n) / rate) if rate > 0 else 0
+        print(f"{{wid}}| {{n:,}}/{{wtotal:,}} files ({{rate:.0f}}/s, ~{{eta}}s left)", file=sys.stderr, flush=True)
     try:
         if not os.path.exists(fp):
             print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
@@ -9824,28 +9833,43 @@ for line in sys.stdin:
 
     def run_worker(worker_id, partition):
         """Run collector script for a file partition, return (stdout, returncode)."""
-        w_prefix = f"W{worker_id:02d}| "
+        w_prefix = f"W{worker_id:02d}"
         partition_size = len(partition)
-        print(f"{w_prefix}processing {partition_size} files...", flush=True)
+        print(f"{w_prefix}| processing {partition_size} files...", flush=True)
         t0 = _time.time()
 
-        filepaths_input = '\n'.join(fp for fp, _, _, _ in partition) + '\n'
+        # First line = "W01 1936" (worker ID + partition size for progress)
+        filepaths_input = f"{w_prefix} {partition_size}\n"
+        filepaths_input += '\n'.join(fp for fp, _, _, _ in partition) + '\n'
         if remote_host:
             cmd = ['ssh', remote_host, f'python3 -c {shlex.quote(collector_script)}']
         else:
             cmd = [sys.executable, '-c', collector_script]
 
         try:
-            result = sp.run(cmd, input=filepaths_input, capture_output=True, text=True,
-                            timeout=max(60, partition_size * 2))
+            proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+
+            # Stream stderr (progress) in a background thread
+            def relay_stderr():
+                for line in proc.stderr:
+                    print(line.rstrip('\n'), flush=True)
+            import threading
+            t = threading.Thread(target=relay_stderr, daemon=True)
+            t.start()
+
+            stdout_data, _ = proc.communicate(input=filepaths_input,
+                                              timeout=max(60, partition_size * 2))
+            t.join(timeout=5)
+            returncode = proc.returncode
         except sp.TimeoutExpired:
-            print(f"{w_prefix}✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
+            proc.kill()
+            print(f"{w_prefix}| ✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
             return '', 1
 
         elapsed = _time.time() - t0
         rate = partition_size / elapsed if elapsed > 0 else 0
-        print(f"{w_prefix}completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
-        return result.stdout, result.returncode
+        print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        return stdout_data, returncode
 
     # Launch workers in parallel
     from concurrent.futures import ThreadPoolExecutor
