@@ -278,7 +278,7 @@ CONFIG_DEFAULTS = {
         'SERVER': {
             'mp4box': None,
             'mkvpropedit': None,
-            'ffprobe': None,
+            'ffmpeg': None,
             'sqlite3': None,
         },
     },
@@ -404,7 +404,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # EXTERNAL_TOOLS = {{
 #     'LOCAL': {{'ssh': '/usr/bin/ssh', 'mpv': '/opt/homebrew/bin/mpv', 'open': '/usr/bin/open'}},
 #     'SERVER': {{'mp4box': '/opt/homebrew/bin/MP4Box', 'mkvpropedit': '/opt/homebrew/bin/mkvpropedit',
-#                'ffprobe': '/opt/homebrew/bin/ffprobe', 'sqlite3': '/usr/bin/sqlite3'}},
+#                'ffmpeg': '/opt/homebrew/bin/ffmpeg', 'sqlite3': '/usr/bin/sqlite3'}},
 # }}
 
 ###############################################################################
@@ -2124,7 +2124,7 @@ class TestCacheSkipLogic(unittest.TestCase):
             "_collect_missing_file_metadata must NOT probe files individually — use batch queue")
 
     def test_batch_metadata_collection_function_exists(self):
-        """_run_batch_metadata_collection must exist and handle batch ffprobe via SSH."""
+        """_run_batch_metadata_collection must exist and handle batch ffmpeg via SSH."""
         content = self._read_script()
         self.assertIn("def _run_batch_metadata_collection(", content)
         import re
@@ -2135,8 +2135,8 @@ class TestCacheSkipLogic(unittest.TestCase):
             "Must read from _metadata_batch_queue")
         self.assertIn("determine_remote_host(", func_body,
             "Must use determine_remote_host to detect remote/local")
-        self.assertIn("run_tool_on_PLEX_server('ffprobe'", func_body,
-            "Must use run_tool_on_PLEX_server for ffprobe path resolution")
+        self.assertIn("run_tool_on_PLEX_server('ffmpeg'", func_body,
+            "Must use run_tool_on_PLEX_server for ffmpeg path resolution")
 
     def test_batch_metadata_marks_broken_on_failure(self):
         """Batch metadata collection must mark ffprobe failures as broken, not abort."""
@@ -2181,14 +2181,14 @@ class TestCacheSkipLogic(unittest.TestCase):
             "Must use determine_remote_host() for proper remote detection")
 
     def test_get_video_file_metadata_uses_run_tool(self):
-        """get_video_file_metadata must use run_tool_on_PLEX_server for ffprobe (local and remote)."""
+        """get_video_file_metadata must use run_tool_on_PLEX_server for ffmpeg (local and remote)."""
         content = self._read_script()
         import re
         match = re.search(r'(def get_video_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("run_tool_on_PLEX_server('ffprobe'", func_body,
-            "Must use run_tool_on_PLEX_server for ffprobe execution")
+        self.assertIn("run_tool_on_PLEX_server('ffmpeg'", func_body,
+            "Must use run_tool_on_PLEX_server for ffmpeg execution")
 
     def test_mkv_container_duration_in_milliseconds(self):
         """MKV metadata must store container_duration in milliseconds (same as Plex)."""
@@ -2313,8 +2313,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("PLEX_DB_REMOTE_HOST", func_body,
             "Must fall back to PLEX_DB_REMOTE_HOST when determine_remote_host fails")
 
-    def test_batch_metadata_continues_on_ffprobe_error(self):
-        """Collector script must continue on ffprobe failure, not abort."""
+    def test_batch_metadata_continues_on_error(self):
+        """Collector script must continue on failure, not abort."""
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
@@ -2324,19 +2324,19 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         script_match = re.search(r"collector_script = f'''(.*?)'''", func_body, re.DOTALL)
         self.assertIsNotNone(script_match, "Must find collector_script in function")
         collector = script_match.group(1)
-        # Collector script must NOT sys.exit on ffprobe failure
+        # Collector script must NOT sys.exit on failure
         self.assertNotIn("sys.exit", collector,
-            "Collector script must not abort on ffprobe failure — continue with remaining files")
-        # Must mark ffprobe errors as broken in cache
-        self.assertIn("ffprobe_error", func_body,
-            "Must mark ffprobe failures with reason='ffprobe_error'")
-        self.assertIn("marked as BROKEN", func_body,
-            "Must report broken file count at end of batch collection")
-        # Must fall back to ffmpeg -i when ffprobe fails (e.g. dvdsub 0x0 errors)
+            "Collector script must not abort on failure — continue with remaining files")
+        # Collector must use ffmpeg -i and parse Duration from stderr
         self.assertIn("ffmpeg", collector,
-            "Collector script must fall back to ffmpeg -i when ffprobe fails")
+            "Collector script must use ffmpeg for metadata collection")
         self.assertIn("Duration:", collector,
             "Collector script must parse Duration from ffmpeg -i stderr output")
+        # Must mark errors as broken in cache
+        self.assertIn("ffprobe_error", func_body,
+            "Must mark failures with reason='ffprobe_error'")
+        self.assertIn("marked as BROKEN", func_body,
+            "Must report broken file count at end of batch collection")
 
     def test_filepath_check_skips_show_season(self):
         """OBJ_BY_FILEPATH check must skip Show/Season directory container objects."""
@@ -4318,7 +4318,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
     If None, auto-detects: locally via shutil.which(), remotely via 'ssh which'.
 
     Args:
-        tool_name: Short tool name, e.g. 'mp4box', 'mkvpropedit', 'ffprobe', 'sqlite3'
+        tool_name: Short tool name, e.g. 'mp4box', 'mkvpropedit', 'ffmpeg', 'sqlite3'
         args: List of arguments (NOT including the tool binary itself)
         remote_host: SSH host for remote execution, None for local
         capture_output: Capture stdout/stderr (default True)
@@ -4662,7 +4662,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 # - This minimizes code changes throughout the rest of my-plex
 #
 # PRESERVED FEATURES:
-# - --force-metadata: Still collects video file metadata via ffprobe for broken file detection
+# - --force-metadata: Still collects video file metadata via ffmpeg for broken file detection
 # - Parallel processing: Works with ThreadPoolExecutor for multi-library updates
 # - Checkpoint system: Resume capability during cache rebuilds
 # - Alternative paths: ALTERNATIVE_ROOTPATHS resolution still works
@@ -9772,14 +9772,14 @@ def _collect_missing_file_metadata(cached_obj, display_title):
 
 
 def _run_batch_metadata_collection():
-    """Batch-collect ffprobe metadata for all queued files via parallel SSH workers.
+    """Batch-collect file metadata for all queued files via parallel SSH workers.
 
-    Uses run_tool_on_PLEX_server('ffprobe', ...) to resolve the ffprobe path
-    (respecting EXTERNAL_TOOLS['SERVER']['ffprobe'] config). Partitions files
+    Uses run_tool_on_PLEX_server('ffmpeg', ...) to resolve the ffmpeg path
+    (respecting EXTERNAL_TOOLS['SERVER']['ffmpeg'] config). Partitions files
     across parallel workers (like --update-cache), each running a lightweight
     Python collector script via SSH that outputs JSON-lines to stdout.
 
-    Continues on ffprobe failures, marking broken files for --broken output.
+    Continues on failures, marking broken files for --broken output.
     """
     global _metadata_batch_queue
     if not _metadata_batch_queue:
@@ -9813,35 +9813,30 @@ def _run_batch_metadata_collection():
         if not os.path.exists(local_db_path):
             remote_host = PLEX_DB_REMOTE_HOST
 
-    # Resolve ffprobe path using existing tool resolution mechanism
-    ffprobe_result = run_tool_on_PLEX_server('ffprobe', ['-version'], remote_host=remote_host, timeout=10)
-    if ffprobe_result is None:
-        print(f"\n✗ Cannot collect file metadata without ffprobe.")
-        print(f"  Skipping metadata collection — run 'my-plex --update-cache' after installing ffprobe.")
+    # Resolve ffmpeg path using existing tool resolution mechanism
+    ffmpeg_result = run_tool_on_PLEX_server('ffmpeg', ['-version'], remote_host=remote_host, timeout=10)
+    if ffmpeg_result is None:
+        print(f"\n✗ Cannot collect file metadata without ffmpeg.")
+        print(f"  Skipping metadata collection — run 'my-plex --update-cache' after installing ffmpeg.")
         _metadata_batch_queue = []
         return
 
-    config_key = "EXTERNAL_TOOLS['SERVER']['ffprobe']"
-    configured = EXTERNAL_TOOLS.get('SERVER', {}).get('ffprobe')
+    configured = EXTERNAL_TOOLS.get('SERVER', {}).get('ffmpeg')
     if configured:
-        ffprobe_path = configured
+        ffmpeg_path = configured
     elif remote_host:
-        cache_key = f"{remote_host}:ffprobe"
-        ffprobe_path = _remote_tool_path_cache.get(cache_key, 'ffprobe')
+        cache_key = f"{remote_host}:ffmpeg"
+        ffmpeg_path = _remote_tool_path_cache.get(cache_key, 'ffmpeg')
     else:
-        ffprobe_path = shutil.which('ffprobe') or 'ffprobe'
-
-    # Derive ffmpeg path from ffprobe path (same directory)
-    ffmpeg_path = ffprobe_path.replace('ffprobe', 'ffmpeg') if 'ffprobe' in ffprobe_path else 'ffmpeg'
+        ffmpeg_path = shutil.which('ffmpeg') or 'ffmpeg'
 
     location = f"on '{remote_host}'" if remote_host else "locally"
-    print(f"  Using ffprobe: {ffprobe_path} ({location})")
+    print(f"  Using ffmpeg: {ffmpeg_path} ({location})")
 
     # Sequential collector script — parallelism is via multiple SSH workers
     # First stdin line = "worker_id total" (for progress reporting), rest = filepaths
     collector_script = f'''import sys, json, subprocess, os, time, re
 from datetime import datetime
-ffprobe = {repr(ffprobe_path)}
 ffmpeg = {repr(ffmpeg_path)}
 header = sys.stdin.readline().strip().split()
 wid, wtotal = header[0], int(header[1])
@@ -9862,18 +9857,12 @@ for line in sys.stdin:
             continue
         filesize = os.path.getsize(fp)
         ext = os.path.splitext(fp)[1].lower()
-        r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            # Fallback: ffmpeg -i parses container header even when ffprobe chokes (e.g. dvdsub 0x0)
-            r2 = subprocess.run([ffmpeg, "-i", fp], capture_output=True, text=True, timeout=30)
-            m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", r2.stderr)
-            if m:
-                dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
-                print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
-                continue
+        r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, text=True, timeout=30)
+        m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", r.stderr)
+        if not m:
             print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": r.stderr.strip()[:200]}}), flush=True)
             continue
-        dur_ms = float(r.stdout.strip()) * 1000
+        dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
         print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
     except Exception as e:
         print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
@@ -9996,7 +9985,7 @@ for line in sys.stdin:
                             PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
                     continue
 
-                # ffprobe error — mark as broken
+                # ffmpeg error — mark as broken
                 error_count += 1
                 file_n = entry.get('n', '?')
                 stderr_msg = entry.get('stderr', '')
@@ -10052,7 +10041,7 @@ for line in sys.stdin:
     else:
         print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
     if error_count > 0:
-        print(f"  ⚠ {error_count} files marked as BROKEN (ffprobe failed — visible in --broken)")
+        print(f"  ⚠ {error_count} files marked as BROKEN (ffmpeg failed — visible in --broken)")
     if not_found_count > 0:
         print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
 
@@ -12982,7 +12971,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_ID, var_name="PLEX_Media.OBJ_BY_ID", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_LIBRARY, var_name="PLEX_Media.OBJ_BY_LIBRARY", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
 
-        # Batch-collect missing file metadata (ffprobe) via single SSH call
+        # Batch-collect missing file metadata (ffmpeg) via single SSH call
         if FORCE_CACHE_UPDATE and _metadata_batch_queue:
             if PLEX_Media.cache_rebuild_lock:
                 PLEX_Media.cache_rebuild_lock.write_progress("Collecting file metadata...")
@@ -13572,7 +13561,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         if file_metadata.get('broken'):
                             is_broken = True
                             reason = file_metadata.get('reason', '')
-                            severity = 'NOT FOUND' if reason == 'file_not_found' else 'FFPROBE ERR'
+                            severity = 'NOT FOUND' if reason == 'file_not_found' else 'PROBE ERR'
                         else:
                             container_duration = file_metadata.get('container_duration')
                             if container_duration:
@@ -13592,7 +13581,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         severity = 'borderline'
 
                     # Fallback: filesize vs duration heuristic (catches truncated files
-                    # even without ffprobe metadata, e.g. 36MB for a 90min movie)
+                    # even without ffmpeg metadata, e.g. 36MB for a 90min movie)
                     if not is_broken and plex_duration > 0:
                         filesize = file_info.get('filesize', 0)
                         if filesize and plex_duration > 60000:  # Only for files >1min
@@ -13617,7 +13606,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return
 
             # Sort by severity (severe first), then by diff_pct (worst first)
-            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'FFPROBE ERR': 5, 'NOT FOUND': 6, None: 4}
+            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
             broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
             # Print broken files with details
@@ -15190,7 +15179,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  --force-metadata")
             print("      Recollects video file metadata (duration, codecs, etc.):")
-            print("        • Runs ffprobe/mediainfo on video files")
+            print("        • Runs ffmpeg on video files")
             print("        • Recollects: container duration, bitrate, codec info")
             print("        • Used for broken file detection")
             print("      Use this when:")
@@ -15317,7 +15306,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex --broken [--type <movie|show>]")
             print()
             print("Lists potentially truncated/broken media files by comparing the container")
-            print("duration (from ffprobe) with the Plex-reported duration.")
+            print("duration (from ffmpeg) with the Plex-reported duration.")
             print()
             print("Files are flagged if the container duration is more than")
             print(f"TRUNCATION_THRESHOLD_PCT% shorter than Plex duration (default: {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}%).")
@@ -15435,10 +15424,10 @@ def main_print_help(args, remaining_args, main_parser):
 ###########################################################################################
 
 def get_video_file_metadata(filepath, filesize, remote_host=None):
-    """Collect metadata from video file (container duration) using ffprobe.
+    """Collect metadata from video file (container duration) using ffmpeg.
 
-    Uses run_tool_on_PLEX_server() which respects EXTERNAL_TOOLS['SERVER']['ffprobe']
-    config and auto-detects ffprobe path. Works both locally and via SSH.
+    Uses run_tool_on_PLEX_server() which respects EXTERNAL_TOOLS['SERVER']['ffmpeg']
+    config and auto-detects ffmpeg path. Works both locally and via SSH.
 
     Args:
         filepath: Path to video file
@@ -15454,6 +15443,7 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
             'file_type': 'mkv'
         }
     """
+    import re
     from datetime import datetime
     from pathlib import Path
 
@@ -15462,18 +15452,18 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
         if ext not in ('.mkv', '.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv'):
             return None
 
-        # Use run_tool_on_PLEX_server for both local and remote ffprobe
-        result = run_tool_on_PLEX_server('ffprobe',
-            ['-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1', filepath],
+        # Use run_tool_on_PLEX_server for both local and remote ffmpeg
+        result = run_tool_on_PLEX_server('ffmpeg',
+            ['-i', filepath],
             remote_host=remote_host, timeout=30)
 
         if result is None:
             return None  # Tool not found — error already printed by run_tool_on_PLEX_server
 
-        if result.returncode == 0 and result.stdout.strip():
-            duration_sec = float(result.stdout.strip())
-            duration_ms = duration_sec * 1000  # Convert to milliseconds (same unit as Plex)
+        # ffmpeg -i prints Duration to stderr (exit code 1 is normal — no output file specified)
+        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", result.stderr)
+        if m:
+            duration_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
 
             return {
                 'container_duration': duration_ms,
@@ -17004,7 +16994,7 @@ def verify_cache():
         if truncated_files > 0:
             parts.append(f"{truncated_files} truncated")
         if broken_metadata > 0:
-            parts.append(f"{broken_metadata} ffprobe failed")
+            parts.append(f"{broken_metadata} ffmpeg failed")
         if file_not_found_metadata > 0:
             parts.append(f"{file_not_found_metadata} not found on disk")
         print(f"\n  ℹ {total_broken} broken files ({', '.join(parts)}) — visible in --broken")
