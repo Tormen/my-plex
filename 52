@@ -4274,8 +4274,8 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
         if cache_key in _remote_tool_path_cache:
             tool_path = _remote_tool_path_cache[cache_key]
         else:
-            # Auto-detect on remote via 'ssh which'
-            result = run_tool_locally('ssh', [remote_host, f'which {tool_name}'], timeout=10)
+            # Auto-detect on remote via login shell (non-interactive SSH doesn't load PATH)
+            result = run_tool_locally('ssh', [remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
             if result and result.returncode == 0 and result.stdout.strip():
                 tool_path = result.stdout.strip()
                 _remote_tool_path_cache[cache_key] = tool_path
