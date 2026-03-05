@@ -2442,6 +2442,40 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertNotIn("if not plex_duration:\n                    continue", broken_block,
             "--broken must not skip objects with None duration — PROBE ERR files would be hidden")
 
+    def test_from_scratch_preserves_file_metadata(self):
+        """--from-scratch must preserve file_metadata and re-attach after rebuild."""
+        content = self._read_script()
+        self.assertIn("_preserved_file_metadata", content,
+            "--from-scratch must extract file_metadata before clearing OBJ_BY_ID")
+        import re
+        # Preservation must happen BEFORE clearing OBJ_BY_ID
+        preserve_pos = content.find("_preserved_file_metadata = {}")
+        clear_pos = content.find("PLEX_Media.OBJ_BY_ID = {}", preserve_pos if preserve_pos > 0 else 0)
+        self.assertGreater(preserve_pos, 0, "Must have _preserved_file_metadata extraction")
+        self.assertGreater(clear_pos, preserve_pos,
+            "_preserved_file_metadata must be extracted BEFORE OBJ_BY_ID is cleared")
+        # Re-attachment must happen BEFORE batch metadata collection
+        reattach_pos = content.find("Re-attached preserved file metadata")
+        batch_pos = content.find("_run_batch_metadata_collection()", reattach_pos if reattach_pos > 0 else 0)
+        self.assertGreater(reattach_pos, 0, "Must re-attach preserved metadata")
+        self.assertLess(reattach_pos, batch_pos,
+            "Re-attachment must happen BEFORE batch metadata collection")
+
+    def test_obj_by_library_no_duplicates(self):
+        """All OBJ_BY_LIBRARY append sites must check for duplicates first."""
+        content = self._read_script()
+        import re
+        # Find all .append() calls on OBJ_BY_LIBRARY (excluding test code and remove() calls)
+        # Each append must be preceded by a "not in" check
+        pattern = r'PLEX_Media\.OBJ_BY_LIBRARY\[.*?\]\[.*?\]\.append\('
+        matches = list(re.finditer(pattern, content))
+        self.assertGreater(len(matches), 0, "Must have OBJ_BY_LIBRARY append calls")
+        for m in matches:
+            # Check the 2 lines before the append for a "not in" guard
+            before = content[max(0, m.start() - 200):m.start()]
+            self.assertIn("not in PLEX_Media.OBJ_BY_LIBRARY", before,
+                f"OBJ_BY_LIBRARY append at position {m.start()} must have duplicate guard")
+
 
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
@@ -12782,6 +12816,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"Warning: Could not delete partial cache: {e}")
 
                 if VRB: print(f"{VRBPFX}From-scratch rebuild mode (--from-scratch): starting with empty cache...")
+
+                # Preserve file_metadata from old cache (keyed by filepath)
+                # This avoids re-probing 17000+ files with ffmpeg after a from-scratch rebuild
+                PLEX_Media._preserved_file_metadata = {}
+                for obj in PLEX_Media.OBJ_BY_ID.values():
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        continue
+                    for _ver, file_info in obj.get('files', {}).items():
+                        if not isinstance(file_info, dict):
+                            continue
+                        fm = file_info.get('file_metadata')
+                        fp = file_info.get('filepath')
+                        if fm and fp:
+                            PLEX_Media._preserved_file_metadata[fp] = fm
+                if PLEX_Media._preserved_file_metadata:
+                    print(f"  Preserving file metadata for {len(PLEX_Media._preserved_file_metadata)} files")
+
                 PLEX_Media.OBJ_BY_ID = {}
                 PLEX_Media.OBJ_BY_MOVIE = {}
                 PLEX_Media.OBJ_BY_SHOW = {}
@@ -13025,6 +13076,35 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             broken_queued += 1
             if broken_queued > 0:
                 print(f"  Queued {broken_queued} broken files for rescan")
+
+        # Re-attach preserved file_metadata from --from-scratch rebuild
+        if hasattr(PLEX_Media, '_preserved_file_metadata') and PLEX_Media._preserved_file_metadata:
+            reattached = 0
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for _ver, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    if file_info.get('file_metadata') is not None:
+                        continue  # Already has metadata
+                    fp = file_info.get('filepath')
+                    if fp and fp in PLEX_Media._preserved_file_metadata:
+                        file_info['file_metadata'] = PLEX_Media._preserved_file_metadata[fp]
+                        reattached += 1
+            if reattached > 0:
+                print(f"  Re-attached preserved file metadata to {reattached} files")
+            # Remove from batch queue any files that now have metadata
+            if _metadata_batch_queue:
+                old_len = len(_metadata_batch_queue)
+                _metadata_batch_queue = [
+                    (fp, obj_key, ver, dt) for fp, obj_key, ver, dt in _metadata_batch_queue
+                    if obj_key in PLEX_Media.OBJ_BY_ID and
+                       PLEX_Media.OBJ_BY_ID[obj_key].get('files', {}).get(ver, {}).get('file_metadata') is None
+                ]
+                if old_len != len(_metadata_batch_queue):
+                    print(f"  Batch queue reduced from {old_len} to {len(_metadata_batch_queue)} files")
+            del PLEX_Media._preserved_file_metadata
 
         # Batch-collect missing file metadata (ffmpeg) via single SSH call
         if FORCE_CACHE_UPDATE and _metadata_batch_queue:
