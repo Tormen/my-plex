@@ -12820,9 +12820,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                 # Preserve file_metadata from old cache backup (keyed by filepath)
                 # This avoids re-probing 17000+ files with ffmpeg after a from-scratch rebuild
+                # Skip if --force-metadata: user wants to re-collect all metadata from scratch
                 # Note: OBJ_BY_ID is already empty at this point, so we read from the backup file
                 PLEX_Media._preserved_file_metadata = {}
-                if backup_cache_file and os.path.exists(backup_cache_file):
+                if FORCE_METADATA:
+                    print(f"  --force-metadata: skipping metadata preservation, will re-collect all")
+                elif backup_cache_file and os.path.exists(backup_cache_file):
                     try:
                         import pickle as _pkl
                         with open(backup_cache_file, 'rb') as _f:
@@ -13105,6 +13108,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         reattached += 1
             if reattached > 0:
                 print(f"  Re-attached preserved file metadata to {reattached} files")
+                print(f"  To force rebuilding metadata, use: my-plex --update-cache --from-scratch --force-metadata")
             # Remove from batch queue any files that now have metadata
             if _metadata_batch_queue:
                 old_len = len(_metadata_batch_queue)
