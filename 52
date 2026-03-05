@@ -12787,7 +12787,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def init():
-        global LOCK_FILE, CACHE_FILE, FROM_SCRATCH
+        global LOCK_FILE, CACHE_FILE, FROM_SCRATCH, _metadata_batch_queue
         if PLEX_Media.init_done: return
         PLEX_Media.OBJ_BY_ID = {}
 
