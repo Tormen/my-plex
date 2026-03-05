@@ -12798,6 +12798,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # FROM_SCRATCH MODE: Delete existing cache files and start completely fresh
             if FROM_SCRATCH:
                 # Move old cache aside as backup (with timestamp)
+                backup_cache_file = None
                 if os.path.exists(CACHE_FILE):
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     backup_cache_file = f"{CACHE_FILE}.old_{timestamp}"
@@ -12817,19 +12818,29 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                 if VRB: print(f"{VRBPFX}From-scratch rebuild mode (--from-scratch): starting with empty cache...")
 
-                # Preserve file_metadata from old cache (keyed by filepath)
+                # Preserve file_metadata from old cache backup (keyed by filepath)
                 # This avoids re-probing 17000+ files with ffmpeg after a from-scratch rebuild
+                # Note: OBJ_BY_ID is already empty at this point, so we read from the backup file
                 PLEX_Media._preserved_file_metadata = {}
-                for obj in PLEX_Media.OBJ_BY_ID.values():
-                    if obj.get('type') not in ('Movie', 'Episode'):
-                        continue
-                    for _ver, file_info in obj.get('files', {}).items():
-                        if not isinstance(file_info, dict):
-                            continue
-                        fm = file_info.get('file_metadata')
-                        fp = file_info.get('filepath')
-                        if fm and fp:
-                            PLEX_Media._preserved_file_metadata[fp] = fm
+                if backup_cache_file and os.path.exists(backup_cache_file):
+                    try:
+                        import pickle as _pkl
+                        with open(backup_cache_file, 'rb') as _f:
+                            old_cache = _pkl.load(_f)
+                        old_obj_by_id = old_cache.get('obj_by_id', {})
+                        for obj in old_obj_by_id.values():
+                            if obj.get('type') not in ('Movie', 'Episode'):
+                                continue
+                            for _ver, file_info in obj.get('files', {}).items():
+                                if not isinstance(file_info, dict):
+                                    continue
+                                fm = file_info.get('file_metadata')
+                                fp = file_info.get('filepath')
+                                if fm and fp:
+                                    PLEX_Media._preserved_file_metadata[fp] = fm
+                        del old_cache, old_obj_by_id
+                    except Exception as e:
+                        print(f"  Warning: Could not read file metadata from backup: {e}")
                 if PLEX_Media._preserved_file_metadata:
                     print(f"  Preserving file metadata for {len(PLEX_Media._preserved_file_metadata)} files")
 
