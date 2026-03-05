@@ -6763,7 +6763,8 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
                                     PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
                                 if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
                                     PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+                                if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
 
                                 if obj_type == 'Movie':
                                     # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
@@ -6874,7 +6875,8 @@ def update_cache_for_library(library_name):
                                 PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
                             if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
                                 PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                            PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+                            if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
 
                             # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
                             if cache_key not in PLEX_Media.OBJ_BY_MOVIE:
@@ -6900,7 +6902,8 @@ def update_cache_for_library(library_name):
                         PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
                     if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
                         PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+                    if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
 
                     items_added += 1
 
@@ -10202,7 +10205,8 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
             PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
         if 'Movie' not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
             PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'] = []
-        PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'].append(movie_key)
+        if movie_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie']:
+            PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'].append(movie_key)
 
         if movie_key not in PLEX_Media.OBJ_BY_MOVIE:
             PLEX_Media.OBJ_BY_MOVIE[movie_key] = {}
@@ -10656,7 +10660,8 @@ def _store_collections_from_database(library_section_id, library_name):
                 PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
             if 'Collection' not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
                 PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'] = []
-            PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'].append(col_key)
+            if col_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection']:
+                PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'].append(col_key)
         if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): stored {len(collections)} collections")
     except Exception as e:
         if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): failed: {e}")
@@ -12929,8 +12934,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping object for non-existent library '{obj['library']}': key='{key}'")
                     continue
 
-                if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ]: PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ].append( key )
-                else:                                                          PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
+                if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ]:
+                    if key not in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ]:
+                        PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ].append( key )
+                else:
+                    PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
 
             # collect data ...
             match obj['type']:
@@ -16934,11 +16942,20 @@ def verify_cache():
                             if ep_key not in PLEX_Media.OBJ_BY_ID:
                                 episode_dangling += 1
 
+    # Check OBJ_BY_LIBRARY for duplicate keys
+    library_total_keys = 0
+    library_duplicate_keys = 0
+    for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+        for _, keys in type_dict.items():
+            library_total_keys += len(keys)
+            library_duplicate_keys += len(keys) - len(set(keys))
+
     # Print cross-reference results
-    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling
+    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling + library_duplicate_keys
     if xref_total_dangling == 0:
         print(f"Cross-references:  ✓ OBJ_BY_FILEPATH ({filepath_entries}), OBJ_BY_MOVIE ({movie_entries}),")
-        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}) — all valid")
+        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}),")
+        print(f"                     OBJ_BY_LIBRARY ({library_total_keys} keys) — all valid")
     else:
         parts = []
         if filepath_dangling > 0:
@@ -16951,6 +16968,8 @@ def verify_cache():
             parts.append(f"OBJ_BY_SHOW: {show_dangling} dangling keys")
         if episode_dangling > 0:
             parts.append(f"OBJ_BY_SHOW_EPISODES: {episode_dangling} dangling keys")
+        if library_duplicate_keys > 0:
+            parts.append(f"OBJ_BY_LIBRARY: {library_duplicate_keys} duplicate keys")
         print(f"Cross-references:  ⚠ {'; '.join(parts)}")
         integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
 
