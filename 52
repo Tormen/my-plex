@@ -2417,6 +2417,31 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIsNotNone(save_match,
             "Must call update_and_save_cache with 'obj_by_filepath' AFTER the rebuild block")
 
+    def test_broken_shows_all_file_versions(self):
+        """--broken must show every broken file version, not just one per object."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(if broken_only:\n\s+broken_files = \[\].*?)(?=\n            if not broken_files:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find broken_only block")
+        broken_block = match.group(1)
+        # Must NOT break after first broken file per object
+        self.assertNotIn("break  # Only add the key once", broken_block,
+            "--broken must show ALL broken file versions, not just one per object")
+        # Must deduplicate obj_keys to avoid counting same object multiple times
+        self.assertIn("seen_keys", broken_block,
+            "--broken must deduplicate obj_keys to avoid duplicate entries from OBJ_BY_LIBRARY")
+
+    def test_broken_includes_no_duration_objects(self):
+        """--broken must include PROBE ERR/NOT FOUND files even when plex duration is None."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(if broken_only:\n\s+broken_files = \[\].*?)(?=\n            if not broken_files:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find broken_only block")
+        broken_block = match.group(1)
+        # Must NOT skip objects with no plex duration (they may have PROBE ERR / NOT FOUND files)
+        self.assertNotIn("if not plex_duration:\n                    continue", broken_block,
+            "--broken must not skip objects with None duration — PROBE ERR files would be hidden")
+
 
 class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
@@ -13555,7 +13580,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Filter for broken files if requested
         if broken_only:
             broken_files = []
+            seen_keys = set()
             for key in obj_keys:
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 obj = PLEX_Media.OBJ_BY_ID[key]
 
                 # Only check Episode and Movie types
@@ -13566,9 +13595,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if library_name and obj.get('library') != library_name:
                     continue
 
-                plex_duration = obj.get('duration')
-                if not plex_duration:
-                    continue
+                plex_duration = obj.get('duration') or 0
 
                 files_dict = obj.get('files', {})
                 for file_info in files_dict.values():
@@ -13584,7 +13611,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             is_broken = True
                             reason = file_metadata.get('reason', '')
                             severity = 'NOT FOUND' if reason == 'file_not_found' else 'PROBE ERR'
-                        else:
+                        elif plex_duration > 0:
                             container_duration = file_metadata.get('container_duration')
                             if container_duration:
                                 diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
@@ -13604,21 +13631,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                     # Fallback: filesize vs duration heuristic (catches truncated files
                     # even without ffmpeg metadata, e.g. 36MB for a 90min movie)
-                    if not is_broken and plex_duration > 0:
+                    if not is_broken and plex_duration > 60000:
                         filesize = file_info.get('filesize', 0)
-                        if filesize and plex_duration > 60000:  # Only for files >1min
+                        if filesize:
                             # Average bitrate in KB/s
                             avg_kbps = filesize / 1024 / (plex_duration / 1000)
                             # A real video file at any quality should be >10 KB/s
                             if avg_kbps < 10:
                                 is_broken = True
                                 severity = 'severe'
-                                diff_pct = diff_pct  # Keep whatever diff we had (may be None)
 
                     if is_broken:
                         filepath = file_info.get('filepath', '')
                         broken_files.append((key, diff_pct, severity, filepath))
-                        break  # Only add the key once even if multiple files
 
             if not broken_files:
                 if library_name:
@@ -13639,13 +13664,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             for key, diff_pct, severity, filepath in broken_files:
                 obj = PLEX_Media.OBJ_BY_ID[key]
                 library = obj.get('library', 'Unknown')[:15]
-                plex_duration = obj.get('duration', 0) / 60000  # Convert to minutes
+                plex_duration_raw = obj.get('duration') or 0
+                plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
 
                 severity_str = severity.upper() if severity else 'BROKEN'
                 diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
+                dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
                 plex_id = obj.get('id', 'N/A')
 
-                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {library:<15} | {plex_duration:>7.1f} min | {filepath}")
+                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {library:<15} | {dur_str} | {filepath}")
 
             print(f"\nTotal: {len(broken_files)} broken/truncated files found")
             print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
