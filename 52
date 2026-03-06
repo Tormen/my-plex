@@ -2157,6 +2157,28 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("_run_batch_metadata_collection()", content,
             "update_cache must call _run_batch_metadata_collection")
 
+    def test_sweep_queues_all_missing_metadata(self):
+        """After re-attachment, a sweep must queue ALL files still missing metadata."""
+        content = self._read_script()
+        # The init() function must have a sweep that iterates OBJ_BY_ID and queues
+        # any Movie/Episode files with file_metadata=None to _metadata_batch_queue.
+        # This covers --from-scratch full processing paths that don't call
+        # _collect_missing_file_metadata individually.
+        self.assertIn("additional files missing metadata", content,
+            "Must have a sweep that reports queuing additional files missing metadata")
+        # The sweep must check file_metadata is not None (skip files that already have it)
+        # and must append to _metadata_batch_queue
+        import re
+        # Find the sweep block — it's between re-attachment and batch collection
+        sweep_pattern = r'already_queued.*?additional files missing metadata'
+        match = re.search(sweep_pattern, content, re.DOTALL)
+        self.assertIsNotNone(match, "Must have sweep block between re-attachment and batch collection")
+        sweep_block = match.group(0)
+        self.assertIn("_metadata_batch_queue.append(", sweep_block,
+            "Sweep must append missing files to _metadata_batch_queue")
+        self.assertIn("file_metadata", sweep_block,
+            "Sweep must check file_metadata status")
+
     def test_batch_collection_uses_json_lines(self):
         """Batch collector script must output JSON-lines for streaming results."""
         content = self._read_script()
@@ -13120,6 +13142,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if old_len != len(_metadata_batch_queue):
                     print(f"  Batch queue reduced from {old_len} to {len(_metadata_batch_queue)} files")
             del PLEX_Media._preserved_file_metadata
+
+        # Queue any files still missing metadata (covers --from-scratch full processing paths
+        # which don't call _collect_missing_file_metadata, and any other edge cases)
+        if FORCE_CACHE_UPDATE:
+            already_queued = set((fp, obj_key, ver) for fp, obj_key, ver, dt in _metadata_batch_queue)
+            sweep_queued = 0
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for version, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    if file_info.get('file_metadata') is not None:
+                        continue
+                    filepath = file_info.get('filepath')
+                    if filepath and (filepath, key, version) not in already_queued:
+                        _metadata_batch_queue.append((filepath, key, version, obj.get('library', '')))
+                        sweep_queued += 1
+            if sweep_queued > 0:
+                print(f"  Queued {sweep_queued} additional files missing metadata")
 
         # Batch-collect missing file metadata (ffmpeg) via single SSH call
         if FORCE_CACHE_UPDATE and _metadata_batch_queue:
