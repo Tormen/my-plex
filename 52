@@ -2070,6 +2070,18 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("['metadata_probed'] += 1", content,
             "metadata_probed must be incremented when ffprobe runs")
 
+    def test_from_scratch_counts_all_items_as_added(self):
+        """--from-scratch summary must count all Movie/Episode objects as added."""
+        content = self._read_script()
+        # FROM_SCRATCH branch must count items directly from OBJ_BY_ID
+        self.assertIn("if FROM_SCRATCH:", content,
+            "Summary must have FROM_SCRATCH branch for counting added items")
+        import re
+        # The FROM_SCRATCH block must iterate OBJ_BY_ID and count Movie/Episode
+        match = re.search(r"if FROM_SCRATCH:.*?total_added \+= 1", content, re.DOTALL)
+        self.assertIsNotNone(match,
+            "FROM_SCRATCH must count Movie/Episode items as total_added from OBJ_BY_ID")
+
     def test_summary_separates_metadata_from_changes(self):
         """Summary must report metadata probing separately from library changes (added/removed/updated)."""
         content = self._read_script()
@@ -13218,7 +13230,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             total_removed = 0
             total_updated = 0
 
-            if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
+            if FROM_SCRATCH:
+                # --from-scratch: everything in OBJ_BY_ID is newly added (delta counters aren't
+                # used by the DB processing path, so we count directly)
+                for obj in PLEX_Media.OBJ_BY_ID.values():
+                    if obj.get('type') in ('Movie', 'Episode'):
+                        total_added += 1
+            elif hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
                 for lib_key, counters in PLEX_Media.library_delta_counters.items():
                     # Count media files (movies and episodes only, not seasons/shows which are containers)
                     total_added += counters['added']['movies'] + counters['added']['episodes']
@@ -13241,7 +13259,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parts.append(f"-{total_removed} removed")
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
-                print(f"{action} {status}: {', '.join(parts)}, {total_media_files} total PLEX items", flush=True)
+                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
+                print(f"{action} {status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items", flush=True)
             elif metadata_probed > 0:
                 print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items", flush=True)
             else:
