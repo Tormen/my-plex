@@ -2755,7 +2755,7 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
 
 
 class TestResolveMediaByNumericID(unittest.TestCase):
-    """resolve_plex_media_obj must resolve bare numeric IDs (e.g. '18349') from cache."""
+    """resolve_plex_media_obj must resolve numeric IDs ('18349' or 'ID:18349') from cache."""
 
     def _read_script(self):
         with open(__file__, 'r') as f:
@@ -2768,10 +2768,20 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("int(media_identifier)", func_body,
+        self.assertIn("int(numeric_str)", func_body,
             "resolve_plex_media_obj must try parsing media_identifier as numeric ID")
         self.assertIn("obj.get('id') == numeric_id", func_body,
             "resolve_plex_media_obj must match numeric ID against obj['id']")
+
+    def test_resolve_supports_id_prefix(self):
+        """resolve_plex_media_obj must accept 'ID:<num>' format (as printed by --broken)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("startswith('ID:')", func_body,
+            "resolve_plex_media_obj must strip 'ID:' prefix for --broken compatibility")
 
     def test_full_key_passes_list_to_helper(self):
         """Full cache key path must pass a list (not bare dict) to get_media_list_from_PLEX_OBJ_list."""
@@ -2783,6 +2793,22 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         # Must wrap in list: [PLEX_Media.OBJ_BY_ID[...]]
         self.assertIn("[PLEX_Media.OBJ_BY_ID[ media_identifier ]]", func_body,
             "Full key path must wrap single obj in list before passing to get_media_list_from_PLEX_OBJ_list")
+
+    def test_broken_prints_id_prefix(self):
+        """--broken output must print PLEX-ID as 'ID:<num>' format."""
+        content = self._read_script()
+        self.assertIn('f"ID:{plex_id}"', content,
+            "--broken must format PLEX-ID column as ID:<num>")
+
+    def test_show_item_info_supports_id_prefix(self):
+        """show_item_info must accept 'ID:<num>' format."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("startswith('ID:')", func_body,
+            "show_item_info must strip 'ID:' prefix for --broken compatibility")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -11035,10 +11061,13 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
         return get_media_list_from_PLEX_OBJ_list( [PLEX_Media.OBJ_BY_ID[ media_identifier ]] )
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
 
-    # Check for numeric Plex ID (e.g. "18349" matches "Episode_ID:18349"):
+    # Check for numeric Plex ID — supports "ID:18349" (as printed by --broken) or bare "18349":
     stage = "1b"
+    numeric_str = media_identifier
+    if numeric_str.upper().startswith('ID:'):
+        numeric_str = numeric_str[3:]
     try:
-        numeric_id = int(media_identifier)
+        numeric_id = int(numeric_str)
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             if obj.get('id') == numeric_id:
                 if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
@@ -13732,8 +13761,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
                 dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
                 plex_id = obj.get('id', 'N/A')
+                plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
 
-                print(f"{plex_id:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
+                print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
 
             print(f"\nTotal: {len(broken_files)} broken/truncated files found")
             print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
@@ -17176,9 +17206,12 @@ def show_item_info(identifier, table_only=False):
     # Try to find the item in cache
     found_items = []
 
-    # Search strategy 1: Try as numeric ID
+    # Search strategy 1: Try as numeric ID — supports "ID:18349" (as printed by --broken) or bare "18349"
+    numeric_str = identifier
+    if numeric_str.upper().startswith('ID:'):
+        numeric_str = numeric_str[3:]
     try:
-        numeric_id = int(identifier)
+        numeric_id = int(numeric_str)
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             if obj.get('id') == numeric_id or f":{numeric_id}" in key:
                 found_items.append((key, obj))
@@ -17832,12 +17865,12 @@ def main():
             help_redirect = 'watched'
         elif safe_getattr(args, 'unwatched', False):
             help_redirect = 'unwatched'
-        # Check cmd_args for GLOBAL_CMD_PARSER args
-        elif safe_getattr(cmd_args, 'duplicates', False):
+        # Check remaining_args for GLOBAL_CMD_PARSER flags (cmd_args not parsed yet)
+        elif '--duplicates' in remaining_args:
             help_redirect = 'duplicates'
-        elif safe_getattr(cmd_args, 'broken', False):
+        elif '--broken' in remaining_args:
             help_redirect = 'broken'
-        elif safe_getattr(cmd_args, 'list', False):
+        elif '--list' in remaining_args:
             help_redirect = 'list'
 
         if help_redirect:
