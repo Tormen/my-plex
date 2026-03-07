@@ -2754,6 +2754,37 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
             "Must have local sqlite3 path for direct execution")
 
 
+class TestResolveMediaByNumericID(unittest.TestCase):
+    """resolve_plex_media_obj must resolve bare numeric IDs (e.g. '18349') from cache."""
+
+    def _read_script(self):
+        with open(__file__, 'r') as f:
+            return f.read()
+
+    def test_resolve_has_numeric_id_stage(self):
+        """resolve_plex_media_obj must have a numeric ID lookup stage."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("int(media_identifier)", func_body,
+            "resolve_plex_media_obj must try parsing media_identifier as numeric ID")
+        self.assertIn("obj.get('id') == numeric_id", func_body,
+            "resolve_plex_media_obj must match numeric ID against obj['id']")
+
+    def test_full_key_passes_list_to_helper(self):
+        """Full cache key path must pass a list (not bare dict) to get_media_list_from_PLEX_OBJ_list."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        # Must wrap in list: [PLEX_Media.OBJ_BY_ID[...]]
+        self.assertIn("[PLEX_Media.OBJ_BY_ID[ media_identifier ]]", func_body,
+            "Full key path must wrap single obj in list before passing to get_media_list_from_PLEX_OBJ_list")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2761,7 +2792,7 @@ _UNITTEST_CLASSES = [
     TestDuplicatesIgnoreLibraryCombinations, TestRunToolLocally, TestRunToolOnPLEXServer,
     TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
     TestLongHelp, TestPlexUpdatedAtTracking, TestCacheSkipLogic,
-    TestNoAPIFallbacks, TestVerifyCacheIntegrity,
+    TestNoAPIFallbacks, TestVerifyCacheIntegrity, TestResolveMediaByNumericID,
     TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
 ]
 
@@ -10997,12 +11028,24 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj( media_identifier='{media_identifier}', library='{library_name}')")
     if media_identifier is None: err (1008, f"This should never be. Please contact maintainer.")
 
-    # Check for ID / FULL_ID:
+    # Check for FULL_ID (exact cache key like "Episode_ID:18349"):
     stage = "1st"
     if media_identifier in PLEX_Media.OBJ_BY_ID:
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
-        return get_media_list_from_PLEX_OBJ_list( PLEX_Media.OBJ_BY_ID[ media_identifier ] )
+        return get_media_list_from_PLEX_OBJ_list( [PLEX_Media.OBJ_BY_ID[ media_identifier ]] )
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
+
+    # Check for numeric Plex ID (e.g. "18349" matches "Episode_ID:18349"):
+    stage = "1b"
+    try:
+        numeric_id = int(media_identifier)
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            if obj.get('id') == numeric_id:
+                if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
+                return get_media_list_from_PLEX_OBJ_list( [obj] )
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> numeric ID {numeric_id} NOT FOUND in PLEX_Media.OBJ_BY_ID")
+    except ValueError:
+        pass  # Not a numeric ID, continue to filepath/title stages
 
     # Check for FILEPATH:
     stage = "2nd"
