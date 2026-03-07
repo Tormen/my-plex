@@ -158,6 +158,7 @@
 #    - Also used for resolve_plex_media_obj() title/search fallback (stages 3-4)
 #      when cache-based lookup fails — reimplementing Plex search is not worth it
 #    - Also used for brute_force_search() and undo_operation() (trash restore)
+#    - Also used for --info server health check (API reachability + version)
 #
 # WHY API FOR WRITES: The Plex SQLite database is effectively read-only from
 # external processes. Plex locks it for writes, and direct SQL modifications
@@ -17290,12 +17291,23 @@ def show_item_info(identifier, table_only=False):
             query = f"SELECT id, title FROM metadata_items WHERE id = {safe_id} AND deleted_at IS NULL"
             rows = query_plex_database(query, mode='rows')
             if rows:
-                print(f"✓ Item EXISTS on Plex server")
+                print(f"✓ Item EXISTS on Plex server (DB)")
                 print(f"  Server item title: {rows[0][1]}")
             else:
                 print(f"✗ Item NOT FOUND on server (may have been deleted)")
         except Exception as e:
-            print(f"  (Server check failed: {e})")
+            print(f"  (DB check failed: {e})")
+
+        # API required: server health/status check — confirms Plex HTTP API is responsive
+        try:
+            plex = ensure_plex_api(required=False)
+            if plex:
+                print(f"✓ Plex API REACHABLE")
+                print(f"  Server: {plex.friendlyName} v{plex.version} ({plex.platform})")
+            else:
+                print(f"  (API health check skipped — not connected)")
+        except Exception as e:
+            print(f"✗ Plex API UNREACHABLE: {e}")
     else:
         print(f"  (Server check skipped - offline mode)")
 
