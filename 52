@@ -13676,7 +13676,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Print broken files with details
             print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-            print(f"\n{'SEVERITY':<12} | {'DIFF%':<8} | {'PLEX-ID':<10} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
+            print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
             print("-" * 150)
 
             for key, diff_pct, severity, filepath in broken_files:
@@ -13690,7 +13690,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
                 plex_id = obj.get('id', 'N/A')
 
-                print(f"{severity_str:<12} | {diff_str:<8} | {plex_id:<10} | {library:<15} | {dur_str} | {filepath}")
+                print(f"{plex_id:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
 
             print(f"\nTotal: {len(broken_files)} broken/truncated files found")
             print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
