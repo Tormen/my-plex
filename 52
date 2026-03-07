@@ -122,6 +122,49 @@
 #   - Serves as executable documentation of expected behavior
 #
 ################################################################################
+#
+# API vs DATABASE ARCHITECTURE:
+# ===============================
+# my-plex uses THREE data access tiers, in order of preference:
+#
+# 1. CACHE (pickle file ~/.plex_media_cache.pkl)
+#    - Used by ALL non-update commands (--list, --info, --broken, --duplicates,
+#      --verify-cache, --resolve, etc.)
+#    - No network, DB, or API access needed — fully offline capable
+#    - Contains: OBJ_BY_ID, OBJ_BY_LIBRARY, OBJ_BY_FILEPATH, OBJ_BY_MOVIE,
+#      OBJ_BY_SHOW, OBJ_BY_SHOW_EPISODES, OBJ_BY_COLLECTION, library_stats
+#
+# 2. PLEX DATABASE (SQLite via SSH or local access)
+#    - Used by --update-cache for all data collection:
+#      • Library listing (get_library_sections_from_database)
+#      • Movie fetching (fetch_movies_from_database)
+#      • Show/episode fetching (fetch_shows_from_database)
+#      • Collection fetching (_store_collections_from_database)
+#      • Library stats/counts (get_library_stats)
+#      • Schema validation (validate_plex_database_schema)
+#    - Also used for read-only checks: --info server existence, playlist detection
+#    - 60x faster than API for bulk data collection
+#
+# 3. PLEX API (plexapi Python library → Plex HTTP API)
+#    - ONLY used for operations that MODIFY Plex server state:
+#      • Library scanning: lib.update(), lib.refresh(), lib.reload()
+#      • Item mutations: media.delete(), media.markWatched(), media.markUnwatched()
+#      • Label management: media.addLabel(), media.removeLabel()
+#      • Rating: media.rate()
+#      • Media analysis: item.analyze()
+#      • Metadata refresh: media.refresh()
+#      • Collection membership: media.addCollection(), media.removeCollection()
+#      • Playlist CRUD: playlist.create(), playlist.addItems(), playlist.delete()
+#    - Also used for resolve_plex_media_obj() title/search fallback (stages 3-4)
+#      when cache-based lookup fails — reimplementing Plex search is not worth it
+#    - Also used for brute_force_search() and undo_operation() (trash restore)
+#
+# WHY API FOR WRITES: The Plex SQLite database is effectively read-only from
+# external processes. Plex locks it for writes, and direct SQL modifications
+# would bypass Plex's internal consistency checks, caching, and event system.
+# All mutations MUST go through Plex's HTTP API (which plexapi wraps).
+#
+################################################################################
 
 from abc import ABC, abstractmethod
 import argparse
@@ -845,7 +888,7 @@ def plex_retry_operation(operation, *args, context=None, library=None, **kwargs)
 
 
 def plex_get_all_items(library):
-    """Wrapper for library.all() with retry logic"""
+    """API required: used by brute_force_search() and undo_operation() only. Wrapper for library.all() with retry logic."""
     return plex_retry_operation(lambda: library.all(), context=f"'{library.title}'.all()")
 
 def plex_get_seasons(item, library_title=""):
@@ -2035,8 +2078,12 @@ class TestCacheSkipLogic(unittest.TestCase):
         content = self._read_script()
         self.assertIn("query_plex_database(query, mode='rows')", content,
             "get_library_stats must query database for item counts")
-        self.assertIn("if item_count == 0 and PLEX_SERVER is not None", content,
-            "DB count should be primary, API totalSize should be fallback")
+        import re
+        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertNotIn("plex_retry_operation", func_body,
+            "get_library_stats must NOT fall back to API — DB is source of truth")
 
     def test_verify_cache_show_libraries_use_db_counts(self):
         content = self._read_script()
@@ -2117,10 +2164,11 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("SKIPPING movie", content)
         # DB episode skip path
         self.assertIn("SKIPPING episode", content)
-        # Count calls to _collect_missing_file_metadata (should be at least 4: 2 DB + 2 API paths)
+        # Count calls to _collect_missing_file_metadata (at least 2 DB skip paths: movie + episode)
+        # Plus 1 for the function definition itself = at least 3 total
         count = content.count("_collect_missing_file_metadata(")
-        self.assertGreaterEqual(count, 4,
-            f"Expected at least 4 calls to _collect_missing_file_metadata (DB+API, movie+episode), found {count}")
+        self.assertGreaterEqual(count, 3,
+            f"Expected at least 3 occurrences of _collect_missing_file_metadata (1 def + 2 DB skip paths), found {count}")
 
     def test_collect_missing_file_metadata_queues_to_batch(self):
         """_collect_missing_file_metadata must queue files for batch collection instead of probing individually."""
@@ -2267,6 +2315,83 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("ffprobe_error", func_body,
             "Must skip files broken due to ffprobe_error (won't fix themselves)")
         # file_not_found should NOT be skipped (Plex still lists them — retry is warranted)
+
+
+class TestNoAPIFallbacks(unittest.TestCase):
+    """API fallbacks must be removed — DB is the only data source for --update-cache."""
+
+    def _read_script(self):
+        with open(os.path.abspath(__file__), 'r') as f:
+            return f.read()
+
+    def test_no_api_fallback_in_movie_processing(self):
+        """update_movie_library_objs must NOT fall back to plex_get_all_items."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def update_movie_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertNotIn("plex_get_all_items", func_body,
+            "update_movie_library_objs must NOT have API fallback via plex_get_all_items")
+
+    def test_no_api_fallback_in_show_processing(self):
+        """update_show_library_objs must NOT fall back to plex_get_all_items."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def update_show_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertNotIn("plex_get_all_items", func_body,
+            "update_show_library_objs must NOT have API fallback via plex_get_all_items")
+
+    def test_no_api_fallback_in_library_stats(self):
+        """get_library_stats must NOT fall back to API totalSize."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertNotIn("totalSize", func_body,
+            "get_library_stats must NOT fall back to API totalSize — DB is source of truth")
+
+    def test_no_api_fallback_in_library_init(self):
+        """PLEX_Library.init must NOT fall back to plex.library.sections() for building OBJ_DICT."""
+        content = self._read_script()
+        # Verify the no-API-fallback comment exists, confirming the API path was removed
+        self.assertIn("No API fallback", content,
+            "PLEX_Library.init must have 'No API fallback' comment confirming API path removed")
+
+    def test_info_server_check_uses_db(self):
+        """--info server check must use DB query, not API fetchItem."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("query_plex_database", func_body,
+            "--info server check must use DB query")
+        self.assertNotIn("fetchItem", func_body,
+            "--info server check must NOT use API fetchItem")
+
+    def test_playlist_detection_uses_db(self):
+        """PLEX_Playlist.detect_if_of_OBJ_TYPE must use DB query, not API."""
+        content = self._read_script()
+        # Find the detect_if_of_OBJ_TYPE in PLEX_Playlist class
+        self.assertIn("metadata_type = 15", content,
+            "Playlist detection must use DB query with metadata_type = 15")
+
+    def test_playlist_list_uses_db(self):
+        """PLEX_Playlist.list must use DB query, not API."""
+        content = self._read_script()
+        import re
+        # Find the list method - it should contain query_plex_database
+        match = re.search(r'class PLEX_Playlist.*?def list\(playlist_name\):\n(.*?)(?=\n    @staticmethod|\n    def )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("query_plex_database", func_body,
+            "PLEX_Playlist.list must use DB query")
+        self.assertNotIn("plex.playlists()", func_body,
+            "PLEX_Playlist.list must NOT use API plex.playlists()")
 
 
 class TestVerifyCacheIntegrity(unittest.TestCase):
@@ -2635,7 +2760,7 @@ _UNITTEST_CLASSES = [
     TestDuplicatesIgnoreLibraryCombinations, TestRunToolLocally, TestRunToolOnPLEXServer,
     TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
     TestLongHelp, TestPlexUpdatedAtTracking, TestCacheSkipLogic,
-    TestVerifyCacheIntegrity,
+    TestNoAPIFallbacks, TestVerifyCacheIntegrity,
     TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
 ]
 
@@ -3842,7 +3967,8 @@ def parse_plex_xml_url(xml_url):
 
 # Connect to Plex server API
 def ensure_plex_api(required=True):
-    """Ensure PLEX_SERVER is connected. Lazily connects on first call.
+    """Infrastructure for all API-dependent write/mutate operations.
+    Ensure PLEX_SERVER is connected. Lazily connects on first call.
     If required=True (default), raises error when API is unavailable.
     If required=False, returns None silently when unavailable."""
     global PLEX_SERVER
@@ -3858,7 +3984,7 @@ def ensure_plex_api(required=True):
     return PLEX_SERVER
 
 def connect_to_plex(plex_url, plex_token):
-    """ connect to plex server and return PLEX_SERVER object """
+    """ Infrastructure for API-dependent operations. Connect to plex server and return PLEX_SERVER object. """
     global PLEX_SERVER, OFFLINE
 
     # Default timeout if not configured
@@ -4024,7 +4150,7 @@ def get_library_stats(supported=True):
 
        RETURNS dict: {
             'updatedAt':{},         key = library.title, value = library.updatedAt (ACTUAL Plex timestamp)
-            'itemsCount':{},        key = library.title, value = library.totalSize == number of items in library
+            'itemsCount':{},        key = library.title, value = number of items in library (from DB query)
             'totalDuration':{},     key = library.title, value = library.totalDuration
             'totalStorage':{}       key = library.title, value = library.totalStorage
         }
@@ -4041,7 +4167,7 @@ def get_library_stats(supported=True):
         library_stats['updatedAt'][title] = library.updatedAt
         library_stats['plexUpdatedAt'][title] = library.updatedAt
 
-        # Get item count - prefer database query (accurate), fall back to API totalSize
+        # Get item count from database
         item_count = 0
         try:
             safe_title = title.replace("'", "''")
@@ -4055,14 +4181,7 @@ def get_library_stats(supported=True):
             item_count = int(rows[0][0]) if rows else 0
         except Exception as e:
             if DBG: print(f"{DBGPFX}get_library_stats(): DB count failed for '{title}': {e}")
-        if item_count == 0 and PLEX_SERVER is not None:
-            try:
-                item_count = plex_retry_operation(
-                    lambda lib=library: lib.totalSize,
-                    context=f"library '{title:<22s}' totalSize"
-                )
-            except Exception as e:
-                if DBG: print(f"{DBGPFX}get_library_stats(): API totalSize failed for '{title}': {e}")
+        # No API fallback — DB count is the source of truth
         library_stats['itemsCount'][title] = item_count
 
         # For show libraries, also query episode count for skip logic comparison
@@ -4117,7 +4236,8 @@ def obj_needs_updating(obj, val=None, key=None, obj_type=None, obj_ratingKey=Non
 
 
 def brute_force_search(media_identifier, library_name=None):
-    """ Returns the matching object if found, else None. """
+    """ API required: exhaustive search via library.all() when cache-based lookup fails.
+        Returns the matching object if found, else None. """
     global PLEX_SERVER
 
     normalized_filepath = os.path.normpath(media_identifier)
@@ -6607,7 +6727,8 @@ def refresh_cache_metadata(cache_key):
         return False
 
 def merge_metadata_from_duplicates(source_key, target_key):
-    """Merge metadata (watched status, labels, ratings) from source to target
+    """API required: modifies Plex state (markWatched, addLabel, rate) during duplicate resolution.
+    Merge metadata (watched status, labels, ratings) from source to target
 
     When resolving duplicates, we want to preserve metadata from both copies.
     This function merges watched status, labels, and ratings from the source
@@ -7437,7 +7558,8 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
     return all_success
 
 def undo_operation(operation_log, remote_host=None):
-    """Undo a resolution operation using the stored undo instructions
+    """API required: re-adds items to cache via add_media_obj() after trash restore — needs plexapi
+    objects to extract media/part structure. Undo a resolution operation using the stored undo instructions
 
     Args:
         operation_log: The operation log entry containing undo_instructions
@@ -8326,7 +8448,7 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
                     obj['audio_languages'] = []
                 obj['audio_languages'].append(lang_3)
 
-    # Trigger Plex Analyze for each modified item
+    # API required: item.analyze() triggers Plex server-side media analysis
     if items_to_analyze:
         print(f"\n{'='*76}")
         print(f"TRIGGERING PLEX ANALYZE FOR {len(items_to_analyze)} ITEM(S)")
@@ -9515,6 +9637,8 @@ def plex_rate_limit_delay():
 
 
 def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
+    """API required: expects plexapi objects (item, media, part). Used by undo_operation() (trash restore)
+    to re-add items to cache. --update-cache uses DB path (_process_movies/shows_from_database) instead."""
     global FORCE_PLEXDATA
     if DBG: print( f"{DBGPFX}add_media_obj(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath})" )
 
@@ -10763,116 +10887,13 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
             # Fetch collections (metadata_type=18) for this library
             _store_collections_from_database(library_section_id, library_name)
     except Exception as e:
-        if DBG: print(f"{DBGPFX}Database fetch failed: {e}, falling back to API")
+        if DBG: print(f"{DBGPFX}Database fetch failed: {e}")
 
-    # Fall back to API if database fetch failed
+    # No API fallback — DB is the only data source for --update-cache
     if all_movies is None:
-        if DBG: print(f"{DBGPFX}Using Plex API fallback for library '{library_name}'")
-        # Continue with old API-based code below...
-        all_movies = []  # Will use API path below
+        err(1071, f"Database fetch failed for movie library '{library_name}'. Check DB access (SSH or local).")
 
-    # If we have database results, use them
-    if all_movies:
-        return _process_movies_from_database(all_movies, library_name, library_idx, total_libraries, start_idx, end_idx)
-
-    # Otherwise use original API code
-    all_movies = plex_get_all_items(library)
-    total_movies = len(all_movies)
-
-    # VIRTUAL PARTITIONING: If start/end indices are provided, slice the movies list
-    # Create display title for partition-aware messages
-    display_title = library.title
-    if start_idx is not None and end_idx is not None:
-        all_movies = all_movies[start_idx:end_idx]
-        display_title = f"{library.title}[{start_idx}:{end_idx}]"
-        if VRB:
-            lib_label = f"library '{display_title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing partition [{start_idx}:{end_idx}] = {len(all_movies)} movies")
-        # Update total for progress display
-        total_movies = len(all_movies)
-
-    # Store server IDs for removal detection (to detect items in cache but not on server)
-    # Accumulate IDs across all partitions of the same base library
-    if not hasattr(PLEX_Media, 'library_server_ids'):
-        PLEX_Media.library_server_ids = {}
-    base_library_name = library.title
-    if base_library_name not in PLEX_Media.library_server_ids:
-        PLEX_Media.library_server_ids[base_library_name] = set()
-
-    # Collect IDs from this partition
-    partition_ids = {get_fullID(item) for item in all_movies}
-
-    # Add to accumulated set for the base library
-    PLEX_Media.library_server_ids[base_library_name].update(partition_ids)
-
-    # In rebuild mode with resume, calculate how many movies are left to process
-    if FORCE_CACHE_UPDATE and FORCE_CACHE_UPDATE:
-        movies_already_cached = sum(1 for item in all_movies if get_fullID(item) in PLEX_Media.OBJ_BY_ID)
-        movies_to_process = total_movies - movies_already_cached
-        if VERYVRB:
-            lib_label = f"library '{display_title}'"
-            if movies_already_cached > 0 and movies_to_process > 0:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} new movies, checking {movies_already_cached} cached movies...", flush=True)
-            elif movies_already_cached > 0:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: checking {movies_already_cached} cached movies...", flush=True)
-            else:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} movies...", flush=True)
-        # Track progress for checkpoint messages
-        PLEX_Media.current_library = display_title
-        PLEX_Media.current_item_total = movies_to_process
-        PLEX_Media.current_item_type = 'movies'
-    elif FORCE_CACHE_UPDATE:
-        if VERYVRB:
-            lib_label = f"library '{display_title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {total_movies} movies...", flush=True)
-        # Track progress for checkpoint messages
-        PLEX_Media.current_library = display_title
-        PLEX_Media.current_item_total = total_movies
-        PLEX_Media.current_item_type = 'movies'
-    # Track number of movies actually processed (excluding skipped ones from resume)
-    processed_count = 0
-    for movie_idx, item in enumerate(all_movies, 1):
-        # Check for graceful shutdown
-        if _shutdown_requested:
-            return False  # Library not completed due to shutdown
-
-        # In rebuild mode with resume: check if this movie is already cached
-        # IMPORTANT: Only skip if NOT doing --force-plexdata
-        # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
-        if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
-            movie_key = get_fullID(item)
-            if movie_key in PLEX_Media.OBJ_BY_ID:
-                # Movie exists in cache with same ID - skip it (already processed in previous run)
-                if DBG: print(f"{DBGPFX}update_movie_library_objs(): SKIPPING movie '{item.title}' - already in cache from previous run")
-                _collect_missing_file_metadata(PLEX_Media.OBJ_BY_ID[movie_key], display_title)
-                continue
-
-            # NOTE: ID mismatches (from re-scanned libraries) should be handled with --update-cache --force
-
-        # Count this movie as processed (not skipped)
-        processed_count += 1
-
-        # Track current progress for checkpoint messages
-        if FORCE_CACHE_UPDATE:
-            PLEX_Media.current_item_idx = processed_count
-
-        if VRB and total_movies > 50 and movie_idx % max(1, total_movies // 10) == 0:
-            lib_label = f"library '{library.title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: processed {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
-            # Update progress for cache rebuild
-            if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
-                if total_libraries > 0:
-                    PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries} ('{library.title}'): {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
-                else:
-                    PLEX_Media.cache_rebuild_lock.write_progress(f"Processing '{library.title}': {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
-
-        item_media = item.media
-        media_cnt = len(item_media)
-        for media_idx, media in enumerate(item_media):
-            media_parts = media.parts
-            part_cnt = len(media_parts)
-            for part_idx, part in enumerate(media_parts):
-                add_media_obj( item, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part, display_title=display_title )
+    return _process_movies_from_database(all_movies, library_name, library_idx, total_libraries, start_idx, end_idx)
 
 
 def update_show_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
@@ -10907,179 +10928,15 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
             _store_collections_from_database(library_section_id, library_name)
     except Exception as e:
         if DBG:
-            print(f"{DBGPFX}Database fetch failed: {e}, falling back to API")
+            print(f"{DBGPFX}Database fetch failed: {e}")
             import traceback
             traceback.print_exc()
 
-    # Fall back to API if database fetch failed
+    # No API fallback — DB is the only data source for --update-cache
     if shows_data is None:
-        if DBG: print(f"{DBGPFX}Using Plex API fallback for library '{library_name}'")
-        shows_data = {}  # Empty dict signals to use API path below
+        err(1072, f"Database fetch failed for show library '{library_name}'. Check DB access (SSH or local).")
 
-    # If we have database results, use them
-    if shows_data:
-        return _process_shows_from_database(shows_data, library_name, library_idx, total_libraries, start_idx, end_idx)
-
-    # Otherwise use original API code
-    all_shows = plex_get_all_items(library)
-    total_shows = len(all_shows)
-
-    # VIRTUAL PARTITIONING: If start/end indices are provided, slice the shows list
-    # Create display title for partition-aware messages
-    display_title = library.title
-    if start_idx is not None and end_idx is not None:
-        all_shows = all_shows[start_idx:end_idx]
-        display_title = f"{library.title}[{start_idx}:{end_idx}]"
-        if VRB:
-            lib_label = f"library '{display_title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing partition [{start_idx}:{end_idx}] = {len(all_shows)} shows")
-        # Update total for progress display
-        total_shows = len(all_shows)
-
-    # Store server IDs for removal detection (to detect items in cache but not on server)
-    # For shows, we need IDs for shows, seasons, and episodes
-    # Accumulate IDs across all partitions of the same base library
-    if not hasattr(PLEX_Media, 'library_server_ids'):
-        PLEX_Media.library_server_ids = {}
-    base_library_name = library.title
-    if base_library_name not in PLEX_Media.library_server_ids:
-        PLEX_Media.library_server_ids[base_library_name] = set()
-
-    # Collect IDs from this partition
-    partition_ids = set()
-    for show in all_shows:
-        partition_ids.add(get_fullID(show))
-        # Also add seasons and episodes
-        for season in show.seasons():
-            partition_ids.add(get_fullID(season))
-            for episode in season.episodes():
-                partition_ids.add(get_fullID(episode))
-
-    # Add to accumulated set for the base library
-    PLEX_Media.library_server_ids[base_library_name].update(partition_ids)
-
-    # In rebuild mode with resume, calculate how many shows are left to process
-    if FORCE_CACHE_UPDATE and FORCE_CACHE_UPDATE:
-        shows_already_cached = sum(1 for item in all_shows if get_fullID(item) in PLEX_Media.OBJ_BY_ID)
-        shows_to_process = total_shows - shows_already_cached
-        # Note: We still check cached shows for new seasons/episodes, so message reflects total work
-        if VERYVRB:
-            lib_label = f"library '{display_title}'"
-            if shows_already_cached > 0 and shows_to_process > 0:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {shows_to_process} new shows, checking {shows_already_cached} cached shows for updates...", flush=True)
-            elif shows_already_cached > 0:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: checking {shows_already_cached} cached shows for new seasons/episodes...", flush=True)
-            else:
-                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {shows_to_process} shows...", flush=True)
-        # Track progress for checkpoint messages
-        PLEX_Media.current_library = display_title
-        PLEX_Media.current_item_total = shows_to_process
-        PLEX_Media.current_item_type = 'shows'
-    elif FORCE_CACHE_UPDATE:
-        if VERYVRB:
-            lib_label = f"library '{display_title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {total_shows} shows...", flush=True)
-        # Track progress for checkpoint messages
-        PLEX_Media.current_library = display_title
-        PLEX_Media.current_item_total = total_shows
-        PLEX_Media.current_item_type = 'shows'
-    # Track number of shows actually processed (excluding skipped ones from resume)
-    processed_count = 0
-    for show_idx, item in enumerate(all_shows, 1):
-        # Check for graceful shutdown
-        if _shutdown_requested:
-            return False  # Library not completed due to shutdown
-
-        # In rebuild mode with resume: DON'T skip shows at show level
-        # We need to process all seasons/episodes even if the show object is cached
-        # The season/episode level filtering (lines 4092-4111) will skip already-cached items
-        # This ensures we don't miss new seasons/episodes added to existing shows
-        if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
-            # INCREMENTAL UPDATE MODE ONLY: check if this show needs updating
-            # NOTE: ID mismatches (from re-scanned libraries) should be handled with --force flag
-            show_key = get_fullID(item)
-            # Don't skip - we still need to check for new seasons/episodes
-
-        # Count this show as processed (not skipped)
-        processed_count += 1
-
-        # Track current progress for checkpoint messages
-        if FORCE_CACHE_UPDATE:
-            PLEX_Media.current_item_idx = processed_count
-
-        # For shows: print progress per show (since each show has many episodes)
-        if VERYVRB:
-            lib_label = f"library '{display_title}'"
-            print(f"{_get_worker_prefix()}{lib_label:<31s}: starting {show_idx}/{total_shows} '{item.title}'...")
-            # Update progress for cache rebuild
-            if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
-                if total_libraries > 0:
-                    PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries} ('{display_title}'): {show_idx}/{total_shows} '{item.title}'")
-                else:
-                    PLEX_Media.cache_rebuild_lock.write_progress(f"Processing '{display_title}': {show_idx}/{total_shows} '{item.title}'")
-
-        if not FORCE_CACHE_UPDATE:
-            key = get_fullID(item)
-            if not obj_needs_updating(item, None, key):
-                if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING SHOW {key} as updatedAt same same (and NOT --update-cache parameter)" )
-                continue
-
-        show_added = False # to avoid adding the show over and over again (for each episode)
-        for season in plex_get_seasons(item, library.title):
-            # Check for graceful shutdown during season processing
-            if _shutdown_requested:
-                return False  # Library not completed due to shutdown
-
-            # Skip seasons that are already in cache (both in normal mode and incremental update mode)
-            season_key = get_fullID(season)
-            if not FORCE_CACHE_UPDATE:
-                # Normal mode: skip if not updated
-                if not obj_needs_updating(season, None, season_key):
-                    if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING SEASON {season_key} as updatedAt same same (and NOT --update-cache parameter)" )
-                    continue
-            elif not FORCE_PLEXDATA:
-                # Incremental update mode: Don't skip seasons just because season object is cached
-                # We need to check individual episodes - some may be missing from cache
-                # Only skip if we're in force rebuild mode (which rebuilds from scratch)
-                pass  # Process all episodes even if season is cached
-
-            episodes = plex_get_episodes(season, library.title, item.title)
-            if len(episodes) == 0: err ( 1045, f"season = {season}")
-            season_added = False # to avoid adding the season over and over again (for each episode)
-            for episode in episodes:
-                # Check for graceful shutdown during episode processing
-                if _shutdown_requested:
-                    return False  # Library not completed due to shutdown
-
-                # Skip episodes that are already in cache (incremental update mode only)
-                # IMPORTANT: Only skip if NOT doing --force-plexdata
-                # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
-                if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
-                    episode_key = get_fullID(episode)
-                    if episode_key in PLEX_Media.OBJ_BY_ID:
-                        if DBG: print( f"{DBGPFX}add_show_library_objs(): SKIPPING EPISODE {episode_key} - already in cache")
-                        _collect_missing_file_metadata(PLEX_Media.OBJ_BY_ID[episode_key], display_title)
-                        continue
-
-                episode_media = episode.media
-                media_cnt = len(episode_media)
-                for media_idx, media in enumerate(episode_media):
-                    media_parts = media.parts
-                    part_cnt = len(media_parts)
-                    for part_idx, part in enumerate(media.parts):
-                        add_media_obj( episode, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part,  season, episode, display_title=display_title )
-                        if media_idx + part_idx != 0: continue
-                        # first media + first part: if we have at least one episode, we will determine the season path and the show/series path!
-                        if not season_added:
-                            season_path =  os.path.dirname( part.file )
-                            if season is None: err(1009)
-                            add_media_obj( season, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part,  season, episode, season_path )
-                            season_added = True
-
-                            if not show_added:
-                                series_path =  os.path.dirname( season_path )
-                                add_media_obj( item, library, item,  media_idx,media_cnt,media,  part_idx,part_cnt,part,  season, episode, series_path )
-                                show_added = True
+    return _process_shows_from_database(shows_data, library_name, library_idx, total_libraries, start_idx, end_idx)
 
 
 def init(args):
@@ -11119,6 +10976,8 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
     """ Resolve media entry by title or file path or PLEX_OBJ_ID and optional library_name.
         Useful to MANIPULATE the actual PLEX database/objects !
         RETURNS: list of actual PLEX-API objects
+        Stages 1-2 use cache (no API). Stages 3-4 use API for title lookup and cross-library
+        search — reimplementing Plex's search logic in SQL is not worth the effort.
 
        With or without library_name:
           1.) we try to get media_identifier_realpath (=realpath(media_identifier))
@@ -11333,18 +11192,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 if l_type in PLEX_Library.SUPPORTED_TYPES:
                     PLEX_Library.OBJ_DICT_SUPPORTED[library_name] = lib_obj
 
-        # Fall back to API if cache is empty and not offline
+        # No API fallback — if cache is empty, user must run --update-cache (which uses DB)
         elif not OFFLINE:
-            plex = ensure_plex_api(required=False)
-            if plex:
-                if DBG: print(f"{DBGPFX}PLEX_Library.init(): Cache empty, falling back to API")
-                for l in plex.library.sections():
-                    l_title = l.title
-                    l_type = l.type.capitalize()
-                    PLEX_Library.OBJ_DICT[l_title] = l
-                    PLEX_Library.OBJ_DICT_TYPE[l_title] = l_type
-                    if l_type in PLEX_Library.SUPPORTED_TYPES:
-                        PLEX_Library.OBJ_DICT_SUPPORTED[l_title] = l
+            if DBG: print(f"{DBGPFX}PLEX_Library.init(): Cache empty, no API fallback — user must run --update-cache")
 
         PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
         PLEX_Library.init_done = True
@@ -11843,6 +11693,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     traceback.print_exc()
                 return
 
+        # API required: triggers Plex's internal filesystem scanner (lib.update/refresh/reload)
+        # Cannot be done via DB — Plex must scan its own media directories
         # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
         # This makes --update-cache self-healing
         # ONLY scan when --update-cache is explicitly used (not during --duplicates, etc.)
@@ -12759,6 +12611,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def create(collection_name, library_name):
+        # API required: collection mutations via Plex HTTP API
         plex = ensure_plex_api()
         Collection.create(server=plex, title=collection_name, section=PLEX_Library.OBJ_DICT[library_name])
 
@@ -15025,6 +14878,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def refresh(media_identifier, library_name=None):
+        # API required: triggers Plex server-side metadata refresh via HTTP API
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.refresh()
@@ -15034,6 +14888,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def delete(media_identifier, library_name=None):
+        # API required: deletes item from Plex via HTTP API
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.delete()
@@ -15045,6 +14900,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def get_watched_status(media_identifier, library_name=None):
+        # API required: reads live watch status from Plex server
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
@@ -15055,6 +14911,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def set_watched(media_identifier, library_name=None):
+        # API required: modifies watch status via Plex HTTP API
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.markWatched()
@@ -15064,6 +14921,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def set_unwatched(media_identifier, library_name=None):
+        # API required: modifies watch status via Plex HTTP API
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.markUnwatched()
@@ -15149,7 +15007,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def retrieve_media_and_part(obj, must_exist=True):
-        """ Searches for media + part in PLEX_SERVER using IDs from obj; see PLEX_Media.load_cache().
+        """ API REQUIRED: Returns plexapi objects needed for write operations (delete, markWatched,
+            addLabel, rate, etc.). Cannot use DB — callers need live plexapi objects to mutate state.
+            Searches for media + part in PLEX_SERVER using IDs from obj; see PLEX_Media.load_cache().
             RETURNS tuple (media, part)
             If must_exist == True: Assums that obj MUST exist in PLEX_SERVER and FAILS if we can't find it.
             Else: RETURNS tuple (None, None) if not found! """
@@ -15207,10 +15067,14 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
-        plex = ensure_plex_api(required=False)
-        if plex is None:
+        # Use DB query instead of API — playlists are metadata_type=15
+        try:
+            safe_obj = obj.replace("'", "''")
+            query = f"SELECT COUNT(*) FROM metadata_items WHERE metadata_type = 15 AND title = '{safe_obj}' AND deleted_at IS NULL"
+            rows = query_plex_database(query, mode='rows')
+            return rows and int(rows[0][0]) > 0
+        except Exception:
             return False
-        return (obj in [ x.title for x in plex.playlists() ])
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
@@ -15225,12 +15089,21 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def list(playlist_name):
-        plex = ensure_plex_api()
-        for playlist in plex.playlists():
-            print(f"Playlist: {playlist.title}")
+        # Use DB query instead of API — playlists are metadata_type=15
+        try:
+            query = "SELECT title FROM metadata_items WHERE metadata_type = 15 AND deleted_at IS NULL ORDER BY title"
+            rows = query_plex_database(query, mode='rows')
+            if rows:
+                for row in rows:
+                    print(f"Playlist: {row[0]}")
+            else:
+                print("No playlists found.")
+        except Exception as e:
+            print(f"Error listing playlists: {e}")
 
     @staticmethod
     def create(playlist_name, media_identifiers):
+        # API required: playlist creation via Plex HTTP API
         plex = ensure_plex_api()
         try:
             media_items = []
@@ -15243,6 +15116,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def update(playlist_name, media_identifiers, action):
+        # API required: playlist modification via Plex HTTP API
         plex = ensure_plex_api()
         try:
             playlist = plex.playlist(playlist_name)
@@ -15261,6 +15135,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def delete(playlist_name):
+        # API required: playlist deletion via Plex HTTP API
         plex = ensure_plex_api()
         try:
             playlist = plex.playlist(playlist_name)
@@ -15907,7 +15782,7 @@ def list_items_with_label(label):
             print(f"{plex_id:<10} | {obj_type:<10} | {title:<60} | {year:<6} | {filepath}")
 
 def add_label_to_item(label, plex_id):
-    """Add a label to a media item"""
+    """Add a label to a media item. API required: label mutations via Plex HTTP API."""
     ensure_plex_api()
 
     try:
@@ -15959,7 +15834,7 @@ def add_label_to_item(label, plex_id):
         err(1066, f"Failed to add label: {e}")
 
 def remove_label_from_item(label, plex_id):
-    """Remove a label from a media item"""
+    """Remove a label from a media item. API required: label mutations via Plex HTTP API."""
     ensure_plex_api()
 
     try:
@@ -17407,19 +17282,22 @@ def show_item_info(identifier, table_only=False):
     print(f"✓ Item IS in cache")
     print(f"  Cache file: {CACHE_FILE}")
 
-    # Check if item exists on server (if not offline)
-    plex = ensure_plex_api(required=False)
-    if plex:
+    # Check if item exists on Plex server via DB query (no API needed)
+    if not OFFLINE:
         try:
-            item = plex.fetchItem(int(obj['item_id']))
-            print(f"✓ Item EXISTS on Plex server")
-            print(f"  Server item title: {item.title}")
+            item_id = int(obj['item_id'])
+            safe_id = int(item_id)  # Ensure integer to prevent SQL injection
+            query = f"SELECT id, title FROM metadata_items WHERE id = {safe_id} AND deleted_at IS NULL"
+            rows = query_plex_database(query, mode='rows')
+            if rows:
+                print(f"✓ Item EXISTS on Plex server")
+                print(f"  Server item title: {rows[0][1]}")
+            else:
+                print(f"✗ Item NOT FOUND on server (may have been deleted)")
         except Exception as e:
-            print(f"✗ Item NOT FOUND on server (may have been deleted)")
-            print(f"  Error: {e}")
+            print(f"  (Server check failed: {e})")
     else:
-        reason = "offline mode" if OFFLINE else "no API credentials configured"
-        print(f"  (Server check skipped - {reason})")
+        print(f"  (Server check skipped - offline mode)")
 
     print("="*76)
 
