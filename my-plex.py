@@ -10393,7 +10393,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def _normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language):
+    def _normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language, excess_versions=None):
         if audio_filter:
             lang_map = {
                 'en': 'en', 'english': 'en', 'eng': 'en',
@@ -10409,7 +10409,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
-        if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language:
+        if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
             print("\nAvailable Libraries:")
             PLEX_Library.print()
             return audio_filter, media_type, False  # False = should not continue
@@ -10513,7 +10513,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
         print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
+        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':<10} | {'LIBRARY':<15} | FILEPATH")
         print("-" * 150)
         for key, diff_pct, severity, filepath in broken_files:
             obj = PLEX_Media.OBJ_BY_ID[key]
@@ -10525,9 +10525,51 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
             plex_id = obj.get('id', 'N/A')
             plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
-            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
+            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+
+    @staticmethod
+    def _list_excess_versions(obj_keys, library_name, version_limit):
+        """List files belonging to entries with >= version_limit versions."""
+        excess_files = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            if obj.get('type') not in ['Episode', 'Movie']:
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            files_dict = obj.get('files', {})
+            total = len(files_dict)
+            if total < version_limit:
+                continue
+            title = obj.get('title', 'Unknown')
+            plex_id = obj.get('id', 'N/A')
+            library = obj.get('library', 'Unknown')
+            for idx, (version, file_info) in enumerate(files_dict.items(), 1):
+                filepath = file_info.get('filepath', '')
+                excess_files.append((plex_id, title, idx, total, library, filepath))
+
+        if not excess_files:
+            print(f"No entries with {version_limit}+ versions{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
+            return
+
+        excess_files.sort(key=lambda x: (x[1].lower(), x[2]))  # sort by title, then version nr
+
+        print(f"\n{'PLEX-ID':<10} | {'ENTRY TITLE':<40} | {'VERSION':<9} | {'LIBRARY':<15} | FILEPATH")
+        print("-" * 150)
+        for plex_id, title, idx, total, library, filepath in excess_files:
+            plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
+            title_str = title[:40]
+            version_str = f"{idx} / {total}"
+            library_str = library[:15]
+            print(f"{plex_id_str:<10} | {title_str:<40} | {version_str:<9} | {library_str:<15} | {filepath}")
+        entry_count = len(set((plex_id, title) for plex_id, title, _, _, _, _ in excess_files))
+        print(f"\nTotal: {len(excess_files)} files across {entry_count} entries with {version_limit}+ versions")
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -10725,19 +10767,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return filtered_keys
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False):
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None):
         global FORMAT
-        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language} )")
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
 
-        audio_filter, media_type, should_continue = PLEX_Media._normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language)
+        audio_filter, media_type, should_continue = PLEX_Media._normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language, excess_versions)
         if not should_continue:
             return
 
         PLEX_Media._print_list_header(library_name, media_type, broken_only, duplicates_only, watched_only, unwatched_only, audio_filter, no_audio_language)
 
         # Collect keys
-        # When checking duplicates or broken files, always collect from ALL libraries so we can filter properly
-        if duplicates_only or broken_only:
+        # When checking duplicates, broken files, or excess versions, always collect from ALL libraries so we can filter properly
+        if duplicates_only or broken_only or excess_versions:
             obj_keys = collect_library_keys(library_name=None, media_type=media_type)
         else:
             obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
@@ -10747,6 +10789,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Filter for broken files if requested
         if broken_only:
             PLEX_Media._list_broken_files(obj_keys, library_name)
+            return
+
+        # List entries with excess versions if requested
+        if excess_versions:
+            PLEX_Media._list_excess_versions(obj_keys, library_name, excess_versions)
             return
 
         # Filter for duplicates if requested
@@ -14025,9 +14072,10 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'collections', False):
         err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
 
-    # Handle --list, --duplicates, or --broken (both --duplicates and --broken automatically enable --list)
+    # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
     # Skip when --broken is used with --update-cache (rescan mode, not display mode)
-    if cmd_args.list or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN):
+    excess_versions = safe_getattr(cmd_args, 'excess_versions', None)
+    if cmd_args.list or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN) or excess_versions:
         # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
         # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
         # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
@@ -14036,14 +14084,14 @@ def execute_global_commands(args, cmd_args):
         broken_only = safe_getattr(cmd_args, 'broken', False)
         resolve_mode = safe_getattr(cmd_args, 'resolve', False)
 
-        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}")
+        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}, excess_versions={excess_versions}")
 
         # Call PLEX_Media.list() with library_name=None to search all libraries
         watched_only = safe_getattr(args, 'watched', False)
         unwatched_only = safe_getattr(args, 'unwatched', False)
         audio_filter = safe_getattr(args, 'audio', None)
         no_audio_language = safe_getattr(args, 'no_audio_language', False)
-        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language)
+        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions)
 
 ###########################################################################################
 #### DO IT
@@ -14374,6 +14422,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
+    GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, choices=[2, 3], help="List entries with LIMIT or more file versions (2 or 3). One line per file.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
