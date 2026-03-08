@@ -528,11 +528,11 @@ HELP_SUFFIX="""
 supported <OBJECT_TYPE>s:
 
     library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>.
-                      To force this OBJECT_TYPE call with: --library <library_name>. For more info: --help library
+                      To force this OBJECT_TYPE call with: --library <library_name>. For more info: --help --library /or/ --library --help
     media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title>, <media_filename>, or ID:<PLEX-ID>.
-                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>. For more info: --help media
+                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>. For more info: --help --media /or/ --media --help
     playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>.
-                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>. For more info: --help playlist
+                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>. For more info: --help --playlist /or/ --playlist --help
 """
 
 ###########################################################################################
@@ -11975,6 +11975,16 @@ def main_print_help(args, remaining_args, main_parser):
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
     has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None
+    # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
+    if args.help == 'default' and remaining_args:
+        for i, ra in enumerate(remaining_args):
+            if ra.startswith('--'):
+                topic = ra.lstrip('-')
+                if topic:
+                    args.help = topic
+                    remaining_args.pop(i)
+                    break
+
     if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0 and not has_standalone_cmd):
         if DBG: print( f"{DBGPFX}main_print_help(): standard help output..." )
         verbose_help = args.offline  # --help --offline or --offline --help shows verbose help
