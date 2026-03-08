@@ -11745,12 +11745,65 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 title = getattr(item, 'title', media_identifier)
                 item.delete()
                 print(f"Deleted Plex entry '{title}'.")
+                PLEX_Media._remove_from_cache_by_id(item_id)
             else:
                 for media in resolve_plex_media_obj(media_identifier, library_name):
+                    mid = getattr(media, 'ratingKey', None)
                     media.delete()
                     print(f"Deleted Plex entry '{media.title}'.")
+                    if mid:
+                        PLEX_Media._remove_from_cache_by_id(int(mid))
         except Exception as e:
             err(1023, f"Error deleting media: {e}")
+
+    @staticmethod
+    def _remove_from_cache_by_id(numeric_id):
+        """Remove all cache entries for a given Plex item ID, then save cache to disk."""
+        keys_to_remove = [
+            key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+            if int(obj.get('id', 0)) == numeric_id
+        ]
+        if not keys_to_remove:
+            return
+
+        for key in keys_to_remove:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            obj_type = obj.get('type', '').rstrip('*')
+            library = obj.get('library')
+
+            # Remove from OBJ_BY_ID
+            del PLEX_Media.OBJ_BY_ID[key]
+
+            # Remove from OBJ_BY_FILEPATH (all file paths for this entry)
+            for file_info in obj.get('files', {}).values():
+                fp = file_info.get('filepath', '')
+                if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
+                    del PLEX_Media.OBJ_BY_FILEPATH[fp]
+            # Also check legacy single 'file' key
+            single_file = obj.get('file')
+            if single_file and single_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[single_file]
+
+            # Remove from OBJ_BY_LIBRARY
+            if library and library in PLEX_Media.OBJ_BY_LIBRARY:
+                for type_key in list(PLEX_Media.OBJ_BY_LIBRARY[library].keys()):
+                    if key in PLEX_Media.OBJ_BY_LIBRARY[library][type_key]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library][type_key].remove(key)
+
+            # Remove from type-specific structures
+            if obj_type == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key]
+            elif obj_type in ('Show', 'Season', 'Episode'):
+                show_key = obj.get('show_key', key)
+                if obj_type == 'Show':
+                    if show_key in PLEX_Media.OBJ_BY_SHOW:
+                        del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+        # Save updated cache to disk
+        update_and_save_cache(build_media_cache_dict())
+        print(f"Cache updated: removed {len(keys_to_remove)} entry/entries for ID {numeric_id}.")
 
     @staticmethod
     def remove(media_identifier, library_name=None):
