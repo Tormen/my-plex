@@ -270,7 +270,7 @@ CONFIG_DEFAULTS = {
     # Output Configuration
     'DUPLICATE_FILE': '/tmp/duplicates',
     'FORMAT': 'tsv_labeled',
-    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{ORIGINALTITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_NR}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
+    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{ORIGINALTITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_IDX}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
     'DBGPFX': ' ~~~ ',
     'PRINTPFX': ' >>> ',
     'VRBPFX': '  >> ',
@@ -17278,7 +17278,11 @@ def show_item_info(identifier, table_only=False):
     print(f"Key:\t{key}")
     print(f"Type:\t{obj.get('type', 'Unknown')}")
     print(f"Title:\t{obj.get('title', 'N/A')}")
-    print(f"Plex ID:\t{obj.get('id', 'N/A')}")
+    plex_id = obj.get('id', 'N/A')
+    item_id = obj.get('item_id')
+    if plex_id != item_id:
+        print(f"Plex ID:\t{plex_id}")
+        print(f"Item ID:\t{item_id}")
     print(f"Library:\t{obj.get('library', 'N/A')}")
 
     # Type-specific info
