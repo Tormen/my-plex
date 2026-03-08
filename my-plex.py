@@ -527,12 +527,15 @@ PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_T
 HELP_SUFFIX="""
 supported <OBJECT_TYPE>s:
 
-    library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library
+    library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>.
                       To force this OBJECT_TYPE call with: --library <library_name>
-    media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title>, <media_filename>, or ID:<PLEX-ID>. For more info: --help media
+                      For more info: --help library
+    media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title>, <media_filename>, or ID:<PLEX-ID>.
                       To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>
-    playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>. For more info: --help playlist
+                      For more info: --help media
+    playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>.
                       To force this OBJECT_TYPE call with: --playlist <PLAYLIST>
+                      For more info: --help playlist
 """
 
 ###########################################################################################
