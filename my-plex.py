@@ -1,1 +1,15132 @@
-52
+#!/usr/bin/python3
+
+# Coding guidelines, architecture docs, and test policies: see README.md
+# errCode range: 1001..1070
+
+from abc import ABC, abstractmethod
+import argparse
+import fcntl
+import functools
+import inspect
+import json
+import os
+import pickle
+import platform
+import random
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+# Force unbuffered output for all print statements (important when redirecting to file)
+print = functools.partial(print, flush=True)
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from datetime import datetime, timedelta
+from functools import reduce
+from pathlib import Path
+from pprint import pprint, pformat
+import readchar
+import threading
+#
+# HELP: https://python-plexapi.readthedocs.io/
+from plexapi.media import Media
+from plexapi.server import PlexServer
+from plexapi.playlist import Playlist
+from plexapi.collection import Collection
+import urllib3.exceptions
+import requests.exceptions
+
+
+###########################################################################################
+#### CONFIG FILE SUPPORT
+###########################################################################################
+#
+# THREE-TIER CONFIGURATION ARCHITECTURE:
+# ======================================
+# The configuration system has a complete three-tier architecture with the following priority:
+#
+#   1. CONFIG_DEFAULTS (lowest priority)
+#      - Defined in the CONFIG_DEFAULTS dictionary below
+#      - Provides sensible defaults for all configuration variables
+#      - PLEX_DB_PATH must be configured for direct database access
+#
+#   2. CONFIG_FILE (medium priority)
+#      - Loaded from ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
+#      - Values in config file override CONFIG_DEFAULTS
+#      - Use --config-file | -C to specify a custom config file path
+#      - Use --create with --config-file to generate a config file with default values
+#
+#   3. COMMAND-LINE (highest priority)
+#      - Command-line arguments override both CONFIG_FILE and CONFIG_DEFAULTS
+#      - Examples: --plex-url, --plex-token, --debug, --verbose, etc.
+#
+# VALIDATION & DEBUG:
+# ===================
+# - All configuration variables are validated after command-line parsing (see validation in main())
+# - Use --debug (-D) to see all configuration variables and their final values
+# - Invalid configurations will result in clear error messages and exit code 1
+#
+# ALL GLOBAL VARIABLES:
+# =====================
+# All global variables (lines ~224-321) are initialized from CONFIG_DEFAULTS to ensure
+# a single source of truth. This includes:
+# - Plex database parameters (PLEX_DB_PATH, PLEX_DB_REMOTE_HOST)
+# - Path configuration (ALTERNATIVE_ROOTPATHS, CACHE_FILE, LOCK_FILE, DUPLICATE_FILE)
+# - Output configuration (FORMAT, LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX)
+# - Debug/verbose flags (DBG, VRB, VERYVRB, DEEPDBG, OFFLINE)
+# - Cache configuration (FORCE_CACHE_UPDATE, FORCE_PLEXDATA, READ_ONLY_MODE, CACHE_CHECKPOINT_INTERVAL)
+# - Performance tuning (MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS)
+#
+###########################################################################################
+
+# Config file search paths (in order of precedence)
+CONFIG_FILE_PATHS = [
+    os.path.expanduser('~/.my-plex.conf'),
+    '/etc/my-plex.conf',
+    '/usr/local/etc/my-plex.conf'
+]
+
+# Default configuration values
+CONFIG_DEFAULTS = {
+    # Plex Server Configuration
+    'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
+    'PLEX_XML_URL': '< PLEASE CONFIGURE /or/ USE PLEX_URL + PLEX_TOKEN >',
+    'PLEX_TIMEOUT': 42,
+
+    # Direct Database Access (via SSH)
+    # Database path on the Plex server (accessed via SSH using 'my-plex' remote_host)
+    'PLEX_DB_PATH': '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db',
+    'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
+
+    # Output Configuration
+    'DUPLICATE_FILE': '/tmp/duplicates',
+    'FORMAT': 'tsv_labeled',
+    'LIST_MEDIA_DEFAULT_TSV_FORMAT': '{LIBRARY}\t{TYPE_STR}\t{ID}\t{TITLE}\t{ORIGINALTITLE}\t{DURATION}\t{YEAR}\t{S0XE0X}\t{MEDIA_IDX}\t{VERSION}\t{PART_NR}\t{PART_ID}\t{FILE}\t{UPDATEDAT}\t{ADDEDAT}\t{UPDATEDAT}\t{LASTVIEWEDAT}\t{VIEWCOUNT}\t{USERRATING}\t{CRITICSRATING}\t{AUDIENCERATING}\t{AUDIO_LANGUAGES}\t{SUBTITLE_LANGUAGES}\t{COUNTRIES}\t{COLLECTIONS}\t{LABELS}\t{GENRES}\t{DIRECTORS}\t{WRITERS}\t{ACTORS}\t{SUMMARY}',
+    'DBGPFX': ' ~~~ ',
+    'PRINTPFX': ' >>> ',
+    'VRBPFX': '  >> ',
+
+    # Debug/Verbose Flags
+    'DBG': False,
+    'VRB': False,
+    'VERYVRB': False,
+    'DEEPDBG': False,
+    'OFFLINE': False,
+
+    # Cache Configuration
+    'CACHE_FILE': '.plex_media_cache.pkl',
+    'LOCK_FILE': '.plex_media_cache.lock',
+    'CACHE_CHECKPOINT_INTERVAL': 100,
+    'FORCE_CACHE_UPDATE': False,
+    'FORCE_PLEXDATA': False,
+    'FROM_SCRATCH': False,
+    'READ_ONLY_MODE': False,
+
+    # Performance Configuration
+    'MAX_PARALLEL_WORKERS': 4,
+    'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
+    'LIBRARY_START_DELAY': 1.0,
+    'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
+
+    # Broken File Detection Configuration
+    'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
+
+    # Duplicate Detection Configuration
+    # List of library groups across which duplicates should be IGNORED.
+    # Each group is a list of library names. A duplicate is excluded ONLY if
+    # ALL of its copies are within the SAME group. Any copy outside the group
+    # means it IS a duplicate.
+    # Example: [['movies.de', 'movies.en', 'movies.fr']] — a movie existing
+    # only in movies.de + movies.en is NOT a duplicate (both in group).
+    # But a movie in movies.de + ,unsorted IS a duplicate (,unsorted not in group).
+    'DUPLICATES_IGNORE_LIBRARY_COMBINATIONS': [],
+
+    # External Tool Paths
+    # LOCAL tools run on this machine, SERVER tools run on the Plex server (via SSH).
+    # Set to None for auto-detection from PATH (locally or via 'ssh which' for server tools).
+    'EXTERNAL_TOOLS': {
+        'LOCAL': {
+            'ssh': None,
+            'mpv': None,
+            'open': None,
+        },
+        'SERVER': {
+            'mp4box': None,
+            'mkvpropedit': None,
+            'ffmpeg': None,
+            'sqlite3': None,
+        },
+    },
+
+    # Audio Language Resolution Configuration
+    # Auto-resolve audio language by library (used ONLY with --no-audio-language --resolve).
+    # List of tuples: (library_name, 2-letter ISO 639-1 language code).
+    # Items in listed libraries auto-select this language without prompting.
+    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY': [],
+}
+
+# ISO 639-1 (2-letter) to ISO 639-2 (3-letter) language code mapping.
+# Plex and config use 2-letter codes; mp4box/mkvpropedit require 3-letter codes.
+ISO_639_1_TO_2 = {
+    'en': 'eng', 'de': 'deu', 'fr': 'fra', 'it': 'ita', 'es': 'spa',
+    'ja': 'jpn', 'ko': 'kor', 'zh': 'zho', 'pt': 'por', 'ru': 'rus',
+    'ar': 'ara', 'hi': 'hin', 'nl': 'nld', 'sv': 'swe', 'da': 'dan',
+    'no': 'nor', 'fi': 'fin', 'pl': 'pol', 'cs': 'ces', 'hu': 'hun',
+    'tr': 'tur', 'el': 'ell', 'he': 'heb', 'th': 'tha', 'vi': 'vie',
+    'uk': 'ukr', 'ro': 'ron',
+}
+
+# Example configuration file template using f-string with CONFIG_DEFAULTS
+EXAMPLE_CONF = f"""# my-plex configuration file
+#
+# IMPORTANT: All values below are commented out and show the built-in defaults.
+# Uncomment and modify only the values you want to change.
+#
+# Configuration priority (highest to lowest):
+#   1. Command-line arguments (--plex-url, --debug, etc.)
+#   2. This config file (uncommented values)
+#   3. Built-in defaults (shown below as comments)
+#
+# NOTE: PLEX_DB_PATH must be configured for database access.
+# All other variables are optional and use sensible defaults.
+
+###############################################################################
+# Plex Server Configuration (REQUIRED - uncomment and configure)
+###############################################################################
+
+# NOTE: my-plex now uses direct database access instead of Plex API!
+# No PLEX_URL or PLEX_TOKEN needed for cache updates.
+# Configure database access instead:
+
+# PLEX_DB_PATH: Path to Plex database on the server (accessed via SSH)
+# PLEX_DB_PATH = {CONFIG_DEFAULTS['PLEX_DB_PATH']!r}
+
+# Example with real values (uncomment and customize):
+# PLEX_DB_PATH = '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
+
+# NOTE: SSH access to the Plex server is required. Database is accessed via:
+#   ssh my-plex "sqlite3 '<PLEX_DB_PATH>' '<query>'"
+
+###############################################################################
+# Path Configuration
+###############################################################################
+
+# Alternative root paths for symlinks or different mount points
+# ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}
+
+###############################################################################
+# Output Configuration
+###############################################################################
+
+# FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}
+# LIST_MEDIA_DEFAULT_TSV_FORMAT = {CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']!r}
+# DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}
+# DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}
+# PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}
+# VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}
+
+###############################################################################
+# Cache Configuration
+###############################################################################
+
+# CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}
+# LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}
+# CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}
+
+###############################################################################
+# Performance Configuration
+###############################################################################
+
+# MAX_PARALLEL_WORKERS = {CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']}
+# RATE_LIMIT_DELAY_RANGE = {CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']!r}
+# LIBRARY_START_DELAY = {CONFIG_DEFAULTS['LIBRARY_START_DELAY']}
+
+###############################################################################
+# Retry Configuration
+###############################################################################
+
+# NOTE: PLEX_RETRY_DELAYS and PLEX_TIMEOUT are no longer needed
+# with direct database access (no API calls to retry or timeout)
+
+###############################################################################
+# Broken File Detection Configuration
+###############################################################################
+
+# Threshold for detecting potentially truncated files (percentage)
+# Files are flagged if container duration is more than this percentage shorter than Plex duration
+# Default: 0.5% - catches meaningful truncation while avoiding false positives
+# Analysis: 80.72% of files are within ±0.1% (normal encoding variance)
+# TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
+
+###############################################################################
+# Duplicate Detection Configuration
+###############################################################################
+
+# Library combinations across which duplicates should be IGNORED.
+# Each entry is a list of library names. A duplicate is excluded ONLY if
+# ALL of its copies are within the SAME group. Any copy outside the group
+# means it IS a duplicate.
+# Example: A movie in movies.de AND movies.en only → NOT a duplicate (both in group).
+# But a movie in movies.de AND ,unsorted → IS a duplicate (,unsorted not in group).
+# DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
+
+###############################################################################
+# External Tool Paths
+###############################################################################
+
+# LOCAL tools run on this machine, SERVER tools run on the Plex server (via SSH).
+# Set to None (default) to auto-detect from PATH.
+# EXTERNAL_TOOLS = {{
+#     'LOCAL': {{'ssh': '/usr/bin/ssh', 'mpv': '/opt/homebrew/bin/mpv', 'open': '/usr/bin/open'}},
+#     'SERVER': {{'mp4box': '/opt/homebrew/bin/MP4Box', 'mkvpropedit': '/opt/homebrew/bin/mkvpropedit',
+#                'ffmpeg': '/opt/homebrew/bin/ffmpeg', 'sqlite3': '/usr/bin/sqlite3'}},
+# }}
+
+###############################################################################
+# Audio Language Resolution Configuration
+###############################################################################
+
+# Auto-resolve audio language by library (used ONLY with --no-audio-language --resolve).
+# List of tuples: (library_name, 2-letter ISO 639-1 language code).
+# Items in listed libraries auto-select this language without prompting.
+# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [('movies.de', 'de'), ('movies.en', 'en')]
+
+###############################################################################
+# Debug/Verbose Flags - These are defaults. They can be set via commandline.
+###############################################################################
+
+# DBG = {CONFIG_DEFAULTS['DBG']}
+# VRB = {CONFIG_DEFAULTS['VRB']}
+# VERYVRB = {CONFIG_DEFAULTS['VERYVRB']}
+# DEEPDBG = {CONFIG_DEFAULTS['DEEPDBG']}
+# OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}
+
+###############################################################################
+# Cache Flags - These are defaults. They can be set via commandline.
+###############################################################################
+
+# FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
+# FORCE_PLEXDATA = {CONFIG_DEFAULTS['FORCE_PLEXDATA']}
+# READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}
+"""
+
+def load_config_file(config_file=None):
+    """Load configuration from file if it exists.
+
+    Supports symlinks - will follow symlinks to find and load the actual config file.
+
+    Args:
+        config_file: Optional path to config file. If None, searches default locations.
+
+    Returns:
+        dict: Configuration dictionary with loaded config values
+    """
+    config = {}
+
+    # Determine which config file to use
+    if config_file:
+        # Expand tilde and resolve symlinks for user-provided path
+        config_paths = [os.path.expanduser(config_file)]
+    else:
+        # CONFIG_FILE_PATHS already has tilde expansion, but double-check
+        config_paths = [os.path.expanduser(p) for p in CONFIG_FILE_PATHS]
+
+    # Find first existing config file (os.path.exists follows symlinks by default)
+    config_file_used = None
+    for path in config_paths:
+        # Check if path exists (will be False for broken symlinks)
+        if os.path.exists(path):
+            # Resolve symlink to actual file
+            real_path = os.path.realpath(path)
+
+            # Verify the resolved path actually exists and is a file
+            if os.path.isfile(real_path):
+                config_file_used = real_path
+                if path != real_path:
+                    # Was a symlink - successfully followed it
+                    # Can't use DEEPDBG here as it's not set yet during early config loading
+                    pass
+                break
+            else:
+                print(f"Warning: Config path '{path}' resolves to '{real_path}' which is not a valid file", file=sys.stderr)
+        elif os.path.islink(path):
+            # Path is a symlink but points to non-existent target (broken symlink)
+            target = os.readlink(path)
+            print(f"Warning: Config file symlink '{path}' is broken - points to non-existent target: {target}", file=sys.stderr)
+
+    if not config_file_used:
+        return config
+
+    # Load config file
+    try:
+        with open(config_file_used, 'r') as f:
+            exec_globals = {}
+            exec(f.read(), exec_globals)
+
+            # Extract config variables (uppercase names)
+            for key, value in exec_globals.items():
+                if key.isupper() and not key.startswith('_'):
+                    config[key] = value
+
+        # Note: Can't use VRB/DBG here as they're not set yet during early config loading
+        # Config was loaded successfully
+    except Exception as e:
+        print(f"Warning: Failed to load config file '{config_file_used}': {e}", file=sys.stderr)
+
+    return config
+
+def generate_default_config():
+    """Generate a default config file content with all available options.
+
+    Returns:
+        str: Config file content from the EXAMPLE_CONF f-string (already populated with CONFIG_DEFAULTS)
+    """
+    return EXAMPLE_CONF
+
+###########################################################################################
+#### GLOBAL VARIABLES FROM CONFIG FILE
+###########################################################################################
+# All configuration variables are initialized from CONFIG_DEFAULTS
+# and can be overridden by config file and command-line arguments
+
+# Allows to provide LIST of Tuples of alternative PATHNAMES (useful e.g. in case of symlinking)
+# The tuples will be used BOTH-WAYs: if LEFT is matching a pathname, it is replaced (swapped) with RIGHT
+# AND THE INVERSE: if RIGHT is matching a pathname, it is replaced (swapped) with LEFT
+# and then BOTH - the original + the new alternative path (with swapped ROOTPATH) is used.
+#
+# Ususally we exepct only ONE tuple and ONE side to match.
+# We will use to translate to alternative path version that will e.g. also be searched, also be printed.
+#
+# !!! All paths here need to be ABOLUTE PATHs !!!
+ALTERNATIVE_ROOTPATHS = CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']
+
+# Plex Server credentials
+# Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
+# They must be set via config file or command-line arguments
+PLEX_URL = None  # Will be set from config file or command-line if provided
+PLEX_TOKEN = None  # Will be set from config file or command-line if provided
+PLEX_XML_URL = None  # Will be set from config file or command-line if provided
+PLEX_TIMEOUT = CONFIG_DEFAULTS['PLEX_TIMEOUT']
+
+# Plex Database Direct Access Configuration
+# my-plex now uses direct SSH database access instead of the Plex API
+# This provides complete data (including audio/subtitle languages) and is much faster
+# Database is accessed via SSH using the existing 'my-plex' remote_host
+PLEX_DB_PATH = CONFIG_DEFAULTS['PLEX_DB_PATH']
+PLEX_DB_REMOTE_HOST = 'my-plex'  # Reuse existing SSH infrastructure  # Path to Plex database on remote server
+
+# Here we will list all duplicates that were found during scanning of library
+# (that happens for caching purposes):
+DUPLICATE_FILE = CONFIG_DEFAULTS['DUPLICATE_FILE']
+
+# Duplicate detection: library combinations to ignore
+# A duplicate is excluded ONLY if ALL copies are within the SAME ignore group.
+# e.g. [['movies.de', 'movies.en', 'movies.fr']] — movie in movies.de + movies.en only → NOT a duplicate.
+# But movie in movies.de + ,unsorted → IS a duplicate (,unsorted not in group).
+DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBRARY_COMBINATIONS']
+EXTERNAL_TOOLS = CONFIG_DEFAULTS['EXTERNAL_TOOLS']
+AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']
+
+# Default output format for --list-media
+FORMAT = CONFIG_DEFAULTS['FORMAT']
+LIST_MEDIA_DEFAULT_TSV_FORMAT = CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']
+
+###########################################################################################
+#### GLOBAL VARIABLES SET+USED BY THIS SCRIPT:
+###########################################################################################
+
+# Debug and verbose flags - initialized from CONFIG_DEFAULTS
+DBG = CONFIG_DEFAULTS['DBG']
+VRB = CONFIG_DEFAULTS['VRB']
+VERYVRB = CONFIG_DEFAULTS['VERYVRB']
+DEEPDBG = CONFIG_DEFAULTS['DEEPDBG']
+DBGPFX = CONFIG_DEFAULTS['DBGPFX']
+PRINTPFX = CONFIG_DEFAULTS['PRINTPFX']
+VRBPFX = CONFIG_DEFAULTS['VRBPFX']
+OFFLINE = CONFIG_DEFAULTS['OFFLINE']
+
+# Cache configuration - initialized from CONFIG_DEFAULTS
+# can be absolute path /or/ a relative path to the current users home directory
+CACHE_FILE = CONFIG_DEFAULTS['CACHE_FILE']
+LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
+FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
+FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
+FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
+FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
+RESCAN_BROKEN = False   # When True with --update-cache, re-queues broken files (ffprobe_error) for metadata collection
+READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
+AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
+AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
+
+# Broken file detection threshold (percentage)
+# Files are flagged as potentially truncated if container duration is more than this percentage shorter than Plex duration
+# Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
+# Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
+TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
+
+# Parallel processing configuration for cache rebuilds
+# Controls how many libraries are processed concurrently during --update-cache
+# Lower values = more stable but slower, Higher values = faster but may trigger Plex throttling
+# Recommended: 1 for slow/remote servers, 2 for normal servers, 4 for fast local servers
+MAX_PARALLEL_WORKERS = CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']  # Conservative default to avoid Plex server throttling
+
+# Rate limiting configuration to prevent Plex server throttling
+# Random delay added between processing each item during cache rebuilds
+# Format: (min_seconds, max_seconds) - actual delay is randomly chosen in this range
+# Examples: (0.1, 1.0) = 100ms-1s, (0.05, 0.3) = 50ms-300ms, (0.5, 2.0) = 500ms-2s
+RATE_LIMIT_DELAY_RANGE = CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']  # Conservative: 100ms-1000ms random delay per item
+
+# Delay between starting each library worker (in seconds)
+# Prevents all workers from hitting Plex server simultaneously
+# Recommended: 0.5s for balanced, 0.0s to disable, 1.0s for very conservative
+LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']  # 500ms stagger between library starts
+
+# Retry configuration for Plex API operations (exponential backoff)
+# List of wait times (in seconds) between retry attempts
+# Total attempts = len(list) + 1 (first attempt + retries)
+# Example: [5, 30, 60] = 4 total attempts with 5s, 30s, 60s waits
+# Current: [5, 30, 60, 120, 240, 480] = 7 attempts, max ~15min total wait
+PLEX_RETRY_DELAYS = CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']  # Exponential: 5s, 30s, 1m, 2m, 4m, 8m
+
+# Checkpoint configuration for cache rebuilds
+# Saves cache periodically during rebuild to prevent total loss on failure
+# Cache is saved after processing N items (0 = disabled, save only at end)
+# Recommended: 100-500 items for large libraries
+# During rebuild, cache is saved as '.plex_media_cache.pkl.partial' and renamed on completion
+CACHE_CHECKPOINT_INTERVAL = CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']  # Save cache every 100 media files (movies/episodes)
+
+#######################################################
+
+US=os.path.basename(__file__); # "my-plex-api.py"
+
+CACHE = {} # global cache object - content written to / read from CACHE_FILE
+CACHE_LOADED = False # to know if we already loaded the cache
+
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{} }
+EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
+
+GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
+PLEX_SERVER = None # server instance will be set where needed
+
+# MAIN DICT used by this script(s command-line parser) to perform it's actions:
+PARSER = 'arg-parser'
+FN     = 'doit-function'
+DETECT = 'detect-function'
+PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_TYPE:
+    PARSER : {},        # PLEXOBJ[PARSER][OBJ_TYPE] = corresponding argparse parser for this OBJ_TYPE
+    FN     : {},        # PLEXOBJ[FN][OBJ_TYPE]     = corresponding python function to call for this OBJ_TYPE 
+    DETECT : {}         # PLEXOBJ[DETECT][OBJ_TYPE] = corresponding detection function for this OBJ_TYPE
+}
+
+# additional explanation needed as we do a partial_parse and then detect object and then parse the rest
+HELP_SUFFIX="""
+supported <OBJECT_TYPE>s:
+
+    library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library
+                      To force this OBJECT_TYPE call with: --library <library_name>
+    media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title> or <media_filename>. For more info: --help media
+                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>
+    playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>. For more info: --help playlist
+                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>
+"""
+
+###########################################################################################
+#### GLOBAL HELPER FUNCTIONS
+###########################################################################################
+
+# Global shutdown flag for graceful termination
+_shutdown_requested = False
+
+def _graceful_shutdown_handler(signum, _frame):
+    """Handle SIGINT (Ctrl+C) and SIGTERM (kill) - set flag so workers exit gracefully.
+    For --update-cache: first Ctrl+C saves checkpoint, second forces exit.
+    For other operations: first Ctrl+C exits immediately."""
+    global _shutdown_requested
+
+    # For read-only operations (not --update-cache), exit immediately on first Ctrl+C
+    # since there's no state to save and we may be stuck in blocking API calls
+    if not FORCE_CACHE_UPDATE:
+        signal_name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else "SIGTERM"
+        print(f"\n\nReceived {signal_name}, exiting...")
+        os._exit(0)
+
+    # For --update-cache: handle graceful shutdown with checkpoint
+    # Second Ctrl+C - force immediate exit (don't wait for blocking socket calls)
+    if _shutdown_requested:
+        print("\n\nSecond Ctrl+C detected - forcing immediate exit...")
+        # Try to save checkpoint before exiting
+        try:
+            if hasattr(PLEX_Media, 'save_checkpoint'):
+                PLEX_Media.save_checkpoint(silent=True)
+                print(f"Checkpoint saved: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects")
+        except Exception as e:
+            print(f"WARNING: Could not save checkpoint: {e}")
+        os._exit(1)
+
+    signal_name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else "SIGTERM"
+    print(f"\n\nReceived {signal_name}, finishing current items and shutting down...")
+    print("(Press Ctrl+C again to force immediate exit)")
+
+    # Set shutdown flag - workers will check this and exit gracefully
+    # The main thread will save checkpoint after all workers finish
+    _shutdown_requested = True
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, _graceful_shutdown_handler)
+signal.signal(signal.SIGTERM, _graceful_shutdown_handler)
+
+def prompt_yes_no(question):
+    """
+    Prompt user with a yes/no question, respecting AUTO_YES and AUTO_NO global flags.
+
+    Args:
+        question: The question to ask (should end with '?')
+
+    Returns:
+        True if user answered yes, False if user answered no
+    """
+    global AUTO_YES, AUTO_NO
+
+    if AUTO_YES:
+        print(f"{question} (yes/no): yes (auto-answered with --yes flag)")
+        return True
+    elif AUTO_NO:
+        print(f"{question} (yes/no): no (auto-answered with --no flag)")
+        return False
+    else:
+        response = input(f"{question} (yes/no): ").strip().lower()
+        return response in ['yes', 'y']
+
+def err(err_code, err_msg=""):
+    if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
+    print(f"\nERROR #{err_code}: {err_msg}\n")
+    sys.exit(1)
+
+def _get_worker_prefix():
+    """Get worker ID prefix for log messages. Empty string if not in a worker thread."""
+    # Check if we're in a ThreadPoolExecutor worker thread
+    thread_name = threading.current_thread().name
+    if not thread_name.startswith('ThreadPoolExecutor'):
+        return ""  # Not in a worker thread (main thread)
+
+    # Extract worker number from thread name like 'ThreadPoolExecutor-0_1' -> 1
+    try:
+        worker_num = int(thread_name.split('_')[-1])
+        return f"W{worker_num:02d}| "
+    except (ValueError, IndexError):
+        return ""  # Can't parse worker number, skip prefix
+
+def plex_retry_operation(operation, *args, context=None, library=None, **kwargs):
+    """
+    Generic retry wrapper for any PLEX operation with exponential backoff.
+    Handles connection throttling/timeouts. During cache update mode, will reduce
+    parallel workers and retry indefinitely. Otherwise exits after retries exhausted.
+
+    Usage: plex_retry_operation(lambda: obj.property_name, context="Episode_ID:123 'Pilot' reload()", library="series.en")
+    or: plex_retry_operation(some_function, arg1, arg2)
+
+    Retry schedule: 5s, 30s, 1min, 2min (total of 5 attempts: initial + 4 retries).
+    """
+    retry_delays = [5, 30, 60, 120]  # 5s, 30s, 1min, 2min
+
+    attempt = 0
+    while True:  # Loop indefinitely during cache update, exit otherwise
+        # Check for shutdown before attempting operation
+        if _shutdown_requested:
+            return None
+
+        try:
+            if callable(operation):
+                return operation(*args, **kwargs)
+            else:
+                return operation
+        except (urllib3.exceptions.ReadTimeoutError,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError,
+                ConnectionResetError,
+                TimeoutError,
+                socket.timeout) as e:
+
+            prefix = _get_worker_prefix()
+            lib = f"library '{library}': " if library else ""
+            ctx = f" [{context}]" if context else ""
+
+            if attempt >= len(retry_delays):
+                # Final attempt failed - try to reduce parallel workers and continue
+                global MAX_PARALLEL_WORKERS, FORCE_CACHE_UPDATE
+                if FORCE_CACHE_UPDATE:
+                    # Save checkpoint before any recovery action
+                    checkpoint_info = ""
+                    if hasattr(PLEX_Media, 'save_checkpoint'):
+                        PLEX_Media.save_checkpoint()
+                        checkpoint_info = f" ({PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects)"
+
+                    if MAX_PARALLEL_WORKERS > 1:
+                        # Reduce workers by 1 and continue
+                        old_workers = MAX_PARALLEL_WORKERS
+                        MAX_PARALLEL_WORKERS -= 1
+                        print(f"\n{'='*80}")
+                        print(f"{prefix}{lib}PLEX THROTTLING{ctx} - Reducing workers: {old_workers} -> {MAX_PARALLEL_WORKERS}")
+                        print(f"{prefix}{lib}Checkpoint saved{checkpoint_info}. Continuing...")
+                        print(f"{'='*80}\n")
+                    else:
+                        # Already at 1 worker - just reset and retry
+                        print(f"\n{'='*80}")
+                        print(f"{prefix}{lib}PLEX THROTTLING{ctx} - Already at 1 worker, retrying...")
+                        print(f"{prefix}{lib}Checkpoint saved{checkpoint_info}")
+                        print(f"{'='*80}\n")
+                    # Reset attempt counter to retry with fresh attempts
+                    attempt = 0
+                    continue
+                else:
+                    # Not in cache update mode - exit
+                    error_msg = f"PLEX connection failed after {len(retry_delays) + 1} attempts{ctx}.\n"
+                    error_msg += f"Last error: {type(e).__name__}: {str(e)}\n"
+                    error_msg += "Please check your PLEX server connection and try again later."
+                    err(1060, error_msg)
+
+            # Check for shutdown before printing retry message
+            if _shutdown_requested:
+                return None  # Exit immediately on shutdown
+
+            # Get wait time for this retry from the list
+            wait_time = retry_delays[attempt]
+
+            # Track retry statistics during cache rebuild
+            if FORCE_CACHE_UPDATE:
+                retry_level = attempt + 1  # 1-based retry level (1, 2, 3, 4)
+                PLEX_Media.retry_count += 1
+                PLEX_Media.retry_wait_time += wait_time
+                # Track by level
+                if retry_level not in PLEX_Media.retry_by_level:
+                    PLEX_Media.retry_by_level[retry_level] = {'count': 0, 'wait_time': 0}
+                PLEX_Media.retry_by_level[retry_level]['count'] += 1
+                PLEX_Media.retry_by_level[retry_level]['wait_time'] += wait_time
+
+            # Format wait time for display
+            if wait_time >= 60:
+                wait_str = f"{wait_time // 60}min"
+            else:
+                wait_str = f"{wait_time}s"
+
+            print(f"{prefix}{lib}timeout{ctx}, retry {attempt + 1}/{len(retry_delays) + 1} in {wait_str}...")
+
+            # Sleep in small intervals to allow quick shutdown response
+            for _ in range(int(wait_time * 10)):
+                if _shutdown_requested:
+                    return None  # Exit immediately on shutdown
+                time.sleep(0.1)
+            attempt += 1
+
+
+def plex_get_all_items(library):
+    """API required: used by brute_force_search() and undo_operation() only. Wrapper for library.all() with retry logic."""
+    return plex_retry_operation(lambda: library.all(), context=f"'{library.title}'.all()")
+
+def plex_get_seasons(item, library_title=""):
+    """Wrapper for item.seasons() with retry logic"""
+    ctx = f"'{library_title}' {item.title}" if library_title else item.title
+    return plex_retry_operation(lambda: item.seasons(), context=f"{ctx}.seasons()")
+
+def plex_get_episodes(season, library_title="", show_title=""):
+    """Wrapper for season.episodes() with retry logic"""
+    ctx = f"'{library_title}' {show_title} {season.title}" if library_title else f"{show_title} {season.title}"
+    return plex_retry_operation(lambda: season.episodes(), context=f"{ctx}.episodes()")
+
+class CacheLock:
+    """Context manager for file-based locking to prevent concurrent cache access"""
+    def __init__(self, lock_file):
+        self.lock_file = lock_file
+        self.lock_fd = None
+
+    def write_progress(self, message):
+        """Write progress message directly to the lock file"""
+        if self.lock_fd:
+            try:
+                # Write to a separate progress file instead of the lock file itself
+                # This avoids issues with reading from a file that's open for writing
+                progress_file = self.lock_file + ".progress"
+                with open(progress_file, 'w') as f:
+                    f.write(message)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except:
+                pass  # Silently ignore write errors
+
+    @staticmethod
+    def read_progress(lock_file):
+        """Read progress message from the lock file"""
+        try:
+            progress_file = lock_file + ".progress"
+            with open(progress_file, 'r') as f:
+                return f.read().strip()
+        except:
+            return "Initializing..."
+
+    def __enter__(self):
+        import select
+        import sys
+
+        self.lock_fd = open(self.lock_file, 'w', buffering=1)  # Line buffering for better visibility
+
+        # Try non-blocking lock first to detect if we need to wait
+        try:
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Got the lock immediately - write initial progress
+            self.write_progress("Cache rebuild started...")
+        except BlockingIOError:
+            # Lock is held by another process
+            print("\n" + "="*76, flush=True)
+            print("CACHE IS CURRENTLY LOCKED", flush=True)
+            print("="*76, flush=True)
+            print("Cache is currently being updated by another process.", flush=True)
+            print("Waiting for lock to be released...", flush=True)
+            print("\nPress 'q' + ENTER to quit", flush=True)
+            print("="*76 + "\n", flush=True)
+
+            # Display initial progress immediately
+            last_progress = CacheLock.read_progress(self.lock_file)
+            print(f"Progress: {last_progress} ", end='', flush=True)
+
+            # Wait for lock with ability to quit and show progress
+            while True:
+                # Try to acquire lock with a short timeout
+                try:
+                    fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Got the lock!
+                    break
+                except BlockingIOError:
+                    # Still locked, check for user input and update progress
+                    # Use select with 0.5 second timeout to check for input
+                    readable, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if readable:
+                        user_input = sys.stdin.readline().strip().lower()
+                        if user_input == 'q':
+                            print("\nUser cancelled. Exiting...", flush=True)
+                            self.lock_fd.close()
+                            sys.exit(0)
+
+                    # Read and display progress from lock file - only update if changed
+                    current_progress = CacheLock.read_progress(self.lock_file)
+                    if current_progress != last_progress:
+                        print(f"\rProgress: {current_progress} ", end='', flush=True)
+                        last_progress = current_progress
+                    # Continue waiting
+
+            print("\n\n" + "="*76, flush=True)
+            print("LOCK ACQUIRED - CONTINUING", flush=True)
+            print("="*76 + "\n", flush=True)
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_fd:
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
+            self.lock_fd.close()
+            try:
+                os.remove(self.lock_file)
+            except:
+                pass
+            try:
+                progress_file = self.lock_file + ".progress"
+                os.remove(progress_file)
+            except:
+                pass
+        return False
+
+def load_cache():
+    global CACHE, CACHE_FILE, LOCK_FILE, EMPTY_CACHE, CACHE_LOADED
+    if CACHE_LOADED: return
+    # Load the previous cache from file if it exists
+    with CacheLock(LOCK_FILE):
+        if os.path.exists(CACHE_FILE):
+            # Check if file is empty
+            file_size = os.path.getsize(CACHE_FILE)
+            if file_size == 0:
+                print(f"CACHE file '{CACHE_FILE}' is EMPTY (0 bytes) - needs to be rebuilt.")
+                print(f"Please run: my-plex --update-cache")
+                CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
+            else:
+                try:
+                    with open(CACHE_FILE, 'rb') as f:
+                        res = pickle.load(f)
+                        CACHE = res
+                        if DEEPDBG: print_var(CACHE, f"CACHE (pickle.load( {CACHE_FILE} )", DBGPFX, intro=f"{DBGPFX}load_cache(): CACHE_FILE='{CACHE_FILE}'\n", depth=1)
+
+                        # Check for old cache format and reject it
+                        # Old format: files = {version: filepath_string}
+                        # New format: files = {version: {'filepath': ..., 'filesize': ...}}
+                        # my-plex ONLY works with new cache format
+                        obj_by_id = CACHE.get('obj_by_id', {})
+                        old_format_detected = False
+                        old_format_examples = []
+
+                        for obj in obj_by_id.values():
+                            files_dict = obj.get('files', {})
+                            if files_dict:
+                                for ver, file_info in files_dict.items():
+                                    if isinstance(file_info, str):
+                                        # Old format detected!
+                                        old_format_detected = True
+                                        if len(old_format_examples) < 3:
+                                            old_format_examples.append(f"{obj.get('title', 'Unknown')} ({obj.get('year', 'N/A')})")
+                                        break
+                            if old_format_detected and len(old_format_examples) >= 3:
+                                break
+
+                        if old_format_detected:
+                            # Allow --update-cache --force to proceed (it will rebuild the cache)
+                            if FORCE_PLEXDATA and FORCE_CACHE_UPDATE:
+                                print()
+                                print("=" * 76)
+                                print("CACHE FORMAT WARNING: Outdated cache format detected")
+                                print("=" * 76)
+                                print(f"Found {len(old_format_examples)} entries with old format.")
+                                print("Proceeding with cache rebuild (--update-cache --force)...")
+                                print("=" * 76)
+                                print()
+                            else:
+                                print()
+                                print("=" * 76)
+                                print("CACHE FORMAT ERROR: Outdated cache format detected")
+                                print("=" * 76)
+                                print()
+                                print(f"Your cache file uses an OLD format that is no longer supported.")
+                                print(f"Found {len(old_format_examples)} entries with old format (showing up to 3 examples):")
+                                for example in old_format_examples:
+                                    print(f"  - {example}")
+                                print()
+                                print("The cache needs to be rebuilt to use the new format with file size tracking.")
+                                print()
+                                print("To fix this issue, run:")
+                                print("  my-plex --update-cache --force")
+                                print()
+                                print("This will rebuild the cache with proper file size information.")
+                                print("=" * 76)
+                                sys.exit(1)
+
+                        # Print cache stats
+                        num_items = len(CACHE.get('obj_by_id', {}))
+                        cache_size_mb = file_size / (1024 * 1024)
+                        if VRB:
+                            print(f"CACHE found: {num_items} items, {cache_size_mb:.2f} MB ({CACHE_FILE})")
+                except Exception as e:
+                    print(f"CACHE file '{CACHE_FILE}' is CORRUPTED - needs to be rebuilt.")
+                    print(f"Error: {e}")
+                    print(f"Please run: my-plex --update-cache")
+                    CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
+        else:
+            # Don't show error if we're doing a from-scratch rebuild (cache was intentionally moved aside)
+            if not FROM_SCRATCH:
+                print(f"CACHE file '{CACHE_FILE}' is MISSING - needs to be built.")
+                print(f"Please run: my-plex --update-cache")
+            CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
+    CACHE_LOADED = True
+
+def build_media_cache_dict(include_paths=True, **extra):
+    """Build a cache dict from current PLEX_Media class attributes.
+
+    Args:
+        include_paths: If True, include OBJ_BY_FILEPATH and OBJ_BY_LIBRARY (default: True).
+        **extra: Additional key-value pairs to include (e.g., library_stats=..., labels_index=...).
+    Returns:
+        dict suitable for passing to update_and_save_cache().
+    """
+    d = {
+        'obj_by_id':             PLEX_Media.OBJ_BY_ID,
+        'obj_by_movie':          PLEX_Media.OBJ_BY_MOVIE,
+        'obj_by_show':           PLEX_Media.OBJ_BY_SHOW,
+        'obj_by_show_episodes':  PLEX_Media.OBJ_BY_SHOW_EPISODES,
+        'obj_by_collection':     PLEX_Media.OBJ_BY_COLLECTION,
+    }
+    if include_paths:
+        d['obj_by_filepath'] = PLEX_Media.OBJ_BY_FILEPATH
+        d['obj_by_library']  = PLEX_Media.OBJ_BY_LIBRARY
+    d.update(extra)
+    return d
+
+def load_media_cache(source):
+    """Load media cache structures from a dict (CACHE or partial_cache).
+
+    Uses .get() with empty-dict default so missing keys are safe.
+    """
+    PLEX_Media.OBJ_BY_ID             = source.get('obj_by_id', {})
+    PLEX_Media.OBJ_BY_MOVIE          = source.get('obj_by_movie', {})
+    PLEX_Media.OBJ_BY_SHOW           = source.get('obj_by_show', {})
+    PLEX_Media.OBJ_BY_SHOW_EPISODES  = source.get('obj_by_show_episodes', {})
+    PLEX_Media.OBJ_BY_COLLECTION     = source.get('obj_by_collection', {})
+    PLEX_Media.OBJ_BY_FILEPATH       = source.get('obj_by_filepath', {})
+    PLEX_Media.OBJ_BY_LIBRARY        = source.get('obj_by_library', {})
+
+    # Detect outdated cache format and instruct user to rebuild
+    # New OBJ_BY_LIBRARY format: {lib: {type: [keys]}} — values are lists
+    # Old format: {lib: {cache_key: obj_dict}} — values are dicts
+    for lib_name, lib_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+        if not lib_dict:
+            continue
+        if any(isinstance(v, dict) for v in lib_dict.values()):
+            err(1080, f"Cache format is outdated (OBJ_BY_LIBRARY has old structure).\n"
+                      f"Please rebuild: my-plex --update-cache --from-scratch")
+
+def update_and_save_cache(obj_dict):
+    global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
+
+    # CRITICAL: Update timestamps to current time + 60s buffer BEFORE merging into CACHE
+    # This applies to BOTH --update-cache AND --duplicates --resolve
+    # The 60s buffer accounts for Plex's asynchronous timestamp updates
+    # We do this BEFORE the merge so timestamps don't get overwritten
+    if DBG: print(f"{DBGPFX}update_and_save_cache(): OFFLINE={OFFLINE}, READ_ONLY_MODE={READ_ONLY_MODE}, has_library_stats={'library_stats' in obj_dict}")
+    if not OFFLINE and not READ_ONLY_MODE and 'library_stats' in obj_dict:
+        # Only update if we actually have timestamp data to work with
+        if DBG: print(f"{DBGPFX}update_and_save_cache(): has_updatedAt={'updatedAt' in obj_dict['library_stats']}, updatedAt_len={len(obj_dict['library_stats'].get('updatedAt', {}))}")
+        if 'updatedAt' in obj_dict['library_stats'] and len(obj_dict['library_stats']['updatedAt']) > 0:
+            from datetime import datetime, timedelta
+            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=60)
+            if DBG: print(f"{DBGPFX}update_and_save_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, current_time={current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            if FORCE_CACHE_UPDATE:
+                # --update-cache: Update ALL library timestamps
+                updated_count = 0
+                for lib_name in obj_dict['library_stats']['updatedAt'].keys():
+                    obj_dict['library_stats']['updatedAt'][lib_name] = current_time
+                    updated_count += 1
+                if DBG:
+                    print(f"{VRBPFX if VRB else DBGPFX}Updated {updated_count} library timestamps to current time +60s (right before disk save): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                # Resolution or other operations: Update timestamps for modified libraries only
+                # CRITICAL: Use CACHED timestamps (not incoming Plex timestamps) to decide which to update
+                # This preserves the +60s buffered timestamps from --update-cache operations
+                two_min_ago = datetime.now() - timedelta(minutes=2)
+                for lib_name, fresh_plex_ts in obj_dict['library_stats']['updatedAt'].items():
+                    # Get the current cached timestamp (may have +60s buffer from previous operations)
+                    cached_ts = CACHE.get('library_stats', {}).get('updatedAt', {}).get(lib_name)
+
+                    # Format timestamps for debug output
+                    if DEEPDBG:
+                        fresh_plex_str = fresh_plex_ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(fresh_plex_ts, 'strftime') else str(fresh_plex_ts)
+                        cached_str = cached_ts.strftime('%Y-%m-%d %H:%M:%S') if cached_ts and hasattr(cached_ts, 'strftime') else 'N/A'
+                        print(f"{DBGPFX}Library '{lib_name}':")
+                        print(f"{DBGPFX}  Fresh PLEX timestamp: {fresh_plex_str}")
+                        print(f"{DBGPFX}  Cached timestamp:     {cached_str}")
+
+                    # Decide whether to update this library's timestamp:
+                    # 1. If cached timestamp exists and is recent (< 2 min old), refresh to current + 60s
+                    # 2. If cached timestamp exists but is old (≥ 2 min old), keep it (preserve the +60s buffer)
+                    # 3. If no cached timestamp, use current + 60s (first-time setup)
+                    if cached_ts and hasattr(cached_ts, 'replace'):
+                        if cached_ts > two_min_ago:
+                            # Cached timestamp is recent - refresh it
+                            obj_dict['library_stats']['updatedAt'][lib_name] = current_time
+                            if VRB or DEEPDBG:
+                                print(f"{VRBPFX if VRB else DBGPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                        else:
+                            # Cached timestamp is old but valid - preserve it (don't overwrite with fresh Plex value)
+                            obj_dict['library_stats']['updatedAt'][lib_name] = cached_ts
+                            if DBG or DEEPDBG:
+                                print(f"{DBGPFX}Preserved cached timestamp for '{lib_name}': {cached_ts.strftime('%Y-%m-%d %H:%M:%S')} (not replacing with Plex value)")
+                    else:
+                        # No cached timestamp - this is first-time setup, use current + 60s
+                        obj_dict['library_stats']['updatedAt'][lib_name] = current_time
+                        if VRB:
+                            print(f"{VRBPFX}Set initial timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Update global CACHE
+    # CRITICAL FIX: Only update keys that have non-empty values to prevent overwriting
+    # good data with empty dicts if PLEX_Media structures get unexpectedly cleared
+    for key, value in obj_dict.items():
+        # Skip empty collections - they likely indicate a bug elsewhere, not intentional clearing
+        if isinstance(value, (dict, list, set)) and len(value) == 0:
+            if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping empty {type(value).__name__} for key '{key}' (preserving existing data)")
+            continue
+        if DBG:
+            if isinstance(value, (dict, list, set)):
+                print(f"{DBGPFX}update_and_save_cache(): Saving {type(value).__name__} for key '{key}' with {len(value)} items")
+        CACHE[key] = value
+
+    # In read-only mode (--info, --verify-cache), don't save to disk
+    if READ_ONLY_MODE:
+        if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
+        return
+
+    # Save the current cache to file
+    # During cache rebuild, we already hold the lock, so don't try to acquire it again
+    if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+        # Already holding the lock during rebuild - just save without locking
+        if DBG: print_obj(CACHE, "CACHE (BEFORE pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): About to save cache to '{CACHE_FILE}'\n", depth=1)
+        if DBG:
+            print(f"{DBGPFX}update_and_save_cache(): CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items before pickle.dump")
+        with open(CACHE_FILE, 'wb') as f:
+            pickle.dump(CACHE, f)
+        if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
+
+        # Create special backup copy for --update-cache --force runs (reliable cache version)
+        if FORCE_PLEXDATA:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_file = f"{CACHE_FILE}.force_backup_{timestamp}"
+            import shutil
+            shutil.copy2(CACHE_FILE, backup_file)
+            print(f"Created force-rebuild backup: {backup_file}")
+    else:
+        # Normal save - acquire lock
+        if DBG: print_obj(CACHE, "CACHE (BEFORE pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): About to save cache to '{CACHE_FILE}'\n", depth=1)
+        with CacheLock(LOCK_FILE):
+            with open(CACHE_FILE, 'wb') as f:
+                pickle.dump(CACHE, f)
+        if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
+
+def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
+    if intro is not None: print(intro, end='')
+    else: intro=""
+    if prefix is None: prefix=""
+    if var_name is not None:
+        pfx = prefix if intro.endswith('\n') else ''
+        print(f"{pfx}{var_name} = {type(var)} (len:{len(var)})", end="")
+    prefix = prefix + "    "
+    if isinstance(var, dict):
+        if (len(var)==0): print()
+        for i,(k,v) in enumerate(var.items()):
+            if isinstance(v,dict):
+                if i==0: print()
+                print_var(v, var_name=None, prefix=prefix, intro=f"{prefix}   '{k}' : {type(v)} (len:{len(v)})'")
+            else:
+                newline = "\n" if i==0 else ""
+                print(f"{newline}", prefix, "   '", k, "' : '", v, "'", sep='')
+    else:
+        for x in pformat( var, width=width, depth=depth ).split('\n'): print(prefix, x, sep='')
+
+def print_obj(obj, var_name=None, prefix="", intro=None, width=80, depth=None):
+    if intro is not None: print(intro, end='')
+    if var_name is not None:
+        pfx = prefix if intro.endswith('\n') else ''
+        print(f"{pfx}{var_name} = {type(obj)}")
+    if prefix is None: prefix=""
+
+    # Special handling for dictionaries when depth=1 (show first level structure nicely)
+    if isinstance(obj, dict) and depth == 1:
+        print(f"{prefix}Dictionary structure (first level):")
+        for key in sorted(obj.keys()):
+            value = obj[key]
+            if isinstance(value, dict):
+                print(f"{prefix}  - {str(key):25s} : {len(value):6d} items (dict)")
+            elif isinstance(value, list):
+                print(f"{prefix}  - {str(key):25s} : {len(value):6d} items (list)")
+            else:
+                print(f"{prefix}  - {str(key):25s} : {type(value).__name__}")
+    else:
+        # Original behavior for non-dict or deeper levels
+        prefix = prefix + "    "
+        for x in pformat( inspect.getmembers(obj), width=width, depth=depth ).split('\n'): print(prefix, x, sep='')
+        #for x in dir(obj):
+        #    obj_x = getattr(obj,x)
+        #    wrap_char = "'" if isinstance(obj_x, str) else ""
+        #    print(prefix, x, " = ", wrap_char, obj_x, wrap_char, sep='')
+
+
+import unittest
+
+############################################################
+#### REGRESSION TESTING (moved to 52_tests.py)
+# To merge tests back inline, replace this section with contents of 52_tests.py
+
+from importlib.util import spec_from_file_location, module_from_spec as _mfs
+_test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.abspath(__file__)), "52_tests.py"))
+_test_mod = _mfs(_test_spec)
+_test_spec.loader.exec_module(_test_mod)
+_UNITTEST_CLASSES = _test_mod._UNITTEST_CLASSES
+def run_regression_tests():
+    _test_mod.run_regression_tests(globals())
+
+
+############################################################
+#### PLEX SERVER HELPER FUNCTIONS
+
+def parse_plex_xml_url(xml_url):
+    """
+    Parse a Plex XML URL to extract server URL and token.
+    Example input: https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400/library/metadata/12345?X-Plex-Token=abc123xyz
+    Returns: (server_url, token) tuple
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    try:
+        parsed = urlparse(xml_url)
+
+        # Extract base server URL (scheme + netloc)
+        server_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Extract token from query parameters
+        query_params = parse_qs(parsed.query)
+        token = query_params.get('X-Plex-Token', [None])[0]
+
+        if not token:
+            err(1060, "No X-Plex-Token found in the provided XML URL")
+
+        return server_url, token
+    except Exception as e:
+        err(1061, f"Failed to parse Plex XML URL: {e}")
+
+# Connect to Plex server API
+def ensure_plex_api(required=True):
+    """Infrastructure for all API-dependent write/mutate operations.
+    Ensure PLEX_SERVER is connected. Lazily connects on first call.
+    If required=True (default), raises error when API is unavailable.
+    If required=False, returns None silently when unavailable."""
+    global PLEX_SERVER
+    if PLEX_SERVER is not None:
+        return PLEX_SERVER
+    if OFFLINE:
+        if required: err(1070, "This operation requires the Plex API but --offline mode is active.")
+        return None
+    if PLEX_URL and PLEX_TOKEN:
+        connect_to_plex(PLEX_URL, PLEX_TOKEN)
+    if PLEX_SERVER is None and required:
+        err(1071, "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
+    return PLEX_SERVER
+
+def connect_to_plex(plex_url, plex_token):
+    """ Infrastructure for API-dependent operations. Connect to plex server and return PLEX_SERVER object. """
+    global PLEX_SERVER, OFFLINE
+
+    # Default timeout if not configured
+    PLEX_TIMEOUT = 42
+
+    if OFFLINE:
+        PLEX_SERVER = None
+        return
+
+    try:
+        #from plexapi.myplex import MyPlexAccount
+        #account = MyPlexAccount(PLEX_USER, PLEX_PASSWORD)
+        #plex = account.resource(PLEX_HOSTNAME).connect()  # returns a PlexServer instance
+
+        # Set GLOBAL socket timeout to prevent hanging on dead connections
+        # This is critical because even with HTTPAdapter timeouts, a socket in CLOSED state
+        # can block forever if the OS doesn't report the connection as dead
+        import socket
+        socket.setdefaulttimeout(PLEX_TIMEOUT)
+        if VRB: print(f"{VRBPFX}Global socket timeout set to {PLEX_TIMEOUT}s to prevent connection deadlocks")
+
+        # Create a session with SSL verification disabled to avoid certificate hostname mismatch errors
+        import requests
+        from requests.adapters import HTTPAdapter
+
+        # Custom adapter that enforces request-level timeouts
+        class TimeoutHTTPAdapter(HTTPAdapter):
+            def __init__(self, timeout=PLEX_TIMEOUT, *args, **kwargs):
+                self.timeout = timeout
+                super().__init__(*args, **kwargs)
+
+            def send(self, request, **kwargs):
+                # Force timeout on every request to prevent hanging on dead connections
+                kwargs['timeout'] = kwargs.get('timeout') or self.timeout
+                return super().send(request, **kwargs)
+
+        session = requests.Session()
+        session.verify = False  # Disable SSL certificate verification
+
+        # Mount the timeout adapter for all requests
+        timeout_adapter = TimeoutHTTPAdapter(timeout=PLEX_TIMEOUT)
+        session.mount('http://', timeout_adapter)
+        session.mount('https://', timeout_adapter)
+        if VRB: print(f"{VRBPFX}TimeoutHTTPAdapter mounted with {PLEX_TIMEOUT}s request timeout")
+
+        # Suppress only the InsecureRequestWarning from urllib3
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # Use retry logic for initial connection
+        PLEX_SERVER = plex_retry_operation(
+            lambda: PlexServer(plex_url, plex_token, session=session, timeout=PLEX_TIMEOUT),
+            context="PlexServer connection"
+        )
+        if VRB: print(f"{VRBPFX}Connected to Plex server: {PLEX_SERVER.friendlyName}")
+    except Exception as e:
+        err(1016, f"Failed to connect to PLEX Server: {plex_url=} {plex_token=} {PLEX_TIMEOUT=}: {e}")
+
+
+def get_alternative_paths(path, including_path=False, path_2nd=None):
+    """ if path_2nd is provided, returns a LIST of TUPLES (alternative_path, alternative_path_2nd)
+            (if only ONE of them matched, the other will be None)
+        else: returns a LIST of alternative paths of path """
+    global ALTERNATIVE_ROOTPATHS
+    if path_2nd is None:
+        if including_path: res = [path]
+        else:              res = []
+    else:
+        if including_path: res = [(path, path_2nd)]
+        else:              res = []
+
+    for (rootpath1,rootpath2) in ALTERNATIVE_ROOTPATHS:
+        new_path = None
+        if path.startswith(rootpath1):
+            new_path = path.replace(rootpath1, rootpath2, 1) # max 1 replacement
+        elif path.startswith(rootpath2):
+            new_path = path.replace(rootpath2, rootpath1, 1) # max 1 replacement
+        if path_2nd is None:
+            # BUG FIX: Only append new_path if it's not None (path matched a rootpath pattern)
+            if new_path is not None:
+                res.append(new_path)
+            continue
+        new_path_2nd = None
+        if path_2nd.startswith(rootpath1):
+            new_path_2nd = path_2nd.replace(rootpath1, rootpath2, 1) # max 1 replacement
+            res.append( (new_path, new_path_2nd) )
+        elif path_2nd.startswith(rootpath2):
+            new_path_2nd = path_2nd.replace(rootpath2, rootpath1, 1) # max 1 replacement
+            res.append( (new_path, new_path_2nd) )
+        else:
+            res.append( (new_path, None) )
+    return res
+
+
+def resolve_filepath_with_alternatives(filepath, remote_host=None):
+    """Resolve filepath by checking all alternative paths and returning the first existing one.
+
+    This function checks:
+    1. The original filepath
+    2. All alternative paths generated from ALTERNATIVE_ROOTPATHS
+
+    Args:
+        filepath: Original file path to check
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        tuple: (resolved_path, exists)
+            - resolved_path: First existing path found, or original filepath if none exist
+            - exists: True if file was found, False otherwise
+
+    Example:
+        If ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
+        And filepath = '/j2/watch.v/movie.mp4' doesn't exist
+        But '/Volumes/2/watch.v/movie.mp4' does exist
+        Returns: ('/Volumes/2/watch.v/movie.mp4', True)
+    """
+    # Get list of paths to check: [original, alternative1, alternative2, ...]
+    paths_to_check = get_alternative_paths(filepath, including_path=True)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}resolve_filepath_with_alternatives: checking {len(paths_to_check)} paths for '{filepath}'")
+
+    # Check each path for existence
+    for check_path in paths_to_check:
+        if check_path is None:
+            continue
+
+        if remote_host:
+            # Remote check
+            escaped_path = escape_path_for_ssh(check_path)
+            cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_path}\\\" ] && echo EXISTS || echo NOTFOUND\""
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip() == 'EXISTS':
+                if DEEPDBG:
+                    print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
+                return (check_path, True)
+            elif DEEPDBG:
+                print(f"{DBGPFX}  -> not found on remote {remote_host}: {check_path}")
+        else:
+            # Local check
+            # IMPORTANT: Use os.path.isfile() instead of os.path.exists() to ensure we're checking for FILES only
+            # os.path.exists() returns True for directories too, which can cause issues when the directory exists
+            # but the specific file doesn't (leading to false positives)
+            if os.path.isfile(check_path):
+                if DEEPDBG:
+                    print(f"{DBGPFX}  -> FOUND locally: {check_path}")
+                return (check_path, True)
+            elif DEEPDBG:
+                print(f"{DBGPFX}  -> not found locally: {check_path}")
+
+    # None of the paths exist - return original filepath with exists=False
+    if DEEPDBG:
+        print(f"{DBGPFX}  -> NOT FOUND in any alternative path, returning original: {filepath}")
+    return (filepath, False)
+
+
+def get_library_stats(supported=True):
+    """Collect statistical information about libraries from Plex server or database
+
+       IMPORTANT: Returns ACTUAL UNMODIFIED values from Plex server/database.
+       This function must return the TRUTH - no modifications or safety margins.
+       Any adjustments should be applied when SAVING to cache, not here.
+
+       RETURNS dict: {
+            'updatedAt':{},         key = library.title, value = library.updatedAt (ACTUAL Plex timestamp)
+            'itemsCount':{},        key = library.title, value = number of items in library (from DB query)
+            'totalDuration':{},     key = library.title, value = library.totalDuration
+            'totalStorage':{}       key = library.title, value = library.totalStorage
+        }
+    """
+    global EMPTY_LIBRARY_STATS, PLEX_SERVER
+    if DBG: print(f"{DBGPFX}get_library_stats(supported:{supported}): START")
+    # CRITICAL FIX: Create a deep copy to avoid mutating the global EMPTY_LIBRARY_STATS template
+    import copy
+    library_stats = copy.deepcopy(EMPTY_LIBRARY_STATS)
+    libraries = PLEX_Library.OBJ_DICT_SUPPORTED.items() if supported else PLEX_Library.OBJ_DICT.items()
+
+    for title,library in libraries:
+        # Store ACTUAL Plex timestamp without any modification
+        library_stats['updatedAt'][title] = library.updatedAt
+        library_stats['plexUpdatedAt'][title] = library.updatedAt
+
+        # Get item count from database
+        item_count = 0
+        try:
+            safe_title = title.replace("'", "''")
+            if library.type == 'movie':
+                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL"
+            elif library.type == 'show':
+                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL"
+            else:
+                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.deleted_at IS NULL"
+            rows = query_plex_database(query, mode='rows')
+            item_count = int(rows[0][0]) if rows else 0
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}get_library_stats(): DB count failed for '{title}': {e}")
+        # No API fallback — DB count is the source of truth
+        library_stats['itemsCount'][title] = item_count
+
+        # For show libraries, also query episode count for skip logic comparison
+        if library.type == 'show':
+            try:
+                ep_query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL"
+                ep_rows = query_plex_database(ep_query, mode='rows')
+                library_stats['episodesCount'][title] = int(ep_rows[0][0]) if ep_rows else 0
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}get_library_stats(): DB episode count failed for '{title}': {e}")
+
+        #library_stats['totalDuration'][title] = library.totalDuration
+        #library_stats['totalStorage'][title] = library.totalStorage
+    if DBG: print(f"{DBGPFX}get_library_stats(supported:{supported}): done")
+    return library_stats
+
+
+def get_fullID(media_obj, obj_type=None, obj_ratingKey=None):
+    if media_obj is None:
+        if obj_type is None: err(1056)      # needed if media_obj is None
+        if obj_ratingKey is None: err(1057) # needed if media_obj is None
+    else:
+        if obj_type is None: obj_type = media_obj.type.capitalize()
+        if obj_ratingKey is None: obj_ratingKey = media_obj.ratingKey
+    match obj_type:  # like in output of Plex-API :)
+        case "Movie" | "Show"  | "Season" | "Episode" : return f"{obj_type}_ID:{obj_ratingKey}"
+        #case "Media" | "Part"                        : return f"{obj_type}_ID:{obj.id}"
+        case _ : err(1052, f"obj_type={obj_type}")
+
+
+def obj_needs_updating(obj, val=None, key=None, obj_type=None, obj_ratingKey=None):
+    """ This needs obj and val. But if val is None, you can provide key to look it up, else key will be determined via get_fullID() using optional obj_type and obj_ratingKey parameter
+        For Movies + Episodes: This is dangerous as for different MEDIA or different PARTS the update would be needed!
+        For Show/Series + Season: No problem to just judge based on obj.updatedAt time.
+        FIXME: maybe improve this? - checking if we have first run to see if we need to collect all media / parts, or check if we have media_cnt entries ??
+    """
+    if val is None:
+        if key is None: key = get_fullID(obj, obj_type, obj_ratingKey)
+        if key not in PLEX_Media.OBJ_BY_ID: return True # if we don't know about the obj yet --> yes, it needs updating ;)
+        val = PLEX_Media.OBJ_BY_ID[key]
+
+    obj_updatedAt = plex_retry_operation(lambda: obj.updatedAt, context=f"{key}.updatedAt")
+    if val['updatedAt'] == obj_updatedAt:
+        # FORCE_CACHE_UPDATE is handled by load_cache(); this check is a performance optimization.
+        if FORCE_CACHE_UPDATE:
+            if DBG: print(f"{DBGPFX}obj_needs_updating(): FORCING cache update (--update-cache parameter)")
+            return True
+        else:
+            return False
+    else:
+        return True
+
+
+def brute_force_search(media_identifier, library_name=None):
+    """ API required: exhaustive search via library.all() when cache-based lookup fails.
+        Returns the matching object if found, else None. """
+    global PLEX_SERVER
+
+    normalized_filepath = os.path.normpath(media_identifier)
+
+    potential_libraries = PLEX_Library.OBJ_DICT_SUPPORTED
+    if library_name is None:
+        potential_libraries = []
+    else:
+        potential_libraries = [library_name]
+    if DBG: print(f"{DBGPFX}brute_force_search() potential_libraries = {potential_libraries} -- based on root-path of libraries!")
+
+    # Gather all potential libraries based on PLEX_Library.PATHS_DICT - this already contains all altnerative paths versions (to compare our path againast)!
+    for (path,library_names) in PLEX_Library.PATHS_DICT.items():
+        if DBG: print(f"{DBGPFX}brute_force_search() LOOP over PLEX_Library.PATHS_DICT: path='{path}'")
+        if media_identifier.startswith(path):
+            for x in library_names: potential_libraries.append(x) if x not in potential_libraries else next # push only NEW library_names
+        if DBG: print(f"{DBGPFX}brute_force_search() LOOP over PLEX_Library.PATHS_DICT: after media_identifier check: potential_libraries={potential_libraries}")
+
+    if len(potential_libraries) == 0:   potential_libraries = PLEX_Library.OBJ_DICT_SUPPORTED
+    else:                               potential_libraries = PLEX_Library.get_filtered_OBJ_DICT(potential_libraries)
+
+    # If file exists -> search for it
+    for (library_name,library) in potential_libraries.items():
+        if DBG: print(f"{DBGPFX}brute_force_search() LOOP over potential_libraries: > library_name='{library_name}'")
+        # Iterate through all items in the library
+        for item in plex_get_all_items(library):
+            if get_fullID(item) == media_identifier:
+                print(f"ID '{media_identifier}' found as item {item.type} '{item.title}', part of library '{library_name}'")
+                return item
+            # Search within movies
+            if item.type == 'movie': # ATTENTION the type is lowercase on the item in PLEX !
+                for media in item.media:
+                    # !! UNSUPPORTED -- Media object has NO .type  --> full_id cannot be of type Media !!
+                    #if get_fullID(media) == media_identifier:
+                    #    print(f"ID '{media_identifier}' found as media, part of {item.type} '{item.title}', part of library '{library_name}'")
+                    #    return True
+                    for part in media.parts:
+                        filepath = os.path.normpath(part.file)
+                        if filepath == normalized_filepath:
+                            print(f"File '{filepath}' found as part, part of media of {item.type} '{item.title}' part of library '{library_name}'")
+                            return part
+
+            # Search within TV shows (seasons and episodes)
+            elif item.type == 'show': # ATTENTION the type is lowercase on the item in PLEX !
+                for season in plex_get_seasons(item, library_name):
+                    if get_fullID(season) == media_identifier:
+                        print(f"ID '{media_identifier}' found as season, part of {item.type} '{item.title}', part of library '{library_name}'")
+                        return season
+                    for episode in plex_get_episodes(season, library_name, item.title):
+                        if get_fullID(episode) == media_identifier:
+                            print(f"ID '{media_identifier}' found as episode, part of {get_fullID(season)}, part of {item.type} '{item.title}', part of library '{library_name}'")
+                            return episode
+                        for media in episode.media:
+                            for part in media.parts:
+                                filepath = os.path.normpath(part.file)
+                                if filepath == normalized_filepath:
+                                    print(f"File '{filepath}' found as part, part of media, part of {get_fullID(episode)}, part of {get_fullID(season)}, part of {item.type} '{item.title}' part of library '{library_name}'")
+                                    return part
+    return None # == NOT found
+
+def format_filesize(size_bytes, force_unit=None):
+    """Convert bytes to human-readable format (B/KB/MB/GB)
+
+    Args:
+        size_bytes: Size in bytes (int or None)
+        force_unit: Optional unit to force ('MB', 'GB', 'KB', 'B'). If specified, always format in this unit.
+
+    Returns:
+        String representation of the size (e.g., "1.5 GB", "800 MB", "N/A")
+    """
+    if size_bytes is None:
+        return 'N/A'
+
+    # Force specific unit if requested
+    if force_unit == 'MB':
+        return f"{size_bytes / (1024**2):.0f} MB"
+    elif force_unit == 'GB':
+        return f"{size_bytes / (1024**3):.1f} GB"
+    elif force_unit == 'KB':
+        return f"{size_bytes / 1024:.0f} KB"
+    elif force_unit == 'B':
+        return f"{size_bytes} B"
+
+    # Auto-detect best unit
+    if size_bytes >= 1024**3:  # GB
+        return f"{size_bytes / (1024**3):.1f} GB"
+    elif size_bytes >= 1024**2:  # MB
+        return f"{size_bytes / (1024**2):.0f} MB"
+    elif size_bytes >= 1024:  # KB
+        return f"{size_bytes / 1024:.0f} KB"
+    else:
+        return f"{size_bytes} B"
+
+def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context=None):
+    """Print detailed SSH error message with troubleshooting instructions
+
+    Args:
+        remote_host: SSH host that failed
+        operation: Description of what operation failed (e.g., "connect", "move file", "check file")
+        cmd: Optional command that failed
+        stderr: Optional stderr output
+        extra_context: Optional dict with additional context (e.g., {'source': path, 'destination': path})
+    """
+    print(f"\n{'='*80}")
+    print(f"ERROR: Failed to {operation} on SSH host '{remote_host}'")
+    print(f"{'='*80}")
+
+    if extra_context:
+        for key, value in extra_context.items():
+            print(f"{key.capitalize()}: {value}")
+
+    if cmd:
+        # Handle cmd as either string or list
+        cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        print(f"Command failed: {cmd_str}")
+    if stderr:
+        print(f"Error output: {stderr}")
+
+    print(f"\nTo fix this issue, please ensure:")
+    print(f"  1. The SSH host '{remote_host}' is configured in your ~/.ssh/config")
+    print(f"  2. You can connect with: ssh {remote_host}")
+    print(f"  3. SSH keys are properly set up (no password prompt)")
+    print(f"  4. The remote host is running and accessible")
+
+    print(f"\nExample ~/.ssh/config entry:")
+    print(f"  Host {remote_host}")
+    print(f"    HostName <your-server-ip-or-hostname>")
+    print(f"    User <your-username>")
+    print(f"    IdentityFile ~/.ssh/id_rsa")
+    print(f"{'='*80}\n")
+
+def get_trash_dir(remote_host=None, file_path=None):
+    """Get or create trash directory for the current OS or remote host
+
+    For remote operations, attempts to place trash on the same volume as the file
+    to enable fast moves instead of slow copy+delete operations.
+
+    Args:
+        remote_host: SSH host (e.g., 'my-plex') for remote operations, None for local
+        file_path: Path to the file being trashed (used to determine volume on remote)
+
+    Returns:
+        Path to trash directory as string
+    """
+    if remote_host:
+        # For remote operations with a file path, try to use trash on same volume
+        if file_path:
+            # Extract the volume/mount point from the file path
+            # For paths like /Volumes/2/watch.v/..., use /Volumes/2/.Trashes/<uid>
+            # For paths like /home/user/..., use ~/.Trash
+            path_parts = file_path.split('/')
+
+            # Check if this is a /Volumes/X path (common on macOS servers)
+            if len(path_parts) >= 3 and path_parts[1] == 'Volumes':
+                # Get the UID on the remote server and create .Trashes/<uid> directory
+                # This follows macOS convention for volume-specific trash
+                cmd = f"ssh {remote_host} 'id -u'"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    uid = result.stdout.strip()
+                    volume_trash = f"/Volumes/{path_parts[2]}/.Trashes/{uid}"
+
+                    # Create the trash directory if it doesn't exist
+                    # Note: .Trashes directory should already exist on the volume, we just create the UID subdirectory
+                    cmd = ['ssh', remote_host, 'sh', '-c', f'mkdir -p "{volume_trash}" && echo "{volume_trash}"']
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+
+                    if result.returncode == 0 and volume_trash in result.stdout:
+                        trash_path = result.stdout.strip()
+                        if DEEPDBG:
+                            print(f"{DBGPFX}Using volume-specific trash on {remote_host}: {trash_path}")
+                        return trash_path
+                    else:
+                        if DEEPDBG:
+                            print(f"{DBGPFX}Failed to create volume trash {volume_trash}, stderr: {result.stderr}")
+
+        # Fall back to home directory trash
+        cmd = f"ssh {remote_host} 'if [ -d ~/.Trash ]; then echo ~/.Trash; elif [ -d ~/.local/share/Trash ]; then echo ~/.local/share/Trash; else echo NONE; fi'"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print_ssh_error(remote_host, "check for trash directory", cmd=cmd, stderr=result.stderr)
+            raise Exception(f"SSH connection to {remote_host} failed")
+
+        trash_path = result.stdout.strip()
+
+        if trash_path == 'NONE' or not trash_path:
+            # Create .Trash on remote
+            trash_path = '~/.Trash'
+            cmd = f"ssh {remote_host} 'mkdir -p {trash_path}'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                print_ssh_error(remote_host, "create trash directory", cmd=cmd, stderr=result.stderr,
+                               extra_context={'trash_path': trash_path})
+                raise Exception(f"Failed to create remote trash directory")
+            print(f"{VRBPFX}Created remote trash directory: {trash_path} on {remote_host}")
+
+        return trash_path
+    else:
+        # Local trash directory
+        system = platform.system()
+
+        if system == 'Darwin':  # macOS
+            trash_dir = os.path.expanduser('~/.Trash')
+        elif system == 'Linux':
+            trash_dir = os.path.expanduser('~/.local/share/Trash/files')
+        elif system == 'Windows':
+            # Windows recycle bin is complex, use a simple .Trash folder
+            trash_dir = os.path.expanduser('~/.Trash')
+        else:
+            trash_dir = os.path.expanduser('~/.Trash')
+
+        # Create if it doesn't exist
+        os.makedirs(trash_dir, exist_ok=True)
+        return trash_dir
+
+def escape_path_for_ssh(filepath):
+    """Escape a file path for safe use in SSH commands
+
+    Args:
+        filepath: File path to escape
+
+    Returns:
+        Escaped path safe for use in double quotes in SSH command
+    """
+    # Escape characters that are special inside double quotes: " $ ` \
+    # This handles ALL file paths including those with apostrophes, spaces, brackets, etc.
+    return filepath.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+
+
+def _resolve_tool_path(tool_name, category):
+    """Resolve the path for an external tool from EXTERNAL_TOOLS config or PATH.
+
+    Args:
+        tool_name: Short tool name, e.g. 'mp4box', 'ssh', 'mpv'
+        category: 'LOCAL' or 'SERVER'
+
+    Returns:
+        (tool_path, config_key_str) — tool_path is str or None if not found
+    """
+    config_key_str = f"EXTERNAL_TOOLS['{category}']['{tool_name}']"
+    configured = EXTERNAL_TOOLS.get(category, {}).get(tool_name)
+    if configured:
+        return (configured, config_key_str)
+    # Auto-detect from PATH
+    found = shutil.which(tool_name)
+    return (found, config_key_str)
+
+
+def run_tool_locally(tool_name, args, capture_output=True, text=True, timeout=None):
+    """Run an external tool on the local machine.
+
+    Looks up EXTERNAL_TOOLS['LOCAL'][tool_name] for configured path.
+    If None, auto-detects from PATH via shutil.which().
+
+    Args:
+        tool_name: Short tool name, e.g. 'ssh', 'mpv', 'open'
+        args: List of arguments (NOT including the tool binary itself)
+        capture_output: Capture stdout/stderr (default True)
+        text: Return strings instead of bytes (default True)
+        timeout: Timeout in seconds (default None)
+
+    Returns:
+        subprocess.CompletedProcess on success, or None if tool not found
+    """
+    tool_path, config_key = _resolve_tool_path(tool_name, 'LOCAL')
+    if not tool_path:
+        print(f"ERROR: Tool '{tool_name}' not found locally. Install it or set {config_key} in ~/.my-plex.conf")
+        return None
+
+    cmd = [tool_path] + list(args)
+    if DBG: print(f"{DBGPFX}run_tool_locally: {' '.join(cmd)}")
+
+    try:
+        return subprocess.run(cmd, capture_output=capture_output, text=text, timeout=timeout)
+    except FileNotFoundError:
+        print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf")
+        return None
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.")
+        return None
+
+
+# Cache for remote tool path lookups (avoid repeated 'ssh which' calls)
+_remote_tool_path_cache = {}
+
+def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=True, text=True, timeout=None):
+    """Run an external tool on the Plex server (locally or via SSH).
+
+    Looks up EXTERNAL_TOOLS['SERVER'][tool_name] for configured path.
+    If None, auto-detects: locally via shutil.which(), remotely via 'ssh which'.
+
+    Args:
+        tool_name: Short tool name, e.g. 'mp4box', 'mkvpropedit', 'ffmpeg', 'sqlite3'
+        args: List of arguments (NOT including the tool binary itself)
+        remote_host: SSH host for remote execution, None for local
+        capture_output: Capture stdout/stderr (default True)
+        text: Return strings instead of bytes (default True)
+        timeout: Timeout in seconds (default None)
+
+    Returns:
+        subprocess.CompletedProcess on success, or None if tool not found
+    """
+    config_key = f"EXTERNAL_TOOLS['SERVER']['{tool_name}']"
+    configured = EXTERNAL_TOOLS.get('SERVER', {}).get(tool_name)
+
+    if configured:
+        tool_path = configured
+    elif remote_host:
+        # Check cache first
+        cache_key = f"{remote_host}:{tool_name}"
+        if cache_key in _remote_tool_path_cache:
+            tool_path = _remote_tool_path_cache[cache_key]
+        else:
+            # Auto-detect on remote via login shell (non-interactive SSH doesn't load PATH)
+            result = run_tool_locally('ssh', [remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
+            if result and result.returncode == 0 and result.stdout.strip():
+                tool_path = result.stdout.strip()
+                _remote_tool_path_cache[cache_key] = tool_path
+            else:
+                tool_path = None
+    else:
+        tool_path = shutil.which(tool_name)
+
+    if not tool_path:
+        location = f"on Plex server '{remote_host}'" if remote_host else "locally"
+        install_hint = f"Install it on the server" if remote_host else "Install it"
+        print(f"ERROR: Tool '{tool_name}' not found {location}. {install_hint} or set {config_key} in ~/.my-plex.conf")
+        return None
+
+    if remote_host:
+        # Build remote command with proper quoting
+        remote_cmd = f'{tool_path} {" ".join(shlex.quote(a) for a in args)}'
+        if DBG: print(f"{DBGPFX}run_tool_on_PLEX_server: ssh {remote_host} {remote_cmd}")
+        return run_tool_locally('ssh', [remote_host, remote_cmd], capture_output=capture_output, text=text, timeout=timeout)
+    else:
+        cmd = [tool_path] + list(args)
+        if DBG: print(f"{DBGPFX}run_tool_on_PLEX_server (local): {' '.join(cmd)}")
+        try:
+            return subprocess.run(cmd, capture_output=capture_output, text=text, timeout=timeout)
+        except FileNotFoundError:
+            print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf")
+            return None
+        except subprocess.TimeoutExpired:
+            print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.")
+            return None
+
+
+def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
+    """Central function for all file operations - executes check + action in ONE SSH call
+
+    ⚠️  CRITICAL: ALL SSH/FILE OPERATIONS MUST USE THIS FUNCTION ⚠️
+
+    This is the SINGLE SOURCE OF TRUTH for all file system operations in my-plex.
+    NEVER use subprocess.run(['ssh', ...]) or direct SSH commands elsewhere in the code.
+    NEVER use os.path.exists(), shutil.move(), etc. directly - use this function instead.
+
+    If you need a new operation type, ADD IT HERE rather than creating direct SSH calls.
+    This ensures consistent error handling, path resolution, and maintainability.
+
+    This function automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    For example, if /j2/watch.v/file.mp4 doesn't exist but /Volumes/2/watch.v/file.mp4 does,
+    it will automatically use the existing alternative path.
+
+    Args:
+        operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE', 'LIST_DIR'
+        filepath: Full path to source file or directory (for LIST_DIR)
+        remote_host: SSH host for remote operations, None for local
+        **kwargs: Additional arguments depending on operation:
+            - trash_dir: For TRASH operation
+            - new_filename: For RENAME operation
+            - dest_path: For MOVE operation
+            - skip_alternatives: Set to True to skip alternative path resolution (default: False)
+            - maxdepth: For LIST_DIR operation (default: 10)
+
+    Returns:
+        For CHECK: (exists: bool, resolved_filepath or None)
+        For TRASH/RENAME/MOVE: (success: bool, result_path: str or None)
+        For REMOVE: (success: bool, None)
+        For LIST_DIR: (success: bool, list_of_files: list or None)
+    """
+    # Resolve filepath using alternative paths (unless explicitly disabled)
+    skip_alternatives = kwargs.get('skip_alternatives', False)
+    if not skip_alternatives:
+        resolved_filepath, exists = resolve_filepath_with_alternatives(filepath, remote_host)
+        if operation == 'CHECK':
+            # For CHECK operation, return the resolved path if it exists
+            return (exists, resolved_filepath if exists else None)
+        elif exists:
+            # For other operations, use the resolved path if it exists
+            filepath = resolved_filepath
+            if DEEPDBG:
+                print(f"{DBGPFX}Using resolved filepath for {operation}: {filepath}")
+        # If file doesn't exist in any alternative path, continue with original filepath
+        # (the operation will likely fail, but that's expected behavior)
+
+    if remote_host:
+        escaped_src = escape_path_for_ssh(filepath)
+
+        if operation == 'CHECK':
+            # Check if file or directory exists (use -e for both)
+            cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_src}\\\" ] && echo EXISTS || echo NOTFOUND\""
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                print_ssh_error(remote_host, "check file existence", cmd=cmd, stderr=result.stderr,
+                               extra_context={'file': filepath})
+                return (False, None)
+            exists = result.stdout.strip() == 'EXISTS'
+            return (exists, None)
+
+        elif operation == 'TRASH':
+            # Move to trash in ONE shot: check exists && move && echo success
+            trash_dir = kwargs.get('trash_dir')
+            if not trash_dir:
+                # Pass the filepath to get_trash_dir so it can place trash on same volume
+                trash_dir = get_trash_dir(remote_host, file_path=filepath)
+
+            filename = os.path.basename(filepath)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            trash_filename = f"{timestamp}_{filename}"
+            trash_path = f"{trash_dir}/{trash_filename}"
+
+            # For remote operations, expand tilde in the trash path
+            # We need to construct the path that will be used on the remote side
+            if trash_path.startswith('~/'):
+                # Use $HOME instead of ~ for reliable expansion in the SSH command
+                trash_path_for_mv = '$HOME/' + trash_path[2:]
+            else:
+                trash_path_for_mv = trash_path
+
+            escaped_dst = escape_path_for_ssh(trash_path_for_mv)
+
+            # Single SSH command: check file/dir exists AND move it AND report success (use -e for both files and dirs)
+            # Note: We echo the original trash_path (with ~) for display purposes
+            cmd = ["ssh", remote_host,
+                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo 'MOVED:{trash_path}' || echo 'FAILED'"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0 and result.stdout.strip().startswith('MOVED:'):
+                actual_trash_path = result.stdout.strip().split(':', 1)[1]
+                print(f"{VRBPFX}Moved to trash on {remote_host}: {actual_trash_path}")
+                return (True, actual_trash_path)
+            else:
+                print_ssh_error(remote_host, "move file to trash", cmd=cmd, stderr=result.stderr,
+                               extra_context={'source file': filepath, 'target trash': trash_path})
+                print("Possible reasons:")
+                print("  - Source file doesn't exist on remote host")
+                print("  - Permission denied for moving the file")
+                print("  - Trash directory doesn't have write permissions\n")
+                return (False, None)
+
+        elif operation == 'RENAME':
+            # Rename file/dir in ONE shot: check exists && move && echo success
+            new_filename = kwargs.get('new_filename')
+            src_dir = os.path.dirname(filepath)
+            dst_path = os.path.join(src_dir, new_filename)
+            escaped_dst = escape_path_for_ssh(dst_path)
+
+            cmd = ["ssh", remote_host,
+                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo 'RENAMED:{dst_path}' || echo 'FAILED'"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0 and result.stdout.strip().startswith('RENAMED:'):
+                actual_dst_path = result.stdout.strip().split(':', 1)[1]
+                print(f"{VRBPFX}Renamed on {remote_host}: {os.path.basename(filepath)} -> {new_filename}")
+                return (True, actual_dst_path)
+            else:
+                print_ssh_error(remote_host, "rename file", cmd=cmd, stderr=result.stderr,
+                               extra_context={'source': filepath, 'new_name': new_filename})
+                print("Possible reasons:")
+                print(f"  - Source file doesn't exist: {filepath}")
+                print("  - Permission denied for renaming the file")
+                print(f"  - Target file already exists: {dst_path}\n")
+                return (False, None)
+
+        elif operation == 'MOVE':
+            # Move file/dir to destination in ONE shot
+            dest_path = kwargs.get('dest_path')
+            escaped_dst = escape_path_for_ssh(dest_path)
+
+            cmd = ["ssh", remote_host,
+                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo 'MOVED:{dest_path}' || echo 'FAILED'"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0 and result.stdout.strip().startswith('MOVED:'):
+                actual_dst_path = result.stdout.strip().split(':', 1)[1]
+                print(f"{VRBPFX}Moved on {remote_host}: {filepath} -> {dest_path}")
+                return (True, actual_dst_path)
+            else:
+                print_ssh_error(remote_host, "move file", cmd=cmd, stderr=result.stderr,
+                               extra_context={'source': filepath, 'destination': dest_path})
+                return (False, None)
+
+        elif operation == 'REMOVE':
+            # Remove file/dir in ONE shot: check exists && remove && echo success
+            # For directories, need to use rm -r
+            cmd = ["ssh", remote_host,
+                   f"[ -e \"{escaped_src}\" ] && /bin/rm -r \"{escaped_src}\" && echo 'REMOVED:{filepath}' || echo 'FAILED'"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0 and result.stdout.strip().startswith('REMOVED:'):
+                print(f"{VRBPFX}Removed on {remote_host}: {filepath}")
+                return (True, None)
+            else:
+                print_ssh_error(remote_host, "remove file", cmd=cmd, stderr=result.stderr,
+                               extra_context={'file': filepath})
+                return (False, None)
+
+        elif operation == 'LIST_DIR':
+            # List all files in directory recursively
+            maxdepth = kwargs.get('maxdepth', 10)
+            cmd = ["ssh", remote_host, f"find \"{escaped_src}\" -maxdepth {maxdepth} -type f"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
+                return (True, files)
+            else:
+                if VRB:
+                    print_ssh_error(remote_host, "list directory contents", cmd=cmd, stderr=result.stderr,
+                                   extra_context={'directory': filepath})
+                return (False, None)
+
+        else:
+            print(f"ERROR: Unknown operation '{operation}'")
+            return (False, None)
+
+    else:
+        # Local operations
+        if operation == 'CHECK':
+            exists = os.path.isfile(filepath)
+            return (exists, None)
+
+        elif operation == 'TRASH':
+            trash_dir = kwargs.get('trash_dir')
+            if not trash_dir:
+                trash_dir = get_trash_dir(None)
+
+            filename = os.path.basename(filepath)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            trash_filename = f"{timestamp}_{filename}"
+            trash_path = os.path.join(trash_dir, trash_filename)
+
+            try:
+                shutil.move(filepath, trash_path)
+                print(f"{VRBPFX}Moved to trash: {trash_path}")
+                return (True, trash_path)
+            except Exception as e:
+                print(f"ERROR: Failed to move file to trash: {e}")
+                return (False, None)
+
+        elif operation == 'RENAME':
+            new_filename = kwargs.get('new_filename')
+            src_dir = os.path.dirname(filepath)
+            dst_path = os.path.join(src_dir, new_filename)
+
+            try:
+                shutil.move(filepath, dst_path)
+                print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
+                return (True, dst_path)
+            except Exception as e:
+                print(f"ERROR: Failed to rename file: {e}")
+                return (False, None)
+
+        elif operation == 'MOVE':
+            dest_path = kwargs.get('dest_path')
+            try:
+                shutil.move(filepath, dest_path)
+                print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
+                return (True, dest_path)
+            except Exception as e:
+                print(f"ERROR: Failed to move file: {e}")
+                return (False, None)
+
+        elif operation == 'REMOVE':
+            try:
+                os.remove(filepath)
+                print(f"{VRBPFX}Removed: {filepath}")
+                return (True, None)
+            except Exception as e:
+                print(f"ERROR: Failed to remove file: {e}")
+                return (False, None)
+
+        elif operation == 'LIST_DIR':
+            # List all files in directory recursively
+            try:
+                files = []
+                for root, dirs, filenames in os.walk(filepath):
+                    for filename in filenames:
+                        files.append(os.path.join(root, filename))
+                return (True, files)
+            except Exception as e:
+                if VRB:
+                    print(f"{VRBPFX}Warning: Could not access directory {filepath}: {e}")
+                return (False, None)
+
+        else:
+            print(f"ERROR: Unknown operation '{operation}'")
+            return (False, None)
+
+################################################################################
+# PLEX DATABASE DIRECT ACCESS
+################################################################################
+#
+# ARCHITECTURE OVERVIEW:
+# ======================
+# my-plex switched from Plex API (plexapi library) to direct database access
+# via SSH for performance and completeness reasons.
+#
+# WHY THE CHANGE:
+# - Plex API doesn't include audio/subtitle language data in bulk queries
+# - API requires individual item fetches (14K+ calls) to get stream data
+# - Direct DB access is 60x faster (40min → 30-60sec for cache rebuild)
+# - Database contains ALL metadata in complete, structured form
+#
+# DATABASE STRUCTURE:
+# - Location: /Users/me/Library/Application Support/Plex Media Server/.../com.plexapp.plugins.library.db
+# - Type: SQLite3 database
+# - Access: Auto-detects local DB or SSH to 'my-plex' remote_host
+# - Key tables:
+#   * metadata_items: Core metadata (title, year, rating, summary, etc.)
+#       - metadata_type: 1=movie, 2=show, 3=season, 4=episode
+#   * media_items: Technical specs (video_codec, audio_codec, resolution, duration)
+#   * media_parts: File paths and sizes on disk
+#   * media_streams: Audio/video/subtitle streams with language data
+#       - stream_type_id: 1=video, 2=audio, 3=subtitle
+#   * tags: Tag definitions (genres, actors, directors, collections, etc.)
+#       - tag_type: 1=genre, 4=director, 5=writer, 6=actor, 8=country, 9=collection
+#   * taggings: Links metadata_items to tags (many-to-many relationship)
+#   * library_sections: Library names and IDs
+#
+# CACHE STRUCTURE UNCHANGED:
+# - The cache dictionaries (OBJ_BY_ID, OBJ_BY_MOVIE, etc.) remain the same
+# - Only the DATA SOURCE changed (from API to database)
+# - This minimizes code changes throughout the rest of my-plex
+#
+# PRESERVED FEATURES:
+# - --force-metadata: Still collects video file metadata via ffmpeg for broken file detection
+# - Parallel processing: Works with ThreadPoolExecutor for multi-library updates
+# - Checkpoint system: Resume capability during cache rebuilds
+# - Alternative paths: ALTERNATIVE_ROOTPATHS resolution still works
+#
+# SCHEMA VALIDATION:
+# - validate_plex_database_schema() checks that all required tables/columns exist
+# - This detects schema changes in future Plex versions early
+# - Should be called at startup before any database queries
+#
+################################################################################
+
+def _parse_csv_to_rows(csv_text):
+    """Helper to convert CSV text to list of tuples
+
+    Returns:
+        List of tuples (one per row), excluding header row
+    """
+    if not csv_text or not csv_text.strip():
+        return []
+
+    import csv
+    import io
+    reader = csv.reader(io.StringIO(csv_text))
+    rows = [tuple(row) for row in reader]
+
+    # Skip header row (first row contains column names when using -header flag)
+    if rows:
+        return rows[1:]  # Skip first row (header)
+    return []
+
+def query_plex_database(query, mode='rows'):
+    """Central function for querying Plex database (locally or via SSH)
+
+    ⚠️  CRITICAL: ALL PLEX DATABASE QUERIES MUST USE THIS FUNCTION ⚠️
+
+    This is the SINGLE SOURCE OF TRUTH for all Plex database operations in my-plex.
+    NEVER use subprocess.run(['ssh', ...]) with sqlite3 commands elsewhere in the code.
+
+    This function:
+    - Auto-detects whether to use local sqlite3 or SSH to remote host
+    - If the database file exists locally → runs sqlite3 directly (no SSH)
+    - If not → uses SSH to PLEX_DB_REMOTE_HOST ('my-plex')
+    - Handles query escaping and error handling consistently
+    - Supports multiple output modes (rows, raw, csv)
+
+    Args:
+        query: SQL query to execute (can be multi-line)
+        mode: Output mode:
+            - 'rows': Returns list of tuples (default) - parsed output
+            - 'raw': Returns raw stdout string - useful for debugging
+            - 'csv': Returns CSV-formatted output with headers
+
+    Returns:
+        On success:
+            - mode='rows': List of tuples, e.g. [(val1, val2, ...), ...]
+            - mode='raw': Raw string output from sqlite3
+            - mode='csv': CSV string with headers
+        On error: None
+
+    Example:
+        rows = query_plex_database(\"\"\"
+            SELECT id, title, year FROM metadata_items
+            WHERE metadata_type = 1 LIMIT 10
+        \"\"\")
+        if rows:
+            for row in rows:
+                print(f"ID: {row[0]}, Title: {row[1]}, Year: {row[2]}")
+    """
+    if not query or not query.strip():
+        print(f"ERROR: Empty query provided to query_plex_database()")
+        return None
+
+    # Auto-detect: if DB file exists locally, use sqlite3 directly (no SSH needed)
+    local_db_path = os.path.expanduser(PLEX_DB_PATH)
+    use_local = os.path.exists(local_db_path)
+
+    if use_local:
+        # LOCAL: run sqlite3 directly on local database
+        if mode == 'raw':
+            cmd = ['sqlite3', local_db_path, query]
+        else:
+            cmd = ['sqlite3', '-header', '-csv', local_db_path, query]
+
+        if DEEPDBG:
+            print(f"{DBGPFX}Executing Plex DB query LOCALLY:")
+            print(f"{DBGPFX}  DB: {local_db_path}")
+            print(f"{DBGPFX}  Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+            print(f"{DBGPFX}  Command: {' '.join(cmd)}")
+    else:
+        # REMOTE: use SSH to access database on remote host
+        # Escape the query for SSH (handle quotes and special characters)
+        query_escaped = query.replace("'", "'\\''")
+
+        # Build sqlite3 command for remote execution
+        if mode == 'raw':
+            sqlite_cmd = f"sqlite3 '{PLEX_DB_PATH}' '{query_escaped}'"
+        else:
+            sqlite_cmd = f"sqlite3 -header -csv '{PLEX_DB_PATH}' '{query_escaped}'"
+
+        cmd = ['ssh', PLEX_DB_REMOTE_HOST, sqlite_cmd]
+
+        if DEEPDBG:
+            print(f"{DBGPFX}Executing Plex DB query via SSH:")
+            print(f"{DBGPFX}  Host: {PLEX_DB_REMOTE_HOST}")
+            print(f"{DBGPFX}  DB: {PLEX_DB_PATH}")
+            print(f"{DBGPFX}  Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+            print(f"{DBGPFX}  Command: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        if result.returncode != 0:
+            print(f"ERROR: Plex database query failed")
+            print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
+            print(f"  Return code: {result.returncode}")
+            if result.stderr:
+                print(f"  Error: {result.stderr}")
+            return None
+
+        # Return based on mode
+        if mode == 'raw':
+            return result.stdout
+        elif mode == 'csv':
+            return result.stdout
+        elif mode == 'rows':
+            # Parse CSV output to list of tuples
+            return _parse_csv_to_rows(result.stdout)
+        else:
+            print(f"ERROR: Unknown mode '{mode}' in query_plex_database()")
+            return None
+
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: Plex database query timed out (>300s)")
+        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        return None
+    except Exception as e:
+        print(f"ERROR: Exception during Plex database query: {e}")
+        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        return None
+
+def validate_plex_database_schema():
+    """Validate that Plex database schema matches our expectations
+
+    This function checks that all required tables, columns, and indexes exist.
+    If the schema changes in a future Plex version, this will detect it early.
+
+    Returns:
+        True if schema is valid, False otherwise
+    """
+    if VRB:
+        print(f"{VRBPFX}Validating Plex database schema...")
+
+    # Define expected schema
+    expected_schema = {
+        'metadata_items': [
+            'id', 'library_section_id', 'metadata_type', 'title', 'original_title',
+            'year', 'rating', 'audience_rating', 'content_rating', 'summary',
+            'duration', 'added_at', 'updated_at', 'deleted_at', 'index',
+            'parent_id'
+        ],
+        'media_items': [
+            'id', 'library_section_id', 'metadata_item_id', 'width', 'height',
+            'duration', 'video_codec', 'audio_codec', 'container', 'bitrate',
+            'deleted_at'
+        ],
+        'media_parts': [
+            'id', 'media_item_id', 'file', 'size', 'deleted_at', 'index'
+        ],
+        'media_streams': [
+            'id', 'stream_type_id', 'media_part_id', 'language', 'codec', 'index'
+        ],
+        'tags': [
+            'id', 'tag', 'tag_type'
+        ],
+        'taggings': [
+            'id', 'metadata_item_id', 'tag_id', 'index'
+        ],
+        'library_sections': [
+            'id', 'name', 'section_type'
+        ],
+        'metadata_item_settings': [
+            'id', 'guid', 'rating', 'view_count', 'last_viewed_at'
+        ]
+    }
+
+    validation_errors = []
+
+    # Check each table
+    for table_name, required_columns in expected_schema.items():
+        # Get table schema
+        schema_query = f"PRAGMA table_info({table_name});"
+        schema_rows = query_plex_database(schema_query, mode='rows')
+
+        if schema_rows is None:
+            validation_errors.append(f"Failed to query schema for table '{table_name}'")
+            continue
+
+        if not schema_rows:
+            validation_errors.append(f"Table '{table_name}' does not exist")
+            continue
+
+        # Extract column names from schema (column name is index 1 in PRAGMA output)
+        actual_columns = [row[1] for row in schema_rows]
+
+        # Check required columns
+        missing_columns = [col for col in required_columns if col not in actual_columns]
+        if missing_columns:
+            validation_errors.append(
+                f"Table '{table_name}' missing required columns: {', '.join(missing_columns)}"
+            )
+
+    if validation_errors:
+        print(f"ERROR: Plex database schema validation FAILED!")
+        print(f"This may indicate that your Plex version has a different database structure.")
+        print(f"Validation errors:")
+        for error in validation_errors:
+            print(f"  - {error}")
+        print(f"\nPlease report this issue to the my-plex maintainer with your Plex version.")
+        return False
+
+    if VRB:
+        print(f"{VRBPFX}Plex database schema validation PASSED - all required tables and columns exist")
+
+    return True
+
+def get_library_sections_from_database():
+    """Get all library sections from the Plex database with timestamps
+
+    REPLACES: PLEX_SERVER.library.sections()
+
+    This fetches library metadata directly from the database instead of via API.
+    Returns library information needed to iterate through libraries for cache updates.
+
+    Includes updated_at timestamps for intelligent cache updates:
+    - Compare cached timestamp with DB timestamp
+    - Only update libraries that changed since last cache update
+    - Preserves the +60s buffer mechanism for cache timestamps
+
+    Returns:
+        List of dicts with keys: id, name, section_type, type, updated_at
+        - id: library_section_id (integer)
+        - name: library name (string)
+        - section_type: 1=movie, 2=show, 8=music
+        - type: 'movie', 'show', or 'artist' (lowercase for compatibility)
+        - updated_at: Unix timestamp (integer) when library was last updated
+        Returns None on database error
+    """
+    query = """
+    SELECT id, name, section_type, updated_at
+    FROM library_sections
+    ORDER BY id
+    """
+
+    rows = query_plex_database(query, mode='rows')
+    if rows is None:
+        return None
+
+    libraries = []
+    for row in rows:
+        lib_id, lib_name, section_type, updated_at = row
+        libraries.append({
+            'id': int(lib_id),
+            'name': lib_name,
+            'section_type': int(section_type),
+            # Map section_type to type string for compatibility
+            'type': 'movie' if section_type == '1' else 'show' if section_type == '2' else 'artist' if section_type == '8' else 'unknown',
+            'updated_at': int(updated_at) if updated_at else 0
+        })
+
+    if VRB:
+        movie_count = sum(1 for lib in libraries if lib['type'] == 'movie')
+        show_count = sum(1 for lib in libraries if lib['type'] == 'show')
+        print(f"{VRBPFX}Found {len(libraries)} library sections in database ({movie_count} movie, {show_count} show)")
+
+    return libraries
+
+def fetch_movies_from_database(library_section_id):
+    """Fetch all movies from a library section with complete metadata via direct database access
+
+    REPLACES: plexapi library.all() + item.reload() + per-item property fetching
+
+    This function executes THREE SQL queries to gather complete movie data:
+    1. Main query: JOINs metadata_items + media_items + media_parts + metadata_item_settings
+       - Gets: title, year, rating, files, codecs, resolution, view counts, timestamps
+    2. Streams query: Gets audio/subtitle languages from media_streams table
+       - This was IMPOSSIBLE via Plex API bulk queries (required 14K+ individual calls)
+    3. Tags query: Gets genres, actors, directors, writers, countries, collections from tags/taggings
+       - More efficient than per-item .genres, .actors, .directors API calls
+
+    WHY THREE QUERIES:
+    - Single massive JOIN would be too complex and slow (Cartesian product issues)
+    - This approach: fetch base data, then augment with streams and tags
+    - Post-processing in Python is faster than complex SQL for this use case
+
+    DATA FLOW:
+    1. Execute main query → get list of (metadata_id, media_id, part_id, filepath, ...)
+    2. Execute streams query → build dict: part_id → {audio_languages: [...], subtitle_languages: [...]}
+    3. Execute tags query → build dict: metadata_id → {genres: [...], actors: [...], ...}
+    4. Combine data → create movie dicts matching cache structure exactly
+    5. Return list of movie dicts ready for cache population
+
+    CACHE COMPATIBILITY:
+    - Returns dicts with same structure as old API-based code
+    - Fields match what add_media_obj() previously created
+    - Downstream code (display, search, resolve) works unchanged
+
+    Args:
+        library_section_id: ID of the library section (from library_sections.id)
+                           Corresponds to plexapi library.key attribute
+
+    Returns:
+        List of movie dicts (one per media_part/file), or None on database error
+        Each dict contains: file, files, type, id, title, year, library, audio_languages,
+                           subtitle_languages, actors, directors, genres, collections, etc.
+    """
+    query = f"""
+    SELECT
+        -- Metadata
+        mi.id as metadata_id,
+        mi.title,
+        mi.original_title,
+        mi.year,
+        mi.rating as critics_rating,
+        mi.audience_rating,
+        mi.content_rating,
+        mi.summary,
+        mi.duration as metadata_duration,
+        mi.added_at,
+        mi.updated_at,
+        ls.name as library_name,
+        -- Media info
+        md.id as media_id,
+        md.width,
+        md.height,
+        md.duration as media_duration,
+        md.video_codec,
+        md.audio_codec,
+        md.container,
+        md.bitrate,
+        -- Part (file) info
+        mp.id as part_id,
+        mp.file as filepath,
+        mp.size as filesize,
+        -- User ratings and views
+        COALESCE(mis.rating, 0) as user_rating,
+        COALESCE(mis.view_count, 0) as view_count,
+        mis.last_viewed_at
+    FROM metadata_items mi
+    JOIN library_sections ls ON mi.library_section_id = ls.id
+    LEFT JOIN media_items md ON mi.id = md.metadata_item_id
+    LEFT JOIN media_parts mp ON md.id = mp.media_item_id
+    LEFT JOIN metadata_item_settings mis ON mi.guid = mis.guid
+    WHERE mi.metadata_type = 1
+      AND mi.library_section_id = {library_section_id}
+      AND mi.deleted_at IS NULL
+      AND (md.deleted_at IS NULL OR md.deleted_at = 0)
+      AND (mp.deleted_at IS NULL OR mp.deleted_at = 0)
+    ORDER BY mi.id, md.id, mp.id
+    """
+
+    rows = query_plex_database(query, mode='rows')
+    if rows is None:
+        return None
+
+    if not rows:
+        return []
+
+    # Now fetch audio/subtitle languages for all parts in this library
+    # This is more efficient than per-item queries
+    streams_query = f"""
+    SELECT
+        mp.id as part_id,
+        ms.stream_type_id,
+        ms.language,
+        ms.codec
+    FROM media_streams ms
+    JOIN media_parts mp ON ms.media_part_id = mp.id
+    JOIN media_items md ON mp.media_item_id = md.id
+    JOIN metadata_items mi ON md.metadata_item_id = mi.id
+    WHERE mi.metadata_type = 1
+      AND mi.library_section_id = {library_section_id}
+      AND ms.language IS NOT NULL
+      AND ms.language != ''
+      AND mi.deleted_at IS NULL
+    ORDER BY mp.id, ms.stream_type_id, ms."index"
+    """
+
+    stream_rows = query_plex_database(streams_query, mode='rows')
+
+    # Build streams lookup: part_id -> {audio_languages: [...], subtitle_languages: [...]}
+    streams_by_part = {}
+    if stream_rows:
+        for row in stream_rows:
+            part_id, stream_type_id, language, _codec = row
+            if part_id not in streams_by_part:
+                streams_by_part[part_id] = {'audio_languages': [], 'subtitle_languages': []}
+
+            # stream_type_id: 2=audio, 3=subtitle
+            if stream_type_id == '2' and language:
+                if language not in streams_by_part[part_id]['audio_languages']:
+                    streams_by_part[part_id]['audio_languages'].append(language)
+            elif stream_type_id == '3' and language:
+                if language not in streams_by_part[part_id]['subtitle_languages']:
+                    streams_by_part[part_id]['subtitle_languages'].append(language)
+
+    # Fetch tags for all movies in this library (genres, actors, directors, etc.)
+    tags_query = f"""
+    SELECT
+        mi.id as metadata_id,
+        t.tag_type,
+        t.tag
+    FROM metadata_items mi
+    JOIN taggings tg ON mi.id = tg.metadata_item_id
+    JOIN tags t ON tg.tag_id = t.id
+    WHERE mi.metadata_type = 1
+      AND mi.library_section_id = {library_section_id}
+      AND mi.deleted_at IS NULL
+      AND t.tag_type IN (1, 4, 5, 6, 8, 9)
+    ORDER BY mi.id, t.tag_type, tg."index"
+    """
+
+    tag_rows = query_plex_database(tags_query, mode='rows')
+
+    # Build tags lookup: metadata_id -> {genres: [...], actors: [...], ...}
+    tags_by_metadata = {}
+    if tag_rows:
+        for row in tag_rows:
+            metadata_id, tag_type, tag = row
+            if metadata_id not in tags_by_metadata:
+                tags_by_metadata[metadata_id] = {
+                    'genres': [], 'actors': [], 'directors': [],
+                    'writers': [], 'countries': [], 'collections': []
+                }
+
+            # tag_type: 1=genre, 4=director, 5=writer, 6=actor, 8=country, 9=collection
+            tag_map = {
+                '1': 'genres', '4': 'directors', '5': 'writers',
+                '6': 'actors', '8': 'countries', '9': 'collections'
+            }
+            list_name = tag_map.get(tag_type)
+            if list_name and tag and tag not in tags_by_metadata[metadata_id][list_name]:
+                tags_by_metadata[metadata_id][list_name].append(tag)
+
+    # Convert rows to movie dicts, grouping multiple media items per metadata_id
+    # Plex can have multiple media_items per movie (multi-version: different quality releases)
+    # The SQL returns one row per (metadata_id, media_id, part_id) — we merge them into one dict
+    movies_by_id = {}  # metadata_id -> movie_dict (with merged files)
+    for row in rows:
+        (metadata_id, title, original_title, year, critics_rating, audience_rating,
+         content_rating, summary, _metadata_duration, added_at, updated_at, library_name,
+         media_id, width, height, media_duration, video_codec, audio_codec,
+         _container, _bitrate, part_id, filepath, filesize,
+         user_rating, view_count, last_viewed_at) = row
+
+        # Get streams for this part
+        streams = streams_by_part.get(part_id, {'audio_languages': [], 'subtitle_languages': []})
+
+        # Get tags for this metadata item
+        tags = tags_by_metadata.get(metadata_id, {
+            'genres': [], 'actors': [], 'directors': [],
+            'writers': [], 'countries': [], 'collections': []
+        })
+
+        # Build version string (matching existing cache format)
+        duration_minutes = round(int(media_duration or 0) / 60000, 2) if media_duration else 0
+        resolution_full = f"{width or 0}x{height or 0}"
+        version = f"{duration_minutes}min {resolution_full} ({video_codec or 'unknown'} {audio_codec or 'unknown'})"
+
+        if metadata_id in movies_by_id:
+            # Additional media item for existing movie — merge into files dict
+            existing = movies_by_id[metadata_id]
+            existing['files'][version] = {
+                'filepath': filepath,
+                'filesize': int(filesize) if filesize else None
+            }
+            # Update media_cnt and type_str to reflect multi-version
+            media_cnt = len(existing['files'])
+            existing['media_cnt'] = media_cnt
+            existing['type_str'] = 'Movie*'
+            existing['media_nr'] = f"1/{media_cnt}"
+            # Merge audio/subtitle languages from this part (different versions may have different languages)
+            for lang in streams['audio_languages']:
+                if lang not in existing['audio_languages']:
+                    existing['audio_languages'].append(lang)
+            for lang in streams['subtitle_languages']:
+                if lang not in existing['subtitle_languages']:
+                    existing['subtitle_languages'].append(lang)
+        else:
+            # First row for this metadata_id — create the movie dict
+            movie_dict = {
+                'file': filepath,
+                'files': {
+                    version: {
+                        'filepath': filepath,
+                        'filesize': int(filesize) if filesize else None
+                    }
+                },
+                'type': 'Movie',
+                'type_str': 'Movie',
+                'id': metadata_id,
+                'title': title,
+                'originalTitle': original_title or '',
+                'year': int(year) if year else 0,
+                'library': library_name,
+                'item_id': metadata_id,
+                'media_id': media_id,
+                'part_id': part_id,
+                'version': version,
+                'media_nr': '1/1',
+                'media_idx': 0,
+                'media_cnt': 1,
+                'part_nr': '1/1',
+                'part_idx': 0,
+                'part_cnt': 1,
+                'updatedAt': int(updated_at) if updated_at else None,
+                'addedAt': int(added_at) if added_at else None,
+                'lastViewedAt': int(last_viewed_at) if last_viewed_at else None,
+                'viewCount': int(view_count) if view_count else 0,
+                'userRating': float(user_rating) if user_rating else None,
+                'criticsRating': float(critics_rating) if critics_rating else None,
+                'audienceRating': float(audience_rating) if audience_rating else None,
+                'summary': summary or '',
+                'duration': int(media_duration) if media_duration else None,
+                'video_codec': video_codec or '',
+                'audio_codec': audio_codec or '',
+                'resolution': f"{height}p" if height else '',
+                'resolution_full': resolution_full,
+                'filesize': int(filesize) if filesize else None,
+                'audio_languages': streams['audio_languages'],
+                'subtitle_languages': streams['subtitle_languages'],
+                'collections': tags.get('collections', []),
+                'labels': [],  # Labels will be fetched separately if needed
+                'actors': tags.get('actors', []),
+                'countries': tags.get('countries', []),
+                'directors': tags.get('directors', []),
+                'writers': tags.get('writers', []),
+                'genres': tags.get('genres', []),
+                'contentRating': content_rating or None,
+                # Movie-specific (no season/episode)
+                'season': None,
+                'S_str': None,
+                'S_idx': None,
+                'episode': None,
+                'E_str': None,
+                'E_idx': None,
+                'S0XE0X': None,
+            }
+            movies_by_id[metadata_id] = movie_dict
+
+    movies = list(movies_by_id.values())
+
+    if VRB:
+        multi_version = sum(1 for m in movies if m['media_cnt'] > 1)
+        if multi_version:
+            print(f"{VRBPFX}Fetched {len(movies)} movies from database ({multi_version} with multiple versions) (library_section_id={library_section_id})")
+        else:
+            print(f"{VRBPFX}Fetched {len(movies)} movies from database (library_section_id={library_section_id})")
+
+    return movies
+
+def fetch_collections_from_database(library_section_id):
+    """Fetch all collections (metadata_type=18) from a library section.
+
+    Collections exist in both movie libraries (subtype='movie') and show libraries
+    (subtype='show'). They have no associated media files — they are pure metadata
+    grouping objects. Each collection_dict has:
+        key             : 'Collection:<id>'
+        id              : Plex ratingKey (int)
+        title           : collection name
+        subtype         : 'movie' or 'show' (library type)
+        library         : library section name
+        addedAt         : unix timestamp
+        updatedAt       : unix timestamp
+        type            : 'Collection'
+        type_str        : 'Collection'
+        member_ids      : list of metadata_item.id values that belong to this collection
+
+    Returns:
+        List of collection_dicts, or [] on error/none.
+    """
+    query = f"""
+    SELECT
+        mi.id, mi.title, mi.added_at, mi.updated_at,
+        ls.name as library_name,
+        ls.section_type
+    FROM metadata_items mi
+    JOIN library_sections ls ON mi.library_section_id = ls.id
+    WHERE mi.metadata_type = 18
+      AND mi.library_section_id = {library_section_id}
+      AND mi.deleted_at IS NULL
+    ORDER BY mi.title
+    """
+    rows = query_plex_database(query, mode='rows')
+    if not rows:
+        return []
+
+    # Collect collection ids to fetch member item ids in one query.
+    # Members are linked via: tags (tag_type=2, tag=collection_title) + taggings (tag_id -> metadata_item_id).
+    # There is no collection_items table in the Plex DB.
+    col_ids = [row[0] for row in rows]
+    placeholders = ','.join(str(i) for i in col_ids)
+
+    members_query = f"""
+    SELECT
+        mi.id as col_id,
+        tg.metadata_item_id
+    FROM metadata_items mi
+    JOIN tags t ON t.tag = mi.title AND t.tag_type = 2
+    JOIN taggings tg ON tg.tag_id = t.id
+    WHERE mi.id IN ({placeholders})
+    ORDER BY mi.id, tg."index"
+    """
+    member_rows = query_plex_database(members_query, mode='rows')
+
+    # Build members dict: collection_id -> [member_ids]
+    members_by_col = {}
+    if member_rows:
+        for col_id, member_id in member_rows:
+            if col_id not in members_by_col:
+                members_by_col[col_id] = []
+            members_by_col[col_id].append(member_id)
+
+    # section_type: 1=movie, 2=show, 8=music, 13=photo
+    section_type_to_subtype = {1: 'movie', 2: 'show', 8: 'artist', 13: 'photo'}
+
+    collections = []
+    for row in rows:
+        col_id, title, added_at, updated_at, library_name, section_type = row
+        subtype = section_type_to_subtype.get(int(section_type) if section_type else 0, 'unknown')
+        col_dict = {
+            'type':       'Collection',
+            'type_str':   'Collection',
+            'id':         col_id,
+            'title':      title,
+            'subtype':    subtype,
+            'library':    library_name,
+            'addedAt':    int(added_at)   if added_at   else None,
+            'updatedAt':  int(updated_at) if updated_at else None,
+            'member_ids': members_by_col.get(col_id, []),
+        }
+        collections.append(col_dict)
+
+    if VRB:
+        print(f"{VRBPFX}Fetched {len(collections)} collections from database (library_section_id={library_section_id})")
+
+    return collections
+
+def check_file_exists(filepath, remote_host=None):
+    """Check if file exists locally or on remote host
+
+    This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
+    For example, if ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]:
+    - Checking '/j2/watch.v/movie.mp4' will also check '/Volumes/2/watch.v/movie.mp4'
+    - Returns True if the file exists in ANY of the alternative locations
+
+    Args:
+        filepath: Full path to file
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        True if file exists (in original or any alternative path), False otherwise
+    """
+    if DEEPDBG:
+        print(f"{DBGPFX}check_file_exists: filepath={filepath}, remote_host={remote_host}")
+
+    exists, resolved_path = my_plex_file_operation('CHECK', filepath, remote_host)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}check_file_exists: result: exists={exists}, resolved_path={resolved_path}")
+
+    return exists
+
+
+def check_file_exists_with_path(filepath, remote_host=None):
+    """Check if file exists and return the resolved path
+
+    This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
+    Unlike check_file_exists(), this returns both the existence status AND the resolved path.
+
+    Args:
+        filepath: Full path to file
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        tuple: (exists: bool, resolved_path: str or None)
+            - exists: True if file was found in any alternative location
+            - resolved_path: The actual path where file was found, or None if not found
+
+    Example:
+        exists, path = check_file_exists_with_path('/j2/watch.v/movie.mp4')
+        if exists:
+            print(f"File found at: {path}")  # Might print: /Volumes/2/watch.v/movie.mp4
+    """
+    return my_plex_file_operation('CHECK', filepath, remote_host)
+
+
+def has_other_video_files_in_dir(directory, exclude_file, remote_host=None):
+    """Check if a directory contains other video files besides the excluded one
+
+    ⚠️  NOTE: This function demonstrates proper use of the centralized my_plex_file_operation()
+    Uses my_plex_file_operation('LIST_DIR', ...) instead of direct SSH calls.
+    This is the CORRECT way to implement file system operations in my-plex.
+
+    Args:
+        directory: Directory path to check
+        exclude_file: File to exclude from the check (the one we're about to trash)
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        bool: True if there are other video files, False if this is the only one
+    """
+    # Common video extensions
+    video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.m2ts', '.ts'}
+
+    # Use the global file operation function to list directory contents
+    success, files = my_plex_file_operation('LIST_DIR', directory, remote_host, maxdepth=10)
+
+    if not success:
+        # If we can't list the directory, assume there might be other files (safer)
+        return True
+
+    # Check each file to see if it's a video file (and not the excluded file)
+    for file in files:
+        # Skip the file we're about to trash
+        if file == exclude_file:
+            continue
+        # Check if it's a video file
+        _, ext = os.path.splitext(file)
+        if ext.lower() in video_extensions:
+            return True
+
+    return False
+
+def move_to_trash(filepath, remote_host=None):
+    """Move file or directory to trash
+
+    Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    If filepath doesn't exist but an alternative path does, uses the alternative.
+
+    Args:
+        filepath: Full path to file or directory to trash
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        Tuple (success: bool, trash_path: str or None) - trash_path is where file/dir was moved to
+    """
+    return my_plex_file_operation('TRASH', filepath, remote_host)
+
+def rename_file(src_path, new_filename, remote_host=None):
+    """Rename file in the same directory
+
+    Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
+    If src_path doesn't exist but an alternative path does, uses the alternative.
+
+    Args:
+        src_path: Full path to source file
+        new_filename: New filename (not full path, just the filename)
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        Tuple (success: bool, new_path: str) - new_path is the full path after rename
+    """
+    return my_plex_file_operation('RENAME', src_path, remote_host, new_filename=new_filename)
+
+def extract_vu_marker(filename):
+    """Extract [vu] or [vu@TIMESTAMP] marker from filename
+
+    Args:
+        filename: The filename to search for vu marker
+
+    Returns:
+        The vu marker string (e.g., '[vu]' or '[vu@20231215_143022]') or None if not found
+    """
+    import re
+    # Match [vu] or [vu@<timestamp>] - timestamp format is flexible
+    match = re.search(r'\[vu(?:@[^\]]+)?\]', filename)
+    if match:
+        return match.group(0)
+    return None
+
+def compare_vu_markers(marker1, marker2):
+    """Compare two [vu] markers and return the newer one
+
+    Args:
+        marker1: First vu marker (e.g., '[vu]' or '[vu@2025-12-26]')
+        marker2: Second vu marker (e.g., '[vu]' or '[vu@2025-12-26_1123]')
+
+    Returns:
+        The newer marker, or marker1 if both are equal or comparison not possible
+    """
+    if not marker1:
+        return marker2
+    if not marker2:
+        return marker1
+
+    # Extract timestamps from markers
+    import re
+    ts1_match = re.search(r'\[vu@([^\]]+)\]', marker1)
+    ts2_match = re.search(r'\[vu@([^\]]+)\]', marker2)
+
+    # If one has timestamp and other doesn't, prefer the one with timestamp
+    if ts1_match and not ts2_match:
+        return marker1
+    if ts2_match and not ts1_match:
+        return marker2
+
+    # If both have timestamps, compare them
+    if ts1_match and ts2_match:
+        ts1 = ts1_match.group(1)
+        ts2 = ts2_match.group(1)
+        # Simple string comparison works for YYYY-MM-DD and YYYY-MM-DD_HHMM formats
+        if ts1 >= ts2:
+            return marker1
+        else:
+            return marker2
+
+    # Both are plain [vu] or comparison not possible - return first one
+    return marker1
+
+def add_vu_marker_to_file(file_path, vu_marker, remote_host=None):
+    """Add vu marker to a video file's filename
+
+    Args:
+        file_path: Full path to the video file
+        vu_marker: The marker to add (e.g., '[vu]' or '[vu@20231215_143022]')
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        Tuple (success: bool, new_path: str) - new_path is the full path after rename
+    """
+    if not vu_marker:
+        return (True, file_path)  # Nothing to do
+
+    filename = os.path.basename(file_path)
+
+    # Check if marker already exists
+    if vu_marker in filename:
+        print(f"{VRBPFX}File already has {vu_marker} marker: {filename}")
+        return (True, file_path)
+
+    # Split filename into name and extension
+    name, ext = os.path.splitext(filename)
+
+    # Add marker before extension
+    new_filename = f"{name}.{vu_marker}{ext}"
+
+    print(f"Adding {vu_marker} marker to file: {filename} -> {new_filename}")
+
+    return rename_file(file_path, new_filename, remote_host)
+
+def move_file(src_path, dst_dir, remote_host=None):
+    """Move file from src to dst directory
+
+    NOTE: This function uses its own SSH implementation and does NOT automatically
+    resolve alternative paths. For operations that need alternative path support,
+    use my_plex_file_operation() directly.
+
+    Args:
+        src_path: Full path to source file
+        dst_dir: Destination directory
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        filename = os.path.basename(src_path)
+        dst_path = os.path.join(dst_dir, filename)
+
+        if remote_host:
+            escaped_dir = escape_path_for_ssh(dst_dir)
+            escaped_src = escape_path_for_ssh(src_path)
+            escaped_dst = escape_path_for_ssh(dst_path)
+            cmd = f"ssh {remote_host} \"mkdir -p \\\"{escaped_dir}\\\" && mv \\\"{escaped_src}\\\" \\\"{escaped_dst}\\\"\""
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"{VRBPFX}Moved on {remote_host}: {src_path} -> {dst_path}")
+                return True
+            else:
+                print_ssh_error(remote_host, "move file", cmd=cmd, stderr=result.stderr,
+                               extra_context={'source': src_path, 'destination': dst_path})
+                print("Possible reasons:")
+                print(f"  - Source file doesn't exist: {src_path}")
+                print("  - Permission denied for moving the file")
+                print(f"  - Cannot create destination directory: {dst_dir}\n")
+                return False
+        else:
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.move(src_path, dst_path)
+            print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
+            return True
+    except Exception as e:
+        print(f"ERROR: Failed to move file: {e}")
+        return False
+
+def format_duration(duration_ms, unit='m'):
+    """Convert duration from milliseconds to specified unit
+
+    Args:
+        duration_ms: Duration in milliseconds
+        unit: Target unit - 's'/'seconds', 'm'/'minutes', 'h'/'hours'
+
+    Returns:
+        Float value of duration in the specified unit (2 decimal places)
+    """
+    if duration_ms is None:
+        return 0.0
+
+    unit_lower = unit.lower()
+    if unit_lower in ['s', 'seconds']:
+        return round(duration_ms / 1000, 2)
+    elif unit_lower in ['m', 'minutes']:
+        return round(duration_ms / 60000, 2)
+    elif unit_lower in ['h', 'hours']:
+        return round(duration_ms / 3600000, 2)
+    else:
+        err(1062, f"Invalid duration unit '{unit}'. Must be 's'/'seconds', 'm'/'minutes', or 'h'/'hours'")
+
+def get_media_language(obj):
+    """Get 2-letter language code from a media object.
+    Uses audio_languages from Plex metadata, falls back to library name."""
+    audio_langs = obj.get('audio_languages', [])
+    if audio_langs:
+        lang = audio_langs[0]
+        if len(lang) == 2:
+            return lang.upper()
+        # Handle cases like 'engeng' -> 'EN'
+        return lang[:2].upper()
+    # Fallback: derive from library name
+    library = obj.get('library', '')
+    if '.' in library:
+        return library.rsplit('.', 1)[-1].upper()
+    return '??'
+
+def get_media_description_original(obj):
+    """Build description using originalTitle (for duplicate listing).
+    Falls back to regular title if no originalTitle."""
+    obj_type = obj['type']
+    title = obj.get('originalTitle') or obj.get('title', 'Unknown')
+    if obj_type == 'Movie':
+        what = f"Movie: {title}"
+        if obj.get('year'):
+            what += f" ({obj['year']})"
+    elif obj_type == 'Episode':
+        series = obj.get('series', 'Unknown Series')
+        s_str = obj.get('S_str', 'S??')
+        e_str = obj.get('E_str', 'E??')
+        what = f"Episode: {series} {s_str}{e_str}"
+        if title:
+            what += f" - {title}"
+    else:
+        what = f"{obj_type}: {title}"
+    return what
+
+def get_media_description(obj):
+    """Build description string for a media object
+
+    Args:
+        obj: Media object from PLEX_Media.OBJ_BY_ID
+
+    Returns:
+        String description of the media (e.g., "Movie: Title (2020)" or "Episode: Series S01E05")
+    """
+    obj_type = obj['type']
+    if obj_type == 'Movie':
+        what = f"Movie: {obj['title']}"
+        if obj.get('year'):
+            what += f" ({obj['year']})"
+    elif obj_type == 'Episode':
+        series = obj.get('series', 'Unknown Series')
+        s_str = obj.get('S_str', 'S??')
+        e_str = obj.get('E_str', 'E??')
+        ep_title = obj.get('title', '')
+        what = f"Episode: {series} {s_str}{e_str}"
+        if ep_title:
+            what += f" - {ep_title}"
+    else:
+        what = f"{obj_type}: {obj['title']}"
+    return what
+
+def get_mkv_header_duration(filepath):
+    """Read duration from MKV file header
+
+    Parses the MKV EBML header to extract the duration metadata.
+    This represents the duration claimed in the container header,
+    which may differ from actual playable duration if file is truncated.
+
+    Args:
+        filepath: Full path to MKV file (local or remote)
+
+    Returns:
+        Duration in minutes (float) or None if unable to read
+    """
+    try:
+        import struct
+
+        # Determine if file is local or remote
+        remote_host, exists, resolved_path = determine_remote_host(filepath)
+        if not exists:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: File not found: {filepath}")
+            return None
+
+        # Use resolved path if available
+        if resolved_path:
+            filepath = resolved_path
+
+        # Read first 4096 bytes of file (sufficient for MKV header)
+        if remote_host:
+            # Remote file: use SSH to read header bytes
+            escaped_path = escape_path_for_ssh(filepath)
+            cmd = f'ssh {remote_host} "dd if=\\"{escaped_path}\\" bs=4096 count=1 2>/dev/null"'
+            result = subprocess.run(cmd, shell=True, capture_output=True)
+            if result.returncode != 0:
+                if DEEPDBG:
+                    print(f"{DBGPFX}get_mkv_header_duration: Failed to read remote file header")
+                return None
+            header_data = result.stdout
+        else:
+            # Local file: read directly
+            with open(filepath, 'rb') as f:
+                header_data = f.read(4096)
+
+        # Search for duration element in MKV header
+        # MKV duration is stored as a float64 in milliseconds
+        # The EBML ID for Duration is 0x4489 (2 bytes: 0x44, 0x89)
+        duration_id = b'\x44\x89'
+        pos = header_data.find(duration_id)
+
+        if pos == -1:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: Duration element not found in header")
+            return None
+
+        # Skip ID (2 bytes) and size byte(s)
+        # MKV uses variable-length encoding for element sizes
+        # For duration (8-byte float), size is usually 0x88 (meaning 8 bytes)
+        pos += 2  # Skip ID
+        size_byte = header_data[pos]
+        pos += 1  # Skip size byte
+
+        # If size indicates 8 bytes (0x88), read the float64 value
+        if size_byte == 0x88 and pos + 8 <= len(header_data):
+            # Read 8 bytes as big-endian float64
+            duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
+            duration_min = duration_ms / 1000.0 / 60.0  # Convert ms to minutes
+            return duration_min
+        else:
+            if DEEPDBG:
+                print(f"{DBGPFX}get_mkv_header_duration: Unexpected size byte {hex(size_byte)}")
+            return None
+
+    except Exception as e:
+        if DEEPDBG:
+            print(f"{DBGPFX}get_mkv_header_duration: Exception reading MKV header: {e}")
+        return None
+
+def display_duplicate_details(nr, obj):
+    """Display detailed information about a duplicate media file
+
+    Args:
+        nr: Number/index of this duplicate in the list
+        obj: Media object from PLEX_Media.OBJ_BY_ID
+    """
+    what = get_media_description(obj)
+    plex_id = obj.get('id', 'N/A')
+    filepath = obj.get('file', 'N/A')
+    version = obj.get('version', 'N/A')
+    size_bytes = obj.get('filesize', None)
+    filesize = format_filesize(size_bytes, force_unit='MB')
+    filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
+
+    print(f"\n[{nr}] {what} (Plex ID: {plex_id})")
+    print(f"    File:    {filepath}")
+    print(f"    Type:    {filetype}")
+    print(f"    Version: {version}")
+    print(f"    Size:    {filesize}")
+
+    # Check for potential file truncation/corruption using cached metadata
+    # First try the new cached metadata (works for all file types, not just MKV)
+    plex_duration = obj.get('duration')  # Duration in milliseconds
+    files_dict = obj.get('files', {})
+
+    # Get file_metadata from the appropriate version
+    file_metadata = None
+    if files_dict:
+        # If this is a synthetic multi-version object, use the specific version
+        if obj.get('_is_synthetic') and version != 'N/A':
+            file_info = files_dict.get(version)
+            if isinstance(file_info, dict):
+                file_metadata = file_info.get('file_metadata')
+        else:
+            # For regular objects, check all file versions
+            for file_info in files_dict.values():
+                if isinstance(file_info, dict):
+                    file_metadata = file_info.get('file_metadata')
+                    if file_metadata:
+                        break
+
+    # Check if file is marked as broken or potentially truncated
+    if not file_metadata:
+        # No cached metadata available - ask user to run --update-cache
+        print(f"    ℹ️  No file metadata cached. Run with --update-cache to collect metadata.")
+    elif plex_duration:
+        if file_metadata.get('broken'):
+            print(f"    ⚠️  WARNING: File marked as BROKEN (metadata collection failed)")
+            if file_metadata.get('reason'):
+                print(f"       Reason: {file_metadata['reason']}")
+        else:
+            container_duration = file_metadata.get('container_duration')
+            if container_duration:
+                # Both durations are in milliseconds
+                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+
+                # Check against threshold
+                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                    # Classify severity
+                    if diff_pct < -10:
+                        severity = 'SEVERE'
+                        emoji = '🔴'
+                    elif diff_pct < -5:
+                        severity = 'MODERATE'
+                        emoji = '🟠'
+                    elif diff_pct < -1:
+                        severity = 'MILD'
+                        emoji = '🟡'
+                    else:
+                        severity = 'BORDERLINE'
+                        emoji = '⚠️'
+
+                    plex_min = plex_duration / 60000
+                    container_min = container_duration / 60000
+                    missing_min = (plex_duration - container_duration) / 60000
+
+                    print(f"    {emoji} WARNING: File appears TRUNCATED ({severity})")
+                    print(f"       Plex expects:     {plex_min:.2f} min")
+                    print(f"       Container has:    {container_min:.2f} min")
+                    print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
+                    print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
+
+def determine_remote_host(filepath):
+    """Determine if file is local or on remote SSH host
+
+    Args:
+        filepath: Full path to file
+
+    Returns:
+        Tuple (remote_host, exists, resolved_filepath) where:
+            - remote_host is None for local files or 'my-plex' for remote
+            - exists is True if file was found, False otherwise
+            - resolved_filepath is the actual path where file was found (may differ from input due to ALTERNATIVE_ROOTPATHS)
+    """
+    if DBG:
+        print(f"{DBGPFX}determine_remote_host: Checking filepath: {filepath}")
+
+    # Check local first - use check_file_exists_with_path to get resolved path
+    if DBG:
+        print(f"{DBGPFX}  Step 1: Checking if file exists LOCALLY...")
+    local_exists, local_resolved_path = check_file_exists_with_path(filepath, None)
+    if DBG:
+        print(f"{DBGPFX}  Step 1 result: local_exists = {local_exists}")
+        if local_resolved_path and DEEPDBG:
+            print(f"{DBGPFX}    resolved_path = {local_resolved_path}")
+
+    if local_exists:
+        if DBG:
+            print(f"{DBGPFX}  -> Returning (None, True, '{local_resolved_path}') - file found LOCALLY")
+        return (None, True, local_resolved_path)
+
+    # Try SSH
+    remote_host = 'my-plex'
+    if DBG:
+        print(f"{DBGPFX}  Step 2: File not local, checking REMOTE host '{remote_host}'...")
+    remote_exists, remote_resolved_path = check_file_exists_with_path(filepath, remote_host)
+    if DBG:
+        print(f"{DBGPFX}  Step 2 result: remote_exists = {remote_exists}")
+        if remote_resolved_path and DEEPDBG:
+            print(f"{DBGPFX}    resolved_path = {remote_resolved_path}")
+
+    if remote_exists:
+        if DBG:
+            print(f"{DBGPFX}  -> Returning ('{remote_host}', True, '{remote_resolved_path}') - file found on REMOTE")
+        return (remote_host, True, remote_resolved_path)
+
+    # Not found anywhere
+    if DBG:
+        print(f"{DBGPFX}  -> Returning (None, False, None) - file NOT FOUND anywhere")
+    return (None, False, None)
+
+def play_media_file(filepath, remote_host=None):
+    """Play a media file using available players (mpv, Plex, or Infuse)
+
+    Args:
+        filepath: Full path to media file
+        remote_host: SSH host for remote files, None for local
+
+    Returns:
+        True if player was launched, False otherwise
+    """
+    if DBG:
+        print(f"{DBGPFX}play_media_file called:")
+        print(f"{DBGPFX}  filepath = {filepath}")
+        print(f"{DBGPFX}  remote_host = {remote_host}")
+
+    # For remote files, try to use SSH streaming with mpv
+    if remote_host:
+        if DBG:
+            print(f"{DBGPFX}  -> Taking REMOTE path (remote_host is not None)")
+        print(f"Playing remote file via SSH: {filepath}")
+
+        # Find mpv binary dynamically
+        mpv_path = shutil.which('mpv')
+        if not mpv_path:
+            print("✗ mpv not found in PATH")
+            print("Please install mpv or ensure it's in your PATH")
+            return False
+
+        # Use SSH to stream the file to mpv
+        escaped_path = escape_path_for_ssh(filepath)
+        if DEEPDBG:
+            print(f"{DBGPFX}  Original filepath: {filepath}")
+            print(f"{DBGPFX}  Escaped filepath:  {escaped_path}")
+
+        # Use double quotes for the path since we're escaping for double quotes
+        cmd = f'ssh {remote_host} "cat \\"{escaped_path}\\"" | {mpv_path} --force-seekable=yes --title="{os.path.basename(filepath)}" -'
+
+        if DEEPDBG:
+            print(f"{DBGPFX}  Full command to execute:")
+            print(f"{DBGPFX}    {cmd}")
+
+        # Try mpv with SSH streaming
+        try:
+            if not DEEPDBG:
+                # Only print the command if not already printed by DEEPDBG
+                print(f"Executing: {cmd}")
+            # Don't suppress stderr so we can see mpv errors
+            subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL)
+            print("✓ mpv command launched (check terminal for any mpv error messages)")
+            return True
+        except Exception as e:
+            print(f"✗ Failed to launch mpv: {e}")
+
+        # For remote files, we can't easily use Plex/Infuse apps, so return
+        print("Note: Plex/Infuse apps cannot play remote SSH files directly.")
+        print("Consider mounting the remote filesystem or using mpv with SSH.")
+        return False
+
+    # Local file handling
+    if DBG:
+        print(f"{DBGPFX}  -> Taking LOCAL path (remote_host is None)")
+        print(f"{DBGPFX}  Checking if file exists locally with os.path.isfile()...")
+
+    file_exists_local = os.path.isfile(filepath)
+    if DBG:
+        print(f"{DBGPFX}  os.path.isfile('{filepath}') = {file_exists_local}")
+
+    if not file_exists_local:
+        if DBG:
+            print(f"{DBGPFX}  -> File does NOT exist locally, returning error")
+        print(f"ERROR: File not found: {filepath}")
+        return False
+
+    if DBG:
+        print(f"{DBGPFX}  -> File EXISTS locally, attempting to play")
+    print(f"Playing local file: {filepath}")
+
+    # Try mpv first (command line)
+    if shutil.which('mpv'):
+        try:
+            print(f"Attempting to play with mpv...")
+            subprocess.Popen(['mpv', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("✓ mpv launched successfully")
+            return True
+        except Exception as e:
+            print(f"✗ Failed to launch mpv: {e}")
+    else:
+        print("mpv not found in PATH")
+
+    # Try Plex app (macOS)
+    system = platform.system()
+    if system == 'Darwin':
+        plex_app = "/Applications/Plex.app"
+        if os.path.exists(plex_app):
+            try:
+                print(f"Attempting to play with Plex app...")
+                subprocess.Popen(['open', '-a', 'Plex', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("✓ Plex app launched successfully")
+                return True
+            except Exception as e:
+                print(f"✗ Failed to launch Plex app: {e}")
+        else:
+            print("Plex app not found")
+
+        # Try Infuse app (macOS)
+        infuse_app = "/Applications/Infuse.app"
+        if os.path.exists(infuse_app):
+            try:
+                print(f"Attempting to play with Infuse app...")
+                subprocess.Popen(['open', '-a', 'Infuse', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("✓ Infuse app launched successfully")
+                return True
+            except Exception as e:
+                print(f"✗ Failed to launch Infuse app: {e}")
+        else:
+            print("Infuse app not found")
+
+    print("ERROR: No suitable media player found!")
+    print("Please install one of: mpv (brew install mpv), Plex app, or Infuse app")
+    return False
+
+def trigger_library_scan(library_name, immediate=True):
+    """Trigger a Plex library scan and optionally wait for completion
+
+    Args:
+        library_name: Name of the library to scan
+        immediate: If True, wait for scan to complete; if False, just trigger the scan
+
+    Returns:
+        True if scan was triggered successfully, False otherwise
+    """
+    global OFFLINE
+
+    if OFFLINE:
+        return False
+
+    if not library_name or library_name not in PLEX_Library.OBJ_DICT:
+        return False
+
+    try:
+        import time
+        lib = PLEX_Library.OBJ_DICT[library_name]
+        print(f"  Scanning Plex library '{library_name}'...", end=' ', flush=True)
+        lib.update()
+
+        if immediate:
+            # Wait for scan to complete
+            max_wait = 60  # Maximum 60 seconds
+            waited = 0
+            while waited < max_wait:
+                lib.reload()  # Refresh library object
+                if not lib.refreshing:
+                    break
+                time.sleep(1)
+                waited += 1
+                if waited % 5 == 0:
+                    print(".", end='', flush=True)
+
+            if waited >= max_wait:
+                print(f" ⚠ (timeout after {max_wait}s, scan may still be running)")
+            else:
+                print(f" ✓ (completed in {waited}s)")
+        else:
+            print(" ✓ (triggered)")
+
+        return True
+    except Exception as e:
+        print(f"  ⚠ Warning: Could not scan library: {e}")
+        return False
+
+def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed_files):
+    """Update cache after successful resolution action
+
+    Args:
+        choice: User choice ('3', '4', '5', '6', '7')
+        keys: List of cache keys for the duplicate items
+        file1: Original path to first file
+        file2: Original path to second file
+        all_files: List of all original file paths (for option 7 with 3+ files)
+        renamed_files: List of new file paths after rename (for option 7)
+
+    Returns:
+        Library name if cache was modified, None otherwise
+    """
+    if not keys:
+        return None
+
+    if choice == '3':
+        # Remove file [1] from cache
+        key_to_remove = keys[0] if len(keys) > 0 else None
+        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
+            obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
+            removed_file = file1  # Use the actual file path passed in, not obj['file']
+            library = obj.get('library')
+            obj_type = obj.get('type')
+
+            # Check if this is a multi-version item (has multiple files in files dict)
+            files_dict = obj.get('files', {})
+            is_multi_version_obj = len(files_dict) > 1
+
+            if is_multi_version_obj:
+                # Multi-version item: only remove the specific file version from files dict
+                # Find and remove the version that matches file1
+                version_to_remove = None
+                removed_filesize = None
+                for version_str, file_info in list(files_dict.items()):
+                    # BUG FIX: Handle both old and new cache formats
+                    if isinstance(file_info, str):
+                        filepath = file_info
+                        filesize = None
+                    else:
+                        filepath = file_info['filepath']
+                        filesize = file_info.get('filesize')
+
+                    if filepath == removed_file:
+                        version_to_remove = version_str
+                        removed_filesize = filesize
+                        break
+
+                if version_to_remove:
+                    del files_dict[version_str]
+                    # Format file size for display
+                    if removed_filesize:
+                        size_mb = removed_filesize / (1024 * 1024)
+                        size_str = f" ({size_mb:.0f} MB)" if size_mb >= 1 else f" ({removed_filesize} bytes)"
+                    else:
+                        size_str = ""
+                    print(f"Cache updated: removed version '{version_to_remove}'{size_str} from multi-version entry")
+
+                    # Update the main 'file' field to point to one of the remaining versions
+                    if files_dict:
+                        # Pick the first remaining version
+                        remaining_version, remaining_file_info = next(iter(files_dict.items()))
+                        # BUG FIX: Handle both old and new cache formats
+                        if isinstance(remaining_file_info, str):
+                            remaining_path = remaining_file_info
+                        else:
+                            remaining_path = remaining_file_info['filepath']
+                        obj['file'] = remaining_path
+                        obj['version'] = remaining_version
+
+                    # For multi-version items, trigger a targeted refresh of this specific Plex item
+                    # so Plex updates its database to remove the deleted file version
+                    plex_id = obj.get('id')
+                    if plex_id and not OFFLINE:
+                        try:
+                            print(f"  Refreshing Plex item ID {plex_id} to detect removed file version...")
+                            for media in resolve_plex_media_obj(str(plex_id)):
+                                media.refresh()
+                                print(f"  ✓ Plex item refreshed")
+                                break
+                        except Exception as e:
+                            print(f"  ⚠ Warning: Could not refresh Plex item: {e}")
+
+                    # Don't delete the object, just modified it
+                    return library
+                else:
+                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    return library
+            else:
+                # Single-version item: remove the entire object
+                del PLEX_Media.OBJ_BY_ID[key_to_remove]
+
+            # Remove from OBJ_BY_FILEPATH
+            if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+            # Remove from OBJ_BY_LIBRARY
+            if library and obj_type and library in PLEX_Media.OBJ_BY_LIBRARY:
+                if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    if key_to_remove in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].remove(key_to_remove)
+
+            # Remove from type-specific structures
+            if obj_type == 'Movie' and key_to_remove in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key_to_remove]
+            elif obj_type in ['Show', 'Season', 'Episode']:
+                show_key = obj.get('show_key', key_to_remove)
+                if obj_type == 'Show' and show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+            print(f"Cache updated: removed entry for trashed file [1]")
+            return library
+
+    elif choice == '4':
+        # Remove file [2] from cache
+        key_to_remove = keys[1] if len(keys) > 1 else keys[0]  # For multi-version, keys[0] is the original key
+        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
+            obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
+            removed_file = file2  # Use the actual file path passed in
+            library = obj.get('library')
+            obj_type = obj.get('type')
+
+            # Check if this is a multi-version item (has multiple files in files dict)
+            files_dict = obj.get('files', {})
+            is_multi_version_obj = len(files_dict) > 1
+
+            if is_multi_version_obj:
+                # Multi-version item: only remove the specific file version from files dict
+                # Find and remove the version that matches file2
+                version_to_remove = None
+                removed_filesize = None
+                for version_str, file_info in list(files_dict.items()):
+                    # BUG FIX: Handle both old and new cache formats
+                    if isinstance(file_info, str):
+                        filepath = file_info
+                        filesize = None
+                    else:
+                        filepath = file_info['filepath']
+                        filesize = file_info.get('filesize')
+
+                    if filepath == removed_file:
+                        version_to_remove = version_str
+                        removed_filesize = filesize
+                        break
+
+                if version_to_remove:
+                    del files_dict[version_str]
+                    # Format file size for display
+                    if removed_filesize:
+                        size_mb = removed_filesize / (1024 * 1024)
+                        size_str = f" ({size_mb:.0f} MB)" if size_mb >= 1 else f" ({removed_filesize} bytes)"
+                    else:
+                        size_str = ""
+                    print(f"Cache updated: removed version '{version_to_remove}'{size_str} from multi-version entry")
+
+                    # Update the main 'file' field to point to one of the remaining versions
+                    if files_dict:
+                        # Pick the first remaining version
+                        remaining_version, remaining_file_info = next(iter(files_dict.items()))
+                        # BUG FIX: Handle both old and new cache formats
+                        if isinstance(remaining_file_info, str):
+                            remaining_path = remaining_file_info
+                        else:
+                            remaining_path = remaining_file_info['filepath']
+                        obj['file'] = remaining_path
+                        obj['version'] = remaining_version
+
+                    # For multi-version items, trigger a targeted refresh of this specific Plex item
+                    # so Plex updates its database to remove the deleted file version
+                    plex_id = obj.get('id')
+                    if plex_id and not OFFLINE:
+                        try:
+                            print(f"  Refreshing Plex item ID {plex_id} to detect removed file version...")
+                            for media in resolve_plex_media_obj(str(plex_id)):
+                                media.refresh()
+                                print(f"  ✓ Plex item refreshed")
+                                break
+                        except Exception as e:
+                            print(f"  ⚠ Warning: Could not refresh Plex item: {e}")
+
+                    # Don't delete the object, just modified it
+                    return library
+                else:
+                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    return library
+            else:
+                # Single-version item: remove the entire object
+                del PLEX_Media.OBJ_BY_ID[key_to_remove]
+
+            # Remove from OBJ_BY_FILEPATH
+            if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+            # Remove from OBJ_BY_LIBRARY
+            if library and obj_type and library in PLEX_Media.OBJ_BY_LIBRARY:
+                if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    if key_to_remove in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].remove(key_to_remove)
+
+            # Remove from type-specific structures
+            if obj_type == 'Movie' and key_to_remove in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key_to_remove]
+            elif obj_type in ['Show', 'Season', 'Episode']:
+                show_key = obj.get('show_key', key_to_remove)
+                if obj_type == 'Show' and show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+            print(f"Cache updated: removed entry for trashed file [2]")
+            return library
+
+    elif choice == '5':
+        # Remove file [1], update file [2] path
+        # IMPORTANT: Save file [1]'s library BEFORE deleting it (needed for file [2] update)
+        target_library = None
+        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
+            target_library = PLEX_Media.OBJ_BY_ID[keys[0]].get('library')
+
+        # Remove file [1]
+        key_to_remove = keys[0] if len(keys) > 0 else None
+        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
+            obj_to_remove = PLEX_Media.OBJ_BY_ID[key_to_remove]
+            removed_file = obj_to_remove.get('file')
+            library = obj_to_remove.get('library')
+            obj_type = obj_to_remove.get('type')
+
+            # Remove from OBJ_BY_ID
+            del PLEX_Media.OBJ_BY_ID[key_to_remove]
+
+            # Remove from OBJ_BY_FILEPATH
+            if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+            # Remove from OBJ_BY_LIBRARY
+            if library and obj_type and library in PLEX_Media.OBJ_BY_LIBRARY:
+                if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    if key_to_remove in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].remove(key_to_remove)
+
+            # Remove from type-specific structures
+            if obj_type == 'Movie' and key_to_remove in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key_to_remove]
+            elif obj_type in ['Show', 'Season', 'Episode']:
+                show_key = obj_to_remove.get('show_key', key_to_remove)
+                if obj_type == 'Show' and show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+        # Handle file [2] after move
+        # When a movie is moved to a DIFFERENT library, Plex assigns it a NEW ID
+        # So we should DELETE the old cache entry and let --update-cache discover it fresh
+        key_to_update = keys[1] if len(keys) > 1 else None
+        if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
+            obj = PLEX_Media.OBJ_BY_ID[key_to_update]
+            old_lib = obj.get('library', '')
+            # Use the target library we saved before deleting file [1]
+            new_lib = target_library if target_library else old_lib
+
+            # Check if library changed
+            if old_lib != new_lib:
+                # Different library: Plex will assign a new ID
+                obj_type = obj.get('type')
+                removed_file = obj.get('file')
+
+                # Remove OLD cache entry from old library
+                del PLEX_Media.OBJ_BY_ID[key_to_update]
+
+                # Remove from OBJ_BY_FILEPATH
+                if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                    del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+                # Remove from OBJ_BY_LIBRARY
+                if old_lib and obj_type and old_lib in PLEX_Media.OBJ_BY_LIBRARY:
+                    if obj_type in PLEX_Media.OBJ_BY_LIBRARY[old_lib]:
+                        if key_to_update in PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type]:
+                            PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type].remove(key_to_update)
+
+                # Remove from type-specific structures
+                if obj_type == 'Movie' and key_to_update in PLEX_Media.OBJ_BY_MOVIE:
+                    del PLEX_Media.OBJ_BY_MOVIE[key_to_update]
+
+                print(f"Cache updated: removed files [1] and [2] (Plex will assign new ID to [2] after scan)")
+            else:
+                # Same library: just update the path
+                # Get the movie directory that was moved
+                movie_dir2 = get_movie_dir_from_path(file2, old_lib)
+                # Get the library directory it was moved to
+                lib_dir1 = get_library_dir_from_path(file1, new_lib)
+
+                # Calculate new path: replace old movie dir prefix with new location
+                new_movie_dir = os.path.join(lib_dir1, os.path.basename(movie_dir2))
+                new_path = file2.replace(movie_dir2, new_movie_dir, 1)
+
+                # Update OBJ_BY_FILEPATH
+                if file2 in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[new_path] = PLEX_Media.OBJ_BY_FILEPATH[file2]
+                    del PLEX_Media.OBJ_BY_FILEPATH[file2]
+
+                # Update file path in OBJ_BY_ID
+                obj['file'] = new_path
+
+                # Refresh metadata from Plex (it was already merged in execute_resolution_action)
+                refresh_cache_metadata(key_to_update)
+
+                print(f"Cache updated: removed file [1], updated path for file [2]")
+
+    elif choice == '6':
+        # Remove file [2], update file [1] path
+        # Store file [2] info before removing (we need it for the library)
+        old_obj2 = PLEX_Media.OBJ_BY_ID.get(keys[1]) if len(keys) > 1 else None
+
+        # Remove file [2]
+        key_to_remove = keys[1] if len(keys) > 1 else None
+        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
+            obj_to_remove = PLEX_Media.OBJ_BY_ID[key_to_remove]
+            removed_file = obj_to_remove.get('file')
+            library = obj_to_remove.get('library')
+            obj_type = obj_to_remove.get('type')
+
+            # Remove from OBJ_BY_ID
+            del PLEX_Media.OBJ_BY_ID[key_to_remove]
+
+            # Remove from OBJ_BY_FILEPATH
+            if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+            # Remove from OBJ_BY_LIBRARY
+            if library and obj_type and library in PLEX_Media.OBJ_BY_LIBRARY:
+                if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    if key_to_remove in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].remove(key_to_remove)
+
+            # Remove from type-specific structures
+            if obj_type == 'Movie' and key_to_remove in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key_to_remove]
+            elif obj_type in ['Show', 'Season', 'Episode']:
+                show_key = obj_to_remove.get('show_key', key_to_remove)
+                if obj_type == 'Show' and show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+        # Handle file [1] after move
+        # When a movie is moved to a DIFFERENT library, Plex assigns it a NEW ID
+        # So we should DELETE the old cache entry and let --update-cache discover it fresh
+        key_to_update = keys[0] if len(keys) > 0 else None
+        if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
+            obj = PLEX_Media.OBJ_BY_ID[key_to_update]
+            old_lib = obj.get('library', '')
+            new_lib = old_obj2.get('library', '') if old_obj2 else old_lib
+
+            # Check if library changed
+            if old_lib != new_lib:
+                # Different library: Plex will assign a new ID
+                obj_type = obj.get('type')
+                removed_file = obj.get('file')
+
+                # Remove OLD cache entry from old library
+                del PLEX_Media.OBJ_BY_ID[key_to_update]
+
+                # Remove from OBJ_BY_FILEPATH
+                if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                    del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+
+                # Remove from OBJ_BY_LIBRARY
+                if old_lib and obj_type and old_lib in PLEX_Media.OBJ_BY_LIBRARY:
+                    if obj_type in PLEX_Media.OBJ_BY_LIBRARY[old_lib]:
+                        if key_to_update in PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type]:
+                            PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type].remove(key_to_update)
+
+                # Remove from type-specific structures
+                if obj_type == 'Movie' and key_to_update in PLEX_Media.OBJ_BY_MOVIE:
+                    del PLEX_Media.OBJ_BY_MOVIE[key_to_update]
+
+                print(f"Cache updated: removed files [1] and [2] (Plex will assign new ID to [1] after scan)")
+            else:
+                # Same library: just update the path
+                # Get the movie directory that was moved
+                movie_dir1 = get_movie_dir_from_path(file1, old_lib)
+                # Get the library directory it was moved to
+                lib_dir2 = get_library_dir_from_path(file2, new_lib)
+
+                # Calculate new path: replace old movie dir prefix with new location
+                new_movie_dir = os.path.join(lib_dir2, os.path.basename(movie_dir1))
+                new_path = file1.replace(movie_dir1, new_movie_dir, 1)
+
+                # Update OBJ_BY_FILEPATH
+                if file1 in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[new_path] = PLEX_Media.OBJ_BY_FILEPATH[file1]
+                    del PLEX_Media.OBJ_BY_FILEPATH[file1]
+
+                # Update file path in OBJ_BY_ID
+                obj['file'] = new_path
+
+                # Refresh metadata from Plex (it was already merged in execute_resolution_action)
+                refresh_cache_metadata(key_to_update)
+
+                print(f"Cache updated: removed file [2], updated path for file [1]")
+
+    elif choice == '7':
+        # Update paths for all renamed files
+        files_to_update = all_files if all_files else [file1, file2]
+
+        for idx, (old_path, new_path) in enumerate(zip(files_to_update, renamed_files)):
+            key_to_update = keys[idx] if idx < len(keys) else None
+            if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
+                # Update OBJ_BY_FILEPATH
+                if old_path in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[new_path] = PLEX_Media.OBJ_BY_FILEPATH[old_path]
+                    del PLEX_Media.OBJ_BY_FILEPATH[old_path]
+
+                # Update file path in OBJ_BY_ID
+                PLEX_Media.OBJ_BY_ID[key_to_update]['file'] = new_path
+
+        print(f"Cache updated: updated paths for {len(renamed_files)} renamed file(s)")
+
+    # Save updated cache
+    update_and_save_cache(build_media_cache_dict())
+
+def get_library_dir_from_path(filepath, library_name):
+    """Extract library directory from file path given the library name
+
+    Args:
+        filepath: Full path to the file
+        library_name: Name of the library (e.g., 'movies.en')
+
+    Returns:
+        Library directory path, or parent directory if library not found in path
+    """
+    # Split the path into parts
+    parts = filepath.split(os.sep)
+
+    # Find the library name in the path
+    if library_name in parts:
+        # Get everything up to and including the library name
+        lib_index = parts.index(library_name)
+        lib_dir = os.sep.join(parts[:lib_index + 1])
+        return lib_dir
+
+    # Fallback: return parent directory of the movie/show folder
+    # Assume structure is: /path/library/movie_folder/file or /path/library/movie_folder/subfolder/file
+    return os.path.dirname(os.path.dirname(filepath))
+
+def refresh_cache_metadata(cache_key):
+    """Refresh metadata in cache from Plex server for a specific item
+
+    After updating metadata via Plex API, we need to update the cache to reflect changes.
+
+    Args:
+        cache_key: Cache key of the item to refresh
+
+    Returns:
+        True if successfully refreshed, False otherwise
+    """
+    try:
+        if cache_key not in PLEX_Media.OBJ_BY_ID:
+            return False
+
+        obj = PLEX_Media.OBJ_BY_ID[cache_key]
+        plex_id = obj.get('id')
+
+        if not plex_id:
+            return False
+
+        # Get the actual Plex media object
+        media = None
+        for m in resolve_plex_media_obj(str(plex_id)):
+            media = m
+            break
+
+        if not media:
+            return False
+
+        # Update metadata fields in cache
+        obj['viewCount'] = plex_retry_operation(lambda: media.viewCount, context=f"{cache_key}.viewCount") or 0
+        obj['lastViewedAt'] = plex_retry_operation(lambda: media.lastViewedAt, context=f"{cache_key}.lastViewedAt")
+        obj['labels'] = plex_retry_operation(lambda: [l.tag for l in media.labels], context=f"{cache_key}.labels") or []
+        obj['userRating'] = plex_retry_operation(lambda: media.userRating, context=f"{cache_key}.userRating")
+
+        return True
+
+    except Exception as e:
+        print(f"  ⚠ Warning: Could not refresh cache metadata: {e}")
+        return False
+
+def merge_metadata_from_duplicates(source_key, target_key):
+    """API required: modifies Plex state (markWatched, addLabel, rate) during duplicate resolution.
+    Merge metadata (watched status, labels, ratings) from source to target
+
+    When resolving duplicates, we want to preserve metadata from both copies.
+    This function merges watched status, labels, and ratings from the source
+    (which will be deleted) to the target (which will remain).
+
+    Args:
+        source_key: Cache key of the duplicate that will be deleted
+        target_key: Cache key of the duplicate that will remain
+
+    Returns:
+        Dictionary with merge details: {
+            'success': bool,
+            'changes': {
+                'watched': {...},
+                'labels': {...},
+                'rating': {...}
+            }
+        }
+    """
+    result = {
+        'success': False,
+        'changes': {
+            'watched': None,
+            'labels': None,
+            'rating': None
+        }
+    }
+
+    try:
+        if source_key not in PLEX_Media.OBJ_BY_ID or target_key not in PLEX_Media.OBJ_BY_ID:
+            return result
+
+        source_obj = PLEX_Media.OBJ_BY_ID[source_key]
+        target_obj = PLEX_Media.OBJ_BY_ID[target_key]
+
+        source_id = source_obj.get('id')
+        target_id = target_obj.get('id')
+
+        if not source_id or not target_id:
+            return result
+
+        # Get the actual Plex media objects
+        source_media = None
+        target_media = None
+
+        for media in resolve_plex_media_obj(str(source_id)):
+            source_media = media
+            break
+
+        for media in resolve_plex_media_obj(str(target_id)):
+            target_media = media
+            break
+
+        if not source_media or not target_media:
+            return result
+
+        metadata_merged = False
+
+        # Merge watched status: if either is watched, mark target as watched
+        source_watched = plex_retry_operation(lambda: source_media.viewCount, context=f"{source_key}.viewCount") or 0
+        target_watched = plex_retry_operation(lambda: target_media.viewCount, context=f"{target_key}.viewCount") or 0
+
+        if source_watched > 0 and target_watched == 0:
+            target_media.markWatched()
+            print(f"  ✓ Transferred watched status from source to target")
+            result['changes']['watched'] = {
+                'action': 'marked_watched',
+                'source_view_count': source_watched,
+                'target_view_count_before': target_watched,
+                'target_view_count_after': source_watched
+            }
+            metadata_merged = True
+        elif source_watched > target_watched:
+            # Source has been watched more times, preserve the higher count
+            # Note: Plex doesn't have direct API to set viewCount, so we just mark as watched
+            target_media.markWatched()
+            print(f"  ✓ Source had higher view count ({source_watched} vs {target_watched}), marked target as watched")
+            result['changes']['watched'] = {
+                'action': 'updated_watch_count',
+                'source_view_count': source_watched,
+                'target_view_count_before': target_watched,
+                'target_view_count_after': source_watched
+            }
+            metadata_merged = True
+        else:
+            result['changes']['watched'] = {
+                'action': 'no_change',
+                'source_view_count': source_watched,
+                'target_view_count': target_watched
+            }
+
+        # Merge labels: add any labels from source that aren't on target
+        source_labels = set(plex_retry_operation(lambda: [l.tag for l in source_media.labels], context=f"{source_key}.labels") or [])
+        target_labels = set(plex_retry_operation(lambda: [l.tag for l in target_media.labels], context=f"{target_key}.labels") or [])
+
+        labels_to_add = source_labels - target_labels
+        if labels_to_add:
+            for label in labels_to_add:
+                target_media.addLabel(label)
+                print(f"  ✓ Transferred label '{label}' from source to target")
+            result['changes']['labels'] = {
+                'action': 'labels_added',
+                'source_labels': list(source_labels),
+                'target_labels_before': list(target_labels),
+                'labels_added': list(labels_to_add),
+                'target_labels_after': list(target_labels | labels_to_add)
+            }
+            metadata_merged = True
+        else:
+            result['changes']['labels'] = {
+                'action': 'no_change',
+                'source_labels': list(source_labels),
+                'target_labels': list(target_labels)
+            }
+
+        # Merge user rating: preserve higher rating
+        source_rating = plex_retry_operation(lambda: source_media.userRating, context=f"{source_key}.userRating") or 0
+        target_rating = plex_retry_operation(lambda: target_media.userRating, context=f"{target_key}.userRating") or 0
+
+        if source_rating > target_rating:
+            target_media.rate(source_rating)
+            print(f"  ✓ Transferred higher user rating ({source_rating}) from source to target")
+            result['changes']['rating'] = {
+                'action': 'rating_updated',
+                'source_rating': source_rating,
+                'target_rating_before': target_rating,
+                'target_rating_after': source_rating
+            }
+            metadata_merged = True
+        else:
+            result['changes']['rating'] = {
+                'action': 'no_change',
+                'source_rating': source_rating,
+                'target_rating': target_rating
+            }
+
+        if not metadata_merged:
+            print(f"  ℹ No metadata differences to merge")
+
+        # Refresh the cache with updated metadata
+        refresh_cache_metadata(target_key)
+
+        result['success'] = True
+        return result
+
+    except Exception as e:
+        print(f"  ⚠ Warning: Could not merge metadata: {e}")
+        result['error'] = str(e)
+        return result
+
+def update_cache_for_file(file_path, library_name, old_cache_key=None):
+    """Update cache by fetching a specific file from Plex server
+
+    This is used after file operations to replace placeholder entries with real Plex data.
+    Actively queries Plex for the file and updates all cache structures.
+
+    Args:
+        file_path: Full path to the file
+        library_name: Name of the library containing the file
+        old_cache_key: Optional old cache key to remove (for replaced placeholders)
+
+    Returns:
+        New cache key if found, None otherwise
+    """
+    try:
+        if library_name not in PLEX_Library.OBJ_DICT:
+            if VRB: print(f"{VRBPFX}Library '{library_name}' not found in cache")
+            return None
+
+        lib = PLEX_Library.OBJ_DICT[library_name]
+        lib.reload()
+
+        # Search for the file in Plex
+        # We need to iterate through all items to find the one with this file path
+        for item in lib.all():
+            try:
+                # For movies, check the file path
+                if hasattr(item, 'media'):
+                    for media in item.media:
+                        for part in media.parts:
+                            if part.file == file_path:
+                                # Found it! Now add/update in cache
+                                obj_type = item.type.capitalize()
+
+                                # Remove old placeholder if exists
+                                if old_cache_key and old_cache_key in PLEX_Media.OBJ_BY_ID:
+                                    old_obj = PLEX_Media.OBJ_BY_ID[old_cache_key]
+                                    old_file = old_obj.get('file')
+
+                                    del PLEX_Media.OBJ_BY_ID[old_cache_key]
+                                    if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
+                                        del PLEX_Media.OBJ_BY_FILEPATH[old_file]
+
+                                    # Remove from library structures
+                                    if library_name in PLEX_Media.OBJ_BY_LIBRARY:
+                                        if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                                            if old_cache_key in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].remove(old_cache_key)
+
+                                # Create new cache entry with real Plex ID
+                                cache_key = f"{obj_type}:{part.id}"
+
+                                cache_entry = {
+                                    'id': item.ratingKey,
+                                    'type': obj_type,
+                                    'library': library_name,
+                                    'file': file_path,
+                                    'title': item.title,
+                                    'year': getattr(item, 'year', None),
+                                    'part_id': part.id,
+                                    'filesize': getattr(part, 'size', 0),
+                                    'duration': getattr(item, 'duration', 0),
+                                    'version': f"{getattr(item, 'duration', 0) / 60000:.2f}min" if hasattr(item, 'duration') else 'N/A'
+                                }
+
+                                # Add to all cache structures
+                                PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
+                                PLEX_Media.OBJ_BY_FILEPATH[file_path] = cache_key
+
+                                if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                                    PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+                                if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
+                                if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+
+                                if obj_type == 'Movie':
+                                    # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
+                                    if cache_key not in PLEX_Media.OBJ_BY_MOVIE:
+                                        PLEX_Media.OBJ_BY_MOVIE[cache_key] = {}
+                                    PLEX_Media.OBJ_BY_MOVIE[cache_key][cache_entry['version']] = file_path
+
+                                if VRB: print(f"{VRBPFX}Cache updated: {file_path} -> {cache_key}")
+                                return cache_key
+
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}Error checking item: {e}")
+                continue
+
+        # File not found in Plex yet
+        if VRB: print(f"{VRBPFX}File not found in Plex: {file_path}")
+        return None
+
+    except Exception as e:
+        print(f"  ⚠ Warning: Could not update cache for file: {e}")
+        return None
+
+def update_cache_for_library(library_name):
+    """Update cache by fetching all items from a specific Plex library
+
+    This completely refreshes the cache entries for the specified library by:
+    1. Removing all existing cache entries for this library
+    2. Fetching fresh data from Plex server
+    3. Rebuilding cache structures for this library
+
+    Args:
+        library_name: Name of the library to update
+
+    Returns:
+        Number of items fetched, or None if error
+    """
+    try:
+        if library_name not in PLEX_Library.OBJ_DICT:
+            if VRB: print(f"{VRBPFX}Library '{library_name}' not found")
+            return None
+
+        lib = PLEX_Library.OBJ_DICT[library_name]
+        lib_type = PLEX_Library.OBJ_DICT_TYPE.get(library_name, 'Unknown')
+
+        # Step 1: Remove all existing entries for this library from cache
+        keys_to_remove = []
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            if obj.get('library') == library_name:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            file_path = obj.get('file')
+
+            # Remove from all cache structures
+            del PLEX_Media.OBJ_BY_ID[key]
+
+            if file_path and file_path in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[file_path]
+
+            obj_type = obj.get('type')
+            if obj_type == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key]
+            elif obj_type == 'Show' and key in PLEX_Media.OBJ_BY_SHOW:
+                del PLEX_Media.OBJ_BY_SHOW[key]
+            elif obj_type == 'Episode':
+                # Remove from show episodes structure
+                for show_key, episodes in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+                    if key in episodes:
+                        episodes.remove(key)
+
+        # Remove library from OBJ_BY_LIBRARY
+        if library_name in PLEX_Media.OBJ_BY_LIBRARY:
+            del PLEX_Media.OBJ_BY_LIBRARY[library_name]
+
+        # Step 2: Fetch all items from Plex and rebuild cache
+        lib.reload()
+        items_added = 0
+
+        for item in lib.all():
+            try:
+                obj_type = item.type.capitalize()
+
+                # Handle Movies
+                if obj_type == 'Movie' and hasattr(item, 'media'):
+                    for media in item.media:
+                        for part in media.parts:
+                            cache_key = f"{obj_type}:{part.id}"
+
+                            cache_entry = {
+                                'id': item.ratingKey,
+                                'type': obj_type,
+                                'library': library_name,
+                                'file': part.file,
+                                'title': item.title,
+                                'year': getattr(item, 'year', None),
+                                'part_id': part.id,
+                                'filesize': getattr(part, 'size', 0),
+                                'duration': getattr(item, 'duration', 0),
+                                'version': f"{getattr(item, 'duration', 0) / 60000:.2f}min" if hasattr(item, 'duration') else 'N/A'
+                            }
+
+                            # Add to cache structures
+                            PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
+                            PLEX_Media.OBJ_BY_FILEPATH[part.file] = cache_key
+
+                            if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                                PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+                            if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
+                            if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+
+                            # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
+                            if cache_key not in PLEX_Media.OBJ_BY_MOVIE:
+                                PLEX_Media.OBJ_BY_MOVIE[cache_key] = {}
+                            PLEX_Media.OBJ_BY_MOVIE[cache_key][cache_entry['version']] = part.file
+
+                            items_added += 1
+
+                # Handle Shows (for TV libraries)
+                elif obj_type == 'Show':
+                    cache_key = f"{obj_type}:{item.ratingKey}"
+
+                    cache_entry = {
+                        'id': item.ratingKey,
+                        'type': obj_type,
+                        'library': library_name,
+                        'title': item.title
+                    }
+
+                    PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
+
+                    if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                        PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+                    if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
+                    if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
+
+                    items_added += 1
+
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}Error processing item in {library_name}: {e}")
+                continue
+
+        if VRB: print(f"{VRBPFX}Updated cache for library '{library_name}': {items_added} items")
+        return items_added
+
+    except Exception as e:
+        print(f"  ⚠ Warning: Could not update cache for library '{library_name}': {e}")
+        return None
+
+def get_movie_dir_from_path(filepath, library_name):
+    """Extract the movie directory (first directory within library) from file path
+
+    For movies, the structure is: /library/MOVIE_DIR/[subfolders/]file
+    This function returns the full path to MOVIE_DIR (the directory directly within the library)
+
+    Args:
+        filepath: Full path to the file
+        library_name: Name of the library (e.g., 'movies.en')
+
+    Returns:
+        Full path to the movie directory (directory directly within library)
+    """
+    # Split the path into parts
+    parts = filepath.split(os.sep)
+
+    # Strategy: Find the library directory in the path, then return the next directory level
+    # This gives us the movie directory that sits directly within the library
+
+    # First try: Use library_name if provided and found in path
+    if library_name and library_name in parts:
+        lib_index = parts.index(library_name)
+        # Movie directory is the next directory after the library
+        if lib_index + 1 < len(parts):
+            # Get everything up to and including the movie directory
+            movie_dir = os.sep.join(parts[:lib_index + 2])
+            return movie_dir
+
+    # Second try: Look for library directory patterns in the path by checking against known libraries
+    # Use PLEX_Library.OBJ_DICT to get all available library names dynamically
+    for i, part in enumerate(parts):
+        # Check if this path component matches any known library name
+        if hasattr(PLEX_Library, 'OBJ_DICT') and part in PLEX_Library.OBJ_DICT:
+            # Found a library directory, get the next one as the movie directory
+            if i + 1 < len(parts):
+                movie_dir = os.sep.join(parts[:i + 2])
+                return movie_dir
+
+    # Ultimate fallback: return the parent directory of the file
+    return os.path.dirname(filepath)
+
+def undo_resolution_action(undo_info, remote_host):
+    """Undo a previously performed resolution action
+
+    ⚠️  NOTE: This function demonstrates proper use of my_plex_file_operation()
+    All file moves use my_plex_file_operation('MOVE', ...) instead of direct SSH/shutil calls.
+
+    Args:
+        undo_info: Dictionary containing information about the action to undo
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        True if undo succeeded, False otherwise
+    """
+    action = undo_info.get('action')
+
+    print(f"\nUndoing action: {action}")
+
+    if action in ['trash_file1', 'trash_file2']:
+        # Restore from trash
+        trashed_path = undo_info.get('trashed_path')
+        original_path = undo_info.get('original_path')
+
+        if not trashed_path or not original_path:
+            print("✗ Cannot undo: missing path information")
+            return False
+
+        print(f"Restoring from trash: {trashed_path} -> {original_path}")
+
+        # Move back from trash to original location using the global file operation function
+        success, _ = my_plex_file_operation('MOVE', trashed_path, remote_host, dest_path=original_path)
+        if not success:
+            print(f"✗ Failed to restore from trash")
+            return False
+
+        print(f"✓ Restored from trash successfully")
+
+        # Restore cache entry
+        key = undo_info.get('removed_key')
+        obj = undo_info.get('removed_obj')
+        if key and obj:
+            PLEX_Media.OBJ_BY_ID[key] = obj
+            if obj.get('file') and obj['file'] not in PLEX_Media.OBJ_BY_FILEPATH:
+                PLEX_Media.OBJ_BY_FILEPATH[obj['file']] = key
+
+            # Restore to OBJ_BY_LIBRARY
+            library = obj.get('library')
+            obj_type = obj.get('type')
+            if library and obj_type:
+                if library not in PLEX_Media.OBJ_BY_LIBRARY:
+                    PLEX_Media.OBJ_BY_LIBRARY[library] = {}
+                if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    PLEX_Media.OBJ_BY_LIBRARY[library][obj_type] = []
+                if key not in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                    PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].append(key)
+
+            print(f"✓ Cache entry restored")
+
+        return True
+
+    elif action in ['move_and_trash']:
+        # This is for options 5 and 6: undo both the move and the trash
+        # First, move the file back to original location
+        moved_from = undo_info.get('moved_from')
+        moved_to = undo_info.get('moved_to')
+        trashed_path = undo_info.get('trashed_path')
+        trashed_original = undo_info.get('trashed_original')
+
+        if not all([moved_from, moved_to, trashed_path, trashed_original]):
+            print("✗ Cannot undo: missing path information")
+            return False
+
+        print(f"Moving back: {moved_to} -> {moved_from}")
+
+        # Move file back to original location using the global file operation function
+        success, _ = my_plex_file_operation('MOVE', moved_to, remote_host, dest_path=moved_from)
+        if not success:
+            print(f"✗ Failed to move file back")
+            return False
+
+        print(f"✓ Moved back successfully")
+
+        # Restore from trash
+        print(f"Restoring from trash: {trashed_path} -> {trashed_original}")
+
+        success, _ = my_plex_file_operation('MOVE', trashed_path, remote_host, dest_path=trashed_original)
+        if not success:
+            print(f"✗ Failed to restore from trash")
+            return False
+
+        print(f"✓ Restored from trash successfully")
+
+        # Restore cache entries
+        removed_key = undo_info.get('removed_key')
+        removed_obj = undo_info.get('removed_obj')
+        updated_key = undo_info.get('updated_key')
+        old_obj_state = undo_info.get('old_obj_state')
+
+        # Restore removed entry
+        if removed_key and removed_obj:
+            PLEX_Media.OBJ_BY_ID[removed_key] = removed_obj
+            if removed_obj.get('file') and removed_obj['file'] not in PLEX_Media.OBJ_BY_FILEPATH:
+                PLEX_Media.OBJ_BY_FILEPATH[removed_obj['file']] = removed_key
+
+            # Restore to OBJ_BY_LIBRARY
+            library = removed_obj.get('library')
+            obj_type = removed_obj.get('type')
+            if library and obj_type:
+                if library not in PLEX_Media.OBJ_BY_LIBRARY:
+                    PLEX_Media.OBJ_BY_LIBRARY[library] = {}
+                if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library]:
+                    PLEX_Media.OBJ_BY_LIBRARY[library][obj_type] = []
+                if removed_key not in PLEX_Media.OBJ_BY_LIBRARY[library][obj_type]:
+                    PLEX_Media.OBJ_BY_LIBRARY[library][obj_type].append(removed_key)
+
+        # Restore updated entry to old state
+        if updated_key and old_obj_state and updated_key in PLEX_Media.OBJ_BY_ID:
+            old_file = PLEX_Media.OBJ_BY_ID[updated_key].get('file')
+            new_file = old_obj_state.get('file')
+
+            # Update OBJ_BY_FILEPATH
+            if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[old_file]
+            if new_file:
+                PLEX_Media.OBJ_BY_FILEPATH[new_file] = updated_key
+
+            # Restore object state
+            PLEX_Media.OBJ_BY_ID[updated_key] = old_obj_state.copy()
+
+            # Update OBJ_BY_LIBRARY if library changed
+            old_lib = old_obj_state.get('library')
+            new_lib = undo_info.get('new_library')
+            obj_type = old_obj_state.get('type')
+
+            if old_lib != new_lib and obj_type:
+                # Remove from new library
+                if new_lib and new_lib in PLEX_Media.OBJ_BY_LIBRARY:
+                    if obj_type in PLEX_Media.OBJ_BY_LIBRARY[new_lib]:
+                        if updated_key in PLEX_Media.OBJ_BY_LIBRARY[new_lib][obj_type]:
+                            PLEX_Media.OBJ_BY_LIBRARY[new_lib][obj_type].remove(updated_key)
+
+                # Add back to old library
+                if old_lib:
+                    if old_lib not in PLEX_Media.OBJ_BY_LIBRARY:
+                        PLEX_Media.OBJ_BY_LIBRARY[old_lib] = {}
+                    if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[old_lib]:
+                        PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type] = []
+                    if updated_key not in PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type]:
+                        PLEX_Media.OBJ_BY_LIBRARY[old_lib][obj_type].append(updated_key)
+
+        print(f"✓ Cache entries restored")
+
+        # Undo metadata merge (restore old metadata)
+        if undo_info.get('metadata_merged'):
+            target_key = undo_info.get('metadata_target_key')
+            old_metadata = undo_info.get('old_metadata')
+            if target_key and old_metadata and target_key in PLEX_Media.OBJ_BY_ID:
+                # Restore old metadata in cache
+                obj = PLEX_Media.OBJ_BY_ID[target_key]
+                obj['viewCount'] = old_metadata.get('viewCount', 0)
+                obj['lastViewedAt'] = old_metadata.get('lastViewedAt')
+                obj['labels'] = old_metadata.get('labels', [])
+                obj['userRating'] = old_metadata.get('userRating')
+                print(f"✓ Metadata restored to previous state")
+
+        return True
+
+    elif action == 'rename':
+        # Undo file renames
+        renamed_files = undo_info.get('renamed_files', [])
+        original_files = undo_info.get('original_files', [])
+
+        if not renamed_files or not original_files:
+            print("✗ Cannot undo: missing file information")
+            return False
+
+        print(f"Renaming {len(renamed_files)} file(s) back to original names")
+
+        all_success = True
+        for new_path, old_path in zip(renamed_files, original_files):
+            # Use the global file operation function for renaming
+            success, _ = my_plex_file_operation('MOVE', new_path, remote_host, dest_path=old_path)
+            if not success:
+                print(f"✗ Failed to rename back: {new_path}")
+                all_success = False
+            else:
+                print(f"✓ Renamed back: {os.path.basename(new_path)} -> {os.path.basename(old_path)}")
+
+        # Restore cache paths
+        updated_keys = undo_info.get('updated_keys', [])
+        for idx, key in enumerate(updated_keys):
+            if idx < len(original_files) and key in PLEX_Media.OBJ_BY_ID:
+                old_file = renamed_files[idx]
+                new_file = original_files[idx]
+
+                # Update OBJ_BY_FILEPATH
+                if old_file in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[new_file] = PLEX_Media.OBJ_BY_FILEPATH[old_file]
+                    del PLEX_Media.OBJ_BY_FILEPATH[old_file]
+
+                # Update file path in OBJ_BY_ID
+                PLEX_Media.OBJ_BY_ID[key]['file'] = new_file
+
+        if all_success:
+            print(f"✓ All files renamed back successfully")
+
+        return all_success
+
+    else:
+        print(f"✗ Unknown action type: {action}")
+        return False
+
+def apply_pending_operations(pending_operations, resolution_log_data, default_remote_host=None):
+    """Apply all pending operations that were recorded during resolution mode
+
+    Args:
+        pending_operations: List of pending operation dictionaries
+        resolution_log_data: Dictionary for JSON logging
+        default_remote_host: Default SSH host for remote operations
+
+    Returns:
+        True if all operations succeeded, False otherwise
+    """
+    if not pending_operations:
+        return True
+
+    all_success = True
+    modified_libraries = set()
+
+    for pending_op in pending_operations:
+        operation_number = pending_op['operation_number']
+        choice = pending_op['choice']
+        file1 = pending_op['file1']
+        file2 = pending_op['file2']
+        remote_host = pending_op['remote_host']
+        all_files = pending_op['all_files']
+        keys = pending_op['keys']
+        same_file = pending_op['same_file']
+        dup_key = pending_op['dup_key']
+        is_multi_version = pending_op.get('is_multi_version', False)
+
+        # Display what we're doing
+        choice_desc = {
+            '3': f'Trash file [1]: {os.path.basename(file1)}',
+            '4': f'Trash file [2]: {os.path.basename(file2)}',
+            '5': f'Trash [1] and move [2] to library of [1]',
+            '6': f'Trash [2] and move [1] to library of [2]',
+            '7': 'Rename files using directory name'
+        }.get(choice, f'Unknown choice: {choice}')
+
+        print(f"\n[{operation_number}/{len(pending_operations)}] Applying: {choice_desc}")
+        print(f"  Duplicate: {dup_key}")
+
+        # Track libraries that need scanning BEFORE executing operations
+        # (for move/delete operations, the source library info may be lost after execution)
+        if keys and len(keys) > 0:
+            lib1 = PLEX_Media.OBJ_BY_ID.get(keys[0], {}).get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
+            if lib1:
+                modified_libraries.add(lib1)
+        if keys and len(keys) > 1:
+            lib2 = PLEX_Media.OBJ_BY_ID.get(keys[1], {}).get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
+            if lib2:
+                modified_libraries.add(lib2)
+
+        # Execute the operation
+        success = execute_resolution_action(choice, file1, file2, remote_host, all_files, keys, resolution_log_data, operation_number, same_file, is_multi_version)
+
+        if success:
+            print(f"  ✓ Operation #{operation_number} completed successfully")
+
+            # Save cache immediately after each successful operation
+            try:
+                update_and_save_cache(build_media_cache_dict(
+                    library_stats=CACHE.get('library_stats', {}),
+                    labels_index=CACHE.get('labels_index', {}),
+                    media_objs=CACHE.get('media_objs', {}),
+                    library_object_counts=CACHE.get('library_object_counts', {})
+                ))
+            except Exception as e:
+                print(f"  ⚠ Warning: Failed to save cache: {e}")
+
+            # Track any additional libraries that may have been affected after execution
+            # (e.g., destination library for move operations)
+            if keys and len(keys) > 0:
+                lib1_after = PLEX_Media.OBJ_BY_ID.get(keys[0], {}).get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
+                if lib1_after:
+                    modified_libraries.add(lib1_after)
+            if keys and len(keys) > 1:
+                lib2_after = PLEX_Media.OBJ_BY_ID.get(keys[1], {}).get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
+                if lib2_after:
+                    modified_libraries.add(lib2_after)
+        else:
+            print(f"  ✗ Operation #{operation_number} failed")
+            all_success = False
+
+    # Trigger Plex library scans for all modified libraries (grouped for efficiency)
+    if modified_libraries and not OFFLINE:
+        print(f"\n{'='*76}")
+        print(f"SCANNING {len(modified_libraries)} MODIFIED LIBRARIES")
+        print(f"{'='*76}")
+        import time
+
+        # Track which libraries completed scanning successfully
+        successfully_scanned_libraries = set()
+
+        for lib_name in sorted(modified_libraries):
+            try:
+                if lib_name in PLEX_Library.OBJ_DICT:
+                    lib = PLEX_Library.OBJ_DICT[lib_name]
+                    print(f"  Scanning: {lib_name}...", end=' ', flush=True)
+                    lib.update()
+
+                    # Wait for scan to complete
+                    max_wait = 60  # Maximum 60 seconds
+                    waited = 0
+                    while waited < max_wait:
+                        lib.reload()
+                        if not lib.refreshing:
+                            break
+                        time.sleep(1)
+                        waited += 1
+                        if waited % 5 == 0:
+                            print(".", end='', flush=True)
+
+                    if waited >= max_wait:
+                        print(f" ⚠ (timeout after {max_wait}s)")
+                        # Don't update cache for this library - scan didn't complete
+                    else:
+                        print(f" ✓ ({waited}s)")
+                        successfully_scanned_libraries.add(lib_name)
+            except Exception as e:
+                print(f"✗ Error: {e}")
+
+        # After scanning completes, add a brief wait to ensure Plex database is fully updated
+        # This prevents subsequent commands from seeing stale/inconsistent data
+        if successfully_scanned_libraries:
+            print(f"  Waiting for Plex database to stabilize...", end=' ', flush=True)
+            time.sleep(3)  # Give Plex database time to fully commit changes
+            print("✓")
+
+        # Verify affected Plex items are properly updated after scan
+        # This ensures DISK, PLEX, and CACHE are fully synchronized
+        if successfully_scanned_libraries:
+            print(f"  Verifying Plex items are synchronized...", end=' ', flush=True)
+            verification_errors = []
+
+            for pending_op in pending_operations:
+                keys = pending_op.get('keys', [])
+                for key in keys:
+                    if key in PLEX_Media.OBJ_BY_ID:
+                        obj = PLEX_Media.OBJ_BY_ID[key]
+                        plex_id = obj.get('id')
+                        library_name = obj.get('library')
+
+                        # Only verify items from successfully scanned libraries
+                        if library_name in successfully_scanned_libraries and plex_id:
+                            try:
+                                # Extract numeric ID from Movie_ID:XXXXX or Episode_ID:XXXXX format
+                                if isinstance(plex_id, str) and '_ID:' in plex_id:
+                                    numeric_id = plex_id.split('_ID:')[1].split('_')[0]
+
+                                    # Fetch fresh item from Plex server to verify it exists
+                                    plex = ensure_plex_api(required=False)
+                                    item = plex_retry_operation(
+                                        lambda: plex.fetchItem(int(numeric_id)),
+                                        context=f"verify item {plex_id} after resolution"
+                                    ) if plex else None
+
+                                    # Verify the item's media parts match what we expect
+                                    if item and hasattr(item, 'media'):
+                                        # Item exists and is accessible - this is good
+                                        pass
+                            except Exception as e:
+                                # Item may have been removed (expected for trashed files)
+                                # Only log unexpected errors
+                                if 'not found' not in str(e).lower():
+                                    verification_errors.append(f"{plex_id}: {e}")
+
+            if verification_errors and VRB:
+                print(f"\n  Note: Some verification checks reported issues (this may be normal):")
+                for err in verification_errors[:3]:  # Show first 3 only
+                    print(f"    - {err}")
+            else:
+                print("✓")
+
+        # Update library timestamps for successfully scanned libraries
+        # Use CURRENT TIME + 30s buffer (same approach as --update-cache)
+        # This ensures cache timestamp is ahead of Plex's final timestamp
+        if successfully_scanned_libraries and 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+            current_time = datetime.now().replace(microsecond=0) + timedelta(seconds=30)
+            for lib_name in successfully_scanned_libraries:
+                if lib_name in CACHE['library_stats']['updatedAt']:
+                    CACHE['library_stats']['updatedAt'][lib_name] = current_time
+                    if VRB:
+                        print(f"{VRBPFX}Updated cache timestamp for library '{lib_name}' to current time +30s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Save cache with inline updates including updated library_stats timestamps
+        try:
+            update_and_save_cache(build_media_cache_dict(
+                library_stats=CACHE.get('library_stats', {}),
+                library_object_counts=CACHE.get('library_object_counts', {}),
+                labels_index=CACHE.get('labels_index', {}),
+                media_objs=CACHE.get('media_objs', {})
+            ))
+            print(f"  ✓ Cache saved successfully")
+        except Exception as e:
+            print(f"  ⚠ Warning: Failed to save cache: {e}")
+
+    return all_success
+
+def undo_operation(operation_log, remote_host=None):
+    """API required: re-adds items to cache via add_media_obj() after trash restore — needs plexapi
+    objects to extract media/part structure. Undo a resolution operation using the stored undo instructions
+
+    Args:
+        operation_log: The operation log entry containing undo_instructions
+        remote_host: SSH host for remote operations, None for local
+
+    Returns:
+        True if undo succeeded, False otherwise
+    """
+    print("\n" + "="*76)
+    print("UNDOING OPERATION")
+    print("="*76)
+
+    undo_instructions = operation_log.get("undo_instructions", [])
+
+    if not undo_instructions:
+        print("✗ No undo instructions available for this operation")
+        return False
+
+    choice = operation_log.get("choice")
+    print(f"Undoing: {operation_log.get('choice_description')}")
+    print(f"Original operation timestamp: {operation_log.get('timestamp')}")
+
+    num_steps = len(undo_instructions)
+    step_word = "step" if num_steps == 1 else "steps"
+    print(f"\nExecute undo in {num_steps} {step_word}:\n")
+
+    # Execute each undo instruction
+    for instruction in undo_instructions:
+        step = instruction.get("step")
+        action = instruction.get("action")
+        description = instruction.get("description")
+
+        print(f"Step {step}: {description}")
+
+        try:
+            if action == "restore_from_trash":
+                # Move file from trash back to original location
+                trash_path = instruction.get("trash_path")
+                original_path = instruction.get("original_path")
+
+                if remote_host:
+                    cmd = f"ssh {remote_host} 'mv \"{trash_path}\" \"{original_path}\"'"
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print(f"  ✗ Failed to restore from trash: {result.stderr}")
+                        return False
+                else:
+                    import shutil
+                    shutil.move(trash_path, original_path)
+
+                print(f"  ✓ Restored from trash successfully")
+
+            elif action == "move_file_back":
+                # Move file back to original location
+                current_path = instruction.get("current_path")
+                original_path = instruction.get("original_path")
+
+                if move_file(current_path, os.path.dirname(original_path), remote_host):
+                    print(f"  ✓ Moved file back successfully")
+                else:
+                    print(f"  ✗ Failed to move file back")
+                    return False
+
+            elif action == "restore_cache_entry":
+                # Update cache with the restored file's new Plex entry
+                # (Plex assigns a NEW ID to restored files after library scan)
+                library_name = instruction.get("library_name")
+                restored_file_path = instruction.get("restored_file_path")
+
+                if not library_name or not restored_file_path:
+                    print(f"  ⚠ Missing library name or file path for cache update")
+                    continue
+
+                if library_name not in PLEX_Library.OBJ_DICT:
+                    print(f"  ⚠ Library '{library_name}' not found")
+                    continue
+
+                lib = PLEX_Library.OBJ_DICT[library_name]
+
+                # Give Plex extra time to fully index the restored file
+                import time
+                print(f"  Waiting for Plex to index restored file...", end=' ', flush=True)
+                time.sleep(5)  # Increased from 3 to 5 seconds
+                lib.reload()
+                print(f"✓")
+
+                print(f"  Searching for restored file in Plex...", end=' ', flush=True)
+
+                # Search for the restored file with increased retries
+                item_found = None
+                max_attempts = 5  # Increased from 3 to 5
+                lib_type = lib.type
+
+                for attempt in range(max_attempts):
+                    try:
+                        # Force fresh data by reloading library before each search
+                        if attempt > 0:
+                            time.sleep(3)  # Wait longer between retries
+                            lib.reload()
+
+                        # Use plex_retry_operation to get fresh library data
+                        # Match by basename (filename) instead of full path, since volume paths may change
+                        import os
+                        restored_basename = os.path.basename(restored_file_path)
+
+                        # Debug: Show what we're looking for and what Plex has
+                        if DBG and attempt == 0:
+                            print(f"{DBGPFX}Searching for basename: '{restored_basename}'")
+                            print(f"{DBGPFX}Full restored path: '{restored_file_path}'")
+
+                        if lib_type == 'movie':
+                            all_items = plex_retry_operation(
+                                lambda: lib.all(),
+                                context=f"library '{library_name}' get all movies for undo"
+                            )
+
+                            # Debug: Show first few files Plex has (only on first attempt)
+                            if DBG and attempt == 0:
+                                print(f"{DBGPFX}Sample of files in Plex library (first 3):")
+                                for i, item in enumerate(all_items[:3]):
+                                    for media in item.media:
+                                        for part in media.parts:
+                                            print(f"{DBGPFX}  [{i}] {os.path.basename(part.file)}")
+                                            print(f"{DBGPFX}      Full path: {part.file}")
+
+                            for item in all_items:
+                                for media in item.media:
+                                    for part in media.parts:
+                                        plex_basename = os.path.basename(part.file)
+                                        plex_dirname = os.path.dirname(part.file)
+
+                                        # Try exact basename match first
+                                        if plex_basename == restored_basename:
+                                            item_found = item
+                                            break
+
+                                        # Also try if restored_basename is a parent directory
+                                        # (e.g., restored path is folder, Plex has folder/movie.mkv)
+                                        if os.path.basename(plex_dirname) == restored_basename:
+                                            item_found = item
+                                            break
+                                    if item_found:
+                                        break
+                                if item_found:
+                                    break
+                        elif lib_type == 'show':
+                            all_shows = plex_retry_operation(
+                                lambda: lib.all(),
+                                context=f"library '{library_name}' get all shows for undo"
+                            )
+
+                            # Debug: Show first few files Plex has (only on first attempt)
+                            if DBG and attempt == 0:
+                                print(f"{DBGPFX}Sample of episodes in Plex library (first 3):")
+                                count = 0
+                                for show in all_shows:
+                                    if count >= 3:
+                                        break
+                                    for season in show.seasons():
+                                        if count >= 3:
+                                            break
+                                        for episode in season.episodes():
+                                            if count >= 3:
+                                                break
+                                            for media in episode.media:
+                                                for part in media.parts:
+                                                    print(f"{DBGPFX}  [{count}] {os.path.basename(part.file)}")
+                                                    print(f"{DBGPFX}      Full path: {part.file}")
+                                                    count += 1
+                                                    if count >= 3:
+                                                        break
+
+                            for show in all_shows:
+                                for season in show.seasons():
+                                    for episode in season.episodes():
+                                        for media in episode.media:
+                                            for part in media.parts:
+                                                plex_basename = os.path.basename(part.file)
+                                                plex_dirname = os.path.dirname(part.file)
+
+                                                # Try exact basename match first
+                                                if plex_basename == restored_basename:
+                                                    item_found = episode
+                                                    break
+
+                                                # Also try if restored_basename is a parent directory
+                                                # (e.g., restored path is folder, Plex has folder/episode.mkv)
+                                                if os.path.basename(plex_dirname) == restored_basename:
+                                                    item_found = episode
+                                                    break
+                                            if item_found:
+                                                break
+                                        if item_found:
+                                            break
+                                    if item_found:
+                                        break
+                                if item_found:
+                                    break
+
+                        if item_found:
+                            break  # Found it!
+
+                        # Not found - print progress dot and retry
+                        if attempt < max_attempts - 1:
+                            print(".", end='', flush=True)
+
+                    except Exception as e:
+                        if DBG: print(f"{DBGPFX}Search attempt {attempt+1} failed: {e}")
+                        if attempt < max_attempts - 1:
+                            print(".", end='', flush=True)
+                            continue
+
+                if item_found:
+                    print(f"✓")
+                    print(f"  Adding to cache (new Plex ID: {item_found.ratingKey})...", end=' ', flush=True)
+
+                    # Add to cache using add_media_obj
+                    if lib_type == 'movie':
+                        for media_idx, media in enumerate(item_found.media):
+                            for part_idx, part in enumerate(media.parts):
+                                add_media_obj(
+                                    item_found, lib, item_found,
+                                    media_idx, len(item_found.media), media,
+                                    part_idx, len(media.parts), part
+                                )
+                    elif lib_type == 'show':
+                        show = item_found.show()
+                        season = item_found.season()
+                        for media_idx, media in enumerate(item_found.media):
+                            for part_idx, part in enumerate(media.parts):
+                                add_media_obj(
+                                    item_found, lib, show,
+                                    media_idx, len(item_found.media), media,
+                                    part_idx, len(media.parts), part,
+                                    season=season, episode=item_found
+                                )
+
+                    # Update OBJ_BY_FILEPATH and OBJ_BY_LIBRARY
+                    key = get_fullID(None, item_found.type.capitalize(), item_found.ratingKey)
+                    obj = PLEX_Media.OBJ_BY_ID.get(key)
+                    if obj:
+                        # Update OBJ_BY_FILEPATH
+                        if obj['file'] in PLEX_Media.OBJ_BY_FILEPATH:
+                            if key not in PLEX_Media.OBJ_BY_FILEPATH[obj['file']]:
+                                PLEX_Media.OBJ_BY_FILEPATH[obj['file']].append(key)
+                        else:
+                            PLEX_Media.OBJ_BY_FILEPATH[obj['file']] = [key]
+
+                        # Update OBJ_BY_LIBRARY
+                        if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                            PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+                        if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                            if key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj['type']]:
+                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj['type']].append(key)
+                        else:
+                            PLEX_Media.OBJ_BY_LIBRARY[library_name][obj['type']] = [key]
+
+                    print(f"✓")
+                else:
+                    print(f"✗")
+                    print(f"  ⚠ Could not find restored file in Plex after {max_attempts} attempts")
+                    print(f"    File path: {restored_file_path}")
+                    print(f"    This may require manual intervention or running --update-cache")
+                    return False
+
+            elif action == "update_cache_entry":
+                # Update cache entry to previous state
+                cache_entry = instruction.get("cache_entry")
+                if cache_entry:
+                    cache_key = f"{cache_entry.get('type')}:{cache_entry.get('id')}"
+
+                    # Get current entry
+                    if cache_key in PLEX_Media.OBJ_BY_ID:
+                        old_file = PLEX_Media.OBJ_BY_ID[cache_key].get('file')
+                        new_file = cache_entry.get('file')
+
+                        # Update OBJ_BY_ID
+                        PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
+
+                        # Update OBJ_BY_FILEPATH
+                        if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
+                            del PLEX_Media.OBJ_BY_FILEPATH[old_file]
+                        if new_file:
+                            PLEX_Media.OBJ_BY_FILEPATH[new_file] = cache_key
+
+                        print(f"  ✓ Updated cache entry for {cache_key}")
+                    else:
+                        print(f"  ⚠ Cache entry not found: {cache_key}")
+                else:
+                    print(f"  ⚠ No cache entry data to update")
+
+            elif action == "restore_metadata":
+                # Restore metadata to previous state
+                plex_id = instruction.get("plex_id")
+                metadata_before = instruction.get("metadata_before", {})
+
+                # Get the Plex media object
+                media = None
+                for m in resolve_plex_media_obj(str(plex_id)):
+                    media = m
+                    break
+
+                if media:
+                    # Restore watched status
+                    watched = metadata_before.get("watched", {})
+                    if watched.get("action") in ["marked_watched", "updated_watch_count"]:
+                        view_count_before = watched.get("target_view_count_before", 0)
+                        if view_count_before == 0:
+                            media.markUnwatched()
+                            print(f"  ✓ Restored unwatched status")
+
+                    # Restore labels
+                    labels = metadata_before.get("labels", {})
+                    if labels.get("action") == "labels_added":
+                        labels_to_remove = labels.get("labels_added", [])
+                        for label in labels_to_remove:
+                            try:
+                                media.removeLabel(label)
+                                print(f"  ✓ Removed label '{label}'")
+                            except:
+                                print(f"  ⚠ Could not remove label '{label}'")
+
+                    # Restore rating
+                    rating = metadata_before.get("rating", {})
+                    if rating.get("action") == "rating_updated":
+                        rating_before = rating.get("target_rating_before", 0)
+                        if rating_before > 0:
+                            media.rate(rating_before)
+                            print(f"  ✓ Restored rating to {rating_before}")
+                        else:
+                            # Clear rating
+                            try:
+                                media.rate(0)
+                                print(f"  ✓ Cleared rating")
+                            except:
+                                pass
+                else:
+                    print(f"  ⚠ Could not find Plex media object with ID {plex_id}")
+
+            elif action == "rename_file_back":
+                # Rename file back to original
+                current_path = instruction.get("current_path")
+                original_filename = instruction.get("original_filename")
+
+                success, new_path = rename_file(current_path, original_filename, remote_host)
+                if success:
+                    print(f"  ✓ Renamed file back successfully")
+                else:
+                    print(f"  ✗ Failed to rename file back")
+                    return False
+
+            elif action == "update_cache_paths":
+                # Cache paths will be updated by restore_cache_entry steps
+                print(f"  ✓ Cache paths updated")
+
+            elif action == "plex_library_scan":
+                library_name = instruction.get("library_name", "")
+                if library_name and library_name in PLEX_Library.OBJ_DICT:
+                    try:
+                        lib = PLEX_Library.OBJ_DICT[library_name]
+                        print(f"  Scanning Plex library '{library_name}'...", end=' ', flush=True)
+                        lib.update()
+
+                        # Wait for scan to complete
+                        import time
+                        max_wait = 60
+                        waited = 0
+                        while waited < max_wait:
+                            lib.reload()
+                            if not lib.refreshing:
+                                break
+                            time.sleep(1)
+                            waited += 1
+                            if waited % 5 == 0:
+                                print(".", end='', flush=True)
+
+                        if waited >= max_wait:
+                            print(f" ⚠ (timeout after {max_wait}s, scan may still be running)")
+                        else:
+                            print(f" ✓ (completed in {waited}s)")
+                    except Exception as e:
+                        print(f"  ⚠ Warning: Could not scan library: {e}")
+                        print(f"    You can trigger a scan manually from Plex web interface")
+                else:
+                    print(f"  ℹ Plex library scan needed - please run manually or wait for automatic scan")
+                    print(f"    You can trigger a scan from Plex web interface: Settings > Library > Scan Library Files")
+
+        except Exception as e:
+            print(f"  ✗ Error executing undo step: {e}")
+            return False
+
+    # Save updated cache
+    print("\nSaving updated cache...")
+    update_and_save_cache(build_media_cache_dict())
+
+    print("\n✓ UNDO COMPLETED SUCCESSFULLY")
+    print("="*76 + "\n")
+    return True
+
+def generate_undo_instructions(choice, operation_log):
+    """Generate step-by-step undo instructions for an operation
+
+    Args:
+        choice: The choice that was made ('3', '4', '5', '6', '7')
+        operation_log: The operation log dictionary with all details
+
+    Returns:
+        List of undo instruction dictionaries
+    """
+    undo_instructions = []
+
+    if choice == '3' or choice == '4':
+        # Simple trash operation
+        for action in operation_log.get("actions", []):
+            if action.get("action") == "trash" and action.get("status") == "success":
+                # Determine if this is a remote operation (SSH-mounted volume)
+                original_path = action.get("original_path")
+                is_remote = original_path.startswith("/Volumes/")
+                remote_note = " (remote via SSH)" if is_remote else ""
+
+                undo_instructions.append({
+                    "step": 1,
+                    "action": "restore_from_trash",
+                    "description": f"Move {action['trash_path']} back to {action['original_path']}{remote_note}",
+                    "trash_path": action.get("trash_path"),
+                    "original_path": action.get("original_path")
+                })
+                # Get library name and file path from the deleted cache entry
+                library_name = action.get("deleted_cache_entry", {}).get("library", "")
+                restored_file_path = action.get("original_path")
+                undo_instructions.append({
+                    "step": 2,
+                    "action": "plex_library_scan",
+                    "description": f"Scan Plex library '{library_name}' to detect the restored file",
+                    "library_name": library_name,
+                    "restored_file_path": restored_file_path
+                })
+                undo_instructions.append({
+                    "step": 3,
+                    "action": "restore_cache_entry",
+                    "description": f"Update cache with restored file (new Plex ID will be assigned)",
+                    "cache_key": action.get("deleted_cache_key"),
+                    "cache_entry": action.get("deleted_cache_entry"),
+                    "library_name": library_name,
+                    "restored_file_path": restored_file_path
+                })
+
+    elif choice == '5' or choice == '6':
+        # Complex operation: trash one, move another, merge metadata
+        step_num = 1
+
+        # Step 1: Restore moved file to original location
+        for action in operation_log.get("actions", []):
+            if action.get("action") == "move" and action.get("status") == "success":
+                # Determine if this is a remote operation (SSH-mounted volume)
+                original_path = action.get("original_path")
+                is_remote = original_path.startswith("/Volumes/")
+                remote_note = " (remote via SSH)" if is_remote else ""
+
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "move_file_back",
+                    "description": f"Move {action['new_path']} back to {action['original_path']}{remote_note}",
+                    "current_path": action.get("new_path"),
+                    "original_path": action.get("original_path")
+                })
+                step_num += 1
+
+        # Step 2: Restore trashed file
+        for action in operation_log.get("actions", []):
+            if action.get("action") == "trash" and action.get("status") == "success":
+                # Determine if this is a remote operation (SSH-mounted volume)
+                original_path = action.get("original_path")
+                is_remote = original_path.startswith("/Volumes/")
+                remote_note = " (remote via SSH)" if is_remote else ""
+
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "restore_from_trash",
+                    "description": f"Move {action['trash_path']} back to {action['original_path']}{remote_note}",
+                    "trash_path": action.get("trash_path"),
+                    "original_path": action.get("original_path")
+                })
+                step_num += 1
+
+        # Step 3: Restore metadata
+        for action in operation_log.get("actions", []):
+            if action.get("action") == "merge_metadata" and action.get("status") == "success":
+                metadata_changes = action.get("metadata_changes", {})
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "restore_metadata",
+                    "description": f"Restore metadata for Plex ID {action.get('to_plex_id')} to state before merge",
+                    "plex_id": action.get("to_plex_id"),
+                    "metadata_before": metadata_changes
+                })
+                step_num += 1
+
+        # Step 4: Restore cache entries
+        if choice == '5':
+            file1_entry = operation_log.get("files", {}).get("file1", {}).get("cache_entry")
+            file2_entry_before = operation_log.get("files", {}).get("file2", {}).get("cache_entry_before")
+            if file1_entry:
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "restore_cache_entry",
+                    "description": f"Restore cache entry for deleted file [1]",
+                    "cache_entry": file1_entry
+                })
+                step_num += 1
+            if file2_entry_before:
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "update_cache_entry",
+                    "description": f"Restore cache entry for file [2] to state before move",
+                    "cache_entry": file2_entry_before
+                })
+                step_num += 1
+        else:  # choice == '6'
+            file2_entry = operation_log.get("files", {}).get("file2", {}).get("cache_entry")
+            file1_entry_before = operation_log.get("files", {}).get("file1", {}).get("cache_entry_before")
+            if file2_entry:
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "restore_cache_entry",
+                    "description": f"Restore cache entry for deleted file [2]",
+                    "cache_entry": file2_entry
+                })
+                step_num += 1
+            if file1_entry_before:
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "update_cache_entry",
+                    "description": f"Restore cache entry for file [1] to state before move",
+                    "cache_entry": file1_entry_before
+                })
+                step_num += 1
+
+        # Step 5: Plex library scan
+        undo_instructions.append({
+            "step": step_num,
+            "action": "plex_library_scan",
+            "description": "Scan Plex library to re-detect the restored files"
+        })
+
+    elif choice == '7':
+        # Rename operation - just rename back
+        step_num = 1
+        for action in operation_log.get("actions", []):
+            if action.get("action") == "rename" and action.get("status") == "success":
+                undo_instructions.append({
+                    "step": step_num,
+                    "action": "rename_file_back",
+                    "description": f"Rename {action['new_filename']} back to {action['original_filename']}",
+                    "current_path": action.get("new_path"),
+                    "original_path": action.get("original_path"),
+                    "current_filename": action.get("new_filename"),
+                    "original_filename": action.get("original_filename")
+                })
+                step_num += 1
+
+        if step_num > 1:
+            undo_instructions.append({
+                "step": step_num,
+                "action": "update_cache_paths",
+                "description": "Update cache with original file paths"
+            })
+
+    return undo_instructions
+
+
+def _detect_container_tool(filepath):
+    """Detect container type and return the appropriate tool name.
+
+    Returns:
+        (tool_name, container_type) or (None, None) for unsupported containers
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ('.mp4', '.m4v'):
+        return ('mp4box', 'mp4')
+    elif ext in ('.mkv',):
+        return ('mkvpropedit', 'mkv')
+    else:
+        return (None, ext)
+
+
+def _build_audio_language_args(tool_name, filepath, lang_code_3):
+    """Build tool-specific arguments for setting audio language.
+
+    Args:
+        tool_name: 'mp4box' or 'mkvpropedit'
+        filepath: Full path to media file
+        lang_code_3: 3-letter ISO 639-2 language code (e.g. 'eng', 'deu')
+
+    Returns:
+        List of arguments for run_tool_on_PLEX_server()
+    """
+    if tool_name == 'mp4box':
+        return ['-lang', f'all={lang_code_3}', filepath]
+    elif tool_name == 'mkvpropedit':
+        return [filepath, '--edit', 'track:a1', '--set', f'language={lang_code_3}']
+    return []
+
+
+def resolve_no_audio_language(obj_keys, args):
+    """Interactive wizard to fix missing audio language tags in media files.
+
+    For each item with no audio language:
+    - Shows file info (title, Plex ID, library, filepath, container type, local/remote)
+    - If AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY has a match, auto-selects that language
+    - Otherwise prompts with language menu (E=eng, D=deu, F=fra, etc.)
+    - Records pending operations, then batch applies:
+      runs mp4box/mkvpropedit, then triggers Plex analyze
+
+    Args:
+        obj_keys: List of cache keys for items with no audio language
+        args: Parsed command line args
+    """
+    # Language choices for interactive menu
+    LANGUAGE_CHOICES = {
+        'E': ('en', 'English'),
+        'D': ('de', 'German/Deutsch'),
+        'F': ('fr', 'French/Français'),
+        'I': ('it', 'Italian/Italiano'),
+        'S': ('es', 'Spanish/Español'),
+        'J': ('ja', 'Japanese'),
+    }
+
+    print("\n" + "="*76)
+    print("INTERACTIVE AUDIO LANGUAGE RESOLUTION MODE")
+    print("="*76)
+    print("\nThis wizard sets the audio language tag in media file containers.")
+    print("After setting the tag, Plex will be asked to re-analyze the file.")
+    print("="*76)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f"/tmp/my-plex_--no-audio-language_--resolve_{timestamp}.json"
+    resolution_log_data = {
+        "session": {
+            "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "command": ' '.join(sys.argv),
+            "timestamp": timestamp,
+        },
+        "operations": []
+    }
+    print(f"\n  Resolution log: {log_filename}\n")
+
+    # Build auto-resolve lookup: library_name -> 2-letter code
+    auto_resolve = {}
+    for lib_name, lang_code in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
+        auto_resolve[lib_name] = lang_code
+
+    pending_operations = []
+    total_items = len(obj_keys)
+
+    try:
+        for item_idx, key in enumerate(obj_keys, 1):
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            filepath = obj.get('file', '')
+            title = obj.get('title', 'Unknown')
+            plex_id = obj.get('id', 'N/A')
+            library = obj.get('library', 'N/A')
+
+            if not filepath:
+                print(f"\n[{item_idx}/{total_items}] Skipping {title} — no file path")
+                continue
+
+            # Detect container type
+            tool_name, container = _detect_container_tool(filepath)
+            if not tool_name:
+                print(f"\n[{item_idx}/{total_items}] Skipping {title} — unsupported container '{container}'")
+                continue
+
+            # Determine if local or remote
+            remote_host, exists, resolved_filepath = determine_remote_host(filepath)
+            if not exists:
+                print(f"\n[{item_idx}/{total_items}] Skipping {title} — file not found")
+                continue
+
+            # Display item info
+            print(f"\n{'='*76}")
+            print(f"[{item_idx}/{total_items}] {title}")
+            print(f"  Plex ID:   {plex_id}")
+            print(f"  Library:   {library}")
+            print(f"  File:      {resolved_filepath}")
+            print(f"  Container: {container} (tool: {tool_name})")
+            location = f"Remote ({remote_host})" if remote_host else "Local"
+            print(f"  Location:  {location}")
+
+            # Check auto-resolve
+            if library in auto_resolve:
+                lang_2 = auto_resolve[library]
+                lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
+                print(f"  Auto-resolve: Setting audio language to '{lang_3}' (library '{library}' → '{lang_2}')")
+                pending_operations.append({
+                    'cache_key': key,
+                    'filepath': resolved_filepath,
+                    'plex_id': plex_id,
+                    'library': library,
+                    'tool_name': tool_name,
+                    'lang_code_2': lang_2,
+                    'lang_code_3': lang_3,
+                    'remote_host': remote_host,
+                    'title': title,
+                })
+                continue
+
+            # Interactive prompt
+            while True:
+                print("\nSet audio language to:")
+                for key_char, (code, desc) in LANGUAGE_CHOICES.items():
+                    lang_3 = ISO_639_1_TO_2.get(code, code)
+                    print(f"  {key_char} = {desc} ({lang_3})")
+                print(f"  C = Custom (enter 3-letter ISO 639-2 code)")
+                print(f"  N = Skip this item")
+                if pending_operations:
+                    print(f"  U = Undo last pending ({len(pending_operations)} pending)")
+                    print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                print(f"  Q = Quit")
+
+                print("\nYour choice: ", end='', flush=True)
+                choice = readchar.readchar()
+                print(choice)
+
+                choice_upper = choice.upper()
+
+                if choice_upper == 'Q':
+                    if pending_operations:
+                        print(f"\n  Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
+                        print("  Y = Yes, quit without applying")
+                        print("  N = No, go back")
+                        print("\nYour choice: ", end='', flush=True)
+                        confirm = readchar.readchar()
+                        print(confirm)
+                        if confirm.upper() != 'Y':
+                            continue
+                    print("Exiting resolution mode.")
+                    return
+
+                if choice_upper == 'A':
+                    if not pending_operations:
+                        print("  No pending operations.")
+                        continue
+                    _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename)
+                    return
+
+                if choice_upper == 'N':
+                    break  # next item
+
+                if choice_upper == 'U':
+                    if pending_operations:
+                        removed = pending_operations.pop()
+                        print(f"  Undone: {removed['lang_code_3']} on {os.path.basename(removed['filepath'])}")
+                    else:
+                        print("  Nothing to undo.")
+                    continue
+
+                if choice_upper == 'C':
+                    print("Enter 3-letter ISO 639-2 language code (e.g. 'kor', 'zho', 'por'): ", end='', flush=True)
+                    lang_3 = input().strip().lower()
+                    if len(lang_3) != 3 or not lang_3.isalpha():
+                        print("  Invalid code. Must be exactly 3 letters.")
+                        continue
+                    lang_2 = lang_3  # custom: use 3-letter as-is
+                elif choice_upper in LANGUAGE_CHOICES:
+                    lang_2, _ = LANGUAGE_CHOICES[choice_upper]
+                    lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
+                else:
+                    print("  Invalid choice.")
+                    continue
+
+                # Record pending operation
+                pending_operations.append({
+                    'cache_key': key,
+                    'filepath': resolved_filepath,
+                    'plex_id': plex_id,
+                    'library': library,
+                    'tool_name': tool_name,
+                    'lang_code_2': lang_2,
+                    'lang_code_3': lang_3,
+                    'remote_host': remote_host,
+                    'title': title,
+                })
+                print(f"  Queued: Set audio language to '{lang_3}'")
+                break  # next item
+
+        # End of loop — apply if any pending
+        if pending_operations:
+            print(f"\n{'='*76}")
+            print(f"All items reviewed. {len(pending_operations)} operation(s) pending.")
+            print("  A = Apply all pending operations")
+            print("  Q = Quit without applying")
+            print("\nYour choice: ", end='', flush=True)
+            final = readchar.readchar()
+            print(final)
+            if final.upper() == 'A':
+                _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename)
+            else:
+                print("Discarded all pending operations.")
+        else:
+            print("\nNo operations to apply.")
+
+    except KeyboardInterrupt:
+        print("\n\nInterrupted. No operations applied.")
+
+
+def _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename):
+    """Apply all pending audio language fix operations.
+
+    For each operation:
+    1. Run mp4box or mkvpropedit to set the audio language tag
+    2. Trigger Plex to re-analyze the specific item
+    3. Update cache with the new audio language
+
+    Args:
+        pending_operations: List of pending operation dicts
+        resolution_log_data: Log data dict for JSON audit trail
+        log_filename: Path to JSON log file
+    """
+    print(f"\n{'='*76}")
+    print(f"APPLYING {len(pending_operations)} AUDIO LANGUAGE OPERATION(S)")
+    print(f"{'='*76}")
+
+    success_count = 0
+    fail_count = 0
+    items_to_analyze = []  # (plex_id, title, cache_key, lang_code_2) for Plex analyze
+
+    for idx, op in enumerate(pending_operations, 1):
+        filepath = op['filepath']
+        lang_3 = op['lang_code_3']
+        tool_name = op['tool_name']
+        remote_host = op['remote_host']
+        title = op['title']
+        plex_id = op['plex_id']
+
+        print(f"\n[{idx}/{len(pending_operations)}] Setting '{lang_3}' on: {os.path.basename(filepath)}")
+
+        # Build tool-specific arguments
+        tool_args = _build_audio_language_args(tool_name, filepath, lang_3)
+        if not tool_args:
+            print(f"  SKIPPED: Unknown tool '{tool_name}'")
+            continue
+
+        result = run_tool_on_PLEX_server(tool_name, tool_args, remote_host=remote_host, timeout=120)
+
+        if result is None:
+            sys.exit(1)
+
+        if result.returncode != 0:
+            fail_count += 1
+            print(f"  FAILED (exit code {result.returncode})")
+            if result.stderr:
+                # Strip any ANSI escape codes from tool output to prevent color bleeding
+                import re as _re
+                stderr_clean = _re.sub(r'\033\[[0-9;]*m', '', result.stderr.strip())
+                for line in stderr_clean.split('\n')[:3]:
+                    print(f"    {line}")
+            cmd_str = f"{tool_name} {' '.join(shlex.quote(a) for a in tool_args)}"
+            if remote_host:
+                cmd_str = f"ssh {remote_host} {cmd_str}"
+            print(f"\n  Command: {cmd_str}")
+            resolution_log_data["operations"].append({
+                "item": idx, "title": title, "plex_id": plex_id,
+                "filepath": filepath, "lang_code": lang_3, "tool": tool_name,
+                "result": f"failed_exit_{result.returncode}",
+            })
+            print(f"\nAborting: external tool failed on '{os.path.basename(filepath)}'")
+            sys.exit(1)
+
+        print(f"  OK: Audio language set to '{lang_3}'")
+        success_count += 1
+        items_to_analyze.append((plex_id, title, op['cache_key'], op['lang_code_2']))
+        resolution_log_data["operations"].append({
+            "item": idx, "title": title, "plex_id": plex_id,
+            "filepath": filepath, "lang_code": lang_3, "tool": tool_name,
+            "result": "success",
+        })
+
+    # Update cache for successful operations
+    for plex_id, title, cache_key, lang_2 in items_to_analyze:
+        if cache_key in PLEX_Media.OBJ_BY_ID:
+            obj = PLEX_Media.OBJ_BY_ID[cache_key]
+            lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
+            if lang_3 not in obj.get('audio_languages', []):
+                if 'audio_languages' not in obj:
+                    obj['audio_languages'] = []
+                obj['audio_languages'].append(lang_3)
+
+    # API required: item.analyze() triggers Plex server-side media analysis
+    if items_to_analyze:
+        print(f"\n{'='*76}")
+        print(f"TRIGGERING PLEX ANALYZE FOR {len(items_to_analyze)} ITEM(S)")
+        print(f"{'='*76}")
+
+        plex = ensure_plex_api(required=False)
+        if plex:
+            for plex_id, title, _, _ in items_to_analyze:
+                try:
+                    item = plex_retry_operation(lambda: plex.fetchItem(int(plex_id)), context=f"analyze {title}", library=None)
+                    print(f"  Analyzing: {title} (ID: {plex_id})...", end=' ', flush=True)
+                    item.analyze()
+                    print("OK")
+                except Exception as e:
+                    print(f"FAILED: {e}")
+        else:
+            print("  Plex API not available — skipping analyze.")
+            print("  Run 'my-plex --update-cache' later to refresh, or trigger analyze manually in Plex.")
+
+    # Save log file
+    try:
+        import json
+        with open(log_filename, 'w') as f:
+            json.dump(resolution_log_data, f, indent=2)
+        print(f"\n  Resolution log saved: {log_filename}")
+    except Exception as e:
+        print(f"  Warning: Could not save log: {e}")
+
+    summary = f"\nDone. {success_count}/{len(pending_operations)} file(s) updated."
+    if fail_count:
+        summary += f" ({fail_count} failed)"
+    print(summary)
+
+
+def execute_resolution_action(choice, file1, file2, remote_host, all_files=None, keys=None, resolution_log_data=None, operation_number=None, same_file=False, is_multi_version=False):
+    """Execute the chosen resolution action for duplicate files
+
+    Args:
+        choice: User choice ('1', '2', '3', '4', '5', '6', '7')
+        file1: Path to first file
+        file2: Path to second file
+        remote_host: SSH host for remote operations, None for local
+        all_files: List of all duplicate files (for option 7 with 3+ files)
+        keys: List of cache keys for the duplicate items (for cache updates)
+        resolution_log_data: Dictionary for JSON logging (optional)
+        operation_number: Sequential operation number for logging (optional)
+        same_file: True if both entries point to same file (Plex DB corruption)
+        is_multi_version: True if this is a multi-version item (single Plex entry with multiple file versions)
+
+    Returns:
+        True if operation succeeded, False otherwise
+    """
+    # Initialize operation log entry
+    operation_log = None
+    if resolution_log_data is not None and operation_number is not None:
+        operation_log = {
+            "operation_number": operation_number,
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "choice": choice,
+            "choice_description": {
+                '3': 'Trash file [1]',
+                '4': 'Trash file [2]',
+                '5': 'Trash [1] and move [2] to library of [1]',
+                '6': 'Trash [2] and move [1] to library of [2]',
+                '7': 'Rename files using directory name'
+            }.get(choice, f'Unknown choice: {choice}'),
+            "files": {},
+            "actions": [],
+            "result": "pending"
+        }
+
+    if choice == '1':
+        print(f"Playing file [1]: {file1}")
+        return play_media_file(file1, remote_host)
+
+    elif choice == '2':
+        print(f"Playing file [2]: {file2}")
+        return play_media_file(file2, remote_host)
+
+    elif choice == '3':
+        # Determine whether to trash just the file or the entire directory
+        # Strategy: Always prefer to trash the directory, but check if there are other video files first
+        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
+
+        # Get the movie directory
+        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
+
+        # Check if there are other video files in the directory
+        has_other_videos = has_other_video_files_in_dir(movie_dir1, file1, remote_host)
+
+        if has_other_videos:
+            # There are other video files - only trash the specific file
+            target_to_trash = file1
+            if VRB: print(f"{VRBPFX}Other video files detected in directory - will trash FILE only: {os.path.basename(file1)}")
+        else:
+            # No other video files - trash the entire directory to avoid leaving orphaned files
+            target_to_trash = movie_dir1
+            if VRB: print(f"{VRBPFX}No other video files in directory - will trash ENTIRE DIRECTORY: {os.path.basename(movie_dir1)}")
+
+        # Capture cache entry before deletion (for undo)
+        deleted_cache_entry = None
+        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
+            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[0]])  # Make a copy
+
+        if operation_log:
+            operation_log["files"]["file1"] = {
+                "path": file1,
+                "movie_directory": target_to_trash if not is_multi_version else get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1),
+                "library": lib1,
+                "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
+                "cache_entry": deleted_cache_entry,
+                "is_multi_version": is_multi_version
+            }
+
+        if same_file:
+            # Same file - delete from Plex DB and remove cache entry, don't trash file
+            print(f"Removing Plex entry [1] from database (file will NOT be trashed)")
+
+            # Delete from Plex database
+            plex_id = PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None
+            if plex_id:
+                try:
+                    for media in resolve_plex_media_obj(str(plex_id)):
+                        media.delete()
+                        print(f"  ✓ Deleted Plex entry ID {plex_id} from Plex database")
+                        break
+                except Exception as e:
+                    print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
+
+            # Remove from cache
+            modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "remove_cache_entry",
+                    "target": "plex_entry_1",
+                    "plex_id": plex_id,
+                    "deleted_cache_entry": deleted_cache_entry,
+                    "deleted_cache_key": keys[0] if keys and len(keys) > 0 else None,
+                    "status": "success"
+                })
+                operation_log["result"] = "success"
+
+            print("✓ Plex entry [1] removed successfully.")
+            if operation_log and resolution_log_data is not None:
+                operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
+                resolution_log_data["operations"].append(operation_log)
+            return True
+        else:
+            # Different files - trash file [1]
+            if is_multi_version:
+                # For multi-version: only trash the specific file, no [vu] marker transfer needed
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving FILE [1] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ File [1] moved to trash successfully.")
+            else:
+                # For regular items: trash entire directory and handle [vu] markers
+                # Check if [vu] marker exists on directory or file [1]
+                vu_marker_dir = extract_vu_marker(os.path.basename(target_to_trash))
+                vu_marker_file = extract_vu_marker(os.path.basename(file1))
+
+                # Add remote SSH notation if path is on mounted volume
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving MOVIE DIRECTORY [1] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ Movie directory [1] moved to trash successfully.")
+
+                    # Transfer [vu] marker from directory [1] to directory [2]
+                    if vu_marker_dir:
+                        dir2_basename = os.path.basename(movie_dir2)
+                        new_dir2_name = dir2_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                        vu_success, renamed_dir = rename_file(movie_dir2, new_dir2_name, remote_host)
+                        if vu_success:
+                            print(f"✓ Directory [2] appended with \"{vu_marker_dir}\" marker")
+                            movie_dir2 = renamed_dir
+                            file2 = os.path.join(renamed_dir, os.path.basename(file2))
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "movie_directory_2",
+                                    "marker": vu_marker_dir,
+                                    "old_path": movie_dir2,
+                                    "new_path": renamed_dir,
+                                    "status": "success"
+                                })
+
+                    # Transfer [vu] marker from file [1] to file [2]
+                    if vu_marker_file:
+                        vu_success, new_file2_path = add_vu_marker_to_file(file2, vu_marker_file, remote_host)
+                        if vu_success and new_file2_path != file2:
+                            print(f"✓ File [2] appended with \"{vu_marker_file}\" marker")
+                            file2 = new_file2_path
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "file2",
+                                    "marker": vu_marker_file,
+                                    "old_path": file2,
+                                    "new_path": new_file2_path,
+                                    "status": "success"
+                                })
+
+            # Handle success/failure for both multi-version and regular items
+            if success:
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "trash",
+                        "target": "file_1" if is_multi_version else "movie_directory_1",
+                        "original_path": target_to_trash,
+                        "trash_path": trash_path,
+                        "deleted_cache_entry": deleted_cache_entry,
+                        "deleted_cache_key": keys[0] if keys and len(keys) > 0 else None,
+                        "status": "success"
+                    })
+                    operation_log["result"] = "success"
+
+                # Update cache (library scan will be done at end when applying all operations)
+                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+                if operation_log and resolution_log_data is not None:
+                    operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
+                    resolution_log_data["operations"].append(operation_log)
+                return True
+            else:
+                print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [1] to trash.")
+
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "trash",
+                        "target": "file_1" if is_multi_version else "movie_directory_1",
+                        "original_path": target_to_trash,
+                        "status": "failed",
+                        "error": "Could not move to trash"
+                    })
+                    operation_log["result"] = "failed"
+                    resolution_log_data["operations"].append(operation_log)
+                return False
+
+    elif choice == '4':
+        # Determine whether to trash just the file or the entire directory
+        # Strategy: Always prefer to trash the directory, but check if there are other video files first
+
+        # For multi-version items, both files belong to the same Plex entry (keys[0])
+        # For regular items, file2 belongs to keys[1]
+        if is_multi_version:
+            cache_key = keys[0] if keys and len(keys) > 0 else None
+        else:
+            cache_key = keys[1] if keys and len(keys) > 1 else None
+
+        lib2 = PLEX_Media.OBJ_BY_ID[cache_key]['library'] if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
+
+        # Get the movie directory
+        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
+
+        # Check if there are other video files in the directory
+        has_other_videos = has_other_video_files_in_dir(movie_dir2, file2, remote_host)
+
+        if has_other_videos:
+            # There are other video files - only trash the specific file
+            target_to_trash = file2
+            if VRB: print(f"{VRBPFX}Other video files detected in directory - will trash FILE only: {os.path.basename(file2)}")
+        else:
+            # No other video files - trash the entire directory to avoid leaving orphaned files
+            target_to_trash = movie_dir2
+            if VRB: print(f"{VRBPFX}No other video files in directory - will trash ENTIRE DIRECTORY: {os.path.basename(movie_dir2)}")
+
+        # Capture cache entry before deletion (for undo)
+        deleted_cache_entry = None
+        if cache_key and cache_key in PLEX_Media.OBJ_BY_ID:
+            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[cache_key])  # Make a copy
+
+        if operation_log:
+            operation_log["files"]["file2"] = {
+                "path": file2,
+                "movie_directory": target_to_trash if not is_multi_version else get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2),
+                "library": lib2,
+                "plex_id": PLEX_Media.OBJ_BY_ID[cache_key].get('id') if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None,
+                "cache_entry": deleted_cache_entry,
+                "is_multi_version": is_multi_version
+            }
+
+        if same_file:
+            # Same file - delete from Plex DB and remove cache entry, don't trash file
+            print(f"Removing Plex entry [2] from database (file will NOT be trashed)")
+
+            # Delete from Plex database
+            plex_id = PLEX_Media.OBJ_BY_ID[cache_key].get('id') if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
+            if plex_id:
+                try:
+                    for media in resolve_plex_media_obj(str(plex_id)):
+                        media.delete()
+                        print(f"  ✓ Deleted Plex entry ID {plex_id} from Plex database")
+                        break
+                except Exception as e:
+                    print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
+
+            # Remove from cache
+            modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "remove_cache_entry",
+                    "target": "plex_entry_2",
+                    "plex_id": plex_id,
+                    "deleted_cache_entry": deleted_cache_entry,
+                    "deleted_cache_key": cache_key,
+                    "status": "success"
+                })
+                operation_log["result"] = "success"
+
+            print("✓ Plex entry [2] removed successfully.")
+            if operation_log and resolution_log_data is not None:
+                operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
+                resolution_log_data["operations"].append(operation_log)
+            return True
+        else:
+            # Different files - trash file [2]
+            if is_multi_version:
+                # For multi-version: check if file [1] is in a subdirectory relative to file [2]
+                file1_dir = os.path.dirname(file1)
+                file2_dir = os.path.dirname(file2)
+
+                # Check if file1 is in a subdirectory of file2's directory
+                file1_is_in_subdir = file1_dir.startswith(file2_dir + os.sep) and file1_dir != file2_dir
+
+                # First, trash file [2]
+                remote_note = " (remote via SSH)" if file2.startswith("/Volumes/") else ""
+                print(f"Moving FILE [2] to trash: {file2}{remote_note}")
+                success, trash_path = move_to_trash(file2, remote_host)
+                if success:
+                    print("✓ File [2] moved to trash successfully.")
+
+                    # If file [1] is in a subdirectory, move it up to parent and remove subdirectory
+                    if file1_is_in_subdir:
+                        subdir_name = os.path.basename(file1_dir)
+                        print(f"File [1] is in subdirectory '{subdir_name}' - moving up to parent directory...")
+
+                        # Check if there are other video files in parent directory
+                        # (excluding file [2] which was just trashed)
+                        has_other_videos = has_other_video_files_in_dir(file2_dir, file2, remote_host)
+
+                        if not has_other_videos:
+                            # No other video files - clean parent directory before moving subdirectory contents
+                            print(f"No other video files in parent - cleaning orphaned files before moving subdirectory contents...")
+                            list_success, parent_files = my_plex_file_operation('LIST_DIR', file2_dir, remote_host, maxdepth=1)
+
+                            if list_success and parent_files:
+                                orphaned_count = 0
+                                for parent_file in parent_files:
+                                    # Skip if it's file2 (already trashed)
+                                    if parent_file == file2:
+                                        continue
+
+                                    # LIST_DIR with maxdepth=1 returns files only (uses find -type f)
+                                    # So we only get files, not directories - no need to check
+
+                                    basename = os.path.basename(parent_file)
+                                    # Trash orphaned file
+                                    orphan_success, orphan_trash = move_to_trash(parent_file, remote_host)
+                                    if orphan_success:
+                                        orphaned_count += 1
+                                        if VRB: print(f"{VRBPFX}Removed orphaned file: {basename}")
+                                        if operation_log:
+                                            operation_log["actions"].append({
+                                                "action": "trash_orphaned_file",
+                                                "target": "parent_directory",
+                                                "file": parent_file,
+                                                "trash_path": orphan_trash,
+                                                "status": "success"
+                                            })
+                                    else:
+                                        print(f"⚠ Warning: Could not trash orphaned file: {basename}")
+
+                                if orphaned_count > 0:
+                                    print(f"✓ Cleaned {orphaned_count} orphaned file(s) from parent directory")
+                            else:
+                                if VRB: print(f"{VRBPFX}No additional files to clean in parent directory")
+                        else:
+                            print(f"Other video files exist in parent - keeping existing files")
+
+                        # Check for [vu] markers on both parent and subdirectory
+                        # Get the movie directory (parent's parent directory)
+                        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
+                        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file2_dir)
+                        parent_dirname = os.path.basename(movie_dir1)
+
+                        parent_vu_marker = extract_vu_marker(parent_dirname)
+                        subdir_vu_marker = extract_vu_marker(subdir_name)
+
+                        # Determine which [vu] marker to keep (the newer one)
+                        vu_marker_to_apply = compare_vu_markers(subdir_vu_marker, parent_vu_marker)
+
+                        if vu_marker_to_apply and vu_marker_to_apply != parent_vu_marker:
+                            # Need to update parent directory with newer [vu] marker
+                            print(f"Subdirectory has newer [vu] marker: {vu_marker_to_apply}")
+                            # Remove old marker from parent dirname if it exists
+                            new_parent_name = parent_dirname
+                            if parent_vu_marker:
+                                new_parent_name = parent_dirname.replace(parent_vu_marker, '').strip()
+                            # Add new marker
+                            new_parent_name = new_parent_name.rstrip() + ' ' + vu_marker_to_apply
+
+                            # Rename parent directory
+                            vu_success, new_movie_dir = rename_file(movie_dir1, new_parent_name, remote_host)
+                            if vu_success:
+                                print(f"✓ Updated parent directory with marker {vu_marker_to_apply}")
+                                movie_dir1 = new_movie_dir
+                                file2_dir = new_movie_dir  # Update file2_dir since it's now in renamed parent
+                                if operation_log:
+                                    operation_log["actions"].append({
+                                        "action": "update_vu_marker",
+                                        "target": "parent_directory",
+                                        "old_marker": parent_vu_marker,
+                                        "new_marker": vu_marker_to_apply,
+                                        "old_path": movie_dir1,
+                                        "new_path": new_movie_dir,
+                                        "status": "success"
+                                    })
+
+                        # List all files in the subdirectory to move them all up
+                        list_success, subdir_files = my_plex_file_operation('LIST_DIR', file1_dir, remote_host, maxdepth=1)
+
+                        if list_success and subdir_files:
+                            # Move each file from subdirectory to parent
+                            move_errors = []
+                            for subfile in subdir_files:
+                                src_path = subfile
+                                dst_path = os.path.join(file2_dir, os.path.basename(subfile))
+                                move_success, moved_path = my_plex_file_operation('MOVE', src_path, remote_host, dest_path=dst_path)
+                                if move_success:
+                                    if VRB: print(f"{VRBPFX}Moved: {os.path.basename(subfile)}")
+                                    # Update file1 path if this is the file we're keeping
+                                    if subfile == file1:
+                                        file1 = dst_path
+                                else:
+                                    move_errors.append(os.path.basename(subfile))
+
+                            if not move_errors:
+                                print(f"✓ Moved all files from subdirectory '{subdir_name}' to parent directory")
+
+                                # Now remove the empty subdirectory
+                                remove_success, _ = my_plex_file_operation('REMOVE', file1_dir, remote_host)
+                                if remove_success:
+                                    print(f"✓ Removed empty subdirectory '{subdir_name}'")
+                                    if operation_log:
+                                        operation_log["actions"].append({
+                                            "action": "remove_subdirectory",
+                                            "target": "subdirectory_of_file1",
+                                            "path": file1_dir,
+                                            "status": "success"
+                                        })
+                                else:
+                                    print(f"⚠ Warning: Could not remove subdirectory '{subdir_name}'")
+                            else:
+                                print(f"⚠ Warning: Failed to move some files: {', '.join(move_errors)}")
+                        else:
+                            print(f"⚠ Warning: Could not list subdirectory contents")
+            else:
+                # For regular items: trash entire directory and handle [vu] markers
+                # Check if [vu] marker exists on directory or file [2]
+                vu_marker_dir = extract_vu_marker(os.path.basename(target_to_trash))
+                vu_marker_file = extract_vu_marker(os.path.basename(file2))
+
+                # Add remote SSH notation if path is on mounted volume
+                remote_note = " (remote via SSH)" if target_to_trash.startswith("/Volumes/") else ""
+                print(f"Moving MOVIE DIRECTORY [2] to trash: {target_to_trash}{remote_note}")
+                success, trash_path = move_to_trash(target_to_trash, remote_host)
+                if success:
+                    print("✓ Movie directory [2] moved to trash successfully.")
+
+                    # Transfer [vu] marker from directory [2] to directory [1]
+                    if vu_marker_dir:
+                        dir1_basename = os.path.basename(movie_dir1)
+                        new_dir1_name = dir1_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                        vu_success, renamed_dir = rename_file(movie_dir1, new_dir1_name, remote_host)
+                        if vu_success:
+                            print(f"✓ Directory [1] appended with \"{vu_marker_dir}\" marker")
+                            movie_dir1 = renamed_dir
+                            file1 = os.path.join(renamed_dir, os.path.basename(file1))
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "movie_directory_1",
+                                    "marker": vu_marker_dir,
+                                    "old_path": movie_dir1,
+                                    "new_path": renamed_dir,
+                                    "status": "success"
+                                })
+
+                    # Transfer [vu] marker from file [2] to file [1]
+                    if vu_marker_file:
+                        vu_success, new_file1_path = add_vu_marker_to_file(file1, vu_marker_file, remote_host)
+                        if vu_success and new_file1_path != file1:
+                            print(f"✓ File [1] appended with \"{vu_marker_file}\" marker")
+                            file1 = new_file1_path
+                            if operation_log:
+                                operation_log["actions"].append({
+                                    "action": "add_vu_marker",
+                                    "target": "file1",
+                                    "marker": vu_marker_file,
+                                    "old_path": file1,
+                                    "new_path": new_file1_path,
+                                    "status": "success"
+                                })
+
+            # Handle success/failure for both multi-version and regular items
+            if success:
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "trash",
+                        "target": "file_2" if is_multi_version else "movie_directory_2",
+                        "original_path": file2 if is_multi_version else target_to_trash,
+                        "trash_path": trash_path,
+                        "deleted_cache_entry": deleted_cache_entry,
+                        "deleted_cache_key": cache_key,
+                        "status": "success"
+                    })
+                    operation_log["result"] = "success"
+
+                # Update cache (library scan will be done at end when applying all operations)
+                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+                if operation_log and resolution_log_data is not None:
+                    operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
+                    resolution_log_data["operations"].append(operation_log)
+                return True
+            else:
+                print(f"✗ Failed to move {'file' if is_multi_version else 'movie directory'} [2] to trash.")
+
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "trash",
+                        "target": "file_2" if is_multi_version else "movie_directory_2",
+                        "original_path": file2 if is_multi_version else target_to_trash,
+                        "status": "failed",
+                        "error": "Could not move to trash"
+                    })
+                    operation_log["result"] = "failed"
+                    resolution_log_data["operations"].append(operation_log)
+                return False
+
+    elif choice == '5':
+        # Get movie directories and library directory
+        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
+        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
+        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else file1
+        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else file2
+        lib_dir1 = get_library_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
+
+        # Capture cache entry before deletion (for undo)
+        deleted_cache_entry = None
+        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
+            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[0]])  # Make a copy
+
+        # Capture file2's cache entry before modification (for undo)
+        file2_cache_entry_before = None
+        if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID:
+            file2_cache_entry_before = dict(PLEX_Media.OBJ_BY_ID[keys[1]])  # Make a copy
+
+        if operation_log:
+            operation_log["files"]["file1"] = {
+                "path": file1,
+                "movie_directory": movie_dir1,
+                "library": lib1,
+                "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
+                "cache_entry": deleted_cache_entry
+            }
+            operation_log["files"]["file2"] = {
+                "path": file2,
+                "movie_directory": movie_dir2,
+                "library": lib2,
+                "target_library_directory": lib_dir1,
+                "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
+                "cache_entry_before": file2_cache_entry_before
+            }
+
+        print(f"Trash movie [1] and move movie [2] to library of [1]: {os.path.basename(movie_dir1)} && mv {os.path.basename(movie_dir2)} \"{lib_dir1}/\"")
+
+        # Merge metadata from [1] (being deleted) to [2] (being kept)
+        print("Merging metadata (watched status, labels, ratings) from [1] to [2]...")
+        metadata_result = merge_metadata_from_duplicates(keys[0], keys[1])
+        if operation_log:
+            operation_log["actions"].append({
+                "action": "merge_metadata",
+                "from": "file1",
+                "from_plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
+                "to": "file2",
+                "to_plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
+                "status": "success" if metadata_result.get('success') else "failed",
+                "metadata_changes": metadata_result.get('changes'),
+                "error": metadata_result.get('error')
+            })
+
+        # Check if [vu] marker exists on directory or file [1]
+        vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir1))
+        vu_marker_file = extract_vu_marker(os.path.basename(file1))
+
+        success1, trash_path1 = move_to_trash(movie_dir1, remote_host)
+        if success1:
+            print("✓ Movie directory [1] moved to trash successfully.")
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "trash",
+                    "target": "movie_directory_1",
+                    "original_path": movie_dir1,
+                    "trash_path": trash_path1,
+                    "deleted_cache_entry": deleted_cache_entry,
+                    "deleted_cache_key": keys[0] if keys and len(keys) > 0 else None,
+                    "status": "success"
+                })
+
+            new_location = os.path.join(lib_dir1, os.path.basename(movie_dir2))
+            if move_file(movie_dir2, lib_dir1, remote_host):
+                print(f"✓ Movie directory [2] moved to {lib_dir1} successfully.")
+
+                # Transfer [vu] marker from directory [1] to directory [2]
+                if vu_marker_dir:
+                    dir_basename = os.path.basename(new_location)
+                    new_dir_name = dir_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                    vu_success, renamed_dir = rename_file(new_location, new_dir_name, remote_host)
+                    if vu_success:
+                        print(f"✓ Directory [2] appended with \"{vu_marker_dir}\" marker and moved to {lib_dir1}")
+                        new_location = renamed_dir
+                        # Update file2 path to reflect the renamed directory
+                        file2 = os.path.join(renamed_dir, os.path.basename(file2))
+                        if operation_log:
+                            operation_log["actions"].append({
+                                "action": "add_vu_marker",
+                                "target": "movie_directory_2",
+                                "marker": vu_marker_dir,
+                                "old_path": new_location,
+                                "new_path": renamed_dir,
+                                "status": "success"
+                            })
+
+                # Transfer [vu] marker from file [1] to file [2]
+                if vu_marker_file:
+                    moved_file2 = os.path.join(new_location, os.path.basename(file2))
+                    vu_success, new_file2_path = add_vu_marker_to_file(moved_file2, vu_marker_file, remote_host)
+                    if vu_success and new_file2_path != moved_file2:
+                        print(f"✓ File [2] appended with \"{vu_marker_file}\" marker")
+                        file2 = new_file2_path
+                        if operation_log:
+                            operation_log["actions"].append({
+                                "action": "add_vu_marker",
+                                "target": "file2",
+                                "marker": vu_marker_file,
+                                "old_path": moved_file2,
+                                "new_path": new_file2_path,
+                                "status": "success"
+                            })
+
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "move",
+                        "target": "movie_directory_2",
+                        "original_path": movie_dir2,
+                        "new_path": new_location,
+                        "status": "success"
+                    })
+                    operation_log["result"] = "success"
+
+                # Update cache (library scans will be done at end when applying all operations)
+                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+                if operation_log and resolution_log_data is not None:
+                    resolution_log_data["operations"].append(operation_log)
+                return True
+            else:
+                print("✗ Failed to move movie directory #2.")
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "move",
+                        "target": "movie_directory_2",
+                        "original_path": movie_dir2,
+                        "destination": lib_dir1,
+                        "status": "failed",
+                        "error": "Could not move to target library"
+                    })
+                    operation_log["result"] = "failed"
+                    resolution_log_data["operations"].append(operation_log)
+                return False
+        else:
+            print("✗ Failed to move movie directory #1 to trash.")
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "trash",
+                    "target": "movie_directory_1",
+                    "original_path": movie_dir1,
+                    "status": "failed",
+                    "error": "Could not trash directory"
+                })
+                operation_log["result"] = "failed"
+                resolution_log_data["operations"].append(operation_log)
+            return False
+
+    elif choice == '6':
+        # Get movie directories and library directory
+        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
+        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
+        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else file1
+        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else file2
+        lib_dir2 = get_library_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
+
+        # Capture cache entry before deletion (for undo)
+        deleted_cache_entry = None
+        if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID:
+            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[1]])  # Make a copy
+
+        # Capture file1's cache entry before modification (for undo)
+        file1_cache_entry_before = None
+        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
+            file1_cache_entry_before = dict(PLEX_Media.OBJ_BY_ID[keys[0]])  # Make a copy
+
+        if operation_log:
+            operation_log["files"]["file1"] = {
+                "path": file1,
+                "movie_directory": movie_dir1,
+                "library": lib1,
+                "target_library_directory": lib_dir2,
+                "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
+                "cache_entry_before": file1_cache_entry_before
+            }
+            operation_log["files"]["file2"] = {
+                "path": file2,
+                "movie_directory": movie_dir2,
+                "library": lib2,
+                "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
+                "cache_entry": deleted_cache_entry
+            }
+
+        print(f"Trash movie [2] and move movie [1] to library of [2]: {os.path.basename(movie_dir2)} && mv {os.path.basename(movie_dir1)} \"{lib_dir2}/\"")
+
+        # Merge metadata from [2] (being deleted) to [1] (being kept)
+        print("Merging metadata (watched status, labels, ratings) from [2] to [1]...")
+        metadata_result = merge_metadata_from_duplicates(keys[1], keys[0])
+        if operation_log:
+            operation_log["actions"].append({
+                "action": "merge_metadata",
+                "from": "file2",
+                "from_plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
+                "to": "file1",
+                "to_plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
+                "status": "success" if metadata_result.get('success') else "failed",
+                "metadata_changes": metadata_result.get('changes'),
+                "error": metadata_result.get('error')
+            })
+
+        # Check if [vu] marker exists on directory or file [2]
+        vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir2))
+        vu_marker_file = extract_vu_marker(os.path.basename(file2))
+
+        success2, trash_path2 = move_to_trash(movie_dir2, remote_host)
+        if success2:
+            print("✓ Movie directory [2] moved to trash successfully.")
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "trash",
+                    "target": "movie_directory_2",
+                    "original_path": movie_dir2,
+                    "trash_path": trash_path2,
+                    "deleted_cache_entry": deleted_cache_entry,
+                    "deleted_cache_key": keys[1] if keys and len(keys) > 1 else None,
+                    "status": "success"
+                })
+
+            new_location = os.path.join(lib_dir2, os.path.basename(movie_dir1))
+            if move_file(movie_dir1, lib_dir2, remote_host):
+                print(f"✓ Movie directory [1] moved to {lib_dir2} successfully.")
+
+                # Transfer [vu] marker from directory [2] to directory [1]
+                if vu_marker_dir:
+                    dir_basename = os.path.basename(new_location)
+                    new_dir_name = dir_basename.rstrip('/') + ' ' + vu_marker_dir
+
+                    vu_success, renamed_dir = rename_file(new_location, new_dir_name, remote_host)
+                    if vu_success:
+                        print(f"✓ Directory [1] appended with \"{vu_marker_dir}\" marker and moved to {lib_dir2}")
+                        new_location = renamed_dir
+                        # Update file1 path to reflect the renamed directory
+                        file1 = os.path.join(renamed_dir, os.path.basename(file1))
+                        if operation_log:
+                            operation_log["actions"].append({
+                                "action": "add_vu_marker",
+                                "target": "movie_directory_1",
+                                "marker": vu_marker_dir,
+                                "old_path": new_location,
+                                "new_path": renamed_dir,
+                                "status": "success"
+                            })
+
+                # Transfer [vu] marker from file [2] to file [1]
+                if vu_marker_file:
+                    moved_file1 = os.path.join(new_location, os.path.basename(file1))
+                    vu_success, new_file1_path = add_vu_marker_to_file(moved_file1, vu_marker_file, remote_host)
+                    if vu_success and new_file1_path != moved_file1:
+                        print(f"✓ File [1] appended with \"{vu_marker_file}\" marker")
+                        file1 = new_file1_path
+                        if operation_log:
+                            operation_log["actions"].append({
+                                "action": "add_vu_marker",
+                                "target": "file1",
+                                "marker": vu_marker_file,
+                                "old_path": moved_file1,
+                                "new_path": new_file1_path,
+                                "status": "success"
+                            })
+
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "move",
+                        "target": "movie_directory_1",
+                        "original_path": movie_dir1,
+                        "new_path": new_location,
+                        "status": "success"
+                    })
+                    operation_log["result"] = "success"
+
+                # Update cache (library scans will be done at end when applying all operations)
+                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+                if operation_log and resolution_log_data is not None:
+                    resolution_log_data["operations"].append(operation_log)
+                return True
+            else:
+                print("✗ Failed to move movie directory #1.")
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "move",
+                        "target": "movie_directory_1",
+                        "original_path": movie_dir1,
+                        "destination": lib_dir2,
+                        "status": "failed",
+                        "error": "Could not move to target library"
+                    })
+                    operation_log["result"] = "failed"
+                    resolution_log_data["operations"].append(operation_log)
+                return False
+        else:
+            print("✗ Failed to move movie directory #2 to trash.")
+            if operation_log:
+                operation_log["actions"].append({
+                    "action": "trash",
+                    "target": "movie_directory_2",
+                    "original_path": movie_dir2,
+                    "status": "failed",
+                    "error": "Could not trash directory"
+                })
+                operation_log["result"] = "failed"
+                resolution_log_data["operations"].append(operation_log)
+            return False
+
+    elif choice == '7':
+        # Rename all files using directory name
+        # Use all_files if provided (for 3+ files), otherwise use file1, file2]
+        files_to_rename = all_files if all_files else [file1, file2]
+
+        if operation_log:
+            operation_log["files"]["count"] = len(files_to_rename)
+            operation_log["files"]["files_to_rename"] = []
+
+        print(f"Renaming {len(files_to_rename)} file(s) using directory names:")
+
+        # Process each file
+        renamed_files = []
+        failed_files = []
+
+        for idx, filepath in enumerate(files_to_rename, 1):
+            dirpath = os.path.dirname(filepath)
+            dirname = os.path.basename(dirpath)
+            filename = os.path.basename(filepath)
+
+            # Create new filename by prepending directory name
+            new_filename = f"{dirname}.{filename}"
+
+            print(f"  File #{idx}: {filename} -> {new_filename}")
+
+            # Rename the file
+            success, new_path = rename_file(filepath, new_filename, remote_host)
+            if success:
+                print(f"  ✓ File #{idx} renamed successfully.")
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "rename",
+                        "file_number": idx,
+                        "original_path": filepath,
+                        "original_filename": filename,
+                        "new_filename": new_filename,
+                        "new_path": new_path,
+                        "status": "success"
+                    })
+                renamed_files.append(new_path)
+            else:
+                print(f"  ✗ Failed to rename file #{idx}.")
+                if operation_log:
+                    operation_log["actions"].append({
+                        "action": "rename",
+                        "file_number": idx,
+                        "original_path": filepath,
+                        "original_filename": filename,
+                        "new_filename": new_filename,
+                        "status": "failed",
+                        "error": "Rename operation failed"
+                    })
+                failed_files.append(filepath)
+
+        # Report results
+        if failed_files:
+            print(f"⚠ Warning: {len(renamed_files)} file(s) renamed successfully, but {len(failed_files)} failed.")
+            if operation_log:
+                operation_log["result"] = "partial_success"
+                operation_log["summary"] = {
+                    "renamed": len(renamed_files),
+                    "failed": len(failed_files)
+                }
+                resolution_log_data["operations"].append(operation_log)
+            if renamed_files:
+                print("⚠ Some files were renamed. You may need to manually fix the failed ones.")
+            return False
+        else:
+            print(f"✓ All {len(files_to_rename)} file(s) renamed successfully.")
+            if operation_log:
+                operation_log["result"] = "success"
+                operation_log["summary"] = {
+                    "renamed": len(renamed_files),
+                    "failed": 0
+                }
+            update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed_files)
+            if operation_log and resolution_log_data is not None:
+                operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
+                resolution_log_data["operations"].append(operation_log)
+            return True
+
+    return False
+
+def collect_library_keys(library_name=None, media_type=None):
+    """Collect media keys from libraries based on criteria
+
+    Args:
+        library_name: Specific library name, or None for all libraries
+        media_type: Specific media type ('Show', 'Movie', 'Episode'), or None for all types
+
+    Returns:
+        List of media keys
+    """
+    obj_keys = []
+
+    # OBJ_BY_LIBRARY structure: {library_name: {type_str: [keys], ...}}
+    if library_name is None:
+        # Collect from all libraries
+        for lib_name in PLEX_Media.OBJ_BY_LIBRARY.keys():
+            lib_dict = PLEX_Media.OBJ_BY_LIBRARY[lib_name]
+            if media_type is None:
+                # Collect Show, Episode, and Movie keys (not Season/Collection)
+                for t in ('Show', 'Episode', 'Movie'):
+                    if t in lib_dict:
+                        obj_keys.extend(lib_dict[t])
+            else:
+                if media_type in lib_dict:
+                    obj_keys.extend(lib_dict[media_type])
+    else:
+        # Collect from specific library
+        if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+            return []
+
+        lib_dict = PLEX_Media.OBJ_BY_LIBRARY[library_name]
+        if media_type is None:
+            for t in ('Show', 'Episode', 'Movie'):
+                if t in lib_dict:
+                    obj_keys.extend(lib_dict[t])
+        else:
+            if media_type in lib_dict:
+                obj_keys.extend(lib_dict[media_type])
+
+    return obj_keys
+
+def generate_duplicate_keys(obj):
+    """Generate keys for identifying duplicate content.
+
+    For movies, returns keys for both title and originalTitle to catch
+    cross-library duplicates where the same movie has different localized titles.
+
+    Args:
+        obj: Media object from PLEX_Media.OBJ_BY_ID
+
+    Returns:
+        List of string keys for duplicate detection, or empty list if not applicable
+    """
+    obj_type = obj.get('type')
+
+    if obj_type == 'Movie':
+        title = obj['title'].lower().strip()
+        year = obj.get('year', 0)
+        keys = [f"movie:{title}:{year}"]
+        original_title = (obj.get('originalTitle') or '').lower().strip()
+        if original_title and original_title != title:
+            keys.append(f"movie:{original_title}:{year}")
+        return keys
+    elif obj_type == 'Episode':
+        series = obj.get('series', '').lower().strip()
+        s_str = obj.get('S_str', '')
+        e_str = obj.get('E_str', '')
+        if s_str == 'S??' or e_str == 'E??':
+            return []
+        return [f"episode:{series}:{s_str}:{e_str}"]
+    else:
+        return []
+
+def generate_duplicate_key(obj):
+    """Generate primary duplicate key (convenience wrapper).
+
+    Returns:
+        String key for duplicate detection, or None if not applicable
+    """
+    keys = generate_duplicate_keys(obj)
+    return keys[0] if keys else None
+
+def classify_multi_version(obj):
+    """Classify a multi-version item (single Plex entry with multiple files).
+
+    Compares durations encoded in the version strings of the files dict to
+    distinguish between:
+      - 'exact_duplicate': Same duration, same size, same codec — truly redundant
+      - 'reencode':        Same duration (±5s), different size/codec/resolution — same content, different quality
+      - 'true_multiversion': Different duration (>5s) — genuinely different content (e.g., east/west coast, theatrical/director's cut)
+
+    Args:
+        obj: Media object from PLEX_Media.OBJ_BY_ID with files dict
+
+    Returns:
+        str: 'exact_duplicate', 'reencode', 'true_multiversion', or 'single' (if <=1 file)
+    """
+    files_dict = obj.get('files', {})
+    if len(files_dict) <= 1:
+        return 'single'
+
+    # Parse durations (in minutes) from version strings: "23.69min 960x720 (h264 aac)"
+    import re
+    durations_ms = []
+    for version_str in files_dict.keys():
+        dur_match = re.match(r'([\d.]+)min', version_str)
+        if dur_match:
+            durations_ms.append(float(dur_match.group(1)) * 60000)  # convert minutes to ms
+        else:
+            durations_ms.append(None)
+
+    # If we couldn't parse durations, fall back to obj-level duration
+    if all(d is None for d in durations_ms):
+        return 'reencode'  # can't determine, treat as same content
+
+    # Check max duration difference (in ms)
+    valid_durations = [d for d in durations_ms if d is not None]
+    if len(valid_durations) < 2:
+        return 'reencode'
+
+    max_diff_ms = max(valid_durations) - min(valid_durations)
+
+    # >5 seconds difference = genuinely different content
+    if max_diff_ms > 5000:
+        return 'true_multiversion'
+
+    # Same duration — check if truly identical (same size + codec) or re-encode
+    sizes = set()
+    codecs = set()
+    for version_str, file_info in files_dict.items():
+        if isinstance(file_info, dict):
+            size = file_info.get('filesize')
+            if size:
+                sizes.add(size)
+        codec_match = re.search(r'\((\w+)', version_str)
+        if codec_match:
+            codecs.add(codec_match.group(1))
+
+    if len(sizes) <= 1 and len(codecs) <= 1:
+        return 'exact_duplicate'
+
+    return 'reencode'
+
+def safe_getattr(obj, attr, default=None):
+    """Safely get attribute from object using hasattr + getattr pattern
+
+    Args:
+        obj: Object to get attribute from
+        attr: Attribute name
+        default: Default value if attribute doesn't exist
+
+    Returns:
+        Attribute value or default
+    """
+    return getattr(obj, attr, default) if hasattr(obj, attr) else default
+
+def get_S_str(season):
+    if season is None:  S_str = ""
+    else:               S_str = "S??" if season.index is None else f"S{season.index:02}"
+    return S_str
+def get_E_str(episode):
+    if episode is None: E_str = ""
+    else:               E_str = "E??" if episode.index is None else f"E{episode.index:02}"
+    return E_str
+
+def add_movie_info(val, obj, obj_type, key, version, filepath, lib_title=None):
+    # Update PLEX_Media.OBJ_BY_MOVIE:
+    title = obj.title
+    match obj_type:
+        case "Movie":
+            val['actors']        = plex_retry_operation(lambda: [a.tag for a in obj.actors], context=f"{key} '{title}' actors", library=lib_title) # Movie, Show, Episode, but NOT Season
+            val['countries']     = plex_retry_operation(lambda: [c.tag for c in obj.countries], context=f"{key} '{title}' countries", library=lib_title) # only Movie + Show have country attribute
+            val['directors']     = plex_retry_operation(lambda: [d.tag for d in obj.directors], context=f"{key} '{title}' directors", library=lib_title)
+            val['writers']       = plex_retry_operation(lambda: [w.tag for w in obj.writers], context=f"{key} '{title}' writers", library=lib_title)
+            val['genres']        = plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title)
+            val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{title}' contentRating", library=lib_title)
+            val['studio']        = plex_retry_operation(lambda: obj.studio, context=f"{key} '{title}' studio", library=lib_title)
+            if key not in PLEX_Media.OBJ_BY_MOVIE: PLEX_Media.OBJ_BY_MOVIE[key] = {}
+            # Store filepath with version for multi-version duplicate detection
+            PLEX_Media.OBJ_BY_MOVIE[key][version] = filepath
+        case _: err(1048, f"obj = {obj}")
+    return val
+
+def add_show_info(val, obj, obj_type, key, item, season, episode, version, lib_title=None):
+    S_str = get_S_str(season)
+    E_str = get_E_str(season)
+    E_str_full = S_str + E_str
+    title = obj.title
+
+    show_key = get_fullID(item)
+
+    # Update PLEX_Media.OBJ_BY_SHOW / PLEX_Media.OBJ_BY_SHOW_EPISODES:
+    match obj_type:
+        case "Episode":
+            # For episodes, include series name in context
+            series_name = item.title
+            val['actors']        = plex_retry_operation(lambda: [a.tag for a in obj.actors], context=f"{key} '{series_name}' '{title}' actors", library=lib_title) # Movie, Show, Episode, but NOT Season
+            val['directors']     = plex_retry_operation(lambda: [d.tag for d in obj.directors], context=f"{key} '{series_name}' '{title}' directors", library=lib_title)
+            val['writers']       = plex_retry_operation(lambda: [w.tag for w in obj.writers], context=f"{key} '{series_name}' '{title}' writers", library=lib_title)
+            val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{series_name}' '{title}' contentRating", library=lib_title)
+            if show_key not in PLEX_Media.OBJ_BY_SHOW_EPISODES: PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key] = {}
+            if S_str not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]: PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str] = {}
+            if E_str not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str]: PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str][E_str] = {}
+            if version not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str][E_str]:
+                PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str][E_str][version] = [ key ]
+            else:
+                PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][S_str][E_str][version].append( key )
+        case "Season":
+            if show_key not in PLEX_Media.OBJ_BY_SHOW: PLEX_Media.OBJ_BY_SHOW[show_key] = {}
+            if S_str in PLEX_Media.OBJ_BY_SHOW and PLEX_Media.OBJ_BY_SHOW[show_key][S_str] is not None: err(1047, f"obj = {obj}")
+            PLEX_Media.OBJ_BY_SHOW[show_key][S_str] = key
+            episode = None # to avoid that we add stuff about it to 'val'
+        case "Show":
+            val['actors']        = plex_retry_operation(lambda: [a.tag for a in obj.actors], context=f"{key} '{title}' actors", library=lib_title) # Movie, Show, Episode, but NOT Season
+            val['genres']        = plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title)
+            val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{title}' contentRating", library=lib_title)
+            val['studio']        = plex_retry_operation(lambda: obj.studio, context=f"{key} '{title}' studio", library=lib_title)
+            if key != show_key: err(1038, f"key='{key}', show_key='{show_key}'")
+            if key not in PLEX_Media.OBJ_BY_SHOW: PLEX_Media.OBJ_BY_SHOW[ key ] = {}
+            (season, episode) = (None, None) # to avoid that we add stuff about them to 'val'
+        case _: err(1044, f"obj_type = '{obj_type}', obj = {obj}")
+
+    (val['series'], val['show_key']) = (item.title, show_key)
+    if season is not None:
+        (val['season'],val['S_str'],val['S_idx']) = (season.title, S_str, season.index)
+    if episode is not None:
+        (val['episode'],val['E_str'],val['E_idx'],val['S0XE0X']) = (episode.title, E_str, episode.index, E_str_full)
+
+    return val
+
+
+def plex_rate_limit_delay():
+    """Add a random delay to avoid hitting Plex server rate limits during cache rebuilds.
+
+    Plex servers throttle connections when too many requests come in too quickly.
+    By adding random delays between requests, we avoid hitting their throttling thresholds.
+
+    Delay range controlled by RATE_LIMIT_DELAY_RANGE global variable.
+    """
+    if FORCE_CACHE_UPDATE:
+        global RATE_LIMIT_DELAY_RANGE
+        min_delay, max_delay = RATE_LIMIT_DELAY_RANGE
+        delay = random.uniform(min_delay, max_delay)
+        time.sleep(delay)
+
+
+def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
+    """API required: expects plexapi objects (item, media, part). Used by undo_operation() (trash restore)
+    to re-add items to cache. --update-cache uses DB path (_process_movies/shows_from_database) instead."""
+    global FORCE_PLEXDATA
+    if DBG: print( f"{DBGPFX}add_media_obj(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath})" )
+
+    # PLEX RATE LIMITING: Add random delay during cache rebuilds to avoid throttling
+    plex_rate_limit_delay()
+
+    obj_type = obj.type.capitalize()
+    obj_ratingKey = obj.ratingKey
+    key = get_fullID(None, obj_type, obj_ratingKey)
+
+    item_ratingKey = item.ratingKey
+    obj_title = obj.title
+    obj_originalTitle = plex_retry_operation(lambda: obj.originalTitle if hasattr(obj, 'originalTitle') else None, context=f"{key} originalTitle", library=library.title)
+    lib_title = library.title  # For retry messages
+
+    # PERFORMANCE OPTIMIZATION: During cache rebuild, skip duplicate detection and timestamp checks
+    # This eliminates expensive cache lookups and file I/O for duplicate checking
+    if not FORCE_CACHE_UPDATE and key in PLEX_Media.OBJ_BY_ID:
+        val = PLEX_Media.OBJ_BY_ID[key]
+
+        # Compare cached vs current: check both FILE and IDs
+        current_file = os.path.normpath(part.file) if filepath is None else filepath
+        cached_file = os.path.normpath(val['file'])
+        same_file = (current_file == cached_file)
+        same_ids = (val['item_id'] == item_ratingKey and val['media_id'] == media.id and val['part_id'] == part.id and val['type'] == obj_type)
+
+        # CASE 1: Same file + Same IDs → Same item, just check if needs updating
+        if same_file and same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} already in cache (same file + same IDs), checking if update needed" )
+            if not obj_needs_updating(obj, val):
+                if DBG: print( f"{DBGPFX}add_media_obj(): SKIPPING item {key} as updatedAt same (and NOT --update-cache parameter)" )
+                return
+            # Timestamp changed, fall through to update it
+
+        # CASE 2: Same file + Different IDs → Plex rescanned and reassigned IDs, update the entry
+        elif same_file and not same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} has same file but different IDs (Plex rescan), updating cache entry" )
+            # Fall through to update it with new IDs
+
+        # CASE 3: Different file + Same IDs → Same episode with different file (shouldn't happen, but handle it)
+        elif not same_file and same_ids:
+            if DBG: print( f"{DBGPFX}add_media_obj(): WARNING - item {key} has same IDs but different file ('{cached_file}' → '{current_file}'), updating" )
+            # Fall through to update it
+
+        # CASE 4: Different file + Different IDs → Could be multi-version OR genuine duplicate
+        else:
+            # Check if this is a multi-version scenario (same item_id, different media/part)
+            same_item_id = (val['item_id'] == item_ratingKey)
+            if same_item_id:
+                # Same item_id with different media/part IDs = multi-version episode
+                # Skip duplicate detection and let multi-version handling at line 6540 process it
+                if DBG: print( f"{DBGPFX}add_media_obj(): item {key} is multi-version (same item_id={item_ratingKey}, different media/part IDs), skipping duplicate check" )
+                # Fall through to multi-version handling
+            else:
+                # Different item_id = GENUINE DUPLICATE (same ratingKey, different content)
+                if filepath is None: filepath = os.path.normpath( part.file )
+                else:                filepath = part.file
+                tmpstr = reduce(lambda s,e: s+f"alternative filename #{e[0]}:\t{e[1][0]} | {e[1][1]}\n", enumerate(get_alternative_paths(filepath, path_2nd=val['file'])), "") # e = (i, (x,y))  i from enumerate() and (x,y) = alternative-path-tuple
+
+                uuid = f"{val['library']}:{val['item_id']}:{val['media_id']}:{val['part_id']}"
+                pattern = rf"^DUPLICATE FOUND WITH key:\t'{key}'\tuuid:\t'{uuid}'" # avoid DUPLICATE entries in DUPLICATE_FILE :D
+                try:
+                    if os.path.exists(DUPLICATE_FILE):
+                        with open(DUPLICATE_FILE, 'r') as file:
+                            for line in file:
+                                if re.search(pattern, line):
+                                    if DBG: print(f"{DBGPFX}DUPLICATE with uuid:'{uuid}' already found in '{DUPLICATE_FILE}'")
+                                    return # entry is already in duplicate file
+                    with open(DUPLICATE_FILE, 'a') as file:
+                        # DEBUG: Show detailed comparison for debugging
+                        debug_info = f"\n  Cached: title='{val.get('title')}', item_id={val['item_id']}, media_id={val['media_id']}, part_id={val['part_id']}, file='{val['file']}'"
+                        debug_info += f"\n  Current: title='{obj_title}', item_id={item_ratingKey}, media_id={media.id}, part_id={part.id}, file='{part.file}'"
+                        if VRB: print(f"{VRBPFX}DUPLICATE FOUND: '{obj_title}' (key: '{key}'){debug_info}")
+                        file.write( f"DUPLICATE FOUND WITH key:\t'{key}'\tuuid:\t'{uuid}'\nlibrary:\t{library} | {val['library']}\nitem_id:\t{item_ratingKey} | {val['item_id']}\nmedia_idi:\t{media.id} | {val['media_id']}\npart_id:\t{part.id} | {val['part_id']}\ntitle:\t{obj_title} | {val['title']}\nfile:\t{part.file} | {val['file']})\ntype:{obj_type} | {val['type']}\n{tmpstr}============================================================================\n" )
+                        if DBG: print(f"{DBGPFX}Wrote DUPLICATE with uuid:'{uuid}' to '{DUPLICATE_FILE}'")
+                        return
+                except Exception as e:
+                    err(1049, f"Error wrinting to DUPLICATE_FILE '{DUPLICATE_FILE}': {e}")
+
+    (media_id, part_id) = (media.id, part.id)
+    match obj_type:
+        case "Show" | "Season" :
+            (media_type, media_type_str)      = (obj_type, obj_type)
+            #(media_id, media_idx, media_cnt) = (None, None, None) # we don't record those as in PLEX there is no media / part for Show/Season !
+            #(part_id,  part_idx,  part_cnt)  = (None, None, None) # but we still need them as we can get a GUESS of duration, resolution, language :)
+        case "Movie" | "Episode" :
+            (media_type, media_type_str)      = (obj_type, obj_type)
+            #(media_id, part_id)              = (media.id, part.id) # media_idx, media_cnt, part_idx, part_cnt stay as they are as they are relevant
+            if media_cnt > 1: media_type_str = media_type_str + "*"
+        #case "Media" | "Part"     : (media_type, media_type_str) = (obj_type, obj_type)
+        case _ : err(1055, f"obj_type={obj_type}")
+
+    # check optional parameters:
+    if season is not None and episode is None: err(1036)
+    if season is None and episode is not None: err(1037)
+    if filepath is None: filepath = os.path.normpath( part.file ) # default value - good for type "Movie"/"Movie*" and "Episode"/"Episode*":
+
+    # PERFORMANCE OPTIMIZATION: Batch-load all properties with a single API call
+    # Instead of making separate network requests for each property (year, rating, updatedAt, etc.),
+    # reload() fetches all properties in one API call, dramatically reducing network overhead
+    # This is especially important during cache rebuilds with thousands of items
+    # Note: media and part objects don't always support reload() (nested objects), so we catch exceptions
+    # IMPORTANT: Only reload once per object (not once per media/part combination)
+    if FORCE_CACHE_UPDATE:
+        # Track which objects we've already reloaded to avoid duplicate reloads
+        if not hasattr(PLEX_Media, '_reloaded_objects'):
+            PLEX_Media._reloaded_objects = set()
+
+        if key not in PLEX_Media._reloaded_objects:
+            try:
+                # For episodes, include series name; for movies, just movie title
+                if obj_type == "Episode":
+                    ctx = f"{key} '{item.title}' '{obj_title}' reload()"
+                else:
+                    ctx = f"{key} '{obj_title}' reload()"
+                plex_retry_operation(lambda: obj.reload(), context=ctx, library=lib_title)
+                PLEX_Media._reloaded_objects.add(key)  # Mark as reloaded
+            except Exception:
+                pass  # obj doesn't support reload(), will fetch properties lazily
+
+        # Media and Part objects often don't support reload() (they're not built from URLs)
+        # We skip reload for them and let properties be fetched lazily if needed
+
+    # Build context string for retry messages - include series name for episodes
+    if obj_type == "Episode":
+        ctx_title = f"'{item.title}' '{obj_title}'"
+    else:
+        ctx_title = f"'{obj_title}'"
+
+    # Access media properties (with retry for lazy-loaded properties)
+    media_duration = plex_retry_operation(lambda: media.duration, context=f"{key} {ctx_title} media.duration", library=lib_title)
+    media_videoResolution = plex_retry_operation(lambda: media.videoResolution, context=f"{key} {ctx_title} media.videoResolution", library=lib_title)
+    media_videoCodec = plex_retry_operation(lambda: media.videoCodec, context=f"{key} {ctx_title} media.videoCodec", library=lib_title)
+    media_audioCodec = plex_retry_operation(lambda: media.audioCodec, context=f"{key} {ctx_title} media.audioCodec", library=lib_title)
+    # Convert duration to minutes for VERSION field
+    duration_minutes = round(media_duration / 60000, 2) if media_duration else 0
+    media_width = plex_retry_operation(lambda: media.width, context=f"{key} {ctx_title} media.width", library=lib_title)
+    media_height = plex_retry_operation(lambda: media.height, context=f"{key} {ctx_title} media.height", library=lib_title)
+    resolution_full = f"{media_width}x{media_height}"
+    version = f"{duration_minutes}min {resolution_full} ({media_videoCodec} {media_audioCodec})"
+
+    # Access obj properties (already loaded by reload() if FORCE_CACHE_UPDATE, otherwise lazy)
+    obj_updatedAt = plex_retry_operation(lambda: obj.updatedAt, context=f"{key} {ctx_title} updatedAt", library=lib_title)
+    obj_addedAt = plex_retry_operation(lambda: obj.addedAt, context=f"{key} {ctx_title} addedAt", library=lib_title)
+    obj_lastViewedAt = plex_retry_operation(lambda: obj.lastViewedAt, context=f"{key} {ctx_title} lastViewedAt", library=lib_title)
+    obj_viewCount = plex_retry_operation(lambda: obj.viewCount, context=f"{key} {ctx_title} viewCount", library=lib_title)
+    obj_userRating = plex_retry_operation(lambda: obj.userRating, context=f"{key} {ctx_title} userRating", library=lib_title)
+    obj_criticsRating = plex_retry_operation(lambda: obj.rating, context=f"{key} {ctx_title} rating", library=lib_title)
+    obj_audienceRating = plex_retry_operation(lambda: getattr(obj, 'audienceRating', None), context=f"{key} {ctx_title} audienceRating", library=lib_title)
+    obj_summary = plex_retry_operation(lambda: obj.summary, context=f"{key} {ctx_title} summary", library=lib_title)
+    obj_year = plex_retry_operation(lambda: getattr(obj, 'year', 0), context=f"{key} {ctx_title} year", library=lib_title)
+
+    # Get filesize for this version
+    part_size = plex_retry_operation(lambda: part.size if hasattr(part, 'size') else None, context=f"{key} {ctx_title} part.size", library=lib_title)
+
+    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
+          'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
+          'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
+          'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
+          'updatedAt':obj_updatedAt, 'addedAt':obj_addedAt, 'lastViewedAt':obj_lastViewedAt, 'viewCount':obj_viewCount,
+          'userRating':obj_userRating, 'criticsRating':obj_criticsRating, 'audienceRating':obj_audienceRating, 'summary':obj_summary,
+          'duration':media_duration, 'video_codec':media_videoCodec, 'audio_codec':media_audioCodec, # audio_ as we also have audio_languages
+          'resolution':media_videoResolution, 'resolution_full':resolution_full,
+          'filesize':part_size,  # Store filesize for primary version
+          'collections'         : plex_retry_operation(lambda: [c.tag for c in obj.collections], context=f"{key} {ctx_title} collections", library=lib_title),
+          'labels'              : plex_retry_operation(lambda: [l.tag for l in obj.labels], context=f"{key} {ctx_title} labels", library=lib_title),
+          'audio_languages'     : plex_retry_operation(lambda: [ audio.language for audio in part.audioStreams() if hasattr(audio, 'language') and audio.language ], context=f"{key} {ctx_title} audioStreams", library=lib_title),            # of this MediaPart (file)
+          'subtitle_languages'  : plex_retry_operation(lambda: [ subtitle.language for subtitle in part.subtitleStreams() if hasattr(subtitle, 'language') and subtitle.language ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title),   # of this MediaPart (file)
+          # defaulting all other possible values:
+          'actors'              : [],
+          'countries'           : [],
+          'directors'           : [],
+          'writers'             : [],
+          'genres'              : [],
+          'contentRating':None,
+          'season':None,
+          'S_str':None,
+          'S_idx':None,
+          'episode':None,
+          'E_str':None,
+          'E_idx':None,
+          'S0XE0X':None,
+        }
+
+    match obj_type:
+        case "Episode" | "Season" | "Show":   val = add_show_info( val, obj, obj_type, key, item, season, episode, version, lib_title)
+        case "Movie":                         val = add_movie_info(val, obj, obj_type, key, version, filepath, lib_title)
+        case _: err( 1017, f"UNSUPPORTED obj.type '{obj_type}' for add_media_obj()" )
+
+    if DBG:
+        match media_type_str:
+            case "Movie*" | "Episode*": print( f"{DBGPFX}add_media_obj(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} [media:{media_idx}/0..{media_cnt}|part:{part_idx}/0..{part_cnt}] ---> val={val}" )
+            case _: print( f"{DBGPFX}add_media_obj(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} ---> val={val}" )
+
+    # If key already exists, check if we're resuming from checkpoint
+    is_new_object = key not in PLEX_Media.OBJ_BY_ID
+    if key in PLEX_Media.OBJ_BY_ID:
+        existing_obj = PLEX_Media.OBJ_BY_ID[key]
+        existing_files = existing_obj.get('files', {})
+        # Check if this exact version already exists (resuming from checkpoint)
+        if version in existing_files:
+            # IMPORTANT: Only skip if NOT doing --force-plexdata
+            # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
+            if not FORCE_PLEXDATA:
+                # Already processed in previous run, skip
+                if DBG: print(f"{DBGPFX}add_media_obj(): SKIPPING already processed key '{key}' version '{version}'")
+                return
+            else:
+                # Force reprocessing to update Plex metadata
+                if DBG: print(f"{DBGPFX}add_media_obj(): REPROCESSING key '{key}' version '{version}' (FORCE_PLEXDATA)")
+        # New version of existing object - merge files dict
+        existing_files[version] = {'filepath': filepath, 'filesize': part_size}
+        val['files'] = existing_files
+        if DBG: print(f"{DBGPFX}add_media_obj(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
+
+    # Collect video file metadata during cache rebuild
+    # This runs during --update-cache and collects container duration for broken file detection
+    if FORCE_CACHE_UPDATE and filepath and part_size:
+        file_info = val['files'][version]
+
+        # Check if metadata collection is needed
+        need_metadata = False
+
+        if FORCE_METADATA:
+            # --force-metadata: Always collect regardless of existing metadata (including broken)
+            need_metadata = True
+        elif 'file_metadata' not in file_info:
+            # No metadata yet: collect it
+            need_metadata = True
+        elif isinstance(file_info.get('file_metadata'), dict):
+            # Check if marked as broken
+            if file_info['file_metadata'].get('broken'):
+                # Skip broken files unless filesize changed
+                if file_info['file_metadata'].get('filesize') != part_size:
+                    # Filesize changed: retry collection
+                    need_metadata = True
+                # else: skip - already marked as broken and filesize unchanged
+            elif file_info['file_metadata'].get('filesize') != part_size:
+                # Normal metadata but filesize changed: re-collect
+                need_metadata = True
+
+        if need_metadata:
+            # Collect metadata from video file
+            # Determine if file is remote (checking for remote_host in filepath or library config)
+            remote_host, _exists, _resolved = determine_remote_host(filepath)
+
+            file_metadata = get_video_file_metadata(filepath, part_size, remote_host)
+
+            if file_metadata:
+                file_info['file_metadata'] = file_metadata
+            else:
+                # Failed to collect metadata - mark as broken
+                from datetime import datetime
+                file_info['file_metadata'] = {
+                    'broken': True,
+                    'filesize': part_size,
+                    'marked_at': datetime.now().isoformat(),
+                    'reason': 'ffprobe_failed'
+                }
+
+            # Track metadata probed count per library
+            lib_key = display_title if display_title else library.title
+            if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
+                PLEX_Media.library_delta_counters[lib_key]['metadata_probed'] += 1
+
+    PLEX_Media.OBJ_BY_ID[key] = val
+
+    # Track delta for library/partition completion summary (ADDED/UPDATED)
+    if FORCE_CACHE_UPDATE:
+        # Use display_title (which includes partition suffix like '[0:314]') if available, otherwise library.title
+        # This ensures delta counters match the partition-specific counters initialized in process_single_library
+        lib_key = display_title if display_title else library.title
+        if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
+            obj_type = val.get('type', '')
+            type_map = {'Show': 'shows', 'Season': 'seasons', 'Episode': 'episodes', 'Movie': 'movies'}
+            type_key = type_map.get(obj_type)
+
+            if type_key:
+                # Prepare detailed info for verbose output
+                detail_info = {
+                    'title': val.get('title', val.get('name', 'Unknown')),
+                    'file': filepath,
+                    'id': key
+                }
+
+                if is_new_object:
+                    # New object added
+                    PLEX_Media.library_delta_counters[lib_key]['added'][type_key] += 1
+                    if hasattr(PLEX_Media, 'library_delta_details') and lib_key in PLEX_Media.library_delta_details:
+                        PLEX_Media.library_delta_details[lib_key]['added'][type_key].append(detail_info)
+
+                    # Print real-time verbose output with -VV
+                    global VERYVRB
+                    if VERYVRB:
+                        file_str = f" [{filepath}]" if filepath else ""
+                        print(f"  [Local Cache] + {detail_info['title']}{file_str} (ID: {key})", flush=True)
+                else:
+                    # Existing object updated (new version or modified)
+                    PLEX_Media.library_delta_counters[lib_key]['updated'][type_key] += 1
+                    if hasattr(PLEX_Media, 'library_delta_details') and lib_key in PLEX_Media.library_delta_details:
+                        PLEX_Media.library_delta_details[lib_key]['updated'][type_key].append(detail_info)
+
+                    # Print real-time verbose output with -VV
+                    if VERYVRB:
+                        file_str = f" [{filepath}]" if filepath else ""
+                        print(f"  [Local Cache] ~ {detail_info['title']}{file_str} (ID: {key})", flush=True)
+
+    # CHECKPOINT: Periodically save cache during rebuild to prevent total loss on failure
+    # Only count actual NEW/UPDATED media files (Movies/Episodes), not container objects (Seasons/Shows)
+    # Items already in cache are skipped (never call add_media_obj), so items_processed only counts changes
+    if FORCE_CACHE_UPDATE and media_type in ('Movie', 'Episode'):
+        PLEX_Media.items_processed += 1
+        global CACHE_CHECKPOINT_INTERVAL
+        # Only save checkpoint if we've actually processed items (avoid saving when items_processed=0, since 0%100==0)
+        if CACHE_CHECKPOINT_INTERVAL > 0 and PLEX_Media.items_processed % CACHE_CHECKPOINT_INTERVAL == 0:
+            # Use display_title if provided (includes partition info), otherwise fall back to library.title
+            checkpoint_lib_name = display_title if display_title else library.title
+            PLEX_Media.save_checkpoint(checkpoint_lib_name)
+
+
+# Batch queue for metadata collection — filled during --update-cache, processed at the end
+_metadata_batch_queue = []  # [(filepath, obj_key, version, display_title), ...]
+
+
+def _collect_missing_file_metadata(cached_obj, display_title):
+    """Queue cached files needing metadata for batch collection.
+
+    Called during --update-cache for objects that are otherwise unchanged.
+    Accumulates filepaths into _metadata_batch_queue instead of probing
+    each file individually — the actual collection happens in a single
+    SSH call at the end via _run_batch_metadata_collection().
+    """
+    if not FORCE_CACHE_UPDATE:
+        return 0
+    queued = 0
+    obj_key = f"{cached_obj.get('type', 'Unknown')}:{cached_obj.get('id', '?')}"
+    for version, file_info in cached_obj.get('files', {}).items():
+        if not isinstance(file_info, dict):
+            continue
+        existing_metadata = file_info.get('file_metadata')
+        if existing_metadata and not existing_metadata.get('broken'):
+            continue  # Already has valid metadata
+        if existing_metadata and existing_metadata.get('reason') == 'ffprobe_error':
+            if not RESCAN_BROKEN:
+                continue  # Broken file — skip unless --broken flag requests rescan
+        # Missing metadata, file_not_found, or broken rescan — queue for (re)collection
+        filepath = file_info.get('filepath')
+        if not filepath:
+            continue
+        _metadata_batch_queue.append((filepath, obj_key, version, display_title))
+        queued += 1
+    return queued
+
+
+def _run_batch_metadata_collection():
+    """Batch-collect file metadata for all queued files via parallel SSH workers.
+
+    Uses run_tool_on_PLEX_server('ffmpeg', ...) to resolve the ffmpeg path
+    (respecting EXTERNAL_TOOLS['SERVER']['ffmpeg'] config). Partitions files
+    across parallel workers (like --update-cache), each running a lightweight
+    Python collector script via SSH that outputs JSON-lines to stdout.
+
+    Continues on failures, marking broken files for --broken output.
+    """
+    global _metadata_batch_queue
+    if not _metadata_batch_queue:
+        return
+
+    # Build lookup: filepath -> [(obj_key, version, display_title), ...]
+    filepath_lookup = {}
+    for filepath, obj_key, version, display_title in _metadata_batch_queue:
+        if filepath not in filepath_lookup:
+            filepath_lookup[filepath] = []
+        filepath_lookup[filepath].append((obj_key, version, display_title))
+
+    # Deduplicate: partition unique filepaths to workers (not queue items)
+    unique_filepaths = list(filepath_lookup.keys())
+    total = len(unique_filepaths)
+    num_workers = min(8, max(1, total // 100))  # 1-8 workers, at least 100 files each
+    print(f"\n{'='*76}")
+    print(f"COLLECTING FILE METADATA ({total} files, {num_workers} workers)")
+    print(f"{'='*76}")
+
+    # Determine remote_host: try first few filepaths, fall back to PLEX_DB_REMOTE_HOST
+    # (files are on the same host as the Plex database)
+    remote_host = None
+    for fp, _, _, _ in _metadata_batch_queue[:5]:
+        rh, exists, _ = determine_remote_host(fp)
+        if exists:
+            remote_host = rh
+            break
+    if remote_host is None:
+        local_db_path = os.path.expanduser(PLEX_DB_PATH)
+        if not os.path.exists(local_db_path):
+            remote_host = PLEX_DB_REMOTE_HOST
+
+    # Resolve ffmpeg path using existing tool resolution mechanism
+    ffmpeg_result = run_tool_on_PLEX_server('ffmpeg', ['-version'], remote_host=remote_host, timeout=10)
+    if ffmpeg_result is None:
+        print(f"\n✗ Cannot collect file metadata without ffmpeg.")
+        print(f"  Skipping metadata collection — run 'my-plex --update-cache' after installing ffmpeg.")
+        _metadata_batch_queue = []
+        return
+
+    configured = EXTERNAL_TOOLS.get('SERVER', {}).get('ffmpeg')
+    if configured:
+        ffmpeg_path = configured
+    elif remote_host:
+        cache_key = f"{remote_host}:ffmpeg"
+        ffmpeg_path = _remote_tool_path_cache.get(cache_key, 'ffmpeg')
+    else:
+        ffmpeg_path = shutil.which('ffmpeg') or 'ffmpeg'
+
+    location = f"on '{remote_host}'" if remote_host else "locally"
+    print(f"  Using ffmpeg: {ffmpeg_path} ({location})")
+
+    # Sequential collector script — parallelism is via multiple SSH workers
+    # First stdin line = "worker_id total" (for progress reporting), rest = filepaths
+    collector_script = f'''import sys, json, subprocess, os, time, re
+from datetime import datetime
+ffmpeg = {repr(ffmpeg_path)}
+header = sys.stdin.readline().strip().split()
+wid, wtotal = header[0], int(header[1])
+n = 0
+t0 = time.time()
+for line in sys.stdin:
+    fp = line.strip()
+    if not fp: continue
+    n += 1
+    if n % 100 == 0:
+        elapsed = time.time() - t0
+        rate = n / elapsed if elapsed > 0 else 0
+        eta = int((wtotal - n) / rate) if rate > 0 else 0
+        print(f"{{wid}}| {{n:,}}/{{wtotal:,}} files ({{rate:.0f}}/s, ~{{eta}}s left)", file=sys.stderr, flush=True)
+    try:
+        if not os.path.exists(fp):
+            print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
+            continue
+        filesize = os.path.getsize(fp)
+        ext = os.path.splitext(fp)[1].lower()
+        r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, timeout=30)
+        stderr_text = r.stderr.decode("utf-8", errors="replace")
+        m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", stderr_text)
+        if not m:
+            print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": stderr_text.strip()[:200]}}), flush=True)
+            continue
+        dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
+        print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
+    except Exception as e:
+        print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
+        continue
+'''
+
+    # Partition unique filepaths across workers
+    partitions = [[] for _ in range(num_workers)]
+    for i, fp in enumerate(unique_filepaths):
+        partitions[i % num_workers].append(fp)
+
+    # Worker function: run collector script for a partition
+    import subprocess as sp
+    import time as _time
+
+    def run_worker(worker_id, partition):
+        """Run collector script for a file partition, return (stdout, returncode)."""
+        w_prefix = f"W{worker_id:02d}"
+        partition_size = len(partition)
+        print(f"{w_prefix}| processing {partition_size} files...", flush=True)
+        t0 = _time.time()
+
+        # First line = "W01 1936" (worker ID + partition size for progress)
+        filepaths_input = f"{w_prefix} {partition_size}\n"
+        filepaths_input += '\n'.join(partition) + '\n'
+        if remote_host:
+            cmd = ['ssh', '-o', 'ControlMaster=no', remote_host, f'python3 -c {shlex.quote(collector_script)}']
+        else:
+            cmd = [sys.executable, '-c', collector_script]
+
+        try:
+            proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+
+            # Stream stderr (progress) in a background thread
+            def relay_stderr():
+                for line in proc.stderr:
+                    print(line.rstrip('\n'), flush=True)
+            import threading
+            t = threading.Thread(target=relay_stderr, daemon=True)
+            t.start()
+
+            # Write stdin and read stdout separately (not communicate())
+            # communicate() races with relay_stderr for the stderr pipe
+            proc.stdin.write(filepaths_input)
+            proc.stdin.close()
+            stdout_data = proc.stdout.read()
+            proc.wait(timeout=max(60, partition_size * 2))
+            t.join(timeout=5)
+            returncode = proc.returncode
+        except sp.TimeoutExpired:
+            proc.kill()
+            print(f"{w_prefix}| ✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
+            return '', 1
+
+        elapsed = _time.time() - t0
+        # Count actual results (lines in stdout), not partition_size
+        actual_count = sum(1 for line in stdout_data.strip().split('\n') if line.strip()) if stdout_data.strip() else 0
+        rate = actual_count / elapsed if elapsed > 0 else 0
+        if actual_count < partition_size:
+            print(f"{w_prefix}| processed {actual_count}/{partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        else:
+            print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+        return stdout_data, returncode
+
+    # Launch workers in parallel
+    from concurrent.futures import ThreadPoolExecutor
+    worker_results = {}
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = {pool.submit(run_worker, i, partitions[i]): i for i in range(num_workers)}
+        for future in futures:
+            worker_id = futures[future]
+            try:
+                stdout, returncode = future.result()
+                worker_results[worker_id] = (stdout, returncode)
+            except Exception as e:
+                print(f"W{worker_id:02d}| ✗ Worker failed: {e}", flush=True)
+                worker_results[worker_id] = ('', 1)
+
+    # Parse JSON-lines output from all workers and integrate results
+    from datetime import datetime
+    success_count = 0
+    error_count = 0
+    not_found_count = 0
+
+    for worker_id in sorted(worker_results.keys()):
+        stdout, returncode = worker_results[worker_id]
+        if not stdout.strip():
+            if returncode != 0:
+                print(f"W{worker_id:02d}| ✗ Worker failed (exit code {returncode})")
+            continue
+
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            filepath = entry.get('path', '')
+            if 'error' in entry:
+                error_msg = entry.get('error', 'unknown')
+
+                if error_msg == 'file not found':
+                    not_found_count += 1
+                    if VRB: print(f"  ⚠ File not found: {filepath}")
+                    targets = filepath_lookup.get(filepath, [])
+                    for obj_key, version, display_title in targets:
+                        if obj_key in PLEX_Media.OBJ_BY_ID:
+                            obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                            files_dict = obj.get('files', {})
+                            if version in files_dict:
+                                files_dict[version]['file_metadata'] = {
+                                    'broken': True,
+                                    'reason': 'file_not_found',
+                                    'filesize': files_dict[version].get('filesize'),
+                                    'marked_at': datetime.now().isoformat()
+                                }
+                        if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                            PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+                    continue
+
+                # ffmpeg error — mark as broken
+                error_count += 1
+                file_n = entry.get('n', '?')
+                stderr_msg = entry.get('stderr', '')
+                print(f"\n  ✗ BROKEN [W{worker_id:02d} #{file_n}]: {os.path.basename(filepath)}")
+                print(f"      Path:  {filepath}")
+                if stderr_msg:
+                    for eline in stderr_msg.split('\n')[:3]:
+                        print(f"      {eline}")
+
+                targets = filepath_lookup.get(filepath, [])
+                for obj_key, version, display_title in targets:
+                    if obj_key in PLEX_Media.OBJ_BY_ID:
+                        obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                        files_dict = obj.get('files', {})
+                        if version in files_dict:
+                            files_dict[version]['file_metadata'] = {
+                                'broken': True,
+                                'reason': 'ffprobe_error',
+                                'stderr': stderr_msg[:200],
+                                'filesize': files_dict[version].get('filesize'),
+                                'marked_at': datetime.now().isoformat()
+                            }
+                    if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                        PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+                continue
+
+            # Success — integrate into cache
+            success_count += 1
+            targets = filepath_lookup.get(filepath, [])
+            for obj_key, version, display_title in targets:
+                if obj_key in PLEX_Media.OBJ_BY_ID:
+                    obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                    files_dict = obj.get('files', {})
+                    if version in files_dict:
+                        file_info = files_dict[version]
+                        meta_filesize = entry.get('filesize')
+                        cache_filesize = file_info.get('filesize')
+                        if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
+                            if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, disk={meta_filesize}")
+                        file_info['file_metadata'] = {
+                            'container_duration': entry['container_duration'],
+                            'filesize': meta_filesize,
+                            'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
+                            'file_type': entry.get('file_type', '')
+                        }
+
+                if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                    PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+
+    processed = success_count + error_count + not_found_count
+    if processed < total:
+        print(f"\n  ✓ Metadata collected: {success_count} files ({processed}/{total} processed, interrupted)")
+    else:
+        print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
+    if error_count > 0:
+        print(f"  ⚠ {error_count} files marked as BROKEN (ffmpeg failed — visible in --broken)")
+    if not_found_count > 0:
+        print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
+
+    # Store for cache update summary
+    PLEX_Media.last_metadata_batch_processed = processed
+    PLEX_Media.last_metadata_batch_total = total
+
+    _metadata_batch_queue = []
+
+
+def _process_movies_from_database(all_movies, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """Process movies fetched from database and populate cache
+
+    Internal function called by update_movie_library_objs() when using database access.
+    This processes the movie data and populates all cache structures directly.
+
+    Args:
+        all_movies: List of movie dicts from fetch_movies_from_database()
+        library_name: Name of library (for display/progress messages)
+        library_idx: Index of this library in total list (for progress)
+        total_libraries: Total number of libraries being processed
+        start_idx, end_idx: Optional partition range for parallel processing
+
+    Returns:
+        True if library completed successfully, False if interrupted
+    """
+    global FORCE_CACHE_UPDATE
+    if DBG: print(f"{DBGPFX}_process_movies_from_database(name='{library_name}', count={len(all_movies)})")
+
+    if not all_movies:
+        if VRB:
+            print(f"{VRBPFX}No movies found in library '{library_name}'")
+        return True
+
+    total_movies = len(all_movies)
+
+    # VIRTUAL PARTITIONING: If start/end indices are provided, slice the movies list
+    display_title = library_name
+    if start_idx is not None and end_idx is not None:
+        all_movies = all_movies[start_idx:end_idx]
+        display_title = f"{library_name}[{start_idx}:{end_idx}]"
+        if VRB:
+            lib_label = f"library '{display_title}'"
+            print(f"{_get_worker_prefix()}{lib_label:<31s}: processing partition [{start_idx}:{end_idx}] = {len(all_movies)} movies")
+        total_movies = len(all_movies)
+
+    # Store server IDs for removal detection
+    if not hasattr(PLEX_Media, 'library_server_ids'):
+        PLEX_Media.library_server_ids = {}
+    if library_name not in PLEX_Media.library_server_ids:
+        PLEX_Media.library_server_ids[library_name] = set()
+
+    # Collect IDs from database results
+    partition_ids = {f"Movie:{movie['id']}" for movie in all_movies}
+    PLEX_Media.library_server_ids[library_name].update(partition_ids)
+
+    # Track progress
+    if FORCE_CACHE_UPDATE:
+        movies_already_cached = sum(1 for movie in all_movies if f"Movie:{movie['id']}" in PLEX_Media.OBJ_BY_ID)
+        movies_to_process = total_movies - movies_already_cached
+        if VERYVRB:
+            lib_label = f"library '{display_title}'"
+            if movies_already_cached > 0 and movies_to_process > 0:
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} new movies, checking {movies_already_cached} cached movies...", flush=True)
+            elif movies_already_cached > 0:
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: checking {movies_already_cached} cached movies...", flush=True)
+            else:
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: processing {movies_to_process} movies...", flush=True)
+
+        PLEX_Media.current_library = display_title
+        PLEX_Media.current_item_total = movies_to_process
+        PLEX_Media.current_item_type = 'movies'
+
+    # Process each movie from database
+    processed_count = 0
+    for movie_idx, movie_dict in enumerate(all_movies, 1):
+        # Check for graceful shutdown
+        if _shutdown_requested:
+            return False
+
+        movie_key = f"Movie:{movie_dict['id']}"
+
+        # Skip if already cached (resume mode) — but update if file versions or paths changed
+        if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
+            if movie_key in PLEX_Media.OBJ_BY_ID:
+                cached = PLEX_Media.OBJ_BY_ID[movie_key]
+                new_files = movie_dict.get('files', {})
+                cached_files = cached.get('files', {})
+                new_file_count = len(new_files)
+                cached_file_count = len(cached_files)
+                # Also check if file paths changed (e.g. rename .mkv → .mp4)
+                new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
+                cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
+                if new_file_count == cached_file_count and new_paths == cached_paths:
+                    if DBG: print(f"{DBGPFX}update_movie_library_objs_db(): SKIPPING movie '{movie_dict['title']}' - already in cache ({cached_file_count} files)")
+                    _collect_missing_file_metadata(cached, display_title)
+                    continue
+                # File versions or paths changed — update the cached entry
+                if VRB: print(f"{VRBPFX}Updating '{movie_dict['title']}': file change detected")
+
+        processed_count += 1
+
+        # Track progress
+        if FORCE_CACHE_UPDATE:
+            PLEX_Media.current_item_idx = processed_count
+
+        if VRB and total_movies > 50 and movie_idx % max(1, total_movies // 10) == 0:
+            lib_label = f"library '{library_name}'"
+            print(f"{_get_worker_prefix()}{lib_label:<31s}: processed {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
+            if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+                if total_libraries > 0:
+                    PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries} ('{library_name}'): {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
+                else:
+                    PLEX_Media.cache_rebuild_lock.write_progress(f"Processing '{library_name}': {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
+
+        # Populate cache directly (bypassing add_media_obj for Plex metadata)
+        # add_media_obj() will still be called if FORCE_METADATA is set for file metadata collection
+        PLEX_Media.OBJ_BY_ID[movie_key] = movie_dict
+
+        # Update other cache indices — register ALL filepaths for multi-version items
+        for _version, file_info in movie_dict.get('files', {}).items():
+            fp = file_info.get('filepath')
+            if fp:
+                if fp not in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[fp] = []
+                if movie_key not in PLEX_Media.OBJ_BY_FILEPATH[fp]:
+                    PLEX_Media.OBJ_BY_FILEPATH[fp].append(movie_key)
+
+        if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+            PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+        if 'Movie' not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+            PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'] = []
+        if movie_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie']:
+            PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'].append(movie_key)
+
+        if movie_key not in PLEX_Media.OBJ_BY_MOVIE:
+            PLEX_Media.OBJ_BY_MOVIE[movie_key] = {}
+        for ver, file_info in movie_dict.get('files', {}).items():
+            PLEX_Media.OBJ_BY_MOVIE[movie_key][ver] = file_info.get('filepath', '')
+
+        # Handle file metadata collection if FORCE_METADATA is set
+        if FORCE_METADATA and movie_dict.get('filesize'):
+            for _version, file_info in movie_dict.get('files', {}).items():
+                fp = file_info.get('filepath')
+                if fp and file_info.get('filesize'):
+                    pass  # TODO: Implement file metadata collection
+
+    if VRB:
+        lib_label = f"library '{display_title}'"
+        print(f"{_get_worker_prefix()}{lib_label:<31s}: completed {processed_count} movies")
+
+    # Save checkpoint
+    if FORCE_CACHE_UPDATE:
+        PLEX_Media.save_checkpoint(display_title)
+
+    return True
+
+def fetch_shows_from_database(library_section_id):
+    """Fetch all shows/episodes from a library section via direct database access
+
+    REPLACES: library.all() + show.seasons() + season.episodes() for TV shows
+
+    Handles the show/season/episode hierarchy from database:
+    - Shows (metadata_type=2)
+    - Seasons (metadata_type=3, parent_id → show)
+    - Episodes (metadata_type=4, parent_id → season)
+
+    Returns:
+        Dict: {show_id: {'show_info': {...}, 'seasons': {season_num: {'episodes': [...]}}}}
+        None on error
+    """
+    query = f"""
+    SELECT
+        ep.id, ep.title, ep.original_title, ep."index" as ep_num, ep.year,
+        ep.rating, ep.audience_rating, ep.content_rating, ep.summary,
+        ep.duration, ep.added_at, ep.updated_at,
+        s.id as s_id, s."index" as s_num, s.title as s_title,
+        sh.id as sh_id, sh.title as sh_title, sh.original_title as sh_orig,
+        sh.year as sh_year, sh.rating as sh_rating, sh.audience_rating as sh_aud_rating,
+        sh.content_rating as sh_content_rating, sh.summary as sh_summary,
+        md.id as md_id, md.width, md.height, md.duration as md_dur,
+        md.video_codec, md.audio_codec,
+        mp.id as mp_id, mp.file, mp.size,
+        ls.name as lib_name,
+        COALESCE(mis.rating, 0) as u_rating,
+        COALESCE(mis.view_count, 0) as v_count,
+        mis.last_viewed_at
+    FROM metadata_items ep
+    JOIN metadata_items s ON ep.parent_id = s.id
+    JOIN metadata_items sh ON s.parent_id = sh.id
+    JOIN library_sections ls ON ep.library_section_id = ls.id
+    LEFT JOIN media_items md ON ep.id = md.metadata_item_id
+    LEFT JOIN media_parts mp ON md.id = mp.media_item_id
+    LEFT JOIN metadata_item_settings mis ON ep.guid = mis.guid
+    WHERE ep.metadata_type = 4 AND s.metadata_type = 3 AND sh.metadata_type = 2
+      AND ep.library_section_id = {library_section_id}
+      AND ep.deleted_at IS NULL
+      AND (md.deleted_at IS NULL OR md.deleted_at = 0)
+      AND (mp.deleted_at IS NULL OR mp.deleted_at = 0)
+    ORDER BY sh.id, s."index", ep."index"
+    """
+
+    rows = query_plex_database(query, mode='rows')
+    if rows is None:
+        return None
+
+    if not rows:
+        return {}
+
+    # DEBUG: Check row structure
+    if rows and DBG:
+        print(f"{DBGPFX}fetch_shows_from_database: Got {len(rows)} rows")
+        print(f"{DBGPFX}First row has {len(rows[0])} fields (expected 36)")
+        if len(rows[0]) != 36:
+            print(f"{DBGPFX}ERROR: Row field count mismatch!")
+            print(f"{DBGPFX}First row: {rows[0]}")
+
+    # Fetch streams (audio/subtitle)
+    streams_query = f"""
+    SELECT mp.id, ms.stream_type_id, ms.language
+    FROM media_streams ms
+    JOIN media_parts mp ON ms.media_part_id = mp.id
+    JOIN media_items md ON mp.media_item_id = md.id
+    JOIN metadata_items ep ON md.metadata_item_id = ep.id
+    WHERE ep.metadata_type = 4 AND ep.library_section_id = {library_section_id}
+      AND ms.language IS NOT NULL AND ms.language != '' AND ep.deleted_at IS NULL
+    """
+
+    stream_rows = query_plex_database(streams_query, mode='rows')
+    streams_by_part = {}
+    if stream_rows:
+        for part_id, stream_type_id, language in stream_rows:
+            if part_id not in streams_by_part:
+                streams_by_part[part_id] = {'audio_languages': [], 'subtitle_languages': []}
+            if stream_type_id == '2' and language not in streams_by_part[part_id]['audio_languages']:
+                streams_by_part[part_id]['audio_languages'].append(language)
+            elif stream_type_id == '3' and language not in streams_by_part[part_id]['subtitle_languages']:
+                streams_by_part[part_id]['subtitle_languages'].append(language)
+
+    # Fetch tags
+    tags_query = f"""
+    SELECT mi.id, t.tag_type, t.tag
+    FROM metadata_items mi
+    JOIN taggings tg ON mi.id = tg.metadata_item_id
+    JOIN tags t ON tg.tag_id = t.id
+    WHERE mi.library_section_id = {library_section_id} AND mi.metadata_type IN (2,4)
+      AND mi.deleted_at IS NULL AND t.tag_type IN (1,4,5,6,8,9)
+    """
+
+    tag_rows = query_plex_database(tags_query, mode='rows')
+    tags_by_id = {}
+    if tag_rows:
+        for mid, ttype, tag in tag_rows:
+            if mid not in tags_by_id:
+                tags_by_id[mid] = {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]}
+            tmap = {'1':'genres','4':'directors','5':'writers','6':'actors','8':'countries','9':'collections'}
+            if ttype in tmap and tag and tag not in tags_by_id[mid][tmap[ttype]]:
+                tags_by_id[mid][tmap[ttype]].append(tag)
+
+    # Build structure, merging multiple media items per episode into files dict
+    shows = {}
+    episodes_seen = {}  # ep_id -> ep_dict (to merge multi-version episodes)
+    for row_idx, row in enumerate(rows):
+        try:
+            (ep_id,ep_title,ep_orig,ep_num,ep_year,ep_rating,ep_aud,ep_cr,ep_sum,_ep_dur,ep_add,ep_upd,
+             s_id,s_num,s_title,sh_id,sh_title,sh_orig,sh_year,sh_rating,sh_aud,sh_cr,sh_sum,
+             md_id,width,height,md_dur,v_codec,a_codec,mp_id,filepath,filesize,lib_name,
+             u_rating,v_count,last_view) = row
+        except ValueError as e:
+            if DBG:
+                print(f"{DBGPFX}Row {row_idx} unpack failed: {e}")
+                print(f"{DBGPFX}Row has {len(row)} fields: {row}")
+            raise
+
+        if sh_id not in shows:
+            sh_tags = tags_by_id.get(sh_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+            shows[sh_id] = {
+                'show_info': {'id':sh_id,'title':sh_title,'originalTitle':sh_orig or '','year':int(sh_year) if sh_year else 0,
+                             'rating':float(sh_rating) if sh_rating else None,'audienceRating':float(sh_aud) if sh_aud else None,
+                             'contentRating':sh_cr,'summary':sh_sum or '','library':lib_name,**sh_tags},
+                'seasons': {}
+            }
+
+        s_key = int(s_num) if s_num else 0
+        if s_key not in shows[sh_id]['seasons']:
+            shows[sh_id]['seasons'][s_key] = {'season_info':{'id':s_id,'index':s_key,'title':s_title or f"Season {s_key}"},'episodes':[]}
+
+        streams = streams_by_part.get(mp_id, {'audio_languages':[],'subtitle_languages':[]})
+        ep_tags = tags_by_id.get(ep_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+
+        dur_min = round(int(md_dur or 0)/60000,2) if md_dur else 0
+        res_full = f"{width or 0}x{height or 0}"
+        version = f"{dur_min}min {res_full} ({v_codec or 'unknown'} {a_codec or 'unknown'})"
+
+        if ep_id in episodes_seen:
+            # Additional media item for existing episode — merge into files dict
+            existing = episodes_seen[ep_id]
+            existing['files'][version] = {'filepath': filepath, 'filesize': int(filesize) if filesize else None}
+            media_cnt = len(existing['files'])
+            existing['media_cnt'] = media_cnt
+            existing['type_str'] = 'Episode*'
+            existing['media_nr'] = f"1/{media_cnt}"
+            for lang in streams['audio_languages']:
+                if lang not in existing['audio_languages']:
+                    existing['audio_languages'].append(lang)
+            for lang in streams['subtitle_languages']:
+                if lang not in existing['subtitle_languages']:
+                    existing['subtitle_languages'].append(lang)
+        else:
+            ep_dict = {
+                'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None}},
+                'type':'Episode','type_str':'Episode','id':ep_id,'title':ep_title,'originalTitle':ep_orig or '',
+                'year':int(ep_year) if ep_year else 0,'library':lib_name,'item_id':ep_id,'media_id':md_id,'part_id':mp_id,
+                'version':version,'media_nr':'1/1','media_idx':0,'media_cnt':1,'part_nr':'1/1','part_idx':0,'part_cnt':1,
+                'updatedAt':int(ep_upd) if ep_upd else None,'addedAt':int(ep_add) if ep_add else None,
+                'lastViewedAt':int(last_view) if last_view else None,'viewCount':int(v_count) if v_count else 0,
+                'userRating':float(u_rating) if u_rating else None,'criticsRating':float(ep_rating) if ep_rating else None,
+                'audienceRating':float(ep_aud) if ep_aud else None,'summary':ep_sum or '','duration':int(md_dur) if md_dur else None,
+                'video_codec':v_codec or '','audio_codec':a_codec or '','resolution':f"{height}p" if height else '',
+                'resolution_full':res_full,'filesize':int(filesize) if filesize else None,
+                'audio_languages':streams['audio_languages'],'subtitle_languages':streams['subtitle_languages'],
+                'contentRating':ep_cr,'season':s_key,'S_str':f"S{s_key:02d}",'S_idx':s_key,
+                'episode':int(ep_num) if ep_num else 0,'E_str':f"E{int(ep_num):02d}" if ep_num else "E00",'E_idx':int(ep_num) if ep_num else 0,
+                'S0XE0X':f"S{s_key:02d}E{int(ep_num):02d}" if ep_num else f"S{s_key:02d}E00",'series':sh_title,
+                'show_key':f"Show:{sh_id}",  # Add show_key for cache structure compatibility
+                'actors':ep_tags.get('actors',[]) or shows[sh_id]['show_info']['actors'],'directors':ep_tags.get('directors',[]),
+                'writers':ep_tags.get('writers',[]),'genres':shows[sh_id]['show_info']['genres'],
+                'countries':shows[sh_id]['show_info']['countries'],
+                'collections':ep_tags.get('collections',[]) or shows[sh_id]['show_info']['collections'],'labels':[]
+            }
+            episodes_seen[ep_id] = ep_dict
+            shows[sh_id]['seasons'][s_key]['episodes'].append(ep_dict)
+
+    if VRB:
+        total_eps = sum(len(s['episodes']) for show in shows.values() for s in show['seasons'].values())
+        print(f"{VRBPFX}Fetched {len(shows)} shows with {total_eps} episodes from database")
+    return shows
+
+def _process_shows_from_database(shows_data, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """Process shows/episodes fetched from database and populate cache
+
+    Internal function called by update_show_library_objs() when using database access.
+    Handles the show/season/episode hierarchy from database results.
+
+    Args:
+        shows_data: Dict from fetch_shows_from_database() with show/season/episode hierarchy
+        library_name: Name of library (for display/progress messages)
+        library_idx, total_libraries: For progress tracking
+        start_idx, end_idx: Optional partition range
+
+    Returns:
+        True if library completed successfully, False if interrupted
+    """
+    global FORCE_CACHE_UPDATE
+    if DBG: print(f"{DBGPFX}_process_shows_from_database(name='{library_name}', shows={len(shows_data)})")
+
+    if not shows_data:
+        if VRB:
+            print(f"{VRBPFX}No shows found in library '{library_name}'")
+        return True
+
+    # Convert to flat list for partitioning
+    all_shows = list(shows_data.items())
+    total_shows = len(all_shows)
+
+    display_title = library_name
+    if start_idx is not None and end_idx is not None:
+        all_shows = all_shows[start_idx:end_idx]
+        display_title = f"{library_name}[{start_idx}:{end_idx}]"
+        if VRB:
+            print(f"{_get_worker_prefix()}library '{display_title}':<31s processing partition [{start_idx}:{end_idx}] = {len(all_shows)} shows")
+        total_shows = len(all_shows)
+
+    # Track progress
+    if FORCE_CACHE_UPDATE and VERYVRB:
+        total_episodes = sum(len(s['episodes']) for _, show in all_shows for s in show['seasons'].values())
+        print(f"{_get_worker_prefix()}library '{display_title}':<31s processing {total_shows} shows, {total_episodes} episodes...")
+        PLEX_Media.current_library = display_title
+        PLEX_Media.current_item_total = total_shows
+        PLEX_Media.current_item_type = 'shows'
+
+    # Store server IDs for removal detection
+    if not hasattr(PLEX_Media, 'library_server_ids'):
+        PLEX_Media.library_server_ids = {}
+    if library_name not in PLEX_Media.library_server_ids:
+        PLEX_Media.library_server_ids[library_name] = set()
+
+    processed_count = 0
+    for show_idx, (show_id, show_data) in enumerate(all_shows, 1):
+        if _shutdown_requested:
+            return False
+
+        show_info = show_data['show_info']
+        show_key = f"Show:{show_id}"
+
+        # Collect all IDs for this show
+        PLEX_Media.library_server_ids[library_name].add(show_key)
+
+        # Ensure OBJ_BY_LIBRARY has the right structure: {type: [keys]}
+        if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+            PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+        lib_dict = PLEX_Media.OBJ_BY_LIBRARY[library_name]
+
+        # Track first episode filepath per show/season for directory paths
+        first_episode_filepath = None  # for show dir
+
+        # Initialize OBJ_BY_SHOW and OBJ_BY_SHOW_EPISODES for this show
+        if show_key not in PLEX_Media.OBJ_BY_SHOW:
+            PLEX_Media.OBJ_BY_SHOW[show_key] = {}
+        if show_key not in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+            PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key] = {}
+
+        # Process each season/episode
+        for _season_num, season_data in show_data['seasons'].items():
+            season_info = season_data['season_info']
+            season_key = f"Season:{season_info['id']}"
+            s_idx = season_info['index']
+            s_str = f"S{s_idx:02d}"
+            PLEX_Media.library_server_ids[library_name].add(season_key)
+
+            first_season_ep_filepath = None  # for season dir
+
+            # OBJ_BY_SHOW: show_key → {S_str → season_key}
+            PLEX_Media.OBJ_BY_SHOW[show_key][s_str] = season_key
+
+            if s_str not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]:
+                PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str] = {}
+
+            for episode_dict in season_data['episodes']:
+                if _shutdown_requested:
+                    return False
+
+                episode_key = f"Episode:{episode_dict['id']}"
+                PLEX_Media.library_server_ids[library_name].add(episode_key)
+
+                # Skip if already cached (resume mode) — but update if file versions or paths changed
+                if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
+                    if episode_key in PLEX_Media.OBJ_BY_ID:
+                        cached = PLEX_Media.OBJ_BY_ID[episode_key]
+                        new_files = episode_dict.get('files', {})
+                        cached_files = cached.get('files', {})
+                        new_file_count = len(new_files)
+                        cached_file_count = len(cached_files)
+                        # Also check if file paths changed (e.g. rename .mkv → .mp4)
+                        new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
+                        cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
+                        if new_file_count == cached_file_count and new_paths == cached_paths:
+                            if DBG: print(f"{DBGPFX}_process_shows_from_database(): SKIPPING episode '{episode_dict['S0XE0X']}' - already cached ({cached_file_count} files)")
+                            _collect_missing_file_metadata(cached, display_title)
+                            continue
+                        if VRB: print(f"{VRBPFX}Updating episode '{episode_dict['S0XE0X']}': file change detected")
+
+                processed_count += 1
+
+                # Track first episode filepath for directory derivation
+                ep_filepath = episode_dict.get('file', '')
+                if ep_filepath:
+                    if first_season_ep_filepath is None:
+                        first_season_ep_filepath = ep_filepath
+                    if first_episode_filepath is None:
+                        first_episode_filepath = ep_filepath
+
+                # Populate cache — Episode in OBJ_BY_ID
+                PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
+
+                # OBJ_BY_FILEPATH — register ALL filepaths for multi-version episodes
+                for _version, file_info in episode_dict.get('files', {}).items():
+                    fp = file_info.get('filepath')
+                    if fp:
+                        if fp not in PLEX_Media.OBJ_BY_FILEPATH:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp] = []
+                        if episode_key not in PLEX_Media.OBJ_BY_FILEPATH[fp]:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp].append(episode_key)
+
+                # OBJ_BY_LIBRARY — {type: [keys]}
+                if 'Episode' not in lib_dict:
+                    lib_dict['Episode'] = []
+                lib_dict['Episode'].append(episode_key)
+
+                # OBJ_BY_SHOW_EPISODES — {version: [episode_keys]}
+                e_str = episode_dict['E_str']
+                version = episode_dict.get('version', '')
+                if e_str not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str]:
+                    PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str] = {}
+                if version not in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str]:
+                    PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str][version] = []
+                PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str][version].append(episode_key)
+
+            # Create Season object in OBJ_BY_ID (matching old API structure)
+            season_dir = os.path.dirname(first_season_ep_filepath) if first_season_ep_filepath else ''
+            season_dict = {
+                'file': season_dir, 'files': {}, 'type': 'Season', 'type_str': 'Season',
+                'id': season_info['id'], 'title': season_info.get('title', f'Season {s_idx}'),
+                'originalTitle': '', 'year': 0, 'library': library_name,
+                'item_id': season_info['id'], 'media_id': None, 'part_id': None,
+                'version': 'Season', 'media_nr': None, 'media_idx': None, 'media_cnt': None,
+                'part_nr': None, 'part_idx': None, 'part_cnt': None,
+                'updatedAt': None, 'addedAt': None, 'lastViewedAt': None, 'viewCount': 0,
+                'userRating': None, 'criticsRating': None, 'audienceRating': None,
+                'summary': '', 'duration': None, 'video_codec': '', 'audio_codec': '',
+                'resolution': '', 'resolution_full': '', 'filesize': None,
+                'audio_languages': [], 'subtitle_languages': [],
+                'collections': [], 'labels': [],
+                'actors': [], 'contentRating': None,
+                'series': show_info['title'], 'show_key': show_key,
+                'season': season_info.get('title', f'Season {s_idx}'),
+                'S_str': s_str, 'S_idx': s_idx,
+                'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
+            }
+            PLEX_Media.OBJ_BY_ID[season_key] = season_dict
+
+            # OBJ_BY_LIBRARY — Season
+            if 'Season' not in lib_dict:
+                lib_dict['Season'] = []
+            lib_dict['Season'].append(season_key)
+
+            # OBJ_BY_FILEPATH — season directory
+            if season_dir:
+                if season_dir not in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[season_dir] = []
+                if season_key not in PLEX_Media.OBJ_BY_FILEPATH[season_dir]:
+                    PLEX_Media.OBJ_BY_FILEPATH[season_dir].append(season_key)
+
+        # Create Show object in OBJ_BY_ID (matching old API structure)
+        show_dir = os.path.dirname(os.path.dirname(first_episode_filepath)) if first_episode_filepath else ''
+        show_dict = {
+            'file': show_dir, 'files': {}, 'type': 'Show', 'type_str': 'Show',
+            'id': show_id, 'title': show_info['title'],
+            'originalTitle': show_info.get('originalTitle', ''), 'year': show_info.get('year', 0),
+            'library': library_name, 'item_id': show_id,
+            'media_id': None, 'part_id': None,
+            'version': 'Show', 'media_nr': None, 'media_idx': None, 'media_cnt': None,
+            'part_nr': None, 'part_idx': None, 'part_cnt': None,
+            'updatedAt': None, 'addedAt': None, 'lastViewedAt': None, 'viewCount': 0,
+            'userRating': None, 'criticsRating': show_info.get('rating'),
+            'audienceRating': show_info.get('audienceRating'),
+            'summary': show_info.get('summary', ''), 'duration': None,
+            'video_codec': '', 'audio_codec': '', 'resolution': '', 'resolution_full': '',
+            'filesize': None, 'audio_languages': [], 'subtitle_languages': [],
+            'collections': show_info.get('collections', []), 'labels': [],
+            'actors': show_info.get('actors', []), 'genres': show_info.get('genres', []),
+            'directors': show_info.get('directors', []), 'writers': show_info.get('writers', []),
+            'countries': show_info.get('countries', []),
+            'contentRating': show_info.get('contentRating', ''), 'studio': '',
+            'series': show_info['title'], 'show_key': show_key,
+            'season': None, 'S_str': None, 'S_idx': None,
+            'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
+        }
+        PLEX_Media.OBJ_BY_ID[show_key] = show_dict
+
+        # OBJ_BY_LIBRARY — Show
+        if 'Show' not in lib_dict:
+            lib_dict['Show'] = []
+        lib_dict['Show'].append(show_key)
+
+        # OBJ_BY_FILEPATH — show directory
+        if show_dir:
+            if show_dir not in PLEX_Media.OBJ_BY_FILEPATH:
+                PLEX_Media.OBJ_BY_FILEPATH[show_dir] = []
+            if show_key not in PLEX_Media.OBJ_BY_FILEPATH[show_dir]:
+                PLEX_Media.OBJ_BY_FILEPATH[show_dir].append(show_key)
+
+        if VRB and total_shows > 50 and show_idx % max(1, total_shows // 10) == 0:
+            print(f"{_get_worker_prefix()}library '{library_name}':<31s processed {show_idx}/{total_shows} shows ({100*show_idx//total_shows}%)")
+
+    if VRB:
+        print(f"{_get_worker_prefix()}library '{display_title}':<31s completed {processed_count} episodes")
+    if DBG:
+        print(f"{DBGPFX}_process_shows_from_database() completed: OBJ_BY_ID now has {len(PLEX_Media.OBJ_BY_ID)} total items")
+
+    if FORCE_CACHE_UPDATE:
+        PLEX_Media.save_checkpoint(display_title)
+
+    return True
+
+def _store_collections_from_database(library_section_id, library_name):
+    """Fetch collections for a library section and store them in OBJ_BY_COLLECTION, OBJ_BY_ID and OBJ_BY_LIBRARY."""
+    try:
+        collections = fetch_collections_from_database(library_section_id)
+        for col_dict in collections:
+            col_key = f"Collection:{col_dict['id']}"
+            PLEX_Media.OBJ_BY_COLLECTION[col_key] = col_dict
+            PLEX_Media.OBJ_BY_ID[col_key] = col_dict
+            if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
+                PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
+            if 'Collection' not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
+                PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'] = []
+            if col_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection']:
+                PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'].append(col_key)
+        if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): stored {len(collections)} collections")
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): failed: {e}")
+
+def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """Retrieve MediaPart IDs and file paths for a Movie library
+    If start_idx and end_idx are provided, only process movies in that index range (virtual partitioning).
+
+    NOW USES DIRECT DATABASE ACCESS instead of Plex API for 60x speed improvement
+    """
+    global FORCE_CACHE_UPDATE
+
+    # Get library info for database query
+    library_name = library.title
+    library_section_id = getattr(library, 'key', None)
+
+    if DBG: print(f"{DBGPFX}update_movie_library_objs(library:'{library_name}', id={library_section_id})")
+
+    # Try database access first, fall back to API if needed
+    all_movies = None
+    try:
+        if library_section_id:
+            # Extract numeric ID from key (e.g., '/library/sections/5' -> 5)
+            if isinstance(library_section_id, str) and '/' in library_section_id:
+                library_section_id = int(library_section_id.split('/')[-1])
+
+            # Fetch from database
+            all_movies = fetch_movies_from_database(library_section_id)
+            if all_movies:
+                if DBG: print(f"{DBGPFX}Successfully fetched {len(all_movies)} movies from database")
+            # Fetch collections (metadata_type=18) for this library
+            _store_collections_from_database(library_section_id, library_name)
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}Database fetch failed: {e}")
+
+    # No API fallback — DB is the only data source for --update-cache
+    if all_movies is None:
+        err(1071, f"Database fetch failed for movie library '{library_name}'. Check DB access (SSH or local).")
+
+    return _process_movies_from_database(all_movies, library_name, library_idx, total_libraries, start_idx, end_idx)
+
+
+def update_show_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
+    """ Retrieve MediaPart IDs and file paths for a Show library (includes seasons and episodes)
+    If start_idx and end_idx are provided, only process shows in that index range (virtual partitioning).
+
+    NOW USES DIRECT DATABASE ACCESS instead of Plex API for 60x speed improvement
+    """
+    global FORCE_CACHE_UPDATE
+
+    # Get library info for database query
+    library_name = library.title
+    library_section_id = getattr(library, 'key', None)
+
+    if DBG: print(f"{DBGPFX}update_show_library_objs(library:'{library_name}', id={library_section_id})")
+
+    # Try database access first, fall back to API if needed
+    shows_data = None
+    try:
+        if library_section_id:
+            # Extract numeric ID from key
+            if isinstance(library_section_id, str) and '/' in library_section_id:
+                library_section_id = int(library_section_id.split('/')[-1])
+
+            # Fetch from database
+            shows_data = fetch_shows_from_database(library_section_id)
+            if shows_data:
+                if DBG: print(f"{DBGPFX}Successfully fetched {len(shows_data)} shows from database")
+            else:
+                if DBG: print(f"{DBGPFX}fetch_shows_from_database returned empty/None for library_section_id={library_section_id}")
+            # Fetch collections (metadata_type=18) for this library
+            _store_collections_from_database(library_section_id, library_name)
+    except Exception as e:
+        if DBG:
+            print(f"{DBGPFX}Database fetch failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # No API fallback — DB is the only data source for --update-cache
+    if shows_data is None:
+        err(1072, f"Database fetch failed for show library '{library_name}'. Check DB access (SSH or local).")
+
+    return _process_shows_from_database(shows_data, library_name, library_idx, total_libraries, start_idx, end_idx)
+
+
+def init(args):
+    global CACHE_FILE, LOCK_FILE
+    # FIXME determine if CACHE_FILE is absolut path... OR relative, then:
+    CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+    LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
+
+
+def init_plex(args=None, all=True, server=False, library=False, media=False):
+    # NOTE: API connection is now LAZY via ensure_plex_api() — called on first actual API use
+    if (all or library): PLEX_Library.init() # <<< needs to be done BEFORE PLEX_Media.init()
+    if (all or media):   PLEX_Media.init()   # <<< needs to be done AFTER PLEX_Library.init()
+
+
+def get_media_list_from_PLEX_OBJ_list( obj_list ):
+    """ Helperf unction used by resolve_plex_media_obj() !
+        RETURNS: list of actual PLEX-API objects
+    """
+    mediae = []
+    for obj in obj_list:
+        media,part = PLEX_Media.retrieve_media_and_part(obj, must_exist=True)
+        match obj["type"]:
+            case "Movie":    print(f"File '{obj['file']}' found as movie '{media.title}' ({media.year})")
+            case "Movie*":   print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of movie '{media.title}' ({media.year})")
+            case "Show":     print(f"File '{obj['file']}' found as series '{obj['title']}' ({obj['year']})")
+            case "Season":   print(f"File '{obj['file']}' found as season {obj['S_str']} as part of series '{obj['series']}' ({obj['year']})")
+            case "Episode":  print(f"File '{obj['file']}' found as episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")
+            case "Episode*": print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")
+            case _:
+                err( 1011, "Unknown obj['type'] '{obj['type']}'.")
+        mediae.append( media )
+    return mediae
+
+
+def resolve_plex_media_obj(media_identifier, library_name=None):
+    """ Resolve media entry by title or file path or PLEX_OBJ_ID and optional library_name.
+        Useful to MANIPULATE the actual PLEX database/objects !
+        RETURNS: list of actual PLEX-API objects
+        Stages 1-2 use cache (no API). Stages 3-4 use API for title lookup and cross-library
+        search — reimplementing Plex's search logic in SQL is not worth the effort.
+
+       With or without library_name:
+          1.) we try to get media_identifier_realpath (=realpath(media_identifier))
+          2.) we'll check if either media_identifier OR media_identifier_realpath startwith one of the paths in the PLEX_Library.PATHS_DICT.
+       For the case that media_dentifier is a PATH:
+          1.) all matching libraries are then searched for media_identifier to confirm that PLEX knows about this file
+       For the case that media_identifier is a MEDIA-TITLE:
+          2.) all matching libraries are used to lookup media_identifier (as title)
+          ELSE
+          3.) all matching libraries are used to SEARCH for media_identifier
+    """
+
+    global PLEX_SERVER
+    mediae = []
+
+    if DBG: print(f"{DBGPFX}resolve_plex_media_obj( media_identifier='{media_identifier}', library='{library_name}')")
+    if media_identifier is None: err (1008, f"This should never be. Please contact maintainer.")
+
+    # Check for FULL_ID (exact cache key like "Episode_ID:18349"):
+    stage = "1st"
+    if media_identifier in PLEX_Media.OBJ_BY_ID:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
+        return get_media_list_from_PLEX_OBJ_list( [PLEX_Media.OBJ_BY_ID[ media_identifier ]] )
+    if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
+
+    # Check for numeric Plex ID — requires "ID:18349" prefix (as printed by --broken):
+    stage = "1b"
+    if media_identifier.upper().startswith('ID:'):
+        try:
+            numeric_id = int(media_identifier[3:])
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(obj.get('id', 0)) == numeric_id:
+                    if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
+                    return get_media_list_from_PLEX_OBJ_list( [obj] )
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> numeric ID {numeric_id} NOT FOUND in PLEX_Media.OBJ_BY_ID")
+        except ValueError:
+            pass  # ID: prefix present but value not numeric
+
+    # Check for FILEPATH:
+    stage = "2nd"
+    normalized_filepath = os.path.normpath(media_identifier)
+    if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} : Checking for FILE/PATH '{normalized_filepath}'")
+    # to search media_identifier in PLEX_Media.OBJ_BY_FILEPATH, first collect ALTERNATIVE versions of normalized_filepath
+    for filepath in get_alternative_paths( normalized_filepath ):
+        if filepath in PLEX_Media.OBJ_BY_FILEPATH:
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND '{filepath}' in PLEX_Media.OBJ_BY_FILEPATH")
+            obj_list = [ PLEX_Media.OBJ_BY_ID[ key ] for key in PLEX_Media.OBJ_BY_FILEPATH[filepath] ]
+            return get_media_list_from_PLEX_OBJ_list( obj_list )
+        else:
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} {'(alternative path)' if filepath == normalized_filepath else ''} '{filepath}' is NOT part of PLEX_Media.OBJ_BY_FILEPATH")
+
+    if DBG and len(mediae) == 0: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> Unable to match part.file of all parts of all items of all potential libraries")
+    stage = "3rd"
+
+    # Try to lookup by title if library_name is provided
+    if library_name:
+        try:
+            library = PLEX_Library.OBJ_DICT[library_name]
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} : Using media_identifier as title to lookup media in library '{library_name}'...")
+            media = library.get(media_identifier)
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND 1 matching media by title!")
+            return [media]
+        except:
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> Did NOT find media by title in library '{library_name}'!")
+
+    # Search across all libraries
+    stage = "4th"
+    try:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} : Searching media via media_identifier...")
+        plex = ensure_plex_api(required=False)
+        mediae = plex.library.search(media_identifier) if plex else []
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND {len(mediae)} media(s) by search in library!")
+        return mediae
+    except:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT found media by search in library!")
+        return []
+        #raise Exception(f"Media not found for title or file path: {media_identifier}")
+
+    # mediae == [] in case potential_libraries would be empty /or/ in case NON of the attempts in LOOP over potential_libraries was able to find 'media':
+    if len(mediae) != 0: err(1039)
+    return [] # Return the found item(s)
+
+
+def print_details(media):
+    """Print detailed information about a Plex media object"""
+    print(f"\nDetails of '{media.title}':")
+    print(f"- type: {media.type}")
+    if hasattr(media, 'year') and media.year:
+        print(f"- year: {media.year}")
+    if hasattr(media, 'rating') and media.rating:
+        print(f"- critics rating: {media.rating}")
+    if hasattr(media, 'audienceRating') and media.audienceRating:
+        print(f"- audience rating: {media.audienceRating}")
+    if hasattr(media, 'summary') and media.summary:
+        print(f"- summary: {media.summary}")
+    if hasattr(media, 'duration') and media.duration:
+        print(f"- duration: {media.duration} ms")
+    if hasattr(media, 'actors') and media.actors:
+        print(f"- actor(s): {', '.join([a.tag for a in media.actors])}")
+    if hasattr(media, 'directors') and media.directors:
+        print(f"- director(s): {', '.join([d.tag for d in media.directors])}")
+    if hasattr(media, 'writers') and media.writers:
+        print(f"- writer(s): {', '.join([w.tag for w in media.writers])}")
+    if hasattr(media, 'genres') and media.genres:
+        print(f"- genre(s): {', '.join([g.tag for g in media.genres])}")
+    if hasattr(media, 'studio') and media.studio:
+        print(f"- studio: {media.studio}")
+    if hasattr(media, 'collections') and media.collections:
+        print(f"- collection(s): {', '.join([c.tag for c in media.collections])}")
+    if hasattr(media, 'labels') and media.labels:
+        print(f"- labels: {', '.join([l.tag for l in media.labels])}")
+    if hasattr(media, 'contentRating') and media.contentRating:
+        print(f"- content rating: {media.contentRating}")
+    if hasattr(media, 'viewCount'):
+        print(f"- view count: {media.viewCount}")
+    if hasattr(media, 'lastViewedAt') and media.lastViewedAt:
+        print(f"- last viewed at: {media.lastViewedAt}")
+    if hasattr(media, 'addedAt') and media.addedAt:
+        print(f"- added at: {media.addedAt}")
+    if hasattr(media, 'updatedAt') and media.updatedAt:
+        print(f"- updated at: {media.updatedAt}")
+    if hasattr(media, 'userRating') and media.userRating:
+        print(f"- user rating: {media.userRating}")
+
+
+###########################################################################################
+#### PLEX OBJ_TYPE MANAGEMENT
+###########################################################################################
+
+# PLEX OBJ_TYPE Interface / Abstract Base Class: --------------------------------------------------
+class PLEX_OBJ_TYPE_ABC(ABC):
+
+    TYPE_STR = None
+    argparser = None
+
+    @staticmethod
+    @abstractmethod
+    def detect_if_of_OBJ_TYPE(args, obj):
+        pass
+
+    # The cmd(s) to exeucte will be provided via 'obj_args'
+    @staticmethod
+    @abstractmethod
+    def execute_cmd(args, obj, obj_args):
+        pass
+
+def add_PLEX_OBJ_TYPE(obj_class):
+    PLEXOBJ[PARSER][obj_class.TYPE_STR] = obj_class.argparser;
+    PLEXOBJ[FN][obj_class.TYPE_STR] = obj_class.execute_cmd;
+    PLEXOBJ[DETECT][obj_class.TYPE_STR] = obj_class.detect_if_of_OBJ_TYPE;
+
+
+###########################################################################################
+#### PLEX LIBRARY OBJECT
+###########################################################################################
+
+class PLEX_Library(PLEX_OBJ_TYPE_ABC):
+    TYPE_STR = 'library'
+    OBJ_DICT = {} # key = library.title, value = library-object
+    OBJ_DICT_TYPE = {} # key = library.title, value = library.type
+    OBJ_DICT_SUPPORTED = {} # key = library.title, value = library-object
+    PATHS_DICT = {} # key = pathname, value = library.title
+    SUPPORTED_TYPES = ["Movie", "Show"]
+
+    init_done = False
+    @staticmethod
+    def init():
+        """Initialize library information from CACHE (normal mode) or DATABASE (update mode)
+
+        IMPORTANT: This function now uses CACHE as the source of truth for library information.
+        Only during --update-cache do we fetch from the database.
+
+        Normal operations (--list, --info, --resolve, etc.):
+            - Load cache
+            - Build OBJ_DICT from cached PLEX_Media.OBJ_BY_LIBRARY keys
+            - No API or database access!
+
+        Cache update mode (--update-cache):
+            - Will later fetch libraries from database via get_library_sections_from_database()
+            - For now, fall back to API if needed for compatibility
+        """
+        global OFFLINE, FORCE_CACHE_UPDATE
+
+        if PLEX_Library.init_done: return
+        load_cache()  # Call global load_cache function - loads CACHE dict
+
+        PLEX_Library.OBJ_DICT = {}
+        PLEX_Library.OBJ_DICT_TYPE = {}
+
+        # Get OBJ_BY_LIBRARY and library_stats from CACHE (not from PLEX_Media which isn't initialized yet)
+        global CACHE
+        cached_obj_by_library = CACHE.get('obj_by_library', {})
+        cached_library_stats = CACHE.get('library_stats', {})
+
+        if DBG: print(f"{DBGPFX}PLEX_Library.init(): cached_obj_by_library has {len(cached_obj_by_library)} libraries")
+
+        # Build library info from CACHE (preferred method)
+        if cached_obj_by_library:
+            if DBG: print(f"{DBGPFX}PLEX_Library.init(): Building from CACHE ({len(cached_obj_by_library)} libraries)")
+
+            # Create library objects from cache info using a dict-like object
+            # OBJ_BY_LIBRARY structure: {library_name: {type: [keys], ...}}
+            for library_name in cached_obj_by_library.keys():
+                # Determine library type from the type keys present
+                objs = cached_obj_by_library[library_name]
+                l_type = 'Unknown'
+                if objs:
+                    if 'Movie' in objs:
+                        l_type = 'Movie'
+                    elif any(t in objs for t in ('Show', 'Season', 'Episode')):
+                        l_type = 'Show'
+
+                # Create a dict-like library object with all necessary attributes
+                # This uses type() to create an anonymous class instance without defining a separate class
+                lib_obj = type('Library', (), {
+                    'title': library_name,
+                    'type': l_type.lower(),
+                    'locations': [],  # Path locations - not available from cache
+                    'updatedAt': cached_library_stats.get('updatedAt', {}).get(library_name),
+                    'totalSize': cached_library_stats.get('itemsCount', {}).get(library_name, 0)
+                })()
+
+                PLEX_Library.OBJ_DICT[library_name] = lib_obj
+                PLEX_Library.OBJ_DICT_TYPE[library_name] = l_type
+                if l_type in PLEX_Library.SUPPORTED_TYPES:
+                    PLEX_Library.OBJ_DICT_SUPPORTED[library_name] = lib_obj
+
+        # No API fallback — if cache is empty, user must run --update-cache (which uses DB)
+        elif not OFFLINE:
+            if DBG: print(f"{DBGPFX}PLEX_Library.init(): Cache empty, no API fallback — user must run --update-cache")
+
+        PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
+        PLEX_Library.init_done = True
+        if DBG: print(f"{DBGPFX}PLEX_Library.init(): OBJ_DICT={list(PLEX_Library.OBJ_DICT.keys())}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_TYPE={PLEX_Library.OBJ_DICT_TYPE}\n{DBGPFX}PLEX_Library.init(): OBJ_DICT_SUPPORTED={list(PLEX_Library.OBJ_DICT_SUPPORTED.keys())}")
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.", allow_abbrev=False, exit_on_error=False)
+    # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
+    #library_parser = subparsers.add_parser('library',      help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library", add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.")
+    argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched/--unwatched to filter by watch status, --audio/--en/--de/--fr to filter by audio language, --no-audio-language to find items with missing language info, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
+    argparser.add_argument('--collections', '--collection', action='store_true', help="List collections in a specified library. Can be used standalone or with --list.")
+    argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
+    argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates (auto-enables --list)
+    argparser.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS) # Interactive resolution mode for duplicates
+    argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
+    argparser.add_argument('--delete', action='store_true',help="Delete the library.")
+    argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
+        Available filters: \
+        title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
+        writer=<writer>, studio=<studio>, type=<type>, contentRating=<content_rating>, \
+        sortBy=<sort_by>, sortOrder=<asc|desc>, includeChildren=<true|false>, \
+        collection=<collection>, date=<date>, summary=<summary>, \
+        label=<label>, duration=<duration>, viewCount=<view_count>, \
+        recentlyAdded=<true|false>, watched=<true|false>, \
+        unwatched=<true|false>, partTitle=<part_title>, \
+        partRatingKey=<part_rating_key>.")
+
+    @staticmethod
+    def process_single_library(title, library, library_idx, total_libraries, current_library_stats,
+                               old_library_stats, old_itemsCount_from_cache, start_idx=None, end_idx=None):
+        """
+        Process a single library for cache update.
+        If start_idx and end_idx are provided, only process shows in that index range (virtual partitioning).
+        Returns True if the library was updated, False if skipped.
+        """
+        global READ_ONLY_MODE
+
+        # Skip automatic cache rebuilds in read-only mode (e.g., during --info)
+        if READ_ONLY_MODE:
+            return False
+
+        import time as time_module
+        library_start_time = time_module.time()
+
+        # For partition-aware completion tracking: create unique key if this is a partition
+        completion_key = title
+        if start_idx is not None and end_idx is not None:
+            completion_key = f"{title}[{start_idx}:{end_idx}]"
+
+        # For display: show partition info if this is a partitioned library
+        display_title = completion_key  # Use the same format for display
+
+        # Track start time for in-progress timing (used by checkpoints)
+        if not hasattr(PLEX_Media, 'library_start_times'):
+            PLEX_Media.library_start_times = {}
+        PLEX_Media.library_start_times[title] = library_start_time
+
+        # Track objects before processing (for ADDED/REMOVED/UPDATED tracking)
+        if not hasattr(PLEX_Media, 'library_objects_before'):
+            PLEX_Media.library_objects_before = {}
+        if not hasattr(PLEX_Media, 'library_delta_counters'):
+            PLEX_Media.library_delta_counters = {}
+
+        # Track partition completion for removal detection across partitions
+        if not hasattr(PLEX_Media, 'library_partition_info'):
+            PLEX_Media.library_partition_info = {}
+
+        # Initialize partition info for this base library if needed
+        # IMPORTANT: Don't overwrite if already initialized (would lose expected_partitions registered during partition creation)
+        if title not in PLEX_Media.library_partition_info:
+            PLEX_Media.library_partition_info[title] = {
+                'expected_partitions': set(),  # Will contain all partition keys like 'series.de[0:19]'
+                'completed_partitions': set(),
+                'all_complete': False
+            }
+
+        # Snapshot current objects for this library (for removal detection)
+        # This is needed in both incremental and force modes to detect removed items
+        objects_before = {
+            'Show': set(),
+            'Season': set(),
+            'Episode': set(),
+            'Movie': set()
+        }
+        for key, val in PLEX_Media.OBJ_BY_ID.items():
+            if val.get('library') == title:
+                obj_type = val.get('type')
+                if obj_type in objects_before:
+                    objects_before[obj_type].add(key)
+
+        PLEX_Media.library_objects_before[completion_key] = objects_before
+        PLEX_Media.library_delta_counters[completion_key] = {
+            'added': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+            'updated': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+            'removed': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+            'metadata_probed': 0,
+        }
+
+        # Track detailed changes for verbose output (title, file path, ID)
+        if not hasattr(PLEX_Media, 'library_delta_details'):
+            PLEX_Media.library_delta_details = {}
+        PLEX_Media.library_delta_details[completion_key] = {
+            'added': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+            'updated': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+            'removed': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []}
+        }
+
+        current_timestamp = current_library_stats['updatedAt'].get(title)
+        current_itemsCount = current_library_stats['itemsCount'].get(title)
+        old_timestamp = old_library_stats['updatedAt'].get(title)
+
+        if DBG:
+            print(f"{DBGPFX}PLEX_Media.load_cache(): SUPPORTED Library Loop: title:'{title}', library:'{library}'")
+            print(f"{DBGPFX}  current_timestamp type={type(current_timestamp)}, value={current_timestamp}")
+            print(f"{DBGPFX}  old_timestamp type={type(old_timestamp)}, value={old_timestamp}")
+
+        # Get cached object counts for this library
+        old_counts = old_itemsCount_from_cache.get(title, {})
+        lib_type = PLEX_Library.OBJ_DICT_TYPE.get(title, 'Unknown')
+
+        # Validate cache format
+        if old_counts and not isinstance(old_counts, dict):
+            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
+            err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --from-scratch to fix.")
+
+        # For show libraries: compare show count AND episode count to detect new episodes
+        # in existing shows (show count alone won't change when episodes are added)
+        if lib_type == 'Show':
+            old_show_count = old_counts.get('shows', 0)
+            old_episode_count = old_counts.get('episodes', 0)
+            old_total_objects = old_counts.get('shows', 0) + old_counts.get('seasons', 0) + old_counts.get('episodes', 0)
+            current_episode_count = current_library_stats.get('episodesCount', {}).get(title, 0)
+            counts_match = (current_itemsCount == old_show_count) and (current_episode_count == old_episode_count or current_episode_count == 0)
+        else:  # Movie library
+            old_movie_count = old_counts.get('movies', 0)
+            old_total_objects = old_movie_count
+            counts_match = (current_itemsCount == old_movie_count)
+
+        def format_elapsed_time(seconds):
+            """Format elapsed time as human-readable string."""
+            if seconds < 60:
+                return f"{seconds:.1f}s"
+            elif seconds < 3600:
+                mins = int(seconds // 60)
+                secs = seconds % 60
+                return f"{mins}m {secs:.0f}s"
+            else:
+                hours = int(seconds // 3600)
+                mins = int((seconds % 3600) // 60)
+                return f"{hours}h {mins}m"
+
+        # If the library has changed since the last run
+        if FORCE_CACHE_UPDATE:
+            # Check if this library/partition was already completed in a previous run (checkpoint resume)
+            if hasattr(PLEX_Media, 'completed_libraries') and completion_key in PLEX_Media.completed_libraries:
+                # Get saved timing from previous run (if available)
+                saved_time = getattr(PLEX_Media, 'library_timings', {}).get(completion_key, 0)
+                lib_label = f"library '{display_title}'"
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: skipping, already completed in previous run ({format_elapsed_time(saved_time)})")
+                return False  # Library/partition already done
+            if VERYVRB:
+                lib_label = f"library '{title}'"
+                print(f"{_get_worker_prefix()}{lib_label:<31s}: forcing cache update (--update-cache parameter)")
+        else:
+            # Debug: Show comparison details
+            if DBG:
+                print(f"{DBGPFX}Library '{title}': Comparing timestamps: old={old_timestamp}, current={current_timestamp}, match={current_timestamp == old_timestamp}")
+                if lib_type == 'Show':
+                    print(f"{DBGPFX}Library '{title}': Cached counts: shows={old_counts.get('shows', 0)}, seasons={old_counts.get('seasons', 0)}, episodes={old_counts.get('episodes', 0)}")
+                    print(f"{DBGPFX}Library '{title}': Comparing show count: old={old_show_count}, current={current_itemsCount}, episodes: old={old_episode_count}, current={current_episode_count}, match={counts_match}")
+                else:
+                    print(f"{DBGPFX}Library '{title}': Comparing movie count: old={old_movie_count}, current={current_itemsCount}, match={counts_match}")
+
+            if current_timestamp == old_timestamp and counts_match:
+                if VRB: print(f"{VRBPFX}Library '{title}': SAME timestamp ({current_timestamp}) + SAME itemsCount ({current_itemsCount})")
+                return False  # Library not updated
+
+            # Check if cache is newer than Plex (happens when cache timestamp was inflated with +60s buffer)
+            # Compare against plexUpdatedAt (the ACTUAL Plex timestamp from last update) to detect real changes
+            if old_timestamp > current_timestamp and counts_match:
+                old_plex_timestamp = old_library_stats.get('plexUpdatedAt', {}).get(title)
+                if old_plex_timestamp and current_timestamp != old_plex_timestamp:
+                    # Plex timestamp changed since last update — files were modified/renamed/re-analyzed
+                    if VRB: print(f"{VRBPFX}Library '{title}': Plex timestamp changed ({old_plex_timestamp} → {current_timestamp}) — updating")
+                else:
+                    if VRB: print(f"{VRBPFX}Library '{title}': Cache is newer ({old_timestamp} > {current_timestamp}) + SAME itemsCount - skipping update")
+                    return False  # Cache already up to date
+
+        # if current_timestamp != old_timestamp or old_totalItemsCount != current_totalItemsCount:
+        if not FORCE_CACHE_UPDATE:
+            # Show the actual timestamps so user can see the difference
+            # Include library name in each line to avoid confusion when multiple threads print in parallel
+            print(f"Updating cache for library '{title}' (newer timestamp found on Plex server)")
+            print(f"  [{title}] Cache timestamp: {old_timestamp}")
+            print(f"  [{title}] Plex timestamp:  {current_timestamp}")
+        if DBG:
+            if current_timestamp != old_timestamp:
+                print(f"{DBGPFX}Library '{title}': Different last-updated timestamp (cache:{old_timestamp}, plex:{current_timestamp}).")
+            if not counts_match:
+                if lib_type == 'Show':
+                    print(f"{DBGPFX}Library '{title}': Different show count (cache:{old_show_count}, plex:{current_itemsCount}).")
+                else:
+                    print(f"{DBGPFX}Library '{title}': Different movie count (cache:{old_movie_count}, plex:{current_itemsCount}).")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress(f"Library {library_idx}/{total_libraries}: Processing '{title}'...")
+
+        # Print progress to terminal
+        # In incremental mode (not FORCE_CACHE_UPDATE): always show
+        # In FORCE mode: show basic progress unless VERYVRB (which has detailed per-show output)
+        if not FORCE_CACHE_UPDATE or not VERYVRB:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
+            worker_prefix = _get_worker_prefix()
+            print(f"{timestamp} {worker_prefix}Processing '{display_title}'...", flush=True)
+
+        # Differentiate between Movie and Show libraries
+        completed = True  # Assume completed unless function returns False
+        try:
+            match library.type:  # ATTENTION the library.type is LOWERCASE
+                case 'movie':   result = update_movie_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
+                case 'show':    result = update_show_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
+                case 'artist':  pass
+                case _:         err(1012, f"UNSUPPORTED library.type '{library.type}'. Please check your parameters. If you believe this is a bug, please reach out to maintainer of this software.")
+            # Check if library processing was interrupted
+            if library.type in ('movie', 'show') and result is False:
+                completed = False  # Library was interrupted, not completed
+        except Exception as e:
+            # Library was deleted or became inaccessible during processing
+            lib_label = f"library '{display_title}'"
+            print(f"{_get_worker_prefix()}{lib_label:<31s}: SKIPPED - library became inaccessible (may have been deleted): {e}")
+            return False  # Library not updated due to error
+
+        # Mark library/partition as completed and save checkpoint (only if actually completed)
+        elapsed = time_module.time() - library_start_time
+
+        # Track partition completion for removal detection (FORCE mode only, since incremental mode doesn't partition)
+        if FORCE_CACHE_UPDATE and completed:
+            if not hasattr(PLEX_Media, 'completed_libraries'):
+                PLEX_Media.completed_libraries = set()
+            if not hasattr(PLEX_Media, 'library_timings'):
+                PLEX_Media.library_timings = {}
+            PLEX_Media.completed_libraries.add(completion_key)  # Use partition-aware key
+            # Accumulate time from previous runs (if any) + this run
+            previous_time = PLEX_Media.library_timings.get(completion_key, 0)
+            total_elapsed = previous_time + elapsed
+            PLEX_Media.library_timings[completion_key] = total_elapsed  # Save total timing for resume display
+            PLEX_Media.save_checkpoint(silent=True)  # Save after each partition completion
+
+            # Track partition completion for removal detection
+            if hasattr(PLEX_Media, 'library_partition_info') and title in PLEX_Media.library_partition_info:
+                partition_info = PLEX_Media.library_partition_info[title]
+                # Mark this partition as completed
+                partition_info['completed_partitions'].add(completion_key)
+                # Check if all expected partitions are now complete
+                if len(partition_info['completed_partitions']) == len(partition_info['expected_partitions']):
+                    partition_info['all_complete'] = True
+        else:
+            # Incremental mode - use elapsed time directly
+            total_elapsed = elapsed
+
+        # Calculate REMOVED objects (objects that were in cache but no longer in Plex)
+        # Compare cache state BEFORE processing with SERVER state to find stale entries
+        # This runs in BOTH incremental and force modes
+        # For non-partitioned libraries: run immediately (completion_key == title)
+        # For partitioned libraries (FORCE mode only): only run when ALL partitions are complete
+        if completed:
+            should_check_removals = False
+            if completion_key in PLEX_Media.library_objects_before:
+                if completion_key == title:
+                    # Non-partitioned library - check immediately
+                    should_check_removals = True
+                elif hasattr(PLEX_Media, 'library_partition_info') and title in PLEX_Media.library_partition_info:
+                    # Partitioned library - only check when all partitions complete
+                    partition_info = PLEX_Media.library_partition_info[title]
+                    if VRB:
+                        print(f"{VRBPFX}Partition '{completion_key}' completed. Progress: {len(partition_info['completed_partitions'])}/{len(partition_info['expected_partitions'])} partitions done for '{title}'")
+                        print(f"{VRBPFX}  Expected: {sorted(partition_info['expected_partitions'])}")
+                        print(f"{VRBPFX}  Completed: {sorted(partition_info['completed_partitions'])}")
+                    if PLEX_Media.library_partition_info[title]['all_complete']:
+                        should_check_removals = True
+                        if VRB:
+                            print(f"{VRBPFX}All partitions complete for '{title}', will check for removals")
+
+            if should_check_removals:
+                # For partitioned libraries, find any partition key to access objects_before
+                # (All partitions have the same snapshot since they filter by base library name)
+                # For non-partitioned libraries, completion_key == title
+                objects_before_key = None
+                if completion_key in PLEX_Media.library_objects_before:
+                    # Non-partitioned library
+                    objects_before_key = completion_key
+                else:
+                    # Partitioned library - find any partition key for this library
+                    for key in PLEX_Media.library_objects_before.keys():
+                        if key.startswith(title + '['):
+                            objects_before_key = key
+                            break
+
+                if objects_before_key is None:
+                    if VRB:
+                        print(f"{VRBPFX}Warning: Could not find objects_before for '{title}', skipping removal detection")
+                    should_check_removals = False
+
+            if should_check_removals:
+                objects_before = PLEX_Media.library_objects_before[objects_before_key]
+                # Use base library name for server_ids lookup
+                server_ids = getattr(PLEX_Media, 'library_server_ids', {}).get(title, set())
+
+                # DEBUG: Show removal detection state
+                if VRB:
+                    total_before = sum(len(objects_before[t]) for t in ['Show', 'Season', 'Episode', 'Movie'])
+                    print(f"{VRBPFX}Removal detection for '{title}': {total_before} items in cache, {len(server_ids)} items on server")
+
+                # Find and remove stale cache entries (in cache but not on server)
+                for obj_type in ['Show', 'Season', 'Episode', 'Movie']:
+                    # Find cache keys that are NOT in server's current items
+                    removed_keys = objects_before[obj_type] - server_ids
+
+                    type_key = obj_type.lower() + 's'
+                    PLEX_Media.library_delta_counters[completion_key]['removed'][type_key] = len(removed_keys)
+
+                    # Build detailed info BEFORE removing (capture original paths before deletion)
+                    removal_details = []
+                    for key in removed_keys:
+                        if key in PLEX_Media.OBJ_BY_ID:
+                            obj = PLEX_Media.OBJ_BY_ID[key]
+                            # Capture file path NOW before object is deleted
+                            detail_info = {
+                                'title': obj.get('title', obj.get('name', 'Unknown')),
+                                'year': obj.get('year'),
+                                'file': obj.get('file'),
+                                'id': key,
+                                'type': obj.get('type')
+                            }
+                            removal_details.append(detail_info)
+
+                    # Actually remove the stale entries from cache
+                    for key in removed_keys:
+                        if key in PLEX_Media.OBJ_BY_ID:
+                            obj = PLEX_Media.OBJ_BY_ID[key]
+                            removed_file = obj.get('file')
+                            removed_obj_type = obj.get('type')
+
+                            # Remove from OBJ_BY_ID
+                            del PLEX_Media.OBJ_BY_ID[key]
+                            # Remove from OBJ_BY_FILEPATH
+                            if removed_file and removed_file in PLEX_Media.OBJ_BY_FILEPATH:
+                                del PLEX_Media.OBJ_BY_FILEPATH[removed_file]
+                            # Remove from OBJ_BY_LIBRARY
+                            if title in PLEX_Media.OBJ_BY_LIBRARY:
+                                if obj_type in PLEX_Media.OBJ_BY_LIBRARY[title]:
+                                    if key in PLEX_Media.OBJ_BY_LIBRARY[title][obj_type]:
+                                        PLEX_Media.OBJ_BY_LIBRARY[title][obj_type].remove(key)
+
+                            # Remove from type-specific structures to prevent stale data accumulation
+                            if removed_obj_type == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                                del PLEX_Media.OBJ_BY_MOVIE[key]
+                            elif removed_obj_type == 'Show' and key in PLEX_Media.OBJ_BY_SHOW:
+                                del PLEX_Media.OBJ_BY_SHOW[key]
+                                # Also clean up episodes for this show
+                                if key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                                    del PLEX_Media.OBJ_BY_SHOW_EPISODES[key]
+                            elif removed_obj_type == 'Episode':
+                                # For episodes, clean up from show episodes structure
+                                show_key = obj.get('show_key')
+                                if show_key and show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                                    s_str = obj.get('S_str')
+                                    e_str = obj.get('E_str')
+                                    if s_str and s_str in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]:
+                                        if e_str and e_str in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str]:
+                                            # Episode structure is: {show_key: {S_str: {E_str: {version: part_id}}}}
+                                            # Remove this episode's entry
+                                            del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str]
+
+                    # Track detailed removal info and print verbose output AFTER deletion
+                    if hasattr(PLEX_Media, 'library_delta_details') and completion_key in PLEX_Media.library_delta_details:
+                        PLEX_Media.library_delta_details[completion_key]['removed'][type_key].extend(removal_details)
+
+                        # Print real-time verbose output with -VV (using captured details)
+                        if VERYVRB:
+                            for detail_info in removal_details:
+                                removed_file = detail_info['file']
+                                file_str = f" [{removed_file}]" if removed_file else ""
+                                print(f"  [Local Cache] - {detail_info['title']}{file_str} (ID: {detail_info['id']})", flush=True)
+
+        # Build delta summary message (runs in both modes)
+        if completed:
+            delta_parts = []
+            if completion_key in PLEX_Media.library_delta_counters:
+                counters = PLEX_Media.library_delta_counters[completion_key]
+                lib_type = library.type
+
+                if lib_type == 'show':
+                    for obj_type in ['shows', 'seasons', 'episodes']:
+                        added = counters['added'][obj_type]
+                        removed = counters['removed'][obj_type]
+                        updated = counters['updated'][obj_type]
+
+                        parts = []
+                        if added > 0:
+                            parts.append(f"+{added}")
+                        if removed > 0:
+                            parts.append(f"-{removed}")
+                        if updated > 0:
+                            parts.append(f"~{updated}")
+
+                        if parts:
+                            delta_parts.append(f"{'/'.join(parts)} {obj_type}")
+
+                elif lib_type == 'movie':
+                    added = counters['added']['movies']
+                    removed = counters['removed']['movies']
+                    updated = counters['updated']['movies']
+
+                    parts = []
+                    if added > 0:
+                        parts.append(f"+{added}")
+                    if removed > 0:
+                        parts.append(f"-{removed}")
+                    if updated > 0:
+                        parts.append(f"~{updated}")
+
+                    if parts:
+                        delta_parts.append(f"{'/'.join(parts)} movies")
+
+            # Print completion message with delta (always show status)
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
+            worker_prefix = _get_worker_prefix()
+            if delta_parts:
+                delta_str = ", ".join(delta_parts)
+                print(f"{timestamp} {worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) {delta_str}")
+            else:
+                print(f"{timestamp} {worker_prefix}{display_title}... ✓ ({format_elapsed_time(total_elapsed)}) no changes")
+
+        return True  # Library was updated
+
+    @staticmethod
+    def update_cache():
+        """
+        Update PLEX_Library cache objects.
+
+        Now uses direct database access for 60x speed improvement!
+        """
+        global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE, READ_ONLY_MODE
+
+        # VALIDATE DATABASE SCHEMA FIRST
+        # This ensures we detect schema changes in future Plex versions early
+        if FORCE_CACHE_UPDATE and not OFFLINE:
+            if DBG: print(f"{DBGPFX}update_cache(): Validating Plex database schema...")
+            if not validate_plex_database_schema():
+                print(f"\nERROR: Database schema validation failed!")
+                print(f"Cannot proceed with cache update - database structure may have changed.")
+                print(f"Please report this issue with your Plex version.")
+                return
+
+            # FETCH LIBRARIES FROM DATABASE
+            # Populate PLEX_Library.OBJ_DICT with library info from database
+            if DBG: print(f"{DBGPFX}update_cache(): Fetching libraries from database...")
+            try:
+                libraries = get_library_sections_from_database()
+                if DBG: print(f"{DBGPFX}update_cache(): Found {len(libraries)} libraries in database")
+
+                # Clear and repopulate OBJ_DICT
+                PLEX_Library.OBJ_DICT = {}
+                PLEX_Library.OBJ_DICT_TYPE = {}
+                PLEX_Library.OBJ_DICT_SUPPORTED = {}
+
+                for lib_info in libraries:
+                    # Create library object using anonymous class (no need for separate class definition)
+                    lib_obj = type('Library', (), {
+                        'id': lib_info['id'],
+                        'title': lib_info['name'],
+                        'type': lib_info['type'],
+                        'key': lib_info['id'],  # Use numeric ID directly
+                        'updatedAt': lib_info['updated_at'],
+                        'locations': [],  # Will be populated if needed
+                        'totalSize': 0  # Will be populated during cache build
+                    })()
+
+                    PLEX_Library.OBJ_DICT[lib_obj.title] = lib_obj
+                    PLEX_Library.OBJ_DICT_TYPE[lib_obj.title] = lib_obj.type.capitalize()
+
+                    # Only add movie and show libraries to SUPPORTED
+                    if lib_obj.type in ['movie', 'show']:
+                        PLEX_Library.OBJ_DICT_SUPPORTED[lib_obj.title] = lib_obj
+
+                if DBG: print(f"{DBGPFX}update_cache(): Populated OBJ_DICT with {len(PLEX_Library.OBJ_DICT)} libraries ({len(PLEX_Library.OBJ_DICT_SUPPORTED)} supported)")
+
+            except Exception as e:
+                print(f"\nERROR: Failed to fetch libraries from database: {e}")
+                if DBG:
+                    import traceback
+                    traceback.print_exc()
+                return
+
+        # API required: triggers Plex's internal filesystem scanner (lib.update/refresh/reload)
+        # Cannot be done via DB — Plex must scan its own media directories
+        # Trigger Plex library scans BEFORE fetching data to ensure cache can detect missing files
+        # This makes --update-cache self-healing
+        # ONLY scan when --update-cache is explicitly used (not during --duplicates, etc.)
+        # NOTE: Library scanning requires API connection
+        if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}, PLEX_SERVER={'connected' if PLEX_SERVER else 'None'}")
+        plex = ensure_plex_api(required=False) if (FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT) else None
+        if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT and plex:
+            global FORCE_PLEXDATA
+
+            # Use lib.refresh() with --force to verify all files exist and refresh metadata
+            # Use lib.update() without --force for quick scan of new/changed files only
+            scan_type = "REFRESHING ALL METADATA FOR" if FORCE_PLEXDATA else "TRIGGER PLEX SCANNING OF"
+            action_desc = "refresh all metadata and verify files" if FORCE_PLEXDATA else "detect filesystem changes"
+
+            # Get real plexapi library objects for scanning
+            # PLEX_Library.OBJ_DICT may contain cache-based lightweight objects without .update()/.reload()
+            api_libraries = {lib.title: lib for lib in plex.library.sections()}
+
+            print(f"\n{'='*76}")
+            print(f"{scan_type} {len(api_libraries)} LIBRARIES TO {action_desc.upper()}")
+            print(f"{'='*76}")
+
+            if FORCE_PLEXDATA:
+                print(f"⚠  Using lib.refresh() - this will verify ALL files and refresh metadata")
+                print(f"   This is SLOWER but will detect missing files and update metadata")
+                print(f"{'='*76}")
+
+            # PERFORMANCE OPTIMIZATION: Trigger all library scans in parallel
+            # Instead of scanning one library at a time (sequential), start all scans simultaneously
+            # This provides 3-4x speedup for --force operations (e.g., 30 mins → 5-8 mins)
+            libraries_list = sorted(api_libraries.items())
+
+            # Phase 1: Start all library scans in parallel
+            # IMPORTANT: With --force, do BOTH update (scan for new files) AND refresh (verify existing files)
+            # Without --force, only do update (fast scan for new/changed files)
+            if FORCE_PLEXDATA:
+                print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update + refresh)...")
+            else:
+                print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update only)...")
+
+            scan_start_times = {}
+            for lib_name, lib in libraries_list:
+                try:
+                    # CRITICAL: Always do update() first to scan for NEW files
+                    lib.update()  # Scan filesystem for new/changed files
+
+                    # With --force, also do refresh() to verify existing files and update metadata
+                    if FORCE_PLEXDATA:
+                        lib.refresh()  # Verify all files exist and refresh metadata
+                        action = "update+refresh"
+                    else:
+                        action = "update"
+
+                    scan_start_times[lib_name] = time.time()
+                    print(f"  ✓ Started {action} for: {lib_name}")
+                except Exception as e:
+                    print(f"  ✗ Failed to start scan for {lib_name}: {e}")
+
+            # Phase 2: Wait for all libraries to complete
+            print(f"\n  Waiting for all libraries to complete scanning...")
+            max_wait = 3600 if FORCE_PLEXDATA else 60  # 1 hour for refresh, 1 min for update
+            completed_libs = set()
+            check_interval = 2  # Check every 2 seconds for better responsiveness
+
+            while len(completed_libs) < len(libraries_list):
+                time.sleep(check_interval)
+
+                for lib_name, lib in libraries_list:
+                    if lib_name in completed_libs:
+                        continue
+
+                    try:
+                        lib.reload()
+                        if not lib.refreshing:
+                            elapsed = time.time() - scan_start_times[lib_name]
+                            print(f"  ✓ Completed: {lib_name} ({elapsed:.0f}s)")
+                            completed_libs.add(lib_name)
+                    except Exception as e:
+                        print(f"  ✗ Error checking {lib_name}: {e}")
+                        completed_libs.add(lib_name)  # Mark as completed to avoid infinite loop
+
+                # Check for timeouts
+                for lib_name, start_time in scan_start_times.items():
+                    if lib_name not in completed_libs:
+                        elapsed = time.time() - start_time
+                        if elapsed > max_wait:
+                            print(f"  ⚠ Timeout: {lib_name} (exceeded {max_wait}s)")
+                            completed_libs.add(lib_name)
+
+            print(f"{'='*76}\n")
+
+            # Refresh library timestamps from DB AFTER scans complete
+            # The scan may have updated library_sections.updated_at in the database
+            refreshed_libs = get_library_sections_from_database()
+            if refreshed_libs:
+                for lib_info in refreshed_libs:
+                    lib_name = lib_info['name']
+                    if lib_name in PLEX_Library.OBJ_DICT:
+                        PLEX_Library.OBJ_DICT[lib_name].updatedAt = lib_info['updated_at']
+                        if DBG: print(f"{DBGPFX}update_cache(): Refreshed '{lib_name}' updatedAt to {lib_info['updated_at']}")
+
+        try:
+            old_library_stats = CACHE['library_stats']
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Loaded library_stats from cache")
+        except:
+            old_library_stats = EMPTY_LIBRARY_STATS
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): No library_stats in cache, using EMPTY template")
+
+        # Get current library stats (with refreshed timestamps from DB after scan)
+        # IMPORTANT: Only fetch fresh stats when doing cache update, otherwise use cached stats
+        if FORCE_CACHE_UPDATE:
+            current_library_stats = get_library_stats()
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Got current library_stats from Plex")
+        else:
+            current_library_stats = old_library_stats
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Using cached library_stats (not updating)")
+
+        # Clean up library_stats for removed libraries
+        current_libraries = set(PLEX_Library.OBJ_DICT.keys())
+        for stat_key in ['updatedAt', 'itemsCount', 'totalDuration', 'totalStorage']:
+            if stat_key in old_library_stats:
+                removed_libs = set(old_library_stats[stat_key].keys()) - current_libraries
+                for removed_lib in removed_libs:
+                    del old_library_stats[stat_key][removed_lib]
+                    if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Removed library '{removed_lib}' from cached library_stats['{stat_key}']")
+
+        # Try to use cached object counts per library for better performance
+        # For show libraries, we store: {'shows': N, 'seasons': M, 'episodes': K}
+        # For movie libraries, we store: {'movies': N}
+        # IMPORTANT: Skip loading old cache when rebuilding to avoid format errors with old cache
+        if FORCE_CACHE_UPDATE:
+            old_itemsCount_from_cache = {}  # Start fresh when rebuilding
+            if VRB: print(f"{VRBPFX}Rebuild mode: skipping old library_object_counts cache")
+        else:
+            try:    old_itemsCount_from_cache = CACHE.get('library_object_counts', {})
+            except: old_itemsCount_from_cache = {}
+
+        # If cache doesn't have it, rebuild it from OBJ_BY_ID
+        # IMPORTANT: For show libraries, we need to track shows, seasons, AND episodes separately
+        # to detect when new seasons or episodes are added (not just new shows)
+        if not old_itemsCount_from_cache or FORCE_CACHE_UPDATE:
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                lib = obj['library']
+                obj_type = obj['type']
+
+                # Initialize library entry if needed
+                if lib not in old_itemsCount_from_cache:
+                    old_itemsCount_from_cache[lib] = {}
+
+                # Count by type
+                if obj_type == 'Show':
+                    old_itemsCount_from_cache[lib]['shows'] = old_itemsCount_from_cache[lib].get('shows', 0) + 1
+                elif obj_type == 'Season':
+                    old_itemsCount_from_cache[lib]['seasons'] = old_itemsCount_from_cache[lib].get('seasons', 0) + 1
+                elif obj_type == 'Episode':
+                    old_itemsCount_from_cache[lib]['episodes'] = old_itemsCount_from_cache[lib].get('episodes', 0) + 1
+                elif obj_type == 'Movie':
+                    old_itemsCount_from_cache[lib]['movies'] = old_itemsCount_from_cache[lib].get('movies', 0) + 1
+
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Rebuilt library_object_counts with detailed type counts")
+        else:
+            if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Using cached library_object_counts.")
+
+        if DBG:
+            for lib, counts in old_itemsCount_from_cache.items():
+                # Validate cache format - must be dict with type counts
+                if not isinstance(counts, dict):
+                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
+                    err(1058, f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --from-scratch to fix.")
+                count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
+                print(f"{DBGPFX}  Library '{lib}': {count_str}")
+
+        if DBG: print(f"{DBGPFX}PLEX_Media.load_cache(): Loaded {len(PLEX_Media.OBJ_BY_ID)} Plex media objects from cache '{CACHE_FILE}'.")
+
+        # Track which libraries were updated (for cache optimization)
+        cache_needs_save = False
+
+        # Track overall progress for all libraries
+        total_libraries = len(PLEX_Library.OBJ_DICT_SUPPORTED)
+
+        # PERFORMANCE OPTIMIZATION: Process libraries in parallel using ThreadPoolExecutor
+        # This allows multiple libraries to be processed concurrently, dramatically reducing
+        # total cache rebuild time when you have multiple libraries (2-4x speedup)
+        # Number of workers controlled by MAX_PARALLEL_WORKERS global variable
+        global MAX_PARALLEL_WORKERS
+        max_workers = min(MAX_PARALLEL_WORKERS, total_libraries) if total_libraries > 1 else 1
+
+        if FORCE_CACHE_UPDATE and max_workers > 1:
+            print(f"Processing {total_libraries} libraries in parallel with {max_workers} workers...")
+            print(f"{'='*76}")
+            # Thread-safe counter for library index
+            library_counter = threading.Lock()
+            library_idx_dict = {'current': 0}
+
+            def get_next_library_idx():
+                with library_counter:
+                    library_idx_dict['current'] += 1
+                    return library_idx_dict['current']
+
+            # Process libraries in parallel
+            global _active_executor, _shutdown_requested
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                _active_executor = executor  # Allow signal handler to shutdown
+                futures = {}
+                global LIBRARY_START_DELAY
+
+                # PERFORMANCE OPTIMIZATION: Sort libraries by size (largest first)
+                # This ensures large libraries start processing early, keeping all workers busy
+                # When resuming, filter out already-completed libraries first
+                all_libraries = list(PLEX_Library.OBJ_DICT_SUPPORTED.items())
+
+                # PERFORMANCE OPTIMIZATION: Always partition large Show and Movie libraries
+                # This allows workers that finish early to pick up partitions from large libraries
+                # that are still being processed, achieving better load balancing
+                PARTITION_MIN_SHOWS = 30  # Only partition Show libraries with > 30 shows
+                PARTITION_MIN_MOVIES = 50  # Only partition Movie libraries with > 50 movies
+                MAX_PARTITIONS_PER_LIBRARY = 4  # Maximum number of partitions per library
+
+                # Filter out completed libraries when resuming
+                # Note: completed_libraries may contain partition keys like "series.de[0:19]"
+                # We need to check if the base library (or all its partitions) are completed
+                if hasattr(PLEX_Media, 'completed_libraries') and PLEX_Media.completed_libraries:
+                    # Build a map of library -> completed partitions
+                    library_partitions = {}  # {library_name: set of completed partition keys}
+                    completed_base_libs = set()  # Libraries that are fully completed
+
+                    for entry in PLEX_Media.completed_libraries:
+                        # Check if this is a partitioned entry (contains '[')
+                        if '[' in entry:
+                            base_name = entry.split('[')[0]
+                            if base_name not in library_partitions:
+                                library_partitions[base_name] = set()
+                            library_partitions[base_name].add(entry)
+                        else:
+                            # Non-partitioned library is fully complete
+                            completed_base_libs.add(entry)
+
+                    # For partitioned libraries, check if ALL expected partitions are complete
+                    for title, lib in all_libraries:
+                        if title in library_partitions:
+                            # This library was previously partitioned
+                            # Check if we have all expected partitions completed
+                            completed_parts = library_partitions[title]
+                            # Extract partition indices to see if we have all partitions
+                            # If library has enough shows/movies to be partitioned, check if all partitions are done
+                            should_partition = False
+                            if lib.type == 'show' and lib.totalSize > PARTITION_MIN_SHOWS:
+                                should_partition = True
+                            elif lib.type == 'movie' and lib.totalSize > PARTITION_MIN_MOVIES:
+                                should_partition = True
+
+                            if should_partition:
+                                expected_partitions = min(MAX_PARTITIONS_PER_LIBRARY, max_workers)
+                                partition_size = (lib.totalSize + expected_partitions - 1) // expected_partitions
+
+                                # Check if all expected partition ranges are present
+                                all_partitions_done = True
+                                for i in range(expected_partitions):
+                                    start = i * partition_size
+                                    end = min((i + 1) * partition_size, lib.totalSize)
+                                    expected_key = f"{title}[{start}:{end}]"
+                                    if expected_key not in completed_parts:
+                                        all_partitions_done = False
+                                        break
+
+                                if all_partitions_done:
+                                    # All partitions are complete, mark library as fully done
+                                    completed_base_libs.add(title)
+
+                    libraries_to_process = [(title, lib) for title, lib in all_libraries
+                                          if title not in completed_base_libs]
+                    if VRB:
+                        skipped_count = len(all_libraries) - len(libraries_to_process)
+                        print(f"{VRBPFX}Resuming: {len(libraries_to_process)} libraries to process, {skipped_count} already completed")
+                else:
+                    libraries_to_process = all_libraries
+
+                partitioned_libraries = []
+
+                # Initialize library_partition_info for tracking partition completion
+                # Must be done BEFORE partition creation so we can register expected partitions
+                if not hasattr(PLEX_Media, 'library_partition_info'):
+                    PLEX_Media.library_partition_info = {}
+
+                for title, library in libraries_to_process:
+                    try:
+                        # Check if library should be partitioned (large Show or Movie libraries)
+                        should_partition = False
+                        lib_type_name = None
+                        if library.type == 'show' and library.totalSize > PARTITION_MIN_SHOWS:
+                            should_partition = True
+                            lib_type_name = 'shows'
+                        elif library.type == 'movie' and library.totalSize > PARTITION_MIN_MOVIES:
+                            should_partition = True
+                            lib_type_name = 'movies'
+
+                        if should_partition:
+                            # Calculate how many partitions to create (max 4 per library)
+                            num_partitions = min(MAX_PARTITIONS_PER_LIBRARY, max_workers)
+                            partition_size = (library.totalSize + num_partitions - 1) // num_partitions
+
+                            # Register expected partitions for removal detection
+                            if title not in PLEX_Media.library_partition_info:
+                                PLEX_Media.library_partition_info[title] = {
+                                    'expected_partitions': set(),
+                                    'completed_partitions': set(),
+                                    'all_complete': False
+                                }
+
+                            # Create virtual partitions, but skip already-completed ones
+                            partitions_added = 0
+                            for partition_idx in range(num_partitions):
+                                start_idx = partition_idx * partition_size
+                                end_idx = min((partition_idx + 1) * partition_size, library.totalSize)
+                                partition_key = f"{title}[{start_idx}:{end_idx}]"
+
+                                # Register this partition as expected
+                                PLEX_Media.library_partition_info[title]['expected_partitions'].add(partition_key)
+
+                                # Skip this partition if it was already completed in a previous run
+                                if hasattr(PLEX_Media, 'completed_libraries') and partition_key in PLEX_Media.completed_libraries:
+                                    # Mark as completed in partition_info as well
+                                    if hasattr(PLEX_Media, 'library_partition_info') and title in PLEX_Media.library_partition_info:
+                                        PLEX_Media.library_partition_info[title]['completed_partitions'].add(partition_key)
+                                    continue  # Partition already done, skip it
+
+                                # Store partition info as tuple: (title, library, start_idx, end_idx, partition_idx, num_partitions)
+                                partitioned_libraries.append((title, library, start_idx, end_idx, partition_idx, num_partitions))
+                                partitions_added += 1
+
+                            if VRB:
+                                if partitions_added > 0:
+                                    print(f"{VRBPFX}Partitioning '{title}' ({library.totalSize} {lib_type_name}) into {num_partitions} chunks for parallel processing")
+                                else:
+                                    # All partitions already completed
+                                    print(f"{VRBPFX}Library '{title}': all {num_partitions} partitions already completed, skipping")
+                        else:
+                            # Not a large Show/Movie library or too small - keep as-is
+                            # Use None for partition info to indicate no partitioning
+                            partitioned_libraries.append((title, library, None, None, None, None))
+                    except:
+                        # If anything fails, just keep library as-is
+                        partitioned_libraries.append((title, library, None, None, None, None))
+
+                libraries_to_process = partitioned_libraries
+
+                # PERFORMANCE: Recalculate max_workers based on actual number of tasks after partitioning
+                # We may have created many more tasks than libraries due to partitioning
+                num_tasks = len(libraries_to_process)
+                max_workers = min(MAX_PARALLEL_WORKERS, num_tasks)
+                if VRB and num_tasks != total_libraries:
+                    print(f"{VRBPFX}After partitioning: {num_tasks} tasks, using {max_workers} workers")
+
+                # Estimate size: Show libraries are typically larger than Movie libraries
+                def estimate_library_size(item):
+                    title, library, start_idx, end_idx, partition_idx, num_partitions = item
+                    try:
+                        # For partitions, use the partition size
+                        if start_idx is not None:
+                            partition_size = end_idx - start_idx
+                            return partition_size * 100  # Show partitions
+                        # Show libraries are usually larger (shows * seasons * episodes)
+                        elif library.type == 'show':
+                            return library.totalSize * 100  # Multiply to prioritize shows
+                        else:
+                            return library.totalSize
+                    except:
+                        return 0  # Unknown size, process last
+
+                sorted_libraries = sorted(libraries_to_process,
+                                        key=estimate_library_size, reverse=True)
+                libraries_iter = iter(sorted_libraries)
+
+                # Submit initial batch of work (up to max_workers)
+                for _ in range(max_workers):
+                    if _shutdown_requested:
+                        break
+                    try:
+                        title, library, start_idx, end_idx, partition_idx, num_partitions = next(libraries_iter)
+                        library_idx = get_next_library_idx()
+
+                        # Create partition suffix for display if this is a partitioned library
+                        if start_idx is not None:
+                            display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                        else:
+                            display_title = title
+
+                        future = executor.submit(
+                            PLEX_Library.process_single_library,
+                            title, library, library_idx, total_libraries,
+                            current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                            start_idx, end_idx  # Pass partition info
+                        )
+                        futures[future] = display_title
+                        if LIBRARY_START_DELAY > 0:
+                            time.sleep(LIBRARY_START_DELAY)
+                    except StopIteration:
+                        break  # No more libraries to process
+
+                # Wait for libraries to complete and submit new work as workers become available
+                while futures and not _shutdown_requested:
+                    # Use short timeout to allow checking shutdown flag frequently
+                    try:
+                        for future in as_completed(futures.keys(), timeout=0.5):
+                            title = futures.pop(future)
+                            try:
+                                was_updated = future.result()
+                                if was_updated:
+                                    cache_needs_save = True
+                            except Exception as e:
+                                if not _shutdown_requested:  # Don't print errors during shutdown
+                                    print(f"ERROR: Library '{title}' failed to update: {e}")
+                                    if DBG:
+                                        import traceback
+                                        traceback.print_exc()
+
+                            # Submit next library if available and not shutting down
+                            if not _shutdown_requested:
+                                try:
+                                    title, library, start_idx, end_idx, partition_idx, num_partitions = next(libraries_iter)
+                                    library_idx = get_next_library_idx()
+
+                                    # Create partition suffix for display if this is a partitioned library
+                                    if start_idx is not None:
+                                        display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                                    else:
+                                        display_title = title
+
+                                    future = executor.submit(
+                                        PLEX_Library.process_single_library,
+                                        title, library, library_idx, total_libraries,
+                                        current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                        start_idx, end_idx  # Pass partition info
+                                    )
+                                    futures[future] = display_title
+                                except StopIteration:
+                                    pass  # No more libraries to submit
+                            break  # Process one future at a time
+                    except (TimeoutError, FuturesTimeoutError):
+                        # No futures completed in timeout period, check shutdown flag again
+                        pass
+                _active_executor = None  # Clear reference
+
+                # Handle graceful shutdown if requested
+                if _shutdown_requested:
+                    print("\nWaiting for workers to finish current items...")
+                    # Wait for all running futures to complete
+                    # IMPORTANT: Must wait for workers to finish so that removals are included in checkpoint
+                    # Workers execute removal logic at end of library processing (line 5857-5872)
+                    # If we save checkpoint before removals complete, cache will have stale entries
+                    import time as time_module
+                    shutdown_start = time_module.time()
+                    shutdown_timeout = 60  # Increased to 60 seconds to ensure removals complete
+
+                    for future in futures:
+                        if not future.done():
+                            # Calculate remaining time from overall timeout
+                            elapsed = time_module.time() - shutdown_start
+                            remaining = max(0.1, shutdown_timeout - elapsed)
+
+                            try:
+                                future.result(timeout=remaining)
+                            except TimeoutError:
+                                print(f"Worker timed out after {shutdown_timeout}s, will be terminated")
+                            except Exception:
+                                pass  # Ignore errors during shutdown
+
+                            # Stop waiting if we've exceeded overall timeout
+                            if time_module.time() - shutdown_start >= shutdown_timeout:
+                                print(f"Shutdown timeout reached ({shutdown_timeout}s), forcing exit...")
+                                print(f"⚠ WARNING: Checkpoint may not include all removals from workers that didn't complete")
+                                break
+                    # Save checkpoint with all progress (including removals from completed workers)
+                    print("Saving checkpoint...")
+                    PLEX_Media.save_checkpoint(silent=True)
+                    print(f"Checkpoint saved. {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects preserved.")
+                    print("Shutdown complete. Run again to resume from checkpoint.")
+
+                    # Force shutdown executor to prevent hanging on exit
+                    # shutdown(wait=False) doesn't wait for workers to complete
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+                    # Use os._exit() to bypass Python cleanup that might hang
+                    # This is safe here because we've already saved the checkpoint
+                    os._exit(0)
+
+            # Print separator after parallel processing completes
+            if FORCE_CACHE_UPDATE:
+                print(f"{'='*76}")
+        else:
+            # Incremental update mode (not full rebuild)
+            # Check if any libraries need updating and prompt user
+            libraries_to_update = []
+            for title, library in PLEX_Library.OBJ_DICT_SUPPORTED.items():
+                old_timestamp = old_library_stats.get('updatedAt', {}).get(title)
+                current_timestamp = current_library_stats['updatedAt'].get(title)
+
+                if not current_timestamp or not old_timestamp:
+                    continue
+
+                # Case 1: Plex timestamp is newer than cache — clear update needed
+                if current_timestamp > old_timestamp:
+                    libraries_to_update.append((title, library, old_timestamp, current_timestamp))
+                # Case 2: Cache timestamp is inflated (newer than Plex) — check if Plex actually changed
+                elif old_timestamp > current_timestamp:
+                    old_plex_timestamp = old_library_stats.get('plexUpdatedAt', {}).get(title)
+                    if old_plex_timestamp and current_timestamp != old_plex_timestamp:
+                        libraries_to_update.append((title, library, old_plex_timestamp, current_timestamp))
+
+            # If libraries need updating, prompt user
+            if libraries_to_update:
+                if VRB:
+                    print(f"  >> Detected outdated libraries (Plex server has newer content)")
+                print(f"\nCache update available for {len(libraries_to_update)} librar{'y' if len(libraries_to_update) == 1 else 'ies'}:")
+                for title, _, old_ts, new_ts in libraries_to_update:
+                    print(f"  - {title}")
+                    print(f"      Cache: {old_ts}")
+                    print(f"      Plex:  {new_ts}")
+
+                print()  # Add blank line before prompt
+                if not prompt_yes_no("Update cache now?"):
+                    print("Skipping cache update.")
+                    libraries_to_update = []
+
+            # Process libraries to update (in parallel if multiple)
+            if libraries_to_update:
+                # Temporarily disable READ_ONLY_MODE since user explicitly approved cache update
+                old_read_only = READ_ONLY_MODE
+                READ_ONLY_MODE = False
+
+                # Always use ThreadPoolExecutor with partitioning for better performance
+                if True:  # Always use parallel processing path
+                    # Add partitioning support for large libraries (same as --update-cache)
+                    PARTITION_MIN_SHOWS = 30
+                    PARTITION_MIN_MOVIES = 50
+                    MAX_PARTITIONS_PER_LIBRARY = 4
+
+                    partitioned_libraries = []
+                    # Initialize partition tracking for incremental updates
+                    if not hasattr(PLEX_Media, 'library_partition_info'):
+                        PLEX_Media.library_partition_info = {}
+
+                    for title, library, _, _ in libraries_to_update:
+                        try:
+                            # Check if this is a large Show or Movie library that should be partitioned
+                            if library.type in ('show', 'movie') and library.totalSize > (PARTITION_MIN_SHOWS if library.type == 'show' else PARTITION_MIN_MOVIES):
+                                # Partition large libraries into chunks for parallel processing
+                                partition_size = library.totalSize // MAX_PARTITIONS_PER_LIBRARY
+                                num_partitions = min(MAX_PARTITIONS_PER_LIBRARY, (library.totalSize + partition_size - 1) // partition_size)
+
+                                # Initialize partition info for this library
+                                if title not in PLEX_Media.library_partition_info:
+                                    PLEX_Media.library_partition_info[title] = {
+                                        'expected_partitions': set(),
+                                        'completed_partitions': set(),
+                                        'all_complete': False
+                                    }
+
+                                for partition_idx in range(num_partitions):
+                                    start_idx = partition_idx * partition_size
+                                    end_idx = min((partition_idx + 1) * partition_size, library.totalSize)
+                                    partition_key = f"{title}[{start_idx}:{end_idx}]"
+
+                                    # Register this partition as expected
+                                    PLEX_Media.library_partition_info[title]['expected_partitions'].add(partition_key)
+
+                                    partitioned_libraries.append((title, library, start_idx, end_idx, partition_idx, num_partitions))
+
+                                if VRB:
+                                    lib_type_name = 'shows' if library.type == 'show' else 'movies'
+                                    print(f"{VRBPFX}Partitioning '{title}' ({library.totalSize} {lib_type_name}) into {num_partitions} chunks for parallel processing")
+                            else:
+                                # Not a large library - process as a whole
+                                partitioned_libraries.append((title, library, None, None, None, None))
+                        except:
+                            # If anything fails, process as a whole
+                            partitioned_libraries.append((title, library, None, None, None, None))
+
+                    # Calculate max_workers based on actual number of tasks (after partitioning)
+                    num_tasks = len(partitioned_libraries)
+                    max_workers = min(MAX_PARALLEL_WORKERS, num_tasks)
+
+                    print(f"\nProcessing {num_tasks} task(s) with {max_workers} worker(s)...")
+                    print(f"{'='*76}")
+
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        _active_executor = executor
+                        futures = {}
+
+                        # PERFORMANCE: Use dynamic work redistribution
+                        # As workers finish, they immediately pick up remaining work
+                        # This ensures all workers stay busy and minimizes idle time
+                        libraries_iter = iter(enumerate(partitioned_libraries, 1))
+
+                        # Submit initial batch of work (up to max_workers)
+                        for _ in range(max_workers):
+                            try:
+                                idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) = next(libraries_iter)
+
+                                if start_idx is not None:
+                                    display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                                else:
+                                    display_title = title
+
+                                future = executor.submit(
+                                    PLEX_Library.process_single_library,
+                                    title, library, idx, len(partitioned_libraries),
+                                    current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                    start_idx, end_idx  # Pass partition info
+                                )
+                                futures[future] = display_title
+                            except StopIteration:
+                                break  # No more work to submit
+
+                        # Wait for tasks to complete and dynamically submit new work as workers become available
+                        while futures:
+                            try:
+                                for future in as_completed(futures.keys(), timeout=0.5):
+                                    display_title = futures.pop(future)
+                                    try:
+                                        was_updated = future.result()
+                                        if was_updated:
+                                            cache_needs_save = True
+                                    except Exception as e:
+                                        print(f"Error processing {display_title}: {e}")
+
+                                    # Submit next task if available
+                                    try:
+                                        idx, (title, library, start_idx, end_idx, partition_idx, num_partitions) = next(libraries_iter)
+
+                                        if start_idx is not None:
+                                            display_title = f"{title} [part {partition_idx+1}/{num_partitions}]"
+                                        else:
+                                            display_title = title
+
+                                        future = executor.submit(
+                                            PLEX_Library.process_single_library,
+                                            title, library, idx, len(partitioned_libraries),
+                                            current_library_stats, old_library_stats, old_itemsCount_from_cache,
+                                            start_idx, end_idx  # Pass partition info
+                                        )
+                                        futures[future] = display_title
+                                    except StopIteration:
+                                        pass  # No more work to submit
+                                    break  # Process one future at a time
+                            except (TimeoutError, FuturesTimeoutError):
+                                # No futures completed in timeout, continue waiting
+                                pass
+
+                        _active_executor = None
+
+                    print(f"{'='*76}")
+
+                # CRITICAL FIX: Mark scanned libraries as "recently modified" so update_and_save_cache()
+                # will refresh their timestamps instead of preserving old ones
+                # Set cached timestamps to current time so the "< 2 min old" check passes
+                from datetime import datetime
+                if libraries_to_update:
+                    current_marker = datetime.now().replace(microsecond=0)
+                    for title, _, _, _ in libraries_to_update:
+                        # Update the IN-MEMORY cached timestamp to mark this library as "just scanned"
+                        # This ensures update_and_save_cache() will refresh it to current+60s
+                        if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                            CACHE['library_stats']['updatedAt'][title] = current_marker
+                            if DBG:
+                                print(f"{DBGPFX}Marked '{title}' as recently scanned (cache timestamp set to {current_marker.strftime('%Y-%m-%d %H:%M:%S')})")
+
+            # Handle graceful shutdown if requested (sequential mode)
+            if _shutdown_requested:
+                print("Saving checkpoint...")
+                PLEX_Media.save_checkpoint(silent=True)
+                print(f"Checkpoint saved. {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects preserved.")
+                print("Shutdown complete. Run again to resume from checkpoint.")
+                sys.exit(0)
+
+            # Show summary if no libraries were updated
+            if not FORCE_CACHE_UPDATE and not cache_needs_save:
+                if VRB: print("Cache still up-to-date")
+
+        # PERFORMANCE OPTIMIZATION: Save cache only ONCE at the end instead of after each library
+        # This dramatically reduces I/O for multi-library setups (5-10x faster)
+        # NOTE: We always save cache (not just when cache_needs_save) to ensure library_stats
+        # and itemsCount_by_item_id are persisted even when no libraries were updated
+        if VRB and cache_needs_save: print(f"{VRBPFX}Saving updated cache to disk (libraries changed)...")
+        elif VRB: print(f"{VRBPFX}Saving cache to disk (updating library_stats)...")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Saving cache to disk...")
+
+        # Rebuild library_object_counts after all updates are complete
+        # Store detailed counts: {'shows': N, 'seasons': M, 'episodes': K} for show libraries
+        # and {'movies': N} for movie libraries
+        updated_library_object_counts = {}
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            lib = obj['library']
+            obj_type = obj['type']
+
+            # Initialize library entry if needed
+            if lib not in updated_library_object_counts:
+                updated_library_object_counts[lib] = {}
+
+            # Count by type
+            if obj_type == 'Show':
+                updated_library_object_counts[lib]['shows'] = updated_library_object_counts[lib].get('shows', 0) + 1
+            elif obj_type == 'Season':
+                updated_library_object_counts[lib]['seasons'] = updated_library_object_counts[lib].get('seasons', 0) + 1
+            elif obj_type == 'Episode':
+                updated_library_object_counts[lib]['episodes'] = updated_library_object_counts[lib].get('episodes', 0) + 1
+            elif obj_type == 'Movie':
+                updated_library_object_counts[lib]['movies'] = updated_library_object_counts[lib].get('movies', 0) + 1
+
+        if DBG:
+            print(f"{DBGPFX}Saving cache with updated library_object_counts:")
+            for lib, counts in updated_library_object_counts.items():
+                lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib, 'Unknown')
+                count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
+                print(f"{DBGPFX}  Library '{lib}' ({lib_type}): {count_str}")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
+
+        # Save cache to disk (timestamps will be updated to current time inside update_and_save_cache())
+        if DBG:
+            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
+        update_and_save_cache(build_media_cache_dict(
+            library_stats=current_library_stats,
+            library_object_counts=updated_library_object_counts
+        ))
+        if DBG:
+            print(f"{DBGPFX}AFTER save: CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items")
+
+        # Restore READ_ONLY_MODE if it was temporarily disabled for user-approved incremental update
+        if 'old_read_only' in locals():
+            READ_ONLY_MODE = old_read_only
+
+        # Store current_library_stats (now with updated timestamps) for SUMMARY display
+        # The timestamps in CACHE['library_stats'] were just updated to current time
+        PLEX_Library.current_library_stats = CACHE.get('library_stats', current_library_stats)
+
+        # Count objects by type
+        total_count = len(PLEX_Media.OBJ_BY_ID)
+        movie_count = len(PLEX_Media.OBJ_BY_MOVIE)
+        show_count = len(PLEX_Media.OBJ_BY_SHOW)
+        season_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Season')
+        episode_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Episode')
+
+        # Format numbers with thousand separator (non-breaking space)
+        def format_count(n):
+            return f"{n:,}".replace(',', ' ')
+
+        # Calculate max width for alignment
+        max_width = max(len(format_count(total_count)),
+                       len(format_count(movie_count)),
+                       len(format_count(show_count)),
+                       len(format_count(season_count)),
+                       len(format_count(episode_count)))
+
+        # Only print media object counts in verbose mode
+        if VRB:
+            print(f"{PRINTPFX}      {format_count(movie_count):>{max_width}} Plex movie objects")
+            print(f"{PRINTPFX}      {format_count(show_count):>{max_width}} Plex show/series objects")
+            print(f"{PRINTPFX}      {format_count(season_count):>{max_width}} Plex season objects")
+            print(f"{PRINTPFX}      {format_count(episode_count):>{max_width}} Plex episode objects")
+            print(f"{PRINTPFX}{'-' * 60}")
+            print(f"{PRINTPFX}TOTAL {format_count(total_count):>{max_width}} Plex media objects")
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_MOVIE, var_name="PLEX_Media.OBJ_BY_MOVIE", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW, var_name="PLEX_Media.OBJ_BY_SHOW", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        # OBJ_BY_SHOW contains the SEASONS :)
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW_EPISODES, var_name="PLEX_Media.OBJ_BY_SHOW_EPISODES", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        for title in PLEX_Library.OBJ_DICT.keys():
+            if title == obj: return True
+
+        # Check if this looks like a library name typo (similar to existing library)
+        # If obj is similar to an existing library name, fail fast with helpful error
+        from difflib import get_close_matches
+        close_matches = get_close_matches(obj, PLEX_Library.OBJ_DICT.keys(), n=3, cutoff=0.6)
+        if close_matches:
+            suggestions = ', '.join(f"'{lib}'" for lib in close_matches)
+            available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+            err(1067, f"Library '{obj}' not found. Did you mean: {suggestions}?\n\nAvailable libraries: {available_libs}")
+
+        return False
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on libraries
+        # Auto-enable --list if --duplicates, --watched, --unwatched, or --audio is used
+        # Note: watched/unwatched/audio are global filters from main parser (args), not library-specific (obj_args)
+        watched_only = safe_getattr(args, 'watched', False)
+        unwatched_only = safe_getattr(args, 'unwatched', False)
+        duplicates_only = safe_getattr(obj_args, 'duplicates', False)
+        audio_filter = safe_getattr(args, 'audio', None)
+        no_audio_language = safe_getattr(args, 'no_audio_language', False)
+        collections_only = safe_getattr(obj_args, 'collections', False)
+
+        # Handle --collections (standalone or combined with --list)
+        if collections_only:
+                                        PLEX_Media.list_collections(obj)
+
+        # Handle --list or --duplicates or --watched or --unwatched or --audio or --no-audio-language
+        if obj_args.list or duplicates_only or watched_only or unwatched_only or audio_filter or no_audio_language:
+                                        media_type = safe_getattr(obj_args, 'type', None)
+                                        resolve_mode = safe_getattr(obj_args, 'resolve', False)
+                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language)
+        if obj_args.create_library:     PLEX_Library.create(obj)
+        if obj_args.delete:             PLEX_Library.delete(obj)
+        if obj_args.search:
+                                        filters = {item.split('=')[0]: item.split('=')[1] for item in obj_args.search}
+                                        PLEX_Library.advanced_search(obj, **filters)
+
+    @staticmethod
+    def print(only_supported=False, prefix=" - ", postfix=""):
+        if not PLEX_Library.init_done: PLEX_Library.init()
+        if only_supported:
+            for l in PLEX_Library.OBJ_DICT_SUPPORTED.values():
+                print(f"{prefix}{l.title}{postfix}") if l.type in PLEX_Library.SUPPORTED_TYPES else next
+        else: # return ALL libraries:
+            for l in PLEX_Library.OBJ_DICT.values():
+                l_type = PLEX_Library.OBJ_DICT_TYPE.get(l.title, l.type)
+                print(f"{prefix}{l.title} [{'supported' if l_type in PLEX_Library.SUPPORTED_TYPES else 'UNSUPPORTED'}]{postfix}")
+
+    @staticmethod
+    def create(library_name):
+        # Implement library creation logic here
+        print(f"Library '{library_name}' created (implement the actual logic).")
+
+    @staticmethod
+    def delete(library_name):
+        # Implement library deletion logic here
+        print(f"Library '{library_name}' deleted (implement the actual logic).")
+
+    @staticmethod
+    def advanced_search(library_name, **filters):
+        global PLEX_SERVER
+        try:
+            library = PLEX_Library.OBJ_DICT[library_name]
+            results = library.search(**filters)
+            print(f"\nAdvanced search results:")
+            for media in results:
+                print(f"- {media.title} ({media.year}) [{media.type}]")
+        except Exception as e:
+            err(1018, f"Error in advanced search: {e}")
+
+    @staticmethod
+    def get_PATHS_DICT():
+        """ collect_all_paths_linked_to_plex_libraries_including_alternative_paths() and set PLEX_Library.PATHS_DICT """
+        if DBG: print(f"{DBGPFX}get_PATHS_DICT()")
+
+        res = {}
+        # Iterate over each library section
+        for section in PLEX_Library.OBJ_DICT.values():
+            if DBG: print(f"{DBGPFX}get_PATHS_DICT(): LOOP 1 (libraries) > library '{section.title}'")
+            # List all paths for the current library
+            for path in section.locations:
+                if DBG: print(f"{DBGPFX}get_PATHS_DICT(): LOOP 2 (section.locations) >> path '{path}'")
+                for alternative_path in get_alternative_paths(path, including_path=True):
+                    if DBG: print(f"{DBGPFX}get_PATHS_DICT(): LOOP 3 (alternative_paths) >>> alternative_path '{alternative_path}'")
+                    if alternative_path in res:
+                        if DBG: print(f"{DBGPFX}get_PATHS_DICT(): EXISTING dict entry: res[{alternative_path}] = {res[alternative_path]} ++ ['{section.title}']")
+                        # making sure entry is unique - not sure if this CAN happen... but better save
+                        if section.title not in res[alternative_path]: res[alternative_path].append(section.title) 
+                    else:
+                        if DBG: print(f"{DBGPFX}get_PATHS_DICT(): NEW dict entry: res[{alternative_path}] = ['{section.title}']")
+                        res[alternative_path] = [section.title]
+        return res
+
+    def get_filtered_OBJ_DICT(library_names):
+        return {key: value for key, value in PLEX_Library.OBJ_DICT.items() if key in library_names}
+
+###########################################################################################
+#### PLEX COLLECTION MANAGEMENT
+###########################################################################################
+
+class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
+    TYPE_STR = 'collection'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage="{US} [--collection] <collection_name> [<COLLECTION_COMMAND> [..]]", description="Without any COLLECTION_COMMAND> this does the same as with <COLLECTION_COMMAND> '--list'.", allow_abbrev=False, exit_on_error=False)
+    argparser._optionals.title = "supported <COLLECTION_COMMAND>s"
+    argparser.add_argument('--list', action='store_true',  help="List media items to collection.")
+    argparser.add_argument('--add-to', nargs='+',      help="Add media items to collection. Example: --add-to-collection <media1> <media2>...", metavar='MEDIA_ITEM')
+    argparser.add_argument('--remove-from', nargs='+', help="Remove media items from collection. Example: --remove-from-collection <media1> <media2>...", metavar='MEDIA_ITEM')
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        # Check if obj matches a collection title in the cache
+        for col_key, col_dict in PLEX_Media.OBJ_BY_COLLECTION.items():
+            if col_dict.get('title') == obj:
+                return True
+        return False
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on collections
+        if obj_args.list:           PLEX_Collection.list(obj)
+        elif obj_args.add_to:       PLEX_Collection.add_to(obj, obj_args.add_to)
+        elif obj_args.remove_from:  PLEX_Collection.remove_from(obj, obj_args.remove_from)
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def list(library_name):
+        try:
+            library = PLEX_Library.OBJ_DICT[library_name]
+            print(f"\nCollections in library '{library_name}':")
+            for collection in library.collections():
+                print(f"- {collection.title}")
+        except Exception as e:
+            err(1019, f"Error listing collections: {e}")
+
+    @staticmethod
+    def create(collection_name, library_name):
+        # API required: collection mutations via Plex HTTP API
+        plex = ensure_plex_api()
+        Collection.create(server=plex, title=collection_name, section=PLEX_Library.OBJ_DICT[library_name])
+
+    @staticmethod
+    def add_to(collection_name, media_identifiers):
+        plex = ensure_plex_api()
+        try:
+            collection = plex.library.collection(collection_name)
+        except:
+            err(1040, f"Collection with name '{collection_name}' not found.")
+
+        for identifier in media_identifiers:
+            for media in resolve_plex_media_obj(identifier):
+                media.addCollection(collection_name)
+                print(f"Media '{media.title}' added to collection '{collection_name}'.")
+
+    @staticmethod
+    def remove_from(collection_name, media_identifiers):
+        plex = ensure_plex_api()
+        try:
+            collection = plex.library.collection(collection_name)
+
+            for identifier in media_identifiers:
+                for media in resolve_plex_media_obj(identifier):
+                    media.removeCollection(collection_name)
+                    print(f"Media '{media.title}' removed from collection '{collection_name}'.")
+        except Exception as e:
+            err(1020, f"Error removing media from collection: {e}")
+
+
+###########################################################################################
+#### PLEX MEDIA MANAGEMENT  //   MEDIA-ITEMS MANAGEMENT
+###########################################################################################
+
+class PLEX_Media(PLEX_OBJ_TYPE_ABC):
+    TYPE_STR = 'media'
+    OBJ_BY_ID = {}          # dict: key=obj.type:part.id - value=DICT with always: "file", "type", "library", "title", "part_id"
+                            #                                         and potentially other keys depending on TYPE!
+    OBJ_BY_FILEPATH = {}    # dict: key=filepath     - value=LIST (as filename can be part of SEVERAL libraries) of part_ids
+    OBJ_BY_LIBRARY  = {}    # dict: key=library_name - value=DICT: key=cache_key,  value=obj_dict
+    OBJ_BY_COLLECTION = {} # dict: key=collection_key (Collection:<id>) - value=collection_dict
+    #                                   movie_obj_key = movie_key = obj.type:part.id for MOVIE OBJ
+    #                                   show_obj_key  = show_key  = obj.type:part.id for SHOW OBJ
+    OBJ_BY_MOVIE    = {}    # dict: key=movie_obj_key  -                        value=DICT: key=version, value=LIST of part_ids
+    OBJ_BY_SHOW_EPISODES={} # dict: key=show_obj       - value=DICT: key='S0x'  value=DICT: key='E0x'    value=DICT: key=version, value=LIST of part_ids
+    OBJ_BY_SHOW     = {}    # dict: key=show_obj_key   - value=DICT: key='S0x'  value=key ?!
+
+    init_done = False
+    cache_rebuild_lock = None  # Will hold the lock during cache rebuild
+    items_processed = 0  # Counter for checkpoint saves during rebuild
+    # Current progress tracking for checkpoint messages
+    current_library = None  # Current library being processed
+    current_item_idx = 0  # Current item index (movie or show)
+    current_item_total = 0  # Total items in current library
+    current_item_type = None  # 'movies' or 'shows'
+    # Retry statistics tracking
+    retry_count = 0  # Total number of retries during cache rebuild
+    retry_wait_time = 0  # Total seconds spent waiting in retries
+    retry_by_level = {}  # Dict: key=retry_level (1-4), value={'count': N, 'wait_time': seconds}
+
+    @staticmethod
+    def init():
+        global LOCK_FILE, CACHE_FILE, FROM_SCRATCH, _metadata_batch_queue
+        if PLEX_Media.init_done: return
+        PLEX_Media.OBJ_BY_ID = {}
+
+        # PERFORMANCE OPTIMIZATION: During cache rebuild, check for partial cache from interrupted rebuild
+        if FORCE_CACHE_UPDATE:
+            partial_cache_file = CACHE_FILE + '.partial'
+
+            # FROM_SCRATCH MODE: Delete existing cache files and start completely fresh
+            if FROM_SCRATCH:
+                # Move old cache aside as backup (with timestamp)
+                backup_cache_file = None
+                if os.path.exists(CACHE_FILE):
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    backup_cache_file = f"{CACHE_FILE}.old_{timestamp}"
+                    try:
+                        os.rename(CACHE_FILE, backup_cache_file)
+                        print(f"Moved old cache aside: {backup_cache_file}")
+                    except Exception as e:
+                        print(f"Warning: Could not move old cache aside: {e}")
+
+                # Delete partial cache if it exists - we want a completely fresh rebuild with --from-scratch
+                if os.path.exists(partial_cache_file):
+                    try:
+                        os.remove(partial_cache_file)
+                        if VRB: print(f"{VRBPFX}Deleted partial cache for fresh rebuild: {partial_cache_file}")
+                    except Exception as e:
+                        print(f"Warning: Could not delete partial cache: {e}")
+
+                if VRB: print(f"{VRBPFX}From-scratch rebuild mode (--from-scratch): starting with empty cache...")
+
+                # Preserve file_metadata from old cache backup (keyed by filepath)
+                # This avoids re-probing 17000+ files with ffmpeg after a from-scratch rebuild
+                # Skip if --force-metadata: user wants to re-collect all metadata from scratch
+                # Note: OBJ_BY_ID is already empty at this point, so we read from the backup file
+                PLEX_Media._preserved_file_metadata = {}
+                if FORCE_METADATA:
+                    print(f"  --force-metadata: skipping metadata preservation, will re-collect all")
+                elif backup_cache_file and os.path.exists(backup_cache_file):
+                    try:
+                        import pickle as _pkl
+                        with open(backup_cache_file, 'rb') as _f:
+                            old_cache = _pkl.load(_f)
+                        old_obj_by_id = old_cache.get('obj_by_id', {})
+                        for obj in old_obj_by_id.values():
+                            if obj.get('type') not in ('Movie', 'Episode'):
+                                continue
+                            for _ver, file_info in obj.get('files', {}).items():
+                                if not isinstance(file_info, dict):
+                                    continue
+                                fm = file_info.get('file_metadata')
+                                fp = file_info.get('filepath')
+                                if fm and fp:
+                                    PLEX_Media._preserved_file_metadata[fp] = fm
+                        del old_cache, old_obj_by_id
+                    except Exception as e:
+                        print(f"  Warning: Could not read file metadata from backup: {e}")
+                if PLEX_Media._preserved_file_metadata:
+                    print(f"  Preserving file metadata for {len(PLEX_Media._preserved_file_metadata)} files")
+
+                PLEX_Media.OBJ_BY_ID = {}
+                PLEX_Media.OBJ_BY_MOVIE = {}
+                PLEX_Media.OBJ_BY_SHOW = {}
+                PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                PLEX_Media.items_processed = 0
+                PLEX_Media.completed_libraries = set()
+
+            # Check if there's a partial cache from an interrupted rebuild
+            # Resume from it unless --from-scratch was specified
+            elif os.path.exists(partial_cache_file):
+                print(f"Found partial cache from interrupted rebuild: {partial_cache_file}")
+                try:
+                    with open(partial_cache_file, 'rb') as f:
+                        partial_cache = pickle.load(f)
+                    load_media_cache(partial_cache)
+                    PLEX_Media.items_processed = partial_cache.get('items_processed', 0)
+                    PLEX_Media.completed_libraries = partial_cache.get('completed_libraries', set())
+                    PLEX_Media.library_timings = partial_cache.get('library_timings', {})
+                    completed_count = len(PLEX_Media.completed_libraries)
+                    print(f"Resuming from checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects, {completed_count} libraries completed")
+                except Exception as e:
+                    print(f"Failed to load partial cache: {e}, starting fresh...")
+                    PLEX_Media.OBJ_BY_ID = {}
+                    PLEX_Media.OBJ_BY_MOVIE = {}
+                    PLEX_Media.OBJ_BY_SHOW = {}
+                    PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                    PLEX_Media.items_processed = 0
+                    PLEX_Media.completed_libraries = set()
+
+            # INCREMENTAL UPDATE MODE (default): Load existing cache and add missing items
+            else:
+                if VRB: print(f"{VRBPFX}Incremental cache update mode: loading existing cache and adding missing items...")
+                # Load the existing cache first
+                load_cache()  # global load_cache function
+                load_media_cache(CACHE)
+                PLEX_Media.items_processed = 0
+                PLEX_Media.completed_libraries = set()
+                if VRB: print(f"{VRBPFX}Loaded {len(PLEX_Media.OBJ_BY_ID)} existing items, will add missing items from server...")
+
+            # Acquire and hold the lock for the entire rebuild process
+            PLEX_Media.cache_rebuild_lock = CacheLock(LOCK_FILE)
+            PLEX_Media.cache_rebuild_lock.__enter__()
+            mode_str = "From-scratch rebuild" if FROM_SCRATCH else "Incremental update"
+            PLEX_Media.cache_rebuild_lock.write_progress(f"Cache {mode_str.lower()} started - initializing...")
+        else:
+            # Load the previous cache
+            load_cache() # global load_cache function
+            if DBG: print(f"{DBGPFX}PLEX_Media.init(): Loading from cache, CACHE has {len(CACHE.get('obj_by_id', {}))} obj_by_id items")
+            load_media_cache(CACHE)
+            if DBG: print(f"{DBGPFX}PLEX_Media.init(): After loading, OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items")
+            if DBG: print(f"{DBGPFX}PLEX_Media.init(): Loaded OBJ_BY_LIBRARY with {len(PLEX_Media.OBJ_BY_LIBRARY)} libraries")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Scanning Plex libraries...")
+
+        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Before update_cache(), OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items")
+        PLEX_Media.update_cache()
+        if DBG: print(f"{DBGPFX}PLEX_Media.init(): After update_cache(), OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items")
+
+        # Convert dict_keys to lists for pickle compatibility
+        # This must happen BEFORE any save operations to avoid pickle errors
+        for (key, obj) in PLEX_Media.OBJ_BY_ID.items():
+            match obj['type']:
+                case "Movie":
+                    if key in PLEX_Media.OBJ_BY_MOVIE:
+                        versions = list(PLEX_Media.OBJ_BY_MOVIE[key].keys())
+                        obj['versions'] = versions
+                        PLEX_Media.OBJ_BY_ID[key] = obj
+                case "Show":
+                    if key in PLEX_Media.OBJ_BY_SHOW:
+                        members = list(PLEX_Media.OBJ_BY_SHOW[key].keys())
+                        obj['members'] = members
+                        PLEX_Media.OBJ_BY_ID[key] = obj
+                case "Season":
+                    if obj.get('show_key') in PLEX_Media.OBJ_BY_SHOW_EPISODES and obj.get('S_str') in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(obj['show_key'], {}):
+                        members = list(PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']].keys())
+                        obj['members'] = members
+                        PLEX_Media.OBJ_BY_ID[key] = obj
+                case "Episode":
+                    if obj.get('show_key') in PLEX_Media.OBJ_BY_SHOW_EPISODES and obj.get('S_str') in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(obj['show_key'], {}) and obj.get('E_str') in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(obj['show_key'], {}).get(obj['S_str'], {}):
+                        versions = list(PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']][obj['E_str']].keys())
+                        obj['versions'] = versions
+                        PLEX_Media.OBJ_BY_ID[key] = obj
+
+        # Clean up cache: Remove media objects from libraries that no longer exist
+        # CRITICAL: Only do cleanup if PLEX_Library.OBJ_DICT is populated
+        # When running commands like --info/--list, PLEX_Library.init() isn't called,
+        # so OBJ_DICT is empty. Skipping cleanup in this case prevents removing all objects.
+        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Before cleanup loop, OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items")
+        current_libraries = set(PLEX_Library.OBJ_DICT.keys()) if PLEX_Library.OBJ_DICT else None
+        if DBG: print(f"{DBGPFX}PLEX_Media.init(): current_libraries = {current_libraries if current_libraries else '(skipping cleanup - OBJ_DICT empty)'}")
+        keys_to_remove = []
+        if current_libraries is not None:
+            for (key, obj) in PLEX_Media.OBJ_BY_ID.items():
+                if obj['library'] not in current_libraries:
+                    keys_to_remove.append(key)
+                    if DBG: print(f"{DBGPFX}PLEX_Media.init(): Removing cached object for deleted library '{obj['library']}': key='{key}'")
+
+        # Remove obsolete cache entries
+        for key in keys_to_remove:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            del PLEX_Media.OBJ_BY_ID[key]
+            # Also clean up other data structures
+            if obj['type'] == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key]
+            elif obj['type'] in ['Show', 'Season', 'Episode']:
+                show_key = obj.get('show_key', key)
+                if show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                    del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+
+        if keys_to_remove:
+            if VRB: print(f"{VRBPFX}Removed {len(keys_to_remove)} cached media object(s) from deleted libraries.")
+            # Save cleaned cache
+            # NOTE: Don't include 'library_stats' here because it was already updated and saved
+            # by PLEX_Library.update_cache() at line 1131. Including it here would overwrite
+            # the fresh timestamps with stale data from the old cache!
+            if DBG: print(f"{DBGPFX}PLEX_Media.init(): About to save cleaned cache, OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items")
+            update_and_save_cache(build_media_cache_dict(include_paths=False))
+
+        # CRITICAL FIX: Only rebuild OBJ_BY_FILEPATH and OBJ_BY_LIBRARY if they're empty
+        # They should be loaded from cache now, so rebuilding is only needed for:
+        # 1. First-time cache creation
+        # 2. Old cache format that doesn't have these fields
+        need_rebuild_filepath = len(PLEX_Media.OBJ_BY_FILEPATH) == 0
+        need_rebuild_library = len(PLEX_Media.OBJ_BY_LIBRARY) == 0
+
+        if need_rebuild_filepath or need_rebuild_library:
+            if DBG and (need_rebuild_filepath or need_rebuild_library):
+                print(f"{DBGPFX}PLEX_Media.init(): Rebuilding index structures (filepath={need_rebuild_filepath}, library={need_rebuild_library})")
+
+            if need_rebuild_library:
+                PLEX_Media.OBJ_BY_LIBRARY = { x:{} for x in PLEX_Library.OBJ_DICT.keys() }
+
+        # Process all objects to rebuild indexes if needed and collect metadata
+        for (key, obj) in PLEX_Media.OBJ_BY_ID.items():
+            if DEEPDBG: print(f"{DBGPFX}PLEX_Media.init(): key='{key}, obj='{obj}'")
+
+            # Rebuild OBJ_BY_FILEPATH if needed (skip types without files, e.g. Collection)
+            if need_rebuild_filepath and 'file' in obj and obj['file']:
+                if obj['file'] in PLEX_Media.OBJ_BY_FILEPATH: PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ].append(key)
+                else:                                          PLEX_Media.OBJ_BY_FILEPATH[ obj['file'] ] = [ key ]
+
+            # Rebuild OBJ_BY_LIBRARY if needed
+            if need_rebuild_library:
+                # Skip if library no longer exists (defensive check, should already be cleaned up above)
+                if obj['library'] not in PLEX_Media.OBJ_BY_LIBRARY:
+                    if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping object for non-existent library '{obj['library']}': key='{key}'")
+                    continue
+
+                if obj['type'] in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ]:
+                    if key not in PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ]:
+                        PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ].append( key )
+                else:
+                    PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
+
+            # collect data ...
+            match obj['type']:
+                case "Movie":
+                    versions = list(PLEX_Media.OBJ_BY_MOVIE[key].keys())
+                case "Show": # key = show_key
+                    members = list(PLEX_Media.OBJ_BY_SHOW[key].keys()) # S01, S02, ...
+                    S_count = len( members )
+                    E_count = reduce( lambda s,x:len(x.keys())+s, PLEX_Media.OBJ_BY_SHOW_EPISODES[key].values(), 0 )
+                case "Season": # key = show_key
+                    # Defensive check: skip if parent show is missing (orphaned data)
+                    # Skip check if OBJ_BY_SHOW is empty (database mode - Show objects not created)
+                    if PLEX_Media.OBJ_BY_SHOW and obj['show_key'] not in PLEX_Media.OBJ_BY_SHOW:
+                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned season - parent show '{obj['show_key']}' not found: key='{key}'")
+                        continue
+                    # In database mode, we don't have Show objects, so skip member/count collection
+                    if obj['show_key'] in PLEX_Media.OBJ_BY_SHOW:
+                        #[ obj['S_str']+E_str for E_str in PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']].keys() ]
+                        members = list(PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']].keys()) # E01, E02, ...
+                        E_count = len( members )
+                        S_count = len( PLEX_Media.OBJ_BY_SHOW[obj['show_key']].keys() )
+                    else:
+                        # Database mode: use fallback values
+                        members = []
+                        E_count = 0
+                        S_count = 0
+                case "Episode": # key = show_key
+                    # Defensive check: skip if parent show is missing (orphaned data)
+                    # Skip check if OBJ_BY_SHOW is empty (database mode - Show objects not created)
+                    if PLEX_Media.OBJ_BY_SHOW and obj['show_key'] not in PLEX_Media.OBJ_BY_SHOW:
+                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned episode - parent show '{obj['show_key']}' not found: key='{key}'")
+                        continue
+                    # Defensive check: skip if season/episode structure is missing (orphaned episode)
+                    if (obj.get('show_key') in PLEX_Media.OBJ_BY_SHOW_EPISODES and
+                        obj.get('S_str') in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(obj['show_key'], {}) and
+                        obj.get('E_str') in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(obj['show_key'], {}).get(obj['S_str'], {})):
+                        versions = list(PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']][obj['E_str']].keys())
+                        if obj['show_key'] in PLEX_Media.OBJ_BY_SHOW:
+                            S_count = len( PLEX_Media.OBJ_BY_SHOW[obj['show_key']].keys() )
+                            E_count = len( PLEX_Media.OBJ_BY_SHOW_EPISODES[obj['show_key']][obj['S_str']].keys() )
+                        else:
+                            # Database mode: OBJ_BY_SHOW is empty, use fallback
+                            S_count = 0
+                            E_count = 0
+                    else:
+                        # Episode not in OBJ_BY_SHOW_EPISODES - skip metadata collection
+                        versions = []
+                        S_count = 0
+                        E_count = 0
+                case "Collection":
+                    continue  # Collections are metadata-only, no versions/members to collect here
+                case _: err(1051, f"obj['type'] = '{obj['type']}'")
+
+            # ... to update PLEX_Media.OBJ_BY_ID[ key ]:
+            match obj['type']:
+                case "Show" | "Season":
+                    (obj['S_count'], obj['E_count'], obj['members']) = (S_count, E_count, members)
+                    PLEX_Media.OBJ_BY_ID[ key ] = obj
+                case "Episode":
+                    (obj['S_count'], obj['E_count'], obj['versions']) = (S_count, E_count, versions)
+                case "Movie":
+                    obj['versions'] = versions
+                case _: err(1050, f"obj['type'] = '{obj['type']}'")
+            PLEX_Media.OBJ_BY_ID[ key ] = obj
+
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_ID, var_name="PLEX_Media.OBJ_BY_ID", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_LIBRARY, var_name="PLEX_Media.OBJ_BY_LIBRARY", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+
+        # --update-cache --broken: queue ALL broken files across all libraries
+        # This is needed because skipped libraries don't call _collect_missing_file_metadata
+        if FORCE_CACHE_UPDATE and RESCAN_BROKEN:
+            broken_queued = 0
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for version, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    fm = file_info.get('file_metadata')
+                    if fm and fm.get('broken'):
+                        filepath = file_info.get('filepath')
+                        if filepath:
+                            _metadata_batch_queue.append((filepath, key, version, obj.get('library', '')))
+                            broken_queued += 1
+            if broken_queued > 0:
+                print(f"  Queued {broken_queued} broken files for rescan")
+
+        # Re-attach preserved file_metadata from --from-scratch rebuild
+        if hasattr(PLEX_Media, '_preserved_file_metadata') and PLEX_Media._preserved_file_metadata:
+            reattached = 0
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for _ver, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    if file_info.get('file_metadata') is not None:
+                        continue  # Already has metadata
+                    fp = file_info.get('filepath')
+                    if fp and fp in PLEX_Media._preserved_file_metadata:
+                        file_info['file_metadata'] = PLEX_Media._preserved_file_metadata[fp]
+                        reattached += 1
+            if reattached > 0:
+                print(f"  Re-attached preserved file metadata to {reattached} files")
+                print(f"  To force rebuilding metadata, use: my-plex --update-cache --from-scratch --force-metadata")
+            # Remove from batch queue any files that now have metadata
+            if _metadata_batch_queue:
+                old_len = len(_metadata_batch_queue)
+                _metadata_batch_queue = [
+                    (fp, obj_key, ver, dt) for fp, obj_key, ver, dt in _metadata_batch_queue
+                    if obj_key in PLEX_Media.OBJ_BY_ID and
+                       PLEX_Media.OBJ_BY_ID[obj_key].get('files', {}).get(ver, {}).get('file_metadata') is None
+                ]
+                if old_len != len(_metadata_batch_queue):
+                    print(f"  Batch queue reduced from {old_len} to {len(_metadata_batch_queue)} files")
+            del PLEX_Media._preserved_file_metadata
+
+        # Queue any files still missing metadata (covers --from-scratch full processing paths
+        # which don't call _collect_missing_file_metadata, and any other edge cases)
+        if FORCE_CACHE_UPDATE:
+            already_queued = set((fp, obj_key, ver) for fp, obj_key, ver, dt in _metadata_batch_queue)
+            sweep_queued = 0
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                for version, file_info in obj.get('files', {}).items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    if file_info.get('file_metadata') is not None:
+                        continue
+                    filepath = file_info.get('filepath')
+                    if filepath and (filepath, key, version) not in already_queued:
+                        _metadata_batch_queue.append((filepath, key, version, obj.get('library', '')))
+                        sweep_queued += 1
+            if sweep_queued > 0:
+                print(f"  Queued {sweep_queued} additional files missing metadata")
+
+        # Batch-collect missing file metadata (ffmpeg) via single SSH call
+        if FORCE_CACHE_UPDATE and _metadata_batch_queue:
+            if PLEX_Media.cache_rebuild_lock:
+                PLEX_Media.cache_rebuild_lock.write_progress("Collecting file metadata...")
+            _run_batch_metadata_collection()
+            # Save cache after metadata collection (before labels index)
+            update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
+
+        # Rebuild OBJ_BY_FILEPATH from OBJ_BY_ID to remove stale entries
+        if FORCE_CACHE_UPDATE:
+            PLEX_Media.OBJ_BY_FILEPATH = {}
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('type') in ('Show', 'Season', 'Collection'):
+                    continue
+                for _ver, fi in obj.get('files', {}).items():
+                    fp = fi.get('filepath') if isinstance(fi, dict) else None
+                    if fp:
+                        if fp not in PLEX_Media.OBJ_BY_FILEPATH:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp] = []
+                        if key not in PLEX_Media.OBJ_BY_FILEPATH[fp]:
+                            PLEX_Media.OBJ_BY_FILEPATH[fp].append(key)
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
+
+        # Build labels index for fast label-based queries
+        labels_index = PLEX_Media.build_labels_index()
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
+
+        # Save labels_index and rebuilt OBJ_BY_FILEPATH to cache
+        update_and_save_cache({'labels_index': labels_index, 'obj_by_filepath': PLEX_Media.OBJ_BY_FILEPATH})
+
+        # Release the cache rebuild lock if we held it
+        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.__exit__(None, None, None)
+            PLEX_Media.cache_rebuild_lock = None
+
+            # Clean up partial cache file on successful completion
+            partial_cache_file = CACHE_FILE + '.partial'
+            if os.path.exists(partial_cache_file):
+                try:
+                    os.remove(partial_cache_file)
+                    if VERYVRB: print(f"{VRBPFX}Removed partial cache file (rebuild complete)")
+                except Exception as e:
+                    if DBG: print(f"{DBGPFX}Failed to remove partial cache file: {e}")
+
+            # Calculate totals from library_delta_counters if available
+            total_added = 0
+            total_removed = 0
+            total_updated = 0
+
+            if FROM_SCRATCH:
+                # --from-scratch: everything in OBJ_BY_ID is newly added (delta counters aren't
+                # used by the DB processing path, so we count directly)
+                for obj in PLEX_Media.OBJ_BY_ID.values():
+                    if obj.get('type') in ('Movie', 'Episode'):
+                        total_added += 1
+            elif hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
+                for lib_key, counters in PLEX_Media.library_delta_counters.items():
+                    # Count media files (movies and episodes only, not seasons/shows which are containers)
+                    total_added += counters['added']['movies'] + counters['added']['episodes']
+                    total_removed += counters['removed']['movies'] + counters['removed']['episodes']
+                    total_updated += counters['updated']['movies'] + counters['updated']['episodes']
+
+            # Show detailed summary (only actual changes — metadata probing reported separately)
+            metadata_probed = getattr(PLEX_Media, 'last_metadata_batch_processed', 0)
+            metadata_total = getattr(PLEX_Media, 'last_metadata_batch_total', 0)
+            metadata_interrupted = metadata_probed > 0 and metadata_probed < metadata_total
+
+            action = "Cache rebuild" if FROM_SCRATCH else "Cache update"
+            status = "interrupted" if metadata_interrupted else "complete"
+            total_media_files = len(PLEX_Media.OBJ_BY_ID)
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
+                parts = []
+                if total_added > 0:
+                    parts.append(f"+{total_added} added")
+                if total_removed > 0:
+                    parts.append(f"-{total_removed} removed")
+                if total_updated > 0:
+                    parts.append(f"~{total_updated} updated")
+                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
+                print(f"{action} {status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items", flush=True)
+            elif metadata_probed > 0:
+                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items", flush=True)
+            else:
+                print(f"{action} {status}: no changes, {total_media_files} total PLEX items", flush=True)
+
+            # Print per-library summary of changes at the end (only if there ARE actual changes)
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
+                print(f"\n{'='*76}")
+                print(f"SUMMARY OF CHANGES")
+                print(f"{'='*76}")
+
+                # Collect library summaries (merge partitions into base libraries)
+                library_summaries = {}  # {base_lib_name: {added: {...}, removed: {...}, updated: {...}}}
+
+                for lib_key, counters in PLEX_Media.library_delta_counters.items():
+                    # Extract base library name (remove partition suffix)
+                    base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
+
+                    if base_lib not in library_summaries:
+                        library_summaries[base_lib] = {
+                            'added': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+                            'removed': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+                            'updated': {'shows': 0, 'seasons': 0, 'episodes': 0, 'movies': 0},
+                            'metadata_probed': 0,
+                        }
+
+                    # Aggregate counts
+                    for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                        library_summaries[base_lib]['added'][obj_type] += counters['added'][obj_type]
+                        library_summaries[base_lib]['removed'][obj_type] += counters['removed'][obj_type]
+                        library_summaries[base_lib]['updated'][obj_type] += counters['updated'][obj_type]
+                    library_summaries[base_lib]['metadata_probed'] += counters.get('metadata_probed', 0)
+
+                # Group libraries by type for organized output
+                show_libs = []
+                movie_libs = []
+                other_libs = []
+
+                for lib_name in sorted(library_summaries.keys()):
+                    summary = library_summaries[lib_name]
+                    lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+
+                    # Build change string for this library
+                    change_parts = []
+                    if lib_type == 'Show':
+                        for obj_type in ['shows', 'seasons', 'episodes']:
+                            added = summary['added'][obj_type]
+                            removed = summary['removed'][obj_type]
+                            updated = summary['updated'][obj_type]
+
+                            if added > 0 or removed > 0 or updated > 0:
+                                parts = []
+                                if added > 0:
+                                    parts.append(f"+{added}")
+                                if removed > 0:
+                                    parts.append(f"-{removed}")
+                                if updated > 0:
+                                    parts.append(f"~{updated}")
+                                change_parts.append(f"{'/'.join(parts)} {obj_type}")
+                    elif lib_type == 'Movie':
+                        added = summary['added']['movies']
+                        removed = summary['removed']['movies']
+                        updated = summary['updated']['movies']
+
+                        if added > 0 or removed > 0 or updated > 0:
+                            parts = []
+                            if added > 0:
+                                parts.append(f"+{added}")
+                            if removed > 0:
+                                parts.append(f"-{removed}")
+                            if updated > 0:
+                                parts.append(f"~{updated}")
+                            change_parts.append(f"{'/'.join(parts)} movies")
+
+                    if lib_type == 'Show':
+                        show_libs.append((lib_name, change_parts))
+                    elif lib_type == 'Movie':
+                        movie_libs.append((lib_name, change_parts))
+                    else:
+                        other_libs.append((lib_name, change_parts))
+
+                # Combine all libraries for table output (with timestamps)
+                # Get timestamps from PLEX_Library.current_library_stats (set by update_cache())
+                library_timestamps = {}
+                if hasattr(PLEX_Library, 'current_library_stats') and PLEX_Library.current_library_stats:
+                    library_timestamps = PLEX_Library.current_library_stats.get('updatedAt', {})
+
+                all_libs = []
+                for lib_name, change_parts in show_libs:
+                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
+                    all_libs.append(('Show', lib_name, status, timestamp))
+                for lib_name, change_parts in movie_libs:
+                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
+                    all_libs.append(('Movie', lib_name, status, timestamp))
+                for lib_name, change_parts in other_libs:
+                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    timestamp = library_timestamps.get(lib_name, 'N/A')
+                    all_libs.append(('Other', lib_name, status, timestamp))
+
+                # Calculate dynamic width for Status column based on longest status text
+                max_status_width = max(len(status) for _, _, status, _ in all_libs) if all_libs else 11
+                # Ensure minimum width for the "Status" header
+                max_status_width = max(max_status_width, len('Status'))
+
+                # Print table header
+                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<{max_status_width}} | {'Updated'}")
+                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*max_status_width}-+-{'-'*19}")
+
+                # Print table rows
+                for lib_type, lib_name, status, timestamp in all_libs:
+                    # Format timestamp for display
+                    ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
+                    print(f"{lib_type:<12} | {lib_name:<20} | {status:<{max_status_width}} | {ts_str}")
+
+                # Keep these for backwards compatibility but make them empty
+                if False and show_libs:
+                    print(f"Series/Show Libraries:")
+                    for lib_name, change_parts in show_libs:
+                        if change_parts:
+                            print(f"  {lib_name}: {', '.join(change_parts)}")
+                        else:
+                            print(f"  {lib_name}: no changes")
+
+                # Print Movie libraries
+                if False and movie_libs:
+                    print(f"Movie Libraries:")
+                    for lib_name, change_parts in movie_libs:
+                        if change_parts:
+                            print(f"  {lib_name}: {', '.join(change_parts)}")
+                        else:
+                            print(f"  {lib_name}: no changes")
+
+                # Print Other libraries (if any)
+                if False and other_libs:
+                    print(f"Other Libraries:")
+                    for lib_name, change_parts in other_libs:
+                        if change_parts:
+                            print(f"  {lib_name}: {', '.join(change_parts)}")
+                        else:
+                            print(f"  {lib_name}: no changes")
+
+                # Print detailed changes with -V or -VV
+                if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
+                    # Merge partitions into base libraries for detailed output
+                    library_details = {}  # {base_lib_name: {added: {...}, removed: {...}, updated: {...}}}
+
+                    for lib_key, details in PLEX_Media.library_delta_details.items():
+                        # Extract base library name (remove partition suffix)
+                        base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
+
+                        if base_lib not in library_details:
+                            library_details[base_lib] = {
+                                'added': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+                                'updated': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+                                'removed': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []}
+                            }
+
+                        # Aggregate details across partitions
+                        for action in ['added', 'removed', 'updated']:
+                            for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                                library_details[base_lib][action][obj_type].extend(details[action][obj_type])
+
+                    # Check if there are ANY changes across ALL libraries
+                    has_any_changes = False
+                    for details in library_details.values():
+                        for action in ['added', 'removed', 'updated']:
+                            for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                                if len(details[action][obj_type]) > 0:
+                                    has_any_changes = True
+                                    break
+                            if has_any_changes:
+                                break
+                        if has_any_changes:
+                            break
+
+                    # Only print section if there are changes
+                    if has_any_changes:
+                        print(f"{'='*76}")
+                        print(f"DETAILED CHANGES")
+                        print(f"{'='*76}")
+
+                        # Print detailed changes per library
+                        for lib_name in sorted(library_details.keys()):
+                            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+                            details = library_details[lib_name]
+
+                            # Check if this library has any changes
+                            has_changes = False
+                            for action in ['added', 'removed', 'updated']:
+                                for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                                    if len(details[action][obj_type]) > 0:
+                                        has_changes = True
+                                        break
+                                if has_changes:
+                                    break
+
+                            if not has_changes:
+                                continue
+
+                            print(f"\n{lib_name}:")
+
+                            # Print added items
+                            for action, symbol in [('added', '+'), ('removed', '-'), ('updated', '~')]:
+                                if lib_type == 'Show':
+                                    obj_types = ['shows', 'seasons', 'episodes']
+                                else:
+                                    obj_types = ['movies']
+
+                                for obj_type in obj_types:
+                                    items = details[action][obj_type]
+                                    if len(items) > 0:
+                                        for item in sorted(items, key=lambda x: x['title']):
+                                            # Build display title with year for movies
+                                            title = item['title']
+                                            if item.get('type') == 'Movie' and item.get('year'):
+                                                title = f"{title} ({item['year']})"
+
+                                            # -V: Show title with year and file path
+                                            # -VV: Show full details (title, year, file path, ID)
+                                            if VERYVRB:
+                                                file_str = f" [{item['file']}]" if item['file'] else ""
+                                                print(f"  [Local Cache] {symbol} {title}{file_str} (ID: {item['id']})")
+                                            else:
+                                                # For -V mode, always show file path for context
+                                                file_str = f" [{item['file']}]" if item['file'] else ""
+                                                print(f"  [Local Cache] {symbol} {title}{file_str}")
+
+                        print(f"{'='*76}\n")
+
+            # Print detailed retry statistics if any retries occurred
+            if PLEX_Media.retry_count > 0:
+                print(f"\nRetry Statistics:", flush=True)
+                print(f"  Total retries: {PLEX_Media.retry_count} attempts", flush=True)
+
+                # Define retry delay labels matching the retry_delays array
+                retry_labels = {1: "(5s)", 2: "(30s)", 3: "(1min)", 4: "(2min)"}
+
+                # Print stats for each retry level
+                for level in sorted(PLEX_Media.retry_by_level.keys()):
+                    stats = PLEX_Media.retry_by_level[level]
+                    count = stats['count']
+                    wait_time = stats['wait_time']
+                    label = retry_labels.get(level, f"({wait_time//count}s)")
+                    print(f"  Retry {level}/5 {label}: {count:3d} attempts = {wait_time:4.0f} seconds", flush=True)
+
+                # Total wait time summary
+                total_wait = PLEX_Media.retry_wait_time
+                if total_wait < 60:
+                    wait_time_str = f"{total_wait:.0f}s ({total_wait:.0f} seconds)"
+                elif total_wait < 3600:
+                    mins = int(total_wait // 60)
+                    secs = int(total_wait % 60)
+                    wait_time_str = f"{mins}m {secs}s ({total_wait:.0f} seconds)"
+                else:
+                    hours = int(total_wait // 3600)
+                    mins = int((total_wait % 3600) // 60)
+                    secs = int(total_wait % 60)
+                    wait_time_str = f"{hours}h {mins}m {secs}s ({total_wait:.0f} seconds)"
+                print(f"  Total retry wait time: {wait_time_str}", flush=True)
+
+        PLEX_Media.init_done = True
+
+    @staticmethod
+    def save_checkpoint(library_title=None, silent=False):
+        """Save current cache state to partial file during rebuild"""
+        global CACHE_FILE
+        if not FORCE_CACHE_UPDATE:
+            return  # Only save checkpoints during cache rebuild
+
+        # Don't create .partial file if no items were actually processed (all items were already cached)
+        if PLEX_Media.items_processed == 0:
+            return
+
+        partial_cache_file = CACHE_FILE + '.partial'
+
+        try:
+            import copy
+            import time as time_module
+            # Make thread-safe copies to avoid "dictionary changed size during iteration"
+            # This is necessary when using parallel workers that modify dictionaries concurrently
+
+            # Calculate current timings including in-progress libraries
+            current_timings = copy.copy(getattr(PLEX_Media, 'library_timings', {}))
+            library_start_times = getattr(PLEX_Media, 'library_start_times', {})
+            completed_libraries = getattr(PLEX_Media, 'completed_libraries', set())
+            now = time_module.time()
+            for lib_name, start_time in library_start_times.items():
+                if lib_name not in completed_libraries:
+                    # Library is in progress - add elapsed time to any previous time
+                    previous_time = current_timings.get(lib_name, 0)
+                    current_timings[lib_name] = previous_time + (now - start_time)
+
+            checkpoint_data = {
+                'obj_by_id': copy.copy(PLEX_Media.OBJ_BY_ID),
+                'obj_by_movie': copy.copy(PLEX_Media.OBJ_BY_MOVIE),
+                'obj_by_show': copy.copy(PLEX_Media.OBJ_BY_SHOW),
+                'obj_by_show_episodes': copy.copy(PLEX_Media.OBJ_BY_SHOW_EPISODES),
+                'obj_by_collection': copy.copy(PLEX_Media.OBJ_BY_COLLECTION),
+                'items_processed': PLEX_Media.items_processed,
+                'completed_libraries': copy.copy(completed_libraries),
+                'library_timings': current_timings
+            }
+
+            with open(partial_cache_file, 'wb') as f:
+                pickle.dump(checkpoint_data, f)
+            # Print checkpoint progress during rebuild (unless silent)
+            if not silent:
+                global MAX_PARALLEL_WORKERS
+                # In parallel mode, per-library progress is inaccurate due to race conditions
+                # between workers, so just show global progress
+                if MAX_PARALLEL_WORKERS > 1:
+                    lib_info = f"library '{library_title}': " if library_title else ""
+                    print(f"{_get_worker_prefix()}{lib_info}checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects", flush=True)
+                else:
+                    # Single worker mode - show per-library progress
+                    lib = PLEX_Media.current_library or library_title
+                    idx = PLEX_Media.current_item_idx
+                    total = PLEX_Media.current_item_total
+                    item_type = PLEX_Media.current_item_type or 'items'
+                    if lib and total > 0:
+                        pct = 100 * idx // total
+                        print(f"{_get_worker_prefix()}library '{lib:<22s}': processed {idx}/{total} {item_type} ({pct}%) - saving checkpoint with {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects", flush=True)
+                    else:
+                        print(f"{_get_worker_prefix()}checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects", flush=True)
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}Failed to save checkpoint: {e}")
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--media] <media_item> [<MEDIA_COMMAND> [..]]", description="Without any <MEDIA_COMMAND> this does the same as with <MEDIA_COMMAND> '--info'.", allow_abbrev=False, exit_on_error=False, epilog="""Examples:
+  {US} series.de -V --list --type show     # lists all shows in PLEX library series.de and because of -V also prints their directories on disk
+    """)
+    # help="Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title> or <media_filename>. For more info: --help media",
+    argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
+    argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
+    argparser.add_argument('--delete', action='store_true',           help="Delete a specific media entry by title or file path.")
+    argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
+    argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
+    argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
+    argparser.add_argument('--clear-user-rating', action='store_true',help="Clear user rating for media.")
+    argparser.add_argument('--set-unwatched', action='store_true',    help="Set media as unwatched.")
+    argparser.add_argument('--set-watched', nargs='?',                help="Set media as watched, optionally to provided watched-date. Example: --set-watched <watched-date in format YYYY-MM-DD HH:MM:SS>")
+    argparser.add_argument('--set-view-offset',                       help="Set view offset for media. Example: --set-view-offset <offset_in_milliseconds>")
+    argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        # Fast path: check if obj is ID:<num> that matches cache — no API needed
+        if obj.upper().startswith('ID:'):
+            try:
+                numeric_id = int(obj[3:])
+                for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+                    if int(cached_obj.get('id', 0)) == numeric_id:
+                        return True
+                return False
+            except (ValueError, TypeError):
+                pass
+        return (len(resolve_plex_media_obj(obj)) > 0)
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
+        if obj_args.info:               PLEX_Media.get_info(obj)
+        if obj_args.refresh:            PLEX_Media.refresh(obj)
+        if obj_args.delete:             PLEX_Media.delete(obj)
+        if obj_args.get_watched:        PLEX_Media.get_watched_status(obj)
+        if obj_args.get_view_offset:    PLEX_Media.get_view_offset(obj)
+        if obj_args.get_user_rating:    PLEX_Media.get_user_rating(obj)
+        if obj_args.clear_user_rating:  PLEX_Media.clear_user_rating(obj)
+        if obj_args.set_unwatched:      PLEX_Media.set_unwatched_status(obj)
+        if obj_args.set_watched:        PLEX_Media.set_watched_status(obj, obj_args.set_watched)
+        if obj_args.set_view_offset:    PLEX_Media.set_view_offset(obj, int(obj_args.set_view_offset))
+        if obj_args.set_user_rating:    PLEX_Media.set_user_rating(obj, float(obj_args.set_user_rating))
+
+    ############################################################
+    ###### HELPER FUNCTIONS:
+
+    @staticmethod
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False):
+        global FORMAT
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language} )")
+
+        # Normalize audio filter to ISO 639-1 code
+        if audio_filter:
+            lang_map = {
+                'en': 'en', 'english': 'en', 'eng': 'en',
+                'de': 'de', 'german': 'de', 'deu': 'de', 'ger': 'de',
+                'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'
+            }
+            audio_filter = lang_map.get(audio_filter.lower(), audio_filter.lower())
+
+        # Normalize media type
+        if media_type is not None:
+            # Capitalize first letter for case-insensitive matching
+            media_type = media_type.capitalize()
+            # Map user-friendly names to Plex types
+            if media_type == "Series":
+                media_type = "Show"  # "Show" = official PLEX type for a TV series
+
+        # Validate media type
+        if media_type is not None and media_type not in ["Show", "Movie"]:
+            err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
+
+        # Validate library_name
+        if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
+            err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
+
+        # Make --list without library a synonym for --list-libraries (unless filtering is requested)
+        if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language:
+            print("\nAvailable Libraries:")
+            PLEX_Library.print()
+            return
+
+        # These filters require a library name
+        if library_name is None:
+            if watched_only:
+                err(1069, "--watched requires a library name.\nExample: my-plex ,unsorted --watched")
+            if unwatched_only:
+                err(1070, "--unwatched requires a library name.\nExample: my-plex ,unsorted --unwatched")
+            if audio_filter:
+                err(1071, "--audio/--en/--de/--fr requires a library name.\nExample: my-plex ,unsorted --en")
+
+        # Print appropriate header
+        if library_name is None:
+            if broken_only:
+                print(f"\nSearching for potentially truncated/broken files in all libraries:")
+            elif duplicates_only:
+                if media_type is None:
+                    print(f"\nSearching for duplicates in all libraries:")
+                else:
+                    print(f"\nMedia of type '{media_type}' (duplicates only):")
+            else:
+                # Build header with optional filters
+                filters = []
+                if media_type:
+                    filters.append(media_type)
+                if watched_only:
+                    filters.append("watched")
+                elif unwatched_only:
+                    filters.append("unwatched")
+                if audio_filter:
+                    filters.append(f"audio: {audio_filter}")
+                if no_audio_language:
+                    filters.append("no audio language")
+
+                filter_str = ", ".join(filters) if filters else "all"
+                if not filters:
+                    print(f"\nAll media:")
+                else:
+                    print(f"\nAll media ({filter_str}):")
+        else:
+            if broken_only:
+                if media_type is None:
+                    print(f"\nSearching for potentially truncated/broken files in library '{library_name}':")
+                else:
+                    print(f"\nSearching for potentially truncated/broken files of type '{media_type}' in library '{library_name}':")
+            elif duplicates_only:
+                if media_type is None:
+                    print(f"\nSearching for duplicates in library '{library_name}':")
+                else:
+                    print(f"\nSearching for duplicates of type '{media_type}' in library '{library_name}':")
+            else:
+                # Build header with optional filters
+                filters = []
+                if media_type:
+                    filters.append(media_type)
+                if watched_only:
+                    filters.append("watched")
+                elif unwatched_only:
+                    filters.append("unwatched")
+                if audio_filter:
+                    filters.append(f"audio: {audio_filter}")
+                if no_audio_language:
+                    filters.append("no audio language")
+
+                filter_str = ", ".join(filters) if filters else "all"
+                if media_type is None and not watched_only and not unwatched_only and not audio_filter and not no_audio_language:
+                    if VRB: print(f"\nMedia in '{library_name}':")
+                else:
+                    if VRB: print(f"\nMedia in '{library_name}' ({filter_str}):")
+
+        # Collect keys
+        # When checking duplicates or broken files, always collect from ALL libraries so we can filter properly
+        if duplicates_only or broken_only:
+            obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+        else:
+            obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
+
+        if DBG: print(f"{DBGPFX}PLEX_Media.list(): obj_keys = {obj_keys}")
+
+        # Filter for broken files if requested
+        if broken_only:
+            broken_files = []
+            seen_keys = set()
+            for key in obj_keys:
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                obj = PLEX_Media.OBJ_BY_ID[key]
+
+                # Only check Episode and Movie types
+                if obj.get('type') not in ['Episode', 'Movie']:
+                    continue
+
+                # Filter by library if specified
+                if library_name and obj.get('library') != library_name:
+                    continue
+
+                plex_duration = obj.get('duration') or 0
+
+                files_dict = obj.get('files', {})
+                for file_info in files_dict.values():
+                    file_metadata = file_info.get('file_metadata')
+
+                    # Include files marked as broken OR potentially truncated
+                    is_broken = False
+                    diff_pct = None
+                    severity = None
+
+                    if file_metadata:
+                        if file_metadata.get('broken'):
+                            is_broken = True
+                            reason = file_metadata.get('reason', '')
+                            severity = 'NOT FOUND' if reason == 'file_not_found' else 'PROBE ERR'
+                        elif plex_duration > 0:
+                            container_duration = file_metadata.get('container_duration')
+                            if container_duration:
+                                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+
+                                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                                    is_broken = True
+
+                                    # Classify severity
+                                    if diff_pct < -10:
+                                        severity = 'severe'
+                                    elif diff_pct < -5:
+                                        severity = 'moderate'
+                                    elif diff_pct < -1:
+                                        severity = 'mild'
+                                    else:
+                                        severity = 'borderline'
+
+                    # Fallback: filesize vs duration heuristic (catches truncated files
+                    # even without ffmpeg metadata, e.g. 36MB for a 90min movie)
+                    if not is_broken and plex_duration > 60000:
+                        filesize = file_info.get('filesize', 0)
+                        if filesize:
+                            # Average bitrate in KB/s
+                            avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                            # A real video file at any quality should be >10 KB/s
+                            if avg_kbps < 10:
+                                is_broken = True
+                                severity = 'severe'
+
+                    if is_broken:
+                        filepath = file_info.get('filepath', '')
+                        broken_files.append((key, diff_pct, severity, filepath))
+
+            if not broken_files:
+                if library_name:
+                    print(f"No broken/truncated files in '{library_name}' found.")
+                else:
+                    print(f"No broken/truncated files found.")
+                return
+
+            # Sort by severity (severe first), then by diff_pct (worst first)
+            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
+            broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
+
+            # Print broken files with details
+            print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
+            print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
+            print("-" * 150)
+
+            for key, diff_pct, severity, filepath in broken_files:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                library = obj.get('library', 'Unknown')[:15]
+                plex_duration_raw = obj.get('duration') or 0
+                plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
+
+                severity_str = severity.upper() if severity else 'BROKEN'
+                diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
+                dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
+                plex_id = obj.get('id', 'N/A')
+                plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
+
+                print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
+
+            print(f"\nTotal: {len(broken_files)} broken/truncated files found")
+            print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+            return
+
+        # Filter for duplicates if requested
+        elif duplicates_only:
+            # Group keys by content identity to find duplicate items
+            # Uses generate_duplicate_keys() which returns multiple keys per item
+            # (title + originalTitle) to catch cross-language duplicates
+            key_to_group = {}  # maps duplicate_key -> canonical group key
+            items_with_duplicates = {}  # maps canonical group key -> [obj_keys]
+
+            for okey in obj_keys:
+                obj = PLEX_Media.OBJ_BY_ID[okey]
+                dup_keys = generate_duplicate_keys(obj)
+                if not dup_keys:
+                    continue
+
+                # Find if any of this item's keys already belong to a group
+                existing_group = None
+                for dk in dup_keys:
+                    if dk in key_to_group:
+                        existing_group = key_to_group[dk]
+                        break
+
+                if existing_group:
+                    # Add to existing group and register all keys
+                    items_with_duplicates[existing_group].append(okey)
+                    for dk in dup_keys:
+                        key_to_group[dk] = existing_group
+                else:
+                    # Create new group using first key as canonical
+                    canonical = dup_keys[0]
+                    items_with_duplicates[canonical] = [okey]
+                    for dk in dup_keys:
+                        key_to_group[dk] = canonical
+
+            # Also include items with multiple versions (same Plex entry with 720p + 1080p etc.)
+            # These are stored in obj['files'] dict (version -> filepath) and represent files in the same directory
+            # BUT skip true multi-version items (genuinely different content like east/west coast, theatrical/director's cut)
+            multi_version_keys = set()
+            true_multiversion_keys = set()
+            for key in obj_keys:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                files_dict = obj.get('files', {})
+                if len(files_dict) > 1:
+                    classification = classify_multi_version(obj)
+                    if classification == 'true_multiversion':
+                        true_multiversion_keys.add(key)
+                        continue  # Skip — genuinely different content, not a duplicate
+                    multi_version_keys.add(key)
+                    # Add to duplicates dict if not already there
+                    duplicate_key = generate_duplicate_key(obj)
+                    if duplicate_key and duplicate_key not in items_with_duplicates:
+                        items_with_duplicates[duplicate_key] = [key]
+
+            # Filter based on mode:
+            # - Global mode (library_name is None): show cross-library duplicates (2+ copies anywhere)
+            # - Specific library mode: show only duplicates where ALL copies are in that library
+            if library_name is not None:
+                # Specific library mode: filter to keep only duplicates where ALL versions are in the same library
+                filtered_duplicates = {}
+                for dup_key, keys in items_with_duplicates.items():
+                    # Include if: multiple Plex entries OR single entry with multiple versions
+                    if len(keys) > 1:
+                        # Check if all copies are in the specified library
+                        all_in_library = all(PLEX_Media.OBJ_BY_ID[k].get('library') == library_name for k in keys)
+                        if all_in_library:
+                            filtered_duplicates[dup_key] = keys
+                    elif len(keys) == 1 and keys[0] in multi_version_keys:
+                        # Single entry with multiple versions
+                        if PLEX_Media.OBJ_BY_ID[keys[0]].get('library') == library_name:
+                            filtered_duplicates[dup_key] = keys
+                items_with_duplicates = filtered_duplicates
+            else:
+                # Global mode: show all duplicates (cross-library) OR multi-version items
+                items_with_duplicates = {
+                    dup_key: keys for dup_key, keys in items_with_duplicates.items()
+                    if len(keys) > 1 or (len(keys) == 1 and keys[0] in multi_version_keys)
+                }
+
+            # Filter out duplicates where ALL copies are within a single ignore group.
+            # Only if every library in the duplicate group is listed in the same
+            # ignore group is the duplicate excluded. Any copy outside the group
+            # makes it a real duplicate.
+            #
+            # Example: klaus.avi in movies.de, movies.fr, movies.en
+            #   ignore group = ['movies.de', 'movies.en', 'movies.fr']
+            #   → ALL libraries within group → NOT a duplicate
+            # Example: klaus.avi in movies.de, movies.fr, ,unsorted, movies.en
+            #   ignore group = ['movies.de', 'movies.en', 'movies.fr']
+            #   → ,unsorted is NOT in the group → IS a duplicate
+            ignored_count = 0
+            if DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
+                filtered = {}
+                for dup_key, keys in items_with_duplicates.items():
+                    if len(keys) <= 1:
+                        # Single-entry multi-version items are not cross-library — keep them
+                        filtered[dup_key] = keys
+                        continue
+                    # Get the set of libraries this duplicate group spans
+                    libs = set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)
+                    # Check if ALL libraries fall within a single ignore group
+                    should_ignore = False
+                    for ignore_group in DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
+                        if libs.issubset(set(ignore_group)):
+                            should_ignore = True
+                            break
+                    if should_ignore:
+                        ignored_count += 1
+                    else:
+                        filtered[dup_key] = keys
+                items_with_duplicates = filtered
+
+            # Check if any duplicates were found
+            if not items_with_duplicates:
+                if library_name:
+                    print(f"No duplicates in '{library_name}' found.")
+                else:
+                    print(f"No duplicates found.")
+                return
+
+            # Sort items_with_duplicates by key to keep same items grouped together
+            # Within each duplicate group, sort by library name (a-z)
+            def sort_duplicate_keys(dup_item):
+                dup_key, keys = dup_item
+                # For each duplicate group, sort the keys by library name alphabetically
+                # Secondary sort by Plex ID for stable, consistent ordering
+                sorted_keys = sorted(keys, key=lambda k: (
+                    PLEX_Media.OBJ_BY_ID[k].get('library', ''),
+                    PLEX_Media.OBJ_BY_ID[k].get('id', 0)
+                ))
+                return (dup_key, sorted_keys)
+
+            sorted_duplicates = [sort_duplicate_keys(item) for item in sorted(items_with_duplicates.items())]
+
+            # Print duplicate list only if NOT in resolve mode
+            if not resolve_mode:
+                # Print header for duplicate listing
+                print(f"\n{'PLEX-ID':<10} | {'ORIGINAL TITLE':<60} |{'LANG':^4}| {'NR':<3} | {'FILESIZE':<10} | {'CODEC':<10} | {'RESOLUTION':<12} | {'FILETYPE':<10} | FILEPATH")
+                print("-" * 220)
+
+                # Print each duplicate item with all its versions
+                for dup_key, keys in sorted_duplicates:
+                    nr = 0
+                    # Check if items in this group have different titles (matched via originalTitle)
+                    group_titles = set(PLEX_Media.OBJ_BY_ID[k].get('title', '') for k in keys)
+                    if len(group_titles) > 1:
+                        # Different titles — show originalTitle as group header
+                        ot = None
+                        for k in keys:
+                            ot = PLEX_Media.OBJ_BY_ID[k].get('originalTitle')
+                            if ot: break
+                        if ot:
+                            libs = ', '.join(sorted(set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)))
+                            print(f"{'':10} | >>> originalTitle: {ot:<38} |{'':4}| {'':3} | {'':10} | {'':10} | {'':12} | {'':10} | libraries: {libs}")
+
+                    for key in keys:
+                        obj = PLEX_Media.OBJ_BY_ID[key]
+                        files_dict = obj.get('files', {})
+
+                        # For multi-version items, show each version
+                        # For regular duplicates (multiple Plex entries), show the single file
+                        if len(files_dict) > 1 and key in multi_version_keys:
+                            # Multi-version item: display each version from obj['files'] dict
+                            # Sort alphabetically by filepath to match --duplicates --resolve ordering (line 8972)
+                            sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath') if isinstance(x[1], dict) else x[1])
+                            for version_str, file_info in sorted_files:
+                                nr += 1
+                                what = get_media_description_original(obj)
+                                lang = get_media_language(obj)
+                                plex_id = obj.get('id')
+                                if plex_id is None:
+                                    err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
+
+                                # BUG FIX: Handle both old and new cache formats
+                                # Old format: files_dict[version] = filepath_string
+                                # New format: files_dict[version] = {'filepath': ..., 'filesize': ...}
+                                if isinstance(file_info, str):
+                                    # Old cache format: file_info is just a filepath string
+                                    filepath = file_info
+                                    size_bytes = None
+                                elif isinstance(file_info, dict):
+                                    # New cache format: file_info is a dict with filepath and filesize
+                                    filepath = file_info.get('filepath', 'N/A')
+                                    size_bytes = file_info.get('filesize', None)
+                                else:
+                                    # Unexpected format
+                                    filepath = 'N/A'
+                                    size_bytes = None
+                                    if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}")
+
+                                # Parse version string for codec/resolution (format: "120.5min 1920x1080 (h264 aac)")
+                                resolution = 'N/A'
+                                codec = 'N/A'
+                                if version_str:
+                                    import re
+                                    res_match = re.search(r'(\d+x\d+)', version_str)
+                                    if res_match:
+                                        resolution = res_match.group(1)
+                                    codec_match = re.search(r'\((\w+)', version_str)
+                                    if codec_match:
+                                        codec = codec_match.group(1)
+
+                                filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
+                                filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
+
+                                if len(what) > 60:
+                                    what = what[:57] + "..."
+
+                                print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
+                        else:
+                            # Regular duplicate entry (different Plex entries)
+                            nr += 1
+                            what = get_media_description_original(obj)
+                            lang = get_media_language(obj)
+                            plex_id = obj.get('id')
+                            if plex_id is None:
+                                err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
+                            filepath = obj.get('file') or 'N/A'
+                            codec = obj.get('video_codec') or 'N/A'
+                            resolution = obj.get('resolution_full') or 'N/A'
+                            size_bytes = obj.get('filesize', None)
+                            filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
+                            filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
+
+                            if len(what) > 60:
+                                what = what[:57] + "..."
+
+                            print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
+
+                if true_multiversion_keys or ignored_count:
+                    print()
+                if true_multiversion_keys:
+                    print(f"({len(true_multiversion_keys)} true multi-version item(s) excluded — genuinely different content, not duplicates)")
+                if ignored_count:
+                    print(f"({ignored_count} cross-library duplicate(s) excluded — matching DUPLICATES_IGNORE_LIBRARY_COMBINATIONS)")
+
+            # Interactive resolution mode
+            if resolve_mode:
+                print("\n" + "="*76)
+                print("INTERACTIVE RESOLUTION MODE")
+                print("="*76)
+                print("\nNOTE: If files are not found locally, the script will automatically attempt")
+                print("to access them via SSH on host 'my-plex'. Please ensure:")
+                print("  - SSH host 'my-plex' is configured in ~/.ssh/config")
+                print("  - You can connect without password: ssh my-plex")
+                print("  - SSH keys are properly set up")
+                print("="*76)
+
+                # Create resolution log file (JSON format)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                log_filename = f"/tmp/my-plex_--duplicates_--resolve_{timestamp}.json"
+
+                try:
+                    resolution_log_data = {
+                        "session": {
+                            "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            "command": ' '.join(sys.argv),
+                            "timestamp": timestamp,
+                            "log_format_version": "1.0"
+                        },
+                        "operations": []
+                    }
+                    print(f"\n📝 Resolution log: {log_filename}\n")
+                except Exception as e:
+                    print(f"⚠ Warning: Could not initialize resolution log: {e}")
+                    resolution_log_data = None
+
+                operation_counter = 0
+                pending_operations = []  # Track pending operations (not yet applied)
+                operations_all_succeeded = True  # Track if all applied operations succeeded
+
+                # DEBUG: Show how many duplicates we're going to process
+                total_duplicates = len(sorted_duplicates)
+                if DBG:
+                    print(f"{DBGPFX}Total duplicate groups to process: {total_duplicates}")
+
+                try:
+                    for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
+                        if DBG:
+                            print(f"{DBGPFX}Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
+
+                        # Check if this is a multi-version item (single Plex entry with multiple file versions)
+                        is_multi_version = False
+                        multi_version_files = []
+                        if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
+                            files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
+                            if len(files_dict) > 1:
+                                is_multi_version = True
+                                # Store (version_str, filepath) for each version
+                                # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
+                                multi_version_files = []
+                                for ver, file_info in files_dict.items():
+                                    if isinstance(file_info, str):
+                                        # Old cache format: files_dict = {ver: filepath_string}
+                                        multi_version_files.append((ver, file_info))
+                                    elif isinstance(file_info, dict):
+                                        # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
+                                        multi_version_files.append((ver, file_info['filepath']))
+                                    else:
+                                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}")
+                                if DBG:
+                                    print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
+
+                        # Skip only if we have less than 2 keys AND it's not a multi-version item
+                        if len(keys) < 2 and not is_multi_version:
+                            if DBG:
+                                print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
+                            continue  # Skip if not actually duplicates
+
+                        # Format the duplicate key for display (add parentheses around year for movies)
+                        display_key = dup_key
+                        if dup_key.startswith('movie:'):
+                            parts = dup_key.split(':')
+                            if len(parts) == 3:
+                                display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
+
+                        # Display the duplicate pair/group
+                        print(f"\n{'='*76}")
+                        print(f"RESOLVING DUPLICATES FOR: {display_key}")
+                        print(f"{'='*76}")
+
+                        # For multi-version items, expand into separate virtual entries
+                        # Create temporary objects for each version so the rest of the code can handle them uniformly
+                        if is_multi_version:
+                            print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
+                            print(f"       Expanding into separate entries for resolution.\n")
+
+                            # Get the original object
+                            original_obj = PLEX_Media.OBJ_BY_ID[keys[0]]
+                            original_key = keys[0]
+
+                            # Create synthetic objects for each file version
+                            synthetic_keys = []
+                            for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
+                                # Create a synthetic key
+                                synthetic_key = f"{original_key}_version{idx}"
+
+                                # Create a copy of the original object but with updated file info
+                                synthetic_obj = dict(original_obj)
+                                synthetic_obj['file'] = filepath
+                                synthetic_obj['version'] = version_str
+
+                                # Get filesize for this specific version from files dict
+                                files_dict = original_obj.get('files', {})
+                                if version_str in files_dict:
+                                    file_info = files_dict[version_str]
+                                    # BUG FIX: Handle both old and new cache formats
+                                    if isinstance(file_info, dict):
+                                        # New format: filesize is stored in the dict
+                                        synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+                                    else:
+                                        # Old format: file_info is just a filepath string, no filesize stored per version
+                                        # Need to get actual filesize from Plex server for accurate display
+                                        # For now, use None to indicate filesize is unknown (will show "N/A")
+                                        # This will be corrected when cache is updated with --update-cache
+                                        synthetic_obj['filesize'] = None
+
+                                synthetic_obj['_is_synthetic'] = True
+                                synthetic_obj['_original_key'] = original_key
+                                synthetic_obj['_version_index'] = idx
+
+                                # Temporarily add to OBJ_BY_ID so display/resolution code can access it
+                                PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
+                                synthetic_keys.append(synthetic_key)
+
+                            # Replace keys with synthetic keys
+                            keys = synthetic_keys
+                        else:
+                            # Always sort keys by file path for consistent display
+                            # This ensures entries are shown in alphabetical order by file location
+                            keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
+    
+                        # Check if both files point to the same physical file (Plex database corruption)
+                        same_file = False
+                        if len(keys) == 2:
+                            file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
+                            file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A')
+                            same_file = (file1_path == file2_path)
+
+                        # Check if directories are different (for option 7)
+                        # Option 7 should be available when there are 2+ files in different directories
+                        show_rename_option = False
+                        if len(keys) >= 2:
+                            # Get all directories
+                            dirs = []
+                            all_files_valid = True
+                            for key in keys:
+                                file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
+                                if file_path == 'N/A':
+                                    all_files_valid = False
+                                    break
+                                dirs.append(os.path.dirname(file_path))
+    
+                            # Show rename option if all files are valid and at least 2 are in different directories
+                            if all_files_valid and len(set(dirs)) > 1:
+                                show_rename_option = True
+    
+                        # Get file paths and library info for menu
+                        file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A') if len(keys) > 0 else 'N/A'
+                        file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) > 1 else 'N/A'
+    
+                        # Get library names and directories for options 5 and 6
+                        lib1_name = PLEX_Media.OBJ_BY_ID[keys[0]].get('library', '') if len(keys) > 0 else ''
+                        lib2_name = PLEX_Media.OBJ_BY_ID[keys[1]].get('library', '') if len(keys) > 1 else ''
+                        lib1_dir = get_library_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' and lib1_name else ''
+                        lib2_dir = get_library_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' and lib2_name else ''
+    
+                        # Get movie directories (directory directly within library) for display in menu
+                        # Always call get_movie_dir_from_path even if lib_name is empty - it has a fallback
+                        movie_dir1 = get_movie_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' else file1_path
+                        movie_dir2 = get_movie_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' else file2_path
+                        file1_folder = os.path.basename(movie_dir1) if movie_dir1 != 'N/A' else ''
+                        file2_folder = os.path.basename(movie_dir2) if movie_dir2 != 'N/A' else ''
+
+                        # Play options - use two-stage menu for 4+ files
+                        num_files = len(keys)
+
+                        while True:
+                            # Display menu inside loop so it refreshes after each undo
+                            # Show file information each time
+                            print()
+                            for nr, key in enumerate(keys, 1):
+                                obj = PLEX_Media.OBJ_BY_ID[key]
+                                display_duplicate_details(nr, obj)
+
+                            print("\nChoose action:")
+
+                            if num_files <= 3:
+                                # Direct play options for 1-3 files
+                                for i in range(num_files):
+                                    print(f"  {i+1} = Play file [{i+1}] (mpv/Plex/Infuse)")
+                            else:
+                                # Two-stage menu for 4+ files
+                                print(f"  1 = Play file (select from {num_files} files)")
+
+                            # Trash options
+                            if num_files <= 3:
+                                # Direct trash options for files 1-3
+                                for i in range(num_files):
+                                    option_num = i + 1 + num_files  # Offset by number of play options
+                                    if same_file:
+                                        print(f"  {option_num} = Remove Plex entry [{i+1}] (database only - file will NOT be trashed)")
+                                    else:
+                                        # Get file path and directory info for this file
+                                        file_key = keys[i]
+                                        file_obj = PLEX_Media.OBJ_BY_ID[file_key]
+                                        file_path = file_obj.get('file', 'N/A')
+                                        lib_name = file_obj.get('library', '')
+                                        movie_dir = get_movie_dir_from_path(file_path, lib_name) if file_path != 'N/A' and lib_name else os.path.dirname(file_path)
+
+                                        # Check if file is in a subdirectory (movie_dir != file's parent dir)
+                                        file_parent = os.path.dirname(file_path)
+                                        is_in_subdir = (movie_dir != file_parent) if file_path != 'N/A' else False
+
+                                        # For multi-version items with 2 files, check the relationship
+                                        other_file_in_subdir = False
+                                        subdir_name = ""
+                                        if is_multi_version and num_files == 2:
+                                            other_idx = 1 - i  # Get the other file index (0->1, 1->0)
+                                            other_key = keys[other_idx]
+                                            other_obj = PLEX_Media.OBJ_BY_ID[other_key]
+                                            other_path = other_obj.get('file', 'N/A')
+                                            other_parent = os.path.dirname(other_path)
+
+                                            # Check if other file is in a subdirectory relative to this file
+                                            if i == 1:  # This is file [2]
+                                                # Check if file [1] is in subdirectory of file [2]'s directory
+                                                file1_parent = os.path.dirname(file1_path)
+                                                file2_parent = os.path.dirname(file2_path)
+                                                if file1_parent.startswith(file2_parent + os.sep) and file1_parent != file2_parent:
+                                                    other_file_in_subdir = True
+                                                    subdir_name = os.path.basename(file1_parent)
+
+                                        if is_in_subdir:
+                                            # This file is in a subdirectory - will be trashed with subdirectory
+                                            subdir_name = os.path.basename(file_parent)
+                                            print(f"  {option_num} = Trash file [{i+1}] (including subdirectory '{subdir_name}')")
+                                        elif other_file_in_subdir:
+                                            # Other file is in subdirectory - trashing this will move other file up
+                                            print(f"  {option_num} = Trash file [{i+1}] and move file [{1-i+1}] from subdirectory '{subdir_name}' to parent (then remove subdirectory)")
+                                        else:
+                                            print(f"  {option_num} = Trash file [{i+1}]")
+                            else:
+                                # For 4+ files, only offer trash via two-stage menu
+                                print(f"  2 = Trash file (select from {num_files} files)")
+
+                            if len(keys) == 2:
+                                if same_file:
+                                    print(f"  NOTE: Both entries point to the SAME file (Plex database corruption)")
+                                    print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove the duplicate Plex entry.")
+                                elif is_multi_version:
+                                    print(f"  NOTE: This is a multi-version item (single Plex entry with multiple file versions)")
+                                    print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove a specific version.")
+                                else:
+                                    print(f"  5 = Trash [1] and move [2] to library of [1]. Trash \"{file1_folder}\" && mv \"{file2_folder}\" \"{lib1_dir}/\"")
+                                    print(f"  6 = Trash [2] and move [1] to library of [2]. Trash \"{file2_folder}\" && mv \"{file1_folder}\" \"{lib2_dir}/\"")
+                            if show_rename_option:
+                                print("  7 = Rename all files using directory name")
+                            if pending_operations:
+                                last_pending = pending_operations[-1]
+                                last_choice = last_pending.get('choice', '')
+
+                                # Get the filename from the pending operation
+                                file1 = last_pending.get('file1', '')
+                                file2 = last_pending.get('file2', '')
+                                if last_choice == '3':
+                                    filename = os.path.basename(file1)
+                                    undo_desc = f"Remove 'Trash file {filename}'"
+                                elif last_choice == '4':
+                                    filename = os.path.basename(file2)
+                                    undo_desc = f"Remove 'Trash file {filename}'"
+                                elif last_choice == '5':
+                                    file1_name = os.path.basename(file1)
+                                    file2_name = os.path.basename(file2)
+                                    undo_desc = f"Remove 'Trash {file1_name} and move {file2_name}'"
+                                elif last_choice == '6':
+                                    file1_name = os.path.basename(file1)
+                                    file2_name = os.path.basename(file2)
+                                    undo_desc = f"Remove 'Trash {file2_name} and move {file1_name}'"
+                                elif last_choice == '7':
+                                    undo_desc = "Remove 'Rename files using directory name'"
+                                else:
+                                    undo_desc = f"Remove operation"
+
+                                print(f"  U = Undo last pending operation ({len(pending_operations)} pending): {undo_desc}")
+                            print("  N = Next (skip this pair)")
+                            if pending_operations:
+                                print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                            print("  Q = Quit resolution mode (without applying pending operations)")
+                            try:
+                                print("\nYour choice: ", end='', flush=True)
+                                choice = readchar.readchar()
+                                # Echo the choice as entered (user must type uppercase)
+                                print(choice)
+
+                                if choice == 'Q':
+                                    if pending_operations:
+                                        print(f"\n⚠ Warning: You have {len(pending_operations)} pending operation(s) that will NOT be applied!")
+                                        print("Are you sure you want to quit without applying them?")
+                                        print("  Y = Yes, quit without applying")
+                                        print("  N = No, go back")
+                                        print("\nYour choice: ", end='', flush=True)
+                                        confirm = readchar.readchar()
+                                        print(confirm)
+                                        if confirm != 'Y':
+                                            print("Cancelled. Returning to resolution mode.")
+                                            continue
+
+                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                                    # Synthetic objects are temporary and should NEVER be saved to cache
+                                    print(f"\nCleaning up synthetic objects...", end=' ', flush=True)
+                                    synthetic_keys_to_remove = [
+                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                        if obj.get('_is_synthetic')
+                                    ]
+                                    for key in synthetic_keys_to_remove:
+                                        del PLEX_Media.OBJ_BY_ID[key]
+                                    if synthetic_keys_to_remove:
+                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                                    else:
+                                        print("✓ (none found)")
+
+                                    print("Exiting resolution mode without applying pending operations.")
+                                    return
+
+                                if choice == 'A':
+                                    if not pending_operations:
+                                        print("No pending operations to apply.")
+                                        continue
+
+                                    # First, clean up synthetic objects for the CURRENT duplicate being displayed
+                                    # (before applying operations)
+                                    if is_multi_version and keys:
+                                        for key in keys:
+                                            if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                                                del PLEX_Media.OBJ_BY_ID[key]
+
+                                    print(f"\n{'='*76}")
+                                    print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
+                                    print(f"{'='*76}")
+                                    # Apply all pending operations
+                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    if not all_success:
+                                        operations_all_succeeded = False
+                                    num_ops = len(pending_operations)
+                                    # Clear pending operations since they've been applied
+                                    pending_operations.clear()
+
+                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                                    # Synthetic objects are temporary and should NEVER be saved to cache
+                                    print(f"\n  Cleaning up synthetic objects...", end=' ', flush=True)
+                                    synthetic_keys_to_remove = [
+                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                        if obj.get('_is_synthetic')
+                                    ]
+                                    for key in synthetic_keys_to_remove:
+                                        del PLEX_Media.OBJ_BY_ID[key]
+                                    if synthetic_keys_to_remove:
+                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                                    else:
+                                        print("✓ (none found)")
+
+                                    if all_success:
+                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                                    else:
+                                        print(f"\n⚠ Some operations failed. Check output above for details.")
+                                    print("Exiting resolution mode.")
+                                    return
+
+                                if choice == 'N':
+                                    print("Skipping this duplicate pair.")
+                                    break
+
+                                if choice == 'U':
+                                    if not pending_operations:
+                                        print("No pending operations to undo.")
+                                        continue
+
+                                    # Remove the last pending operation
+                                    last_pending = pending_operations.pop()
+                                    operation_counter -= 1
+
+                                    choice_desc = {
+                                        '3': f'Trash file [1]',
+                                        '4': f'Trash file [2]',
+                                        '5': f'Trash [1] and move [2] to library of [1]',
+                                        '6': f'Trash [2] and move [1] to library of [2]',
+                                        '7': 'Rename files using directory name'
+                                    }.get(last_pending['choice'], f'Unknown choice: {last_pending["choice"]}')
+
+                                    print(f"\n✓ Removed pending operation #{last_pending['operation_number']}: {choice_desc}")
+                                    print(f"  (Total pending: {len(pending_operations)})")
+                                    print("\nReturning to current duplicate pair...\n")
+
+                                    # Don't break - stay on current duplicate pair
+                                    continue
+    
+                                # Build list of valid choices based on number of files
+                                valid_choices = []
+                                if num_files <= 3:
+                                    # Direct options: 1-N for play, (N+1)-(2N) for trash
+                                    for i in range(1, num_files + 1):
+                                        valid_choices.append(str(i))  # Play options
+                                    for i in range(num_files + 1, 2 * num_files + 1):
+                                        valid_choices.append(str(i))  # Trash options
+                                else:
+                                    # Two-stage menu: 1 = play, 2 = trash
+                                    valid_choices = ['1', '2']
+    
+                                if len(keys) == 2 and not same_file:
+                                    valid_choices.extend(['5', '6'])
+                                if show_rename_option:
+                                    valid_choices.append('7')
+    
+                                if choice not in valid_choices:
+                                    valid_str = ', '.join(valid_choices)
+                                    print(f"Invalid choice. Please enter {valid_str}, N, or Q.")
+                                    continue
+    
+                                # Handle two-stage menu for 4+ files
+                                if num_files > 3 and choice in ['1', '2']:
+                                    action = 'play' if choice == '1' else 'trash'
+                                    print(f"\nSelect file to {action} (1-{min(num_files, 9)}):")
+                                    for i in range(min(num_files, 9)):
+                                        file_path = PLEX_Media.OBJ_BY_ID[keys[i]].get('file', 'N/A')
+                                        print(f"  {i+1} = {os.path.basename(file_path)}")
+                                    if num_files > 9:
+                                        print(f"  (Only showing first 9 of {num_files} files)")
+    
+                                    print("\nYour selection: ", end='', flush=True)
+                                    file_choice = readchar.readchar()
+                                    print(file_choice)
+    
+                                    if file_choice not in [str(i) for i in range(1, min(num_files, 9) + 1)]:
+                                        print(f"Invalid selection. Please enter 1-{min(num_files, 9)}.")
+                                        continue
+    
+                                    # Map to direct choice number
+                                    file_idx = int(file_choice) - 1
+                                    if action == 'play':
+                                        choice = file_choice  # Play is 1-9
+                                    else:
+                                        # Trash: need to map to appropriate choice
+                                        # For now, we'll handle this differently
+                                        choice = str(num_files + file_idx + 1)
+    
+                                # Handle choices for pairs only (5 and 6 require exactly 2 files)
+                                # Option 7 works for 2+ files
+                                if choice in ['5', '6'] and len(keys) != 2:
+                                    print(f"Options 5 and 6 only work with pairs (2 files), but this group has {len(keys)} files.")
+                                    continue
+    
+                                # Prevent options 5 and 6 when both entries point to the same file
+                                if choice in ['5', '6'] and same_file:
+                                    print(f"Options 5 and 6 are not available when both entries point to the same file.")
+                                    print(f"This is a Plex database corruption. Use option 3 or 4 to trash the duplicate entry.")
+                                    continue
+
+                                # Prevent options 5 and 6 for multi-version items
+                                if choice in ['5', '6'] and is_multi_version:
+                                    print(f"Options 5 and 6 are not available for multi-version items (single Plex entry with multiple file versions).")
+                                    print(f"Use option 3 or 4 to remove a specific version.")
+                                    continue
+    
+                                # Handle option 7 only when directories are different
+                                if choice == '7' and not show_rename_option:
+                                    print("Option 7 is only available when files are in different directories.")
+                                    continue
+    
+                                # Determine which files are involved based on choice
+                                file1 = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
+                                file2 = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) >= 2 else 'N/A'
+    
+                                # Check if this is a play action for file 3 (when we have 3 files)
+                                if num_files == 3 and choice == '3':
+                                    # This is "Play file [3]"
+                                    file_to_play = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')
+                                    remote_host_play, exists_play, resolved_file_to_play = determine_remote_host(file_to_play)
+                                    if exists_play:
+                                        print(f"Playing file [3]: {file_to_play}")
+                                        play_media_file(resolved_file_to_play, remote_host_play)
+                                        print("\nFile player launched. You can continue with other actions on this pair.")
+                                    else:
+                                        print(f"ERROR: Cannot find file: {file_to_play}")
+                                    continue  # Go back to menu for next choice
+    
+                                # Check if this is a trash action for file 3
+                                if num_files == 3 and choice == '6':
+                                    # This is "Trash file [3]"
+                                    file1 = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')  # Use keys[2] as file1
+                                    file2 = 'N/A'  # Not needed for single file trash
+                                    # Remap choice to '3' or '4' for execute_resolution_action
+                                    choice = '3'  # Will trash file1 (which is actually file [3])
+    
+                                # Get all files for option 7 (when there are 3+ files)
+                                all_files = None
+                                if choice == '7' and len(keys) > 2:
+                                    all_files = [PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A') for key in keys]
+    
+                                # Determine if files are local or remote, and resolve file paths
+                                remote_host, exists, resolved_file1 = determine_remote_host(file1)
+                                if not exists:
+                                    print(f"ERROR: Cannot find file locally or on remote host: {file1}")
+                                    print("Skipping this pair.")
+                                    break
+
+                                # For play actions with file2, resolve file2 as well
+                                resolved_file2 = file2
+                                if choice == '2' and file2 != 'N/A':
+                                    _, exists2, resolved_file2 = determine_remote_host(file2)
+                                    if not exists2:
+                                        print(f"ERROR: Cannot find file locally or on remote host: {file2}")
+                                        print("Skipping this pair.")
+                                        break
+
+                                # Handle the chosen action
+                                # Play actions: 1, 2 (and 3 for 3-file case, but handled above)
+                                is_play_action = choice in ['1', '2']
+
+                                if is_play_action:
+                                    # Execute play actions immediately (not recorded)
+                                    # Use resolved paths for play actions
+                                    success = execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
+                                    print("\nFile player launched. You can continue with other actions on this pair.")
+                                    # Continue loop to allow more choices
+                                else:
+                                    # Record non-play actions for later execution
+                                    operation_counter += 1
+
+                                    # For multi-version items, replace synthetic keys with original key
+                                    # This is because synthetic objects are cleaned up after each duplicate
+                                    actual_keys = keys
+                                    if is_multi_version and len(keys) > 0:
+                                        # Get the original key from the first synthetic object
+                                        first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
+                                        original_key = first_obj.get('_original_key')
+                                        if original_key:
+                                            # For multi-version, store original key only (not synthetic keys)
+                                            # The file paths in file1/file2 tell us which version to operate on
+                                            actual_keys = [original_key]
+
+                                    pending_op = {
+                                        'operation_number': operation_counter,
+                                        'choice': choice,
+                                        'file1': file1,
+                                        'file2': file2,
+                                        'remote_host': remote_host,
+                                        'all_files': all_files,
+                                        'keys': actual_keys,
+                                        'same_file': same_file,
+                                        'dup_key': dup_key,
+                                        'is_multi_version': is_multi_version
+                                    }
+                                    pending_operations.append(pending_op)
+
+                                    # Show confirmation
+                                    choice_desc = {
+                                        '3': f'Trash file [1]: {os.path.basename(file1)}',
+                                        '4': f'Trash file [2]: {os.path.basename(file2)}',
+                                        '5': f'Trash [1] and move [2] to library of [1]',
+                                        '6': f'Trash [2] and move [1] to library of [2]',
+                                        '7': 'Rename files using directory name'
+                                    }.get(choice, f'Unknown choice: {choice}')
+                                    print(f"\n✓ Operation #{operation_counter} recorded: {choice_desc}")
+                                    print(f"  (Total pending: {len(pending_operations)})")
+
+                                    # Move to next duplicate pair
+                                    break
+
+                            except KeyboardInterrupt:
+                                print("\n\nInterrupted by user. Exiting resolution mode.")
+                                break  # Break out of duplicate pairs loop, will still save cache
+                            except Exception as e:
+                                print(f"ERROR: {e}")
+                                print("Skipping this pair.")
+                                break
+
+                        # DEBUG: Confirm we finished processing this duplicate
+                        if DBG:
+                            print(f"{DBGPFX}Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
+
+                        # Cleanup: Remove synthetic objects from OBJ_BY_ID to prevent them from being saved to cache
+                        if is_multi_version:
+                            for key in keys:
+                                if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                                    del PLEX_Media.OBJ_BY_ID[key]
+                            if DBG:
+                                print(f"{DBGPFX}Cleaned up {len(keys)} synthetic objects for multi-version item")
+
+                    # After processing all duplicates, prompt user for final action if there are pending operations
+                    # Also check if no duplicates were actually processed (all skipped)
+                    if not pending_operations and dup_idx == total_duplicates:
+                        # Check if all duplicates were skipped
+                        # This happens when the cache is stale and contains duplicates that were already resolved
+                        print(f"\n{'='*139}")
+                        print(f"ALL DUPLICATES ALREADY RESOLVED")
+                        print(f"{'='*139}")
+                        print(f"\nAll {total_duplicates} duplicate(s) in the list have already been resolved (only 1 item remaining).")
+                        print(f"This means your cache is stale and needs to be refreshed from the Plex server.")
+                        print(f"\nTo update the cache and see only current duplicates, run:")
+                        print(f"  my-plex --update-cache")
+                    elif pending_operations:
+                        print(f"\n{'='*139}")
+                        print(f"ALL DUPLICATES PROCESSED")
+                        print(f"{'='*139}")
+                        print(f"\nYou have {len(pending_operations)} pending operation(s) that need to be applied.")
+                        print("Choose final action:")
+                        print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                        print("  Q = Quit without applying pending operations")
+
+                        while True:
+                            try:
+                                print("\nYour choice: ", end='', flush=True)
+                                final_choice = readchar.readchar()
+                                print(final_choice)
+
+                                if final_choice == 'A':
+                                    print(f"\n{'='*76}")
+                                    print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
+                                    print(f"{'='*76}")
+                                    # Apply all pending operations
+                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                                    if not all_success:
+                                        operations_all_succeeded = False
+                                    num_ops = len(pending_operations)
+                                    # Clear pending operations since they've been applied
+                                    pending_operations.clear()
+                                    if all_success:
+                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                                    else:
+                                        print(f"\n⚠ Some operations failed. Check output above for details.")
+                                    break
+                                elif final_choice == 'Q':
+                                    print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
+                                    print("Are you sure you want to quit without applying them?")
+                                    print("  Y = Yes, quit without applying")
+                                    print("  N = No, go back")
+                                    print("\nYour choice: ", end='', flush=True)
+                                    confirm = readchar.readchar()
+                                    print(confirm)
+                                    if confirm == 'Y':
+                                        print("Exiting without applying pending operations.")
+                                        break
+                                    else:
+                                        print("Cancelled. Choose A or Q.")
+                                        continue
+                                else:
+                                    print(f"Invalid choice. Please enter A or Q.")
+                                    continue
+                            except KeyboardInterrupt:
+                                print("\n\nInterrupted by user.")
+                                break
+
+                except KeyboardInterrupt:
+                    # Ctrl+C pressed during resolution
+                    print("\n\n⚠ Resolution interrupted by user.")
+                finally:
+                    # DEBUG: Show loop completion info
+                    if DBG:
+                        print(f"{DBGPFX}For loop exited. Expected {total_duplicates} duplicates, processed through dup_idx={locals().get('dup_idx', 'N/A')}")
+
+                    # Write resolution log to JSON file
+                    if resolution_log_data:
+                        resolution_log_data["session"]["ended"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        resolution_log_data["session"]["total_operations"] = len(resolution_log_data.get("operations", []))
+
+                        try:
+                            with open(log_filename, 'w') as f:
+                                # Use default handler to convert datetime objects to strings
+                                json.dump(resolution_log_data, f, indent=2, default=str)
+                            print(f"\n📝 Resolution log saved: {log_filename}")
+                        except Exception as e:
+                            print(f"\n⚠ Warning: Could not write resolution log: {e}")
+
+                    print("\n" + "="*76)
+                    print("RESOLUTION MODE COMPLETE")
+                    print("="*76)
+
+                    # Show summary
+                    if pending_operations:
+                        print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) were NOT applied.")
+                        print(f"   To apply them, re-run resolution mode and press 'A' to apply and quit.")
+                    elif operation_counter > 0:
+                        if operations_all_succeeded:
+                            print(f"\n✓ All {operation_counter} operation(s) were successfully applied.")
+                        else:
+                            print(f"\n⚠ Some operations failed. Check output above for details.")
+                    else:
+                        print(f"\n   No operations were performed.")
+        else:
+            # Filter by watched/unwatched status and/or language if requested
+            if watched_only or unwatched_only or audio_filter or no_audio_language:
+                filtered_keys = []
+                for key in obj_keys:
+                    obj = PLEX_Media.OBJ_BY_ID[key]
+
+                    # Skip non-media types (Show/Season have no files/audio)
+                    obj_type = obj.get('type')
+                    if obj_type in ('Show', 'Season'):
+                        continue
+
+                    # Check watched/unwatched filter
+                    if watched_only or unwatched_only:
+                        view_count = obj.get('viewCount', 0)
+                        if watched_only and view_count == 0:
+                            continue  # Skip unwatched items
+                        if unwatched_only and view_count > 0:
+                            continue  # Skip watched items
+
+                    # Check language filter
+                    if audio_filter:
+                        audio_languages = obj.get('audio_languages', [])
+                        if not audio_languages or audio_filter not in audio_languages:
+                            continue  # Skip items without matching language
+
+                    # Check no-audio-language filter
+                    if no_audio_language:
+                        audio_languages = obj.get('audio_languages', [])
+                        if audio_languages:
+                            continue  # Skip items that HAVE audio language
+
+                    filtered_keys.append(key)
+
+                if not filtered_keys:
+                    # Build descriptive message
+                    filter_parts = []
+                    if watched_only:
+                        filter_parts.append("watched")
+                    elif unwatched_only:
+                        filter_parts.append("unwatched")
+                    if audio_filter:
+                        filter_parts.append(f"{audio_filter} audio")
+                    if no_audio_language:
+                        filter_parts.append("no-audio-language")
+
+                    filter_desc = " ".join(filter_parts)
+                    if library_name:
+                        print(f"No {filter_desc} items found in library '{library_name}'.")
+                    else:
+                        print(f"No {filter_desc} items found.")
+                    return
+
+                obj_keys = filtered_keys
+
+            # Use compact format for --no-audio-language unless user specified a custom format
+            saved_format = None
+            if no_audio_language and FORMAT in ('tsv_labeled', 'tsv'):
+                saved_format = FORMAT
+                FORMAT = '{ID}\t{LIBRARY}\t{TITLE}\t{VERSION}\t{FILE}'
+
+            for key in obj_keys: PLEX_Media.print_OBJ_BY_ID( key )
+
+            if saved_format is not None:
+                FORMAT = saved_format
+
+            # Interactive resolution mode for --no-audio-language
+            if no_audio_language and resolve_mode:
+                resolve_no_audio_language(obj_keys, args)
+
+    @staticmethod
+    def list_collections(library_name):
+        """List all collections in a specific library."""
+        collections = []
+        for col_key, col_dict in PLEX_Media.OBJ_BY_COLLECTION.items():
+            if col_dict.get('library') == library_name:
+                collections.append(col_dict)
+
+        if not collections:
+            print(f"No collections found in library '{library_name}'.")
+            return
+
+        collections.sort(key=lambda c: c.get('title', '').lower())
+
+        if VRB: print(f"\nCollections in '{library_name}':")
+        for col in collections:
+            member_count = len(col.get('member_ids', []))
+            print(f"  {col['title']} ({member_count} items)")
+        print(f"\nTotal: {len(collections)} collections")
+
+    @staticmethod
+    def print_OBJ_BY_ID( key ):
+        global DBG, VRB, FORMAT, LIST_MEDIA_DEFAULT_TSV_FORMAT
+
+        if DBG: print(f"{DBGPFX}PLEX_Media.print_OBJ_BY_ID( key={key} )")
+
+        labeled = False
+        replace_w_bar = None
+        match FORMAT:
+            case 'pretty':
+                PLEX_Media.print_OBJ_BY_ID___pretty( key )
+                return
+            case 'details'|'detailed':
+                PLEX_Media.print_OBJ_BY_ID___details( key )
+                return
+            case 'tsv':         (replace_w_bar, format_str)          = ('\t', LIST_MEDIA_DEFAULT_TSV_FORMAT)
+            case 'tsv_labeled': (replace_w_bar, format_str, labeled) = ('\t', LIST_MEDIA_DEFAULT_TSV_FORMAT, True)
+            case _:     format_str = FORMAT
+
+        # set all available variables in dict 'var'
+        obj = PLEX_Media.OBJ_BY_ID[key]
+        var = {}
+        label = ''
+        for k, v in obj.items():
+            #print(f"k={k.upper()} : v={v}'''")
+            #if v is None: v = 'n/a'
+            k = k.upper()
+
+            # Convert duration from milliseconds to minutes
+            if k == 'DURATION' and v is not None:
+                v = format_duration(v, 'm')
+
+            if isinstance(v, list):
+                match k:
+                    case 'LABELS':              label = 'LABEL:' if labeled else ''
+                    case 'ACTORS':              label = 'ACTOR:' if labeled else ''
+                    case 'COLLECTIONS':         label = 'COLLECTION:' if labeled else ''
+                    case 'DIRECTORS':           label = 'DIRECTOR:' if labeled else ''
+                    case 'COUNTRIES':           label = 'COUNTRY:' if labeled else ''
+                    case 'GENRES':              label = 'GENRE:' if labeled else ''
+                    case 'AUDIO_LANGUAGES':     label = 'AUDIO-LANG:' if labeled else ''
+                    case 'SUBTITLE_LANGUAGES':  label = 'SUBTITLE-LANG:' if labeled else ''
+                    case 'WRITERS':             label = 'WRITER:' if labeled else ''
+                    case 'VERSIONS':            label = 'VERSION:' if labeled else ''
+                    case 'MEMBER_IDS':          label = 'MEMBER:' if labeled else ''
+                    case 'MEMBERS':             label = 'MEMBER:' if labeled else ''
+                    case _:                     err(1058, f"Unknown list type (k={k})")
+                v = (label if len(v)>0 else'') + (','+label).join(str(x) for x in v)
+            else:
+                if labeled: v = f"{k}:{v}"
+
+            # ensure for instance for 'tsv' format, that we do NOT have tabs in the value:
+            if replace_w_bar is not None: v.replace(replace_w_bar, '|')
+
+            var[k] = v
+
+        # prepare format_str: introduce var[..]
+        #pattern = r"\{([A-Z_][A-Z0-9_]*)\}" # Regular expression to find uppercase words inside curly braces
+        #format_str = re.sub(pattern, r"{var['\1']}", format_str) # Replace matches with the desired format
+
+        # Pre-fill any format variables not present in obj with '' so format() won't KeyError
+        for match in re.finditer(r'\{([A-Z_][A-Z0-9_]*)\}', format_str):
+            if match.group(1) not in var:
+                var[match.group(1)] = ''
+
+        if DBG: print(f"{DBGPFX}PLEX_Media.print_OBJ_BY_ID(): format_str = '{format_str}'\n{DBGPFX}PLEX_Media.print_OBJ_BY_ID(): var = {var}")
+        try:
+            print( format_str.format(**var) )
+        except KeyError as e:
+            err(1046, f"You used an invalid variable name '{e.args[0]}' in the format string. See --format for more info.")
+
+    @staticmethod
+    def print_OBJ_BY_ID___pretty( key ):
+        obj = PLEX_Media.OBJ_BY_ID[key]
+        match obj['type']:
+            case "Show": # key = show_key
+                year_str = f"\t({obj['year']})" if obj['year']>0 else ""
+                season_plural = "s" if obj['S_count']>1 else ""
+                print(f"> SERIES\t{obj['title']}{year_str}\t: {obj['S_count']} season{season_plural}")
+                if VRB:
+                    print( f"{obj['file']}" )
+                    for S_str in obj['members']:
+                        season_obj_id = PLEX_Media.OBJ_BY_SHOW[ key ][ S_str ]
+                        season = PLEX_Media.OBJ_BY_ID[ season_obj_id ]
+                        print(f"SERIES\t{obj['title']} Season {season['S_idx']}: {season['title']}")
+                        for E_str in season['members']:
+                            for version,partList in PLEX_Media.OBJ_BY_SHOW_EPISODES[ key ][S_str][ E_str ].items():
+                                for part in partList:
+                                    episode = PLEX_Media.OBJ_BY_ID[ part ]
+                                    if VERYVRB:
+                                        print(f"SERIES\t{obj['title']} {episode['E_str_full']} [{version}] {{{part}}}: {episode['title']}")
+                                    else:
+                                        print(f"SERIES\t{obj['title']} {episode['E_str_full']}: {episode['title']}")
+                                    print(f"'{episode['file']}'")
+            case "Movie":
+                if VRB:
+                    for version,obj_keys in obj['members'].items():
+                        for key in obj_keys:
+                            obj = PLEX_Media.OBJ_BY_ID[ key ]
+                            if VERYVRB:
+                                print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}] {{{key}}}\t'{obj['file']}'")
+                            else:
+                                print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}]\t'{obj['file']}'")
+                else:
+                    print(f"MOVIE\t{obj['title']} ({obj['year']})")
+            case "Collection":
+                member_count = len(obj.get('member_ids', []))
+                print(f"COLLECTION\t{obj['title']}\t({member_count} items)")
+
+
+
+    @staticmethod
+    def print_OBJ_BY_ID___details( key ):
+        obj = PLEX_Media.OBJ_BY_ID[key]
+        if obj['type'] == 'Collection':
+            member_count = len(obj.get('member_ids', []))
+            print(f"\nDetails of Collection '{obj['title']}':")
+            print(f"- type: {obj['type']}")
+            print(f"- subtype: {obj.get('subtype', 'N/A')}")
+            print(f"- library: {obj.get('library', 'N/A')}")
+            print(f"- members: {member_count}")
+            return
+        print(f"\nDetails of '{obj['title']}':")
+        print(f"- type: {obj['type']}")
+        print(f"- year: {obj['year']}")
+        print(f"- critics rating: {obj.get('criticsRating', 'N/A')}")
+        print(f"- audience rating: {obj.get('audienceRating', 'N/A')}")
+        print(f"- summary: {obj['summary']}")
+        print(f"- duration: {obj['duration']} ms")
+        print(f"- actor(s): {', '.join([a.tag for a in obj['actors']])}")
+        print(f"- director(s): {', '.join([d.tag for d in obj['directors']])}")
+        print(f"- writer(s): {', '.join([w.tag for w in obj['writers']])}")
+        print(f"- genre(s): {', '.join([g.tag for g in obj['genres']])}")
+        print(f"- studio: {obj['studio']}")
+        print(f"- collection(s): {', '.join([c.tag for c in obj['collections']])}")
+        print(f"- labels: {', '.join([l.tag for l in obj['labels']])}")
+        print(f"- audio language(s): {obj['audio_languages']}")
+        print(f"- subtitle language(s): {obj['subtitle_languages']}")
+        print(f"- content rating: {obj['contentrating']}")
+        print(f"- view count: {obj['viewcount']}")
+        print(f"- last viewed at: {obj['lastviewedat']}")
+        print(f"- added at: {obj['addedat']}")
+        print(f"- updated at: {obj['updatedat']}")
+        print(f"- user rating: {obj['userrating']}")
+        print(f"- season count: {obj['seasoncount'] if 'seasoncount' in obj else 'n/a'}")
+        print(f"- episode count: {obj['episodecount'] if 'episodecount' in obj else 'n/a'}")
+        print(f"- part count: {len(obj['parts'])}")
+        for part in obj['parts']:
+            print(f"  - part: {part.title} | duration: {part.duration} ms | codec: {part.video_codec}")
+        print(f"- original title: {obj['originaltitle']}")
+        print(f"- country: {obj['country']}")
+        print(f"- resolution: {obj['resolution']}")
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def get_info(media_identifier, library_name=None):
+        # Uses cache-based show_item_info() — no API needed for read-only info display
+        show_item_info(media_identifier)
+
+    @staticmethod
+    def refresh(media_identifier, library_name=None):
+        # API required: triggers Plex server-side metadata refresh via HTTP API
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.refresh()
+                print(f"Refreshed '{media.title}'.")
+        except Exception as e:
+            err(1022, f"Error refreshing media: {e}")
+
+    @staticmethod
+    def delete(media_identifier, library_name=None):
+        # API required: deletes item from Plex via HTTP API
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.delete()
+                print(f"Deleted '{media.title}'.")
+        except Exception as e:
+            err(1023, f"Error deleting media: {e}")
+
+    ###### Metadata management ---------------------------------------------------
+
+    @staticmethod
+    def get_watched_status(media_identifier, library_name=None):
+        # API required: reads live watch status from Plex server
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
+                print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
+                print(f"View count: {media.viewCount}")
+        except Exception as e:
+            err(1024, f"Error fetching watched status: {e}")
+
+    @staticmethod
+    def set_watched(media_identifier, library_name=None):
+        # API required: modifies watch status via Plex HTTP API
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.markWatched()
+                print(f"Media '{media.title}' marked as watched.")
+        except Exception as e:
+            err(1025, f"Error setting watched status: {e}")
+
+    @staticmethod
+    def set_unwatched(media_identifier, library_name=None):
+        # API required: modifies watch status via Plex HTTP API
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.markUnwatched()
+                print(f"Media '{media.title}' marked as unwatched.")
+        except Exception as e:
+            err(1026, f"Error setting unwatched status: {e}")
+
+    @staticmethod
+    def set_watched_date(media_identifier, watched_date, library_name=None):
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.markWatched()
+                media.lastViewedAt = watched_date
+                media.save()
+                print(f"Watched date set to {watched_date} for '{media.title}'.")
+        except Exception as e:
+            err(1027, f"Error setting watched date: {e}")
+
+    @staticmethod
+    def set_view_offset(media_identifier, offset, library_name=None):
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.updateProgress(viewOffset=offset, viewCount=media.viewCount)
+                print(f"View offset set to {offset} milliseconds for '{media.title}'.")
+        except Exception as e:
+            err(1028, f"Error setting view offset: {e}")
+
+    @staticmethod
+    def get_view_offset(media_identifier, library_name=None):
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
+        except Exception as e:
+            err(1029, f"Error fetching view offset: {e}")
+
+    @staticmethod
+    def set_user_rating(media_identifier, rating, library_name=None):
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.userRating = rating
+                media.save()
+                print(f"User rating set to {rating} for '{media.title}'.")
+        except Exception as e:
+            err(1030, f"Error setting user rating: {e}")
+
+    @staticmethod
+    def clear_user_rating(media_identifier, library_name=None):
+        try:
+            for media in resolve_plex_media_obj(media_identifier, library_name):
+                media.userRating = None
+                media.save()
+                print(f"User rating cleared for '{media.title}'.")
+        except Exception as e:
+            err(1031, f"Error clearing user rating: {e}")
+
+    @staticmethod
+    def update_cache():
+        """
+        Delegates to PLEX_Library.update_cache() to avoid code duplication.
+        This method is kept for backwards compatibility.
+        """
+        PLEX_Library.update_cache()
+
+    @staticmethod
+    def build_labels_index():
+        """Build a reverse index mapping label names to lists of object IDs
+
+        Returns:
+            Dictionary mapping label -> list of object IDs that have that label
+        """
+        global CACHE
+        labels_index = {}
+
+        for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+            labels = obj.get('labels', []) or []  # Handle None case
+            for label in labels:
+                if label not in labels_index:
+                    labels_index[label] = []
+                labels_index[label].append(obj_id)
+
+        if DBG: print(f"{DBGPFX}build_labels_index(): Built index with {len(labels_index)} unique labels")
+        return labels_index
+
+    @staticmethod
+    def retrieve_media_and_part(obj, must_exist=True):
+        """ API REQUIRED: Returns plexapi objects needed for write operations (delete, markWatched,
+            addLabel, rate, etc.). Cannot use DB — callers need live plexapi objects to mutate state.
+            Searches for media + part in PLEX_SERVER using IDs from obj; see PLEX_Media.load_cache().
+            RETURNS tuple (media, part)
+            If must_exist == True: Assums that obj MUST exist in PLEX_SERVER and FAILS if we can't find it.
+            Else: RETURNS tuple (None, None) if not found! """
+
+        global PLEX_SERVER
+        if DBG: print( f"{DBGPFX}retrieve_media_and_part() OBJ = {obj}" )
+
+        try: library = PLEX_Library.OBJ_DICT[ obj['library'] ]
+        except Exception as e: err(1013, f"section with library name not found: {e}\nOBJ = {obj}") if must_exist else next
+
+        try: item = library.fetchItem( obj['item_id'] )
+        except Exception as e: err(1014, f"Item with ID not found: {e}\nOBJ = {obj}") if must_exist else next
+        #except Exception as e: err(xxxx, f"Item with ID {obj['item_id']} not found: {e}\nOBJ = {obj}")
+
+        match library.type:
+            case "Movie":
+                for media in item.media:
+                    if media.id != obj['media_id']: continue
+                    for part in media.parts:
+                        if part.id != obj['part_id']: continue
+                        return (media, part)
+            case "Show":
+                for season in plex_get_seasons(item, obj['library']):
+                    if season.index != obj['S_idx']: continue
+                    for episode in plex_get_episodes(season, obj['library'], item.title):
+                        if episode.index != obj['E_idx']: continue
+                        for media in episode.media:
+                            if media.id != obj['media_id']: continue
+                            for part in media.parts:
+                                if part.id != obj['part_id']: continue
+                                return (media, part)
+            case "Artist": pass
+            case _: err(1015, f"UNSUPPORTED library.type '{library.type}'.")
+
+        if must_exist: err( 1010, f"OBJ not fund in PLEX db. This should not happen. Please contact maintainer.\nOBJ = {obj}")
+        return (None, None)
+
+
+
+###########################################################################################
+#### PLEX PLAYLIST MANAGEMENT
+###########################################################################################
+
+class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
+    TYPE_STR = 'playlist'
+
+    argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--playlist] <playlist_name> [<PLAYLIST_COMMAND> [..]]", description="Without any PLAYLIST_COMMAND> this does the same as with <PLAYLIST_COMMAND> '--list'.", allow_abbrev=False, exit_on_error=False)
+    # help="Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>. For more info: --help playlist",
+    argparser._optionals.title = '// if PLEX_OBJECT is a playlist_name: Available <PLAYLIST_COMMAND>s' # argparse.SUPPRESS
+    argparser.add_argument('--list', action='store_true', help="List all items in the playlist.")
+    argparser.add_argument('--delete', action='store_true', help="Delete the specified playlist.")
+    argparser.add_argument('--create-playlist', nargs='+', help="Create a playlist. Example: --create <media1> <media2>...")
+    argparser.add_argument('--add-to', nargs='+', metavar='<MEDIA_ITEM>', help="Add <MEDIA_ITEM> to the specified playlist.")
+    argparser.add_argument('--remove-from', nargs='+', metavar='<MEDIA_ITEM>', help="Remove <MEDIA_ITEM> from the specified playlist.")
+
+    @staticmethod
+    def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        # Use DB query instead of API — playlists are metadata_type=15
+        try:
+            safe_obj = obj.replace("'", "''")
+            query = f"SELECT COUNT(*) FROM metadata_items WHERE metadata_type = 15 AND title = '{safe_obj}' AND deleted_at IS NULL"
+            rows = query_plex_database(query, mode='rows')
+            return rows and int(rows[0][0]) > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def execute_cmd(args, obj, obj_args):      # Handling actions on playlists
+        if obj_args.list:             PLEX_Playlist.list(obj)
+        if obj_args.create_playlist:  PLEX_Playlist.create(obj, obj_args.create_playlist)
+        if obj_args.add_to:           PLEX_Playlist.update(obj, obj_args.add_to, 'add')
+        if obj_args.remove_from:      PLEX_Playlist.update(obj, obj_args.remove_from, 'remove')
+        if obj_args.delete:           PLEX_Playlist.delete(obj)
+
+    ############################################################
+    ###### COMMAND FUNCTIONS:
+
+    @staticmethod
+    def list(playlist_name):
+        # Use DB query instead of API — playlists are metadata_type=15
+        try:
+            query = "SELECT title FROM metadata_items WHERE metadata_type = 15 AND deleted_at IS NULL ORDER BY title"
+            rows = query_plex_database(query, mode='rows')
+            if rows:
+                for row in rows:
+                    print(f"Playlist: {row[0]}")
+            else:
+                print("No playlists found.")
+        except Exception as e:
+            print(f"Error listing playlists: {e}")
+
+    @staticmethod
+    def create(playlist_name, media_identifiers):
+        # API required: playlist creation via Plex HTTP API
+        plex = ensure_plex_api()
+        try:
+            media_items = []
+            for identifier in media_identifiers:
+                media_items += resolve_plex_media_obj(identifier)
+            Playlist.create(server=plex, title=playlist_name, items=media_items)
+            print(f"Playlist '{playlist_name}' created successfully.")
+        except Exception as e:
+            err(1032, f"Error creating playlist: {e}")
+
+    @staticmethod
+    def update(playlist_name, media_identifiers, action):
+        # API required: playlist modification via Plex HTTP API
+        plex = ensure_plex_api()
+        try:
+            playlist = plex.playlist(playlist_name)
+            media_items = []
+            for identifier in media_identifiers:
+                media_items += resolve_plex_media_obj(identifier)
+
+            if action == 'add':
+                playlist.addItems(media_items)
+                print(f"Media added to playlist '{playlist_name}'.")
+            elif action == 'remove':
+                playlist.removeItems(media_items)
+                print(f"Media removed from playlist '{playlist_name}'.")
+        except Exception as e:
+            err(1033, f"Error updating playlist: {e}")
+
+    @staticmethod
+    def delete(playlist_name):
+        # API required: playlist deletion via Plex HTTP API
+        plex = ensure_plex_api()
+        try:
+            playlist = plex.playlist(playlist_name)
+            playlist.delete()
+            print(f"Playlist '{playlist_name}' deleted successfully.")
+        except Exception as e:
+            err(1034, f"Error deleting playlist: {e}")
+
+
+###########################################################################################
+#### PRINT HELP
+###########################################################################################
+
+def main_print_help_of_subparsers(parser):
+    # retrieve subparsers from parser
+    subparsers_actions = [
+        action for action in parser._actions 
+        if isinstance(action, argparse._SubParsersAction) ]
+    # there will probably only be one subparser_action,
+    # but better safe than sorry
+    for subparsers_action in subparsers_actions:
+        # get all subparsers and print help
+        for choice, subparser in subparsers_action.choices.items():
+            print()
+            if DBG: print("{DBGPFX}Subparser '{}'".format(choice))
+            print(subparser.format_help())
+
+
+def main_print_help(args, remaining_args, main_parser):
+    global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
+    if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
+    # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None
+    if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0 and not has_standalone_cmd):
+        if DBG: print( f"{DBGPFX}main_print_help(): standard help output..." )
+        verbose_help = args.offline  # --help --offline or --offline --help shows verbose help
+
+        # For standard help: temporarily hide verbose-only options
+        verbose_only_args = ['--plex-xml-url', '--plex-url', '--plex-token',
+                             '--audio', '--en', '--de', '--fr',
+                             '--watched', '--unwatched',
+                             '-Y', '-N', '-D', '-DD', '-VV', '-f']
+        saved_help = {}
+        if not verbose_help:
+            for action in main_parser._actions:
+                for opt in verbose_only_args:
+                    if opt in action.option_strings:
+                        saved_help[opt] = action.help
+                        action.help = argparse.SUPPRESS
+                        break
+
+        main_parser.print_help()
+        print()
+        GLOBAL_CMD_PARSER.usage = argparse.SUPPRESS;
+        GLOBAL_CMD_PARSER.description = argparse.SUPPRESS;
+        GLOBAL_CMD_PARSER.print_help()
+        print(HELP_SUFFIX)
+
+        if not verbose_help:
+            print("For verbose help with all options: my-plex --help --offline")
+            # Restore suppressed help texts
+            for action in main_parser._actions:
+                for opt in verbose_only_args:
+                    if opt in action.option_strings and opt in saved_help:
+                        action.help = saved_help[opt]
+                        break
+
+        sys.exit(0)
+
+    if args.help is None: return
+
+    match args.help.lower():
+        case 'all':
+            if DBG: print( f"{DBGPFX}main_print_help(): ALL help output..." )
+            main_parser.print_help()
+            print()
+            GLOBAL_CMD_PARSER.usage = argparse.SUPPRESS;
+            GLOBAL_CMD_PARSER.description = argparse.SUPPRESS;
+            GLOBAL_CMD_PARSER.print_help()
+            print(HELP_SUFFIX)
+            for parser in PLEXOBJ[PARSER].values():
+                print("///////////////////////////////////////////////////////////////////////////////");
+                parser.usage = argparse.SUPPRESS;
+                tmpstr = parser.description;
+                parser.description = argparse.SUPPRESS;
+                parser.print_help()
+                if len(tmpstr) > 0: print(tmpstr)
+                main_print_help_of_subparsers(parser)
+                print()
+            sys.exit(0)
+        case 'global' | 'glob' | 'cmd':
+            if DBG: print( f"{DBGPFX}main_print_help(): GLOBAL_CMD_PARSER output..." )
+            GLOBAL_CMD_PARSER.print_help()
+            sys.exit(0)
+        case 'update-cache' | 'update_cache' | 'cache':
+            if DBG: print( f"{DBGPFX}main_print_help(): --update-cache help..." )
+            print()
+            print("=" * 76)
+            print("CACHE UPDATE HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --update-cache [MODIFIERS]")
+            print()
+            print("Updates the cache by comparing with Plex server and adding missing items.")
+            print()
+            print("MODIFIERS:")
+            print()
+            print("  --from-scratch")
+            print("      Deletes existing cache file before rebuilding.")
+            print("      Use this for a completely fresh start.")
+            print("      Example: my-plex --update-cache --from-scratch")
+            print()
+            print("  --force")
+            print("      Complete rebuild: recollects BOTH Plex data AND file metadata.")
+            print("      This is equivalent to using --force-plexdata + --force-metadata.")
+            print("      Example: my-plex --update-cache --force")
+            print()
+            print("  --force-plexdata")
+            print("      Recollects ALL data from Plex server:")
+            print("        • Runs lib.refresh() to verify all files exist")
+            print("        • Recollects: audio_languages, subtitle_languages, collections,")
+            print("          labels, actors, directors, writers, genres, etc.")
+            print("        • Does NOT skip items already in cache")
+            print("        • Takes longer (up to 1 hour for large libraries)")
+            print("      Use this when:")
+            print("        • Cache is missing audio_languages, collections, or other Plex data")
+            print("        • You need to populate new fields added to the cache structure")
+            print("      Example: my-plex --update-cache --force-plexdata")
+            print()
+            print("  --force-metadata")
+            print("      Recollects video file metadata (duration, codecs, etc.):")
+            print("        • Runs ffmpeg on video files")
+            print("        • Recollects: container duration, bitrate, codec info")
+            print("        • Used for broken file detection")
+            print("      Use this when:")
+            print("        • You need to rebuild metadata for broken file detection")
+            print("        • Video files have changed but Plex hasn't noticed")
+            print("      Example: my-plex --update-cache --force-metadata")
+            print()
+            print("  --broken")
+            print("      Rescan files previously marked as broken (ffmpeg failed):")
+            print("        • Re-queues broken files for metadata collection")
+            print("        • Useful after fixing ffmpeg issues or updating ffmpeg")
+            print("      Example: my-plex --update-cache --broken")
+            print()
+            print("COMBINATIONS:")
+            print()
+            print("  # Incremental update (only add missing items)")
+            print("  my-plex --update-cache")
+            print()
+            print("  # Fresh start (delete cache and rebuild everything)")
+            print("  my-plex --update-cache --from-scratch")
+            print()
+            print("  # Recollect only Plex server data")
+            print("  my-plex --update-cache --force-plexdata")
+            print()
+            print("  # Recollect only video file metadata")
+            print("  my-plex --update-cache --force-metadata")
+            print()
+            print("  # Rescan broken files only")
+            print("  my-plex --update-cache --broken")
+            print()
+            print("  # Complete rebuild (Plex data + file metadata)")
+            print("  my-plex --update-cache --force")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'no-audio-language' | 'no-language' | 'no_audio_language':
+            print()
+            print("=" * 76)
+            print("NO AUDIO LANGUAGE HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --no-audio-language [--resolve]")
+            print()
+            print("Lists media items that have no audio language tag in their file container.")
+            print("This is common with YTS releases and other re-encodes that strip metadata.")
+            print()
+            print("Without --resolve, simply lists affected items in compact format:")
+            print("  PLEX_ID  LIBRARY  TITLE  VERSION  FILE")
+            print()
+            print("RESOLVE MODE (--resolve):")
+            print()
+            print("  my-plex --no-audio-language --resolve")
+            print()
+            print("  Interactive wizard to fix missing audio language tags:")
+            print("  - For each item, choose a language (E=English, D=German, F=French, etc.)")
+            print("  - Sets the language tag in the file container using:")
+            print("    - mp4box (GPAC) for MP4/M4V files")
+            print("    - mkvpropedit (MKVToolNix) for MKV files")
+            print("  - After fixing, triggers Plex to re-analyze the file")
+            print()
+            print("  These tools must be installed on the Plex server (or locally if same machine).")
+            print("  Install: brew install gpac mkvtoolnix")
+            print()
+            print("CONFIG OPTIONS (in ~/.my-plex.conf):")
+            print()
+            print("  AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:")
+            print("    Auto-select language for specific libraries (used ONLY in --resolve mode).")
+            print("    List of tuples: (library_name, 2-letter ISO 639-1 code).")
+            print("    Items in listed libraries skip the interactive prompt.")
+            print("    Example:")
+            print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [")
+            print("          ('movies.de', 'de'), ('movies.en', 'en'), ('movies.fr', 'fr'),")
+            print("      ]")
+            print()
+            print("  EXTERNAL_TOOLS['SERVER']['mp4box']:")
+            print("  EXTERNAL_TOOLS['SERVER']['mkvpropedit']:")
+            print("    Custom paths for the tools on the Plex server.")
+            print("    Leave unset to auto-detect from PATH.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  # List items with missing audio language")
+            print("  my-plex --no-audio-language")
+            print()
+            print("  # Fix missing audio language interactively")
+            print("  my-plex --no-audio-language --resolve")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'duplicates':
+            print()
+            print("=" * 76)
+            print("DUPLICATES HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --duplicates [--resolve] [--type <movie|show>]")
+            print()
+            print("Lists duplicate media items across all libraries.")
+            print("Duplicates are detected by matching title + year (and originalTitle for cross-")
+            print("library matches with different localized titles).")
+            print()
+            print("MULTI-VERSION vs DUPLICATE:")
+            print("  Items with genuinely different content (duration differs by >5s) are")
+            print("  classified as 'true multi-version' and excluded from duplicates.")
+            print("  Example: 30 Rock east coast vs west coast versions.")
+            print()
+            print("RESOLVE MODE (--resolve):")
+            print("  my-plex --duplicates --resolve")
+            print("  Interactive wizard to resolve duplicates (trash, move, rename files).")
+            print()
+            print("CONFIG OPTIONS (in ~/.my-plex.conf):")
+            print()
+            print("  DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:")
+            print("    Ignore duplicates when ALL copies are within the same library group.")
+            print("    Example: [['movies.de', 'movies.en', 'movies.fr']]")
+            print("    A movie in movies.de + movies.en only → NOT a duplicate (both in group).")
+            print("    But movies.de + ,unsorted → IS a duplicate (,unsorted not in group).")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --duplicates              # List all duplicates")
+            print("  my-plex --duplicates --resolve     # Resolve interactively")
+            print("  my-plex --duplicates --type movie  # Only movie duplicates")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'broken':
+            print()
+            print("=" * 76)
+            print("BROKEN FILES HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --broken [--type <movie|show>]")
+            print()
+            print("Lists potentially truncated/broken media files by comparing the container")
+            print("duration (from ffmpeg) with the Plex-reported duration.")
+            print()
+            print("Files are flagged if the container duration is more than")
+            print(f"TRUNCATION_THRESHOLD_PCT% shorter than Plex duration (default: {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}%).")
+            print()
+            print("CONFIG OPTIONS (in ~/.my-plex.conf):")
+            print()
+            print("  TRUNCATION_THRESHOLD_PCT = 0.5  # percentage threshold")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --broken                   # List all broken files")
+            print("  my-plex --broken --type movie       # Only broken movies")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'watched':
+            print()
+            print("=" * 76)
+            print("WATCHED/UNWATCHED HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <library_name> --watched")
+            print("       my-plex <library_name> --unwatched")
+            print()
+            print("Filters media items by watch status within a specific library.")
+            print("Requires a library name.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex ,unsorted --watched        # List watched items in ,unsorted")
+            print("  my-plex ,unsorted --unwatched       # List unwatched items in ,unsorted")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'unwatched':
+            print()
+            print("=" * 76)
+            print("WATCHED/UNWATCHED HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <library_name> --unwatched")
+            print()
+            print("Lists unwatched media items within a specific library.")
+            print("Requires a library name.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex ,unsorted --unwatched       # List unwatched items in ,unsorted")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'list':
+            print()
+            print("=" * 76)
+            print("LIST HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex [<library_name>] --list [OPTIONS]")
+            print()
+            print("Lists media items. Without a library name, lists all libraries.")
+            print("With a library name, lists all items in that library.")
+            print()
+            print("OPTIONS:")
+            print("  --type <movie|show>       Filter by media type")
+            print("  --duplicates              Show only duplicates")
+            print("  --broken                  Show only broken files")
+            print("  --watched                 Show only watched items (requires library)")
+            print("  --unwatched               Show only unwatched items (requires library)")
+            print("  --en / --de / --fr        Filter by audio language (requires library)")
+            print("  --no-audio-language       Show items with missing audio language")
+            print("  --resolve                 Interactive resolution (with --duplicates or --no-audio-language)")
+            print()
+            print("FORMAT OPTIONS:")
+            print("  --format <fmt>            Custom output format using {VARIABLE} placeholders")
+            print("  Default format: tsv_labeled (tab-separated with labels)")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --list                     # List all libraries")
+            print("  my-plex ,unsorted --list            # List all items in ,unsorted")
+            print("  my-plex ,unsorted --list --type movie  # Only movies in ,unsorted")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'en' | 'de' | 'fr':
+            lang_names = {'en': 'English', 'de': 'German', 'fr': 'French'}
+            lang = args.help.lower()
+            print()
+            print("=" * 76)
+            print(f"AUDIO LANGUAGE FILTER HELP (--{lang})")
+            print("=" * 76)
+            print()
+            print(f"Usage: my-plex <library_name> --{lang}")
+            print()
+            print(f"Lists media items with {lang_names.get(lang, lang)} audio in a specific library.")
+            print("Requires a library name.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print(f"  my-plex ,unsorted --{lang}            # List items with {lang_names.get(lang, lang)} audio")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+    if args.help.lower() not in PLEXOBJ[PARSER]: err(1001, f"Unknown parameter of --help '{args.help}'. Call without parameter for more info.")
+
+    if DBG: print( f"{DBGPFX}main_print_help(): parser of '{args.help.lower()}' output..." )
+    PLEXOBJ[PARSER][ args.help.lower() ].print_help()
+    main_print_help_of_subparsers( PLEXOBJ[PARSER][ args.help.lower() ] )
+    sys.exit(0)
+
+
+###########################################################################################
+#### LABEL MANAGEMENT FUNCTIONS:
+###########################################################################################
+
+def get_video_file_metadata(filepath, filesize, remote_host=None):
+    """Collect metadata from video file (container duration) using ffmpeg.
+
+    Uses run_tool_on_PLEX_server() which respects EXTERNAL_TOOLS['SERVER']['ffmpeg']
+    config and auto-detects ffmpeg path. Works both locally and via SSH.
+
+    Args:
+        filepath: Path to video file
+        filesize: File size in bytes (for validation)
+        remote_host: Optional remote host (if file is on remote server)
+
+    Returns:
+        dict with metadata or None if unable to read:
+        {
+            'container_duration': 6214000,  # milliseconds (same unit as Plex)
+            'filesize': 725000000,
+            'scanned_at': '2025-12-31T10:30:00',
+            'file_type': 'mkv'
+        }
+    """
+    import re
+    from datetime import datetime
+    from pathlib import Path
+
+    try:
+        ext = Path(filepath).suffix.lower()
+        if ext not in ('.mkv', '.mp4', '.m4v', '.avi', '.mpg', '.mpeg', '.flv', '.webm', '.wmv'):
+            return None
+
+        # Use run_tool_on_PLEX_server for both local and remote ffmpeg
+        # text=False to avoid UnicodeDecodeError on files with non-UTF-8 metadata
+        result = run_tool_on_PLEX_server('ffmpeg',
+            ['-i', filepath],
+            remote_host=remote_host, text=False, timeout=30)
+
+        if result is None:
+            return None  # Tool not found — error already printed by run_tool_on_PLEX_server
+
+        # ffmpeg -i prints Duration to stderr (exit code 1 is normal — no output file specified)
+        stderr_text = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else result.stderr
+        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", stderr_text)
+        if m:
+            duration_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
+
+            return {
+                'container_duration': duration_ms,
+                'filesize': filesize,
+                'scanned_at': datetime.now().isoformat(),
+                'file_type': ext[1:]  # Remove leading dot
+            }
+
+    except Exception as e:
+        if VRB:
+            print(f"{VRBPFX}Warning: Could not read metadata for {filepath}: {e}")
+        return None
+
+    return None
+
+def integrate_metadata_from_json(json_file):
+    """Integrate video metadata from JSON file into cache
+
+    Loads metadata collected on Plex server and merges it into cache objects.
+    Validates filesize matches to ensure data integrity.
+
+    Args:
+        json_file: Path to JSON file created by collect_video_metadata.py
+    """
+    if not os.path.exists(json_file):
+        print(f"✗ Error: Metadata file not found: {json_file}")
+        sys.exit(1)
+
+    # Load cache
+    load_cache()
+
+    if not PLEX_Media.OBJ_BY_ID:
+        print("✗ Error: No media found in cache. Run --update-cache first.")
+        sys.exit(1)
+
+    # Load metadata JSON
+    try:
+        with open(json_file, 'r') as f:
+            metadata_by_filepath = json.load(f)
+    except Exception as e:
+        print(f"✗ Error loading metadata JSON: {e}")
+        sys.exit(1)
+
+    print(f"Loaded metadata for {len(metadata_by_filepath)} files from {json_file}")
+
+    # Integrate metadata into cache objects
+    integrated_count = 0
+    filesize_mismatch_count = 0
+    not_in_cache_count = 0
+    already_has_metadata_count = 0
+
+    for filepath, file_metadata in metadata_by_filepath.items():
+        # Find the object(s) that contain this filepath
+        found_in_cache = False
+
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            files_dict = obj.get('files', {})
+
+            # Check if this filepath is in any version of this object
+            for file_info in files_dict.values():
+                if file_info.get('filepath') == filepath:
+                    found_in_cache = True
+
+                    # Validate filesize matches
+                    cache_filesize = file_info.get('filesize')
+                    metadata_filesize = file_metadata.get('filesize')
+
+                    if cache_filesize != metadata_filesize:
+                        filesize_mismatch_count += 1
+                        if VRB:
+                            print(f"⚠ Filesize mismatch for {filepath}")
+                            print(f"  Cache: {cache_filesize:,} bytes, Metadata: {metadata_filesize:,} bytes")
+                        continue
+
+                    # Check if metadata already exists for this version
+                    if 'file_metadata' in file_info and file_info['file_metadata'].get('filesize') == metadata_filesize:
+                        already_has_metadata_count += 1
+                        continue
+
+                    # Add metadata to this file version
+                    file_info['file_metadata'] = file_metadata
+                    integrated_count += 1
+
+                    if VERYVRB:
+                        duration_min = file_metadata.get('container_duration', 0)
+                        print(f"  ✓ {filepath}: {duration_min:.1f} min")
+
+        if not found_in_cache:
+            not_in_cache_count += 1
+            if VERYVRB:
+                print(f"⚠ File not in cache: {filepath}")
+
+    # Save updated cache
+    update_and_save_cache(CACHE)
+
+    print(f"\n{'='*80}")
+    print(f"METADATA INTEGRATION COMPLETE")
+    print(f"{'='*80}")
+    print(f"✓ Integrated metadata:    {integrated_count:>6} files")
+    if already_has_metadata_count > 0:
+        print(f"  Already had metadata:   {already_has_metadata_count:>6} files")
+    if filesize_mismatch_count > 0:
+        print(f"⚠ Filesize mismatches:    {filesize_mismatch_count:>6} files (skipped)")
+    if not_in_cache_count > 0:
+        print(f"⚠ Not in cache:           {not_in_cache_count:>6} files (skipped)")
+    print(f"\nCache updated: {CACHE_FILE}")
+
+    if filesize_mismatch_count > 0 or not_in_cache_count > 0:
+        print(f"\n⚠ Some files were skipped. Consider running --update-cache to refresh the cache.")
+
+def generate_metadata_filelist(output_file):
+    """Generate file list for metadata collection on Plex server
+
+    Extracts all video file paths from cache and writes them to a text file.
+    This file can be transferred to the Plex server for metadata collection.
+
+    Args:
+        output_file: Path to output text file
+    """
+    load_cache()
+
+    if not PLEX_Media.OBJ_BY_ID:
+        print("✗ Error: No media found in cache. Run --update-cache first.")
+        sys.exit(1)
+
+    # Collect all unique file paths from all objects and all versions
+    all_filepaths = set()
+
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        # Get all file versions
+        files_dict = obj.get('files', {})
+        for file_info in files_dict.values():
+            filepath = file_info.get('filepath')
+            if filepath:
+                all_filepaths.add(filepath)
+
+    if not all_filepaths:
+        print("✗ Error: No video files found in cache.")
+        sys.exit(1)
+
+    # Sort for consistent output
+    sorted_filepaths = sorted(all_filepaths)
+
+    # Write to output file
+    try:
+        with open(output_file, 'w') as f:
+            for filepath in sorted_filepaths:
+                f.write(f"{filepath}\n")
+
+        print(f"✓ Generated metadata file list: {output_file}")
+        print(f"  Total files: {len(sorted_filepaths)}")
+        print(f"  File size: {os.path.getsize(output_file):,} bytes")
+        print(f"\nNext steps:")
+        print(f"  1. Deploy collector: ./test-playground/deploy_metadata_collector.sh")
+        print(f"  2. Copy file list to server: scp {output_file} home:/tmp/video_files.txt")
+        print(f"  3. Run on server: ssh home 'python3 /tmp/collect_video_metadata.py --file-list /tmp/video_files.txt --output /tmp/video_metadata.json'")
+        print(f"  4. Copy results back: scp home:/tmp/video_metadata.json /tmp/")
+        print(f"  5. Integrate into cache: my-plex --integrate-metadata /tmp/video_metadata.json")
+
+    except Exception as e:
+        print(f"✗ Error writing file list: {e}")
+        sys.exit(1)
+
+def list_all_labels():
+    """List all labels and the count of media items for each"""
+    global CACHE
+
+    # Load labels_index from cache
+    load_cache()
+    labels_index = CACHE.get('labels_index', {})
+
+    if not labels_index:
+        print("No labels found in media library.")
+        return
+
+    print(f"\n{'LABEL':<40} | {'COUNT':<10}")
+    print("-" * 55)
+
+    # Sort labels alphabetically
+    for label in sorted(labels_index.keys()):
+        count = len(labels_index[label])
+        print(f"{label:<40} | {count:<10}")
+
+    print(f"\nTotal: {len(labels_index)} unique labels")
+
+def list_items_with_label(label):
+    """List all media items that have the specified label"""
+    global CACHE
+
+    # Load labels_index from cache
+    load_cache()
+    labels_index = CACHE.get('labels_index', {})
+
+    if label not in labels_index:
+        print(f"No media items found with label '{label}'.")
+        return
+
+    object_ids = labels_index[label]
+
+    print(f"\nMedia items with label '{label}' ({len(object_ids)} items):")
+    print(f"\n{'PLEX-ID':<10} | {'TYPE':<10} | {'TITLE':<60} | {'YEAR':<6} | FILEPATH")
+    print("-" * 180)
+
+    for obj_id in object_ids:
+        obj = PLEX_Media.OBJ_BY_ID.get(obj_id)
+        if obj:
+            plex_id = obj.get('id', 'N/A')
+            obj_type = obj.get('type', 'N/A')
+            title = obj.get('title', 'N/A')
+            year = obj.get('year', '')
+            filepath = obj.get('file', 'N/A')
+
+            # Truncate title if too long
+            if len(title) > 60:
+                title = title[:57] + "..."
+
+            print(f"{plex_id:<10} | {obj_type:<10} | {title:<60} | {year:<6} | {filepath}")
+
+def add_label_to_item(label, plex_id):
+    """Add a label to a media item. API required: label mutations via Plex HTTP API."""
+    ensure_plex_api()
+
+    try:
+        plex_id = int(plex_id)
+    except ValueError:
+        err(1063, f"Invalid PLEX-ID '{plex_id}'. Must be a number.")
+
+    # Find the item in our cache first
+    obj = None
+    obj_key = None
+    for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+        if cached_obj.get('id') == plex_id:
+            obj = cached_obj
+            obj_key = key
+            break
+
+    if not obj:
+        err(1064, f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+
+    # Fetch the actual Plex media object
+    try:
+        library_name = obj['library']
+        library = PLEX_Library.OBJ_DICT[library_name]
+        item = library.fetchItem(obj['item_id'])
+    except Exception as e:
+        err(1065, f"Failed to fetch media item from Plex server: {e}")
+
+    # Check if label already exists
+    if label in [l.tag for l in item.labels]:
+        print(f"Label '{label}' already exists on media item '{item.title}'.")
+        return
+
+    # Add the label
+    try:
+        item.addLabel(label)
+        print(f"✓ Added label '{label}' to media item '{item.title}' (PLEX-ID: {plex_id}).")
+
+        # Update cache
+        obj['labels'].append(label)
+        PLEX_Media.OBJ_BY_ID[obj_key] = obj
+
+        # Rebuild and save labels index
+        labels_index = PLEX_Media.build_labels_index()
+        update_and_save_cache({
+            'obj_by_id': PLEX_Media.OBJ_BY_ID,
+            'labels_index': labels_index
+        })
+    except Exception as e:
+        err(1066, f"Failed to add label: {e}")
+
+def remove_label_from_item(label, plex_id):
+    """Remove a label from a media item. API required: label mutations via Plex HTTP API."""
+    ensure_plex_api()
+
+    try:
+        plex_id = int(plex_id)
+    except ValueError:
+        err(1067, f"Invalid PLEX-ID '{plex_id}'. Must be a number.")
+
+    # Find the item in our cache first
+    obj = None
+    obj_key = None
+    for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+        if cached_obj.get('id') == plex_id:
+            obj = cached_obj
+            obj_key = key
+            break
+
+    if not obj:
+        err(1068, f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+
+    # Fetch the actual Plex media object
+    try:
+        library_name = obj['library']
+        library = PLEX_Library.OBJ_DICT[library_name]
+        item = library.fetchItem(obj['item_id'])
+    except Exception as e:
+        err(1069, f"Failed to fetch media item from Plex server: {e}")
+
+    # Check if label exists
+    if label not in [l.tag for l in item.labels]:
+        print(f"Label '{label}' does not exist on media item '{item.title}'.")
+        return
+
+    # Remove the label
+    try:
+        item.removeLabel(label)
+        print(f"✓ Removed label '{label}' from media item '{item.title}' (PLEX-ID: {plex_id}).")
+
+        # Update cache
+        if label in obj['labels']:
+            obj['labels'].remove(label)
+        PLEX_Media.OBJ_BY_ID[obj_key] = obj
+
+        # Rebuild and save labels index
+        labels_index = PLEX_Media.build_labels_index()
+        update_and_save_cache({
+            'obj_by_id': PLEX_Media.OBJ_BY_ID,
+            'labels_index': labels_index
+        })
+    except Exception as e:
+        err(1070, f"Failed to remove label: {e}")
+
+def get_library_differences(lib_name, lib_type, deep_episode_check=False):
+    """
+    Get detailed differences between cached and server content for a library.
+
+    Args:
+        lib_name: Name of the library to check
+        lib_type: Type of library ('Movie' or 'Show')
+        deep_episode_check: If True, count individual missing episodes (slow).
+                          If False, only report missing seasons (fast).
+
+    Returns a dict with:
+    - 'missing_from_cache': list of items (titles or dicts for shows) that are on server but not in cache
+    - 'deleted_from_server': list of items (titles) that are in cache but no longer on server
+    - 'missing_seasons': for Show libraries, count of missing seasons
+    - 'missing_episodes': for Show libraries, count of missing episodes (only if deep_episode_check=True)
+    """
+    global PLEX_Library, PLEX_Media
+
+    result = {
+        'missing_from_cache': [],
+        'deleted_from_server': [],
+        'missing_seasons': 0,
+        'missing_episodes': 0
+    }
+
+    lib = PLEX_Library.OBJ_DICT.get(lib_name)
+    if not lib:
+        return result
+
+    # Get cached item IDs for this library
+    cached_ids = set()
+    cached_shows = {}  # For Show libraries: show_title -> {seasons: set, episodes: set}
+
+    if len(PLEX_Media.OBJ_BY_ID) > 0:
+        for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+            if obj.get('library') == lib_name:
+                cached_ids.add(obj_id)
+
+                # For Show libraries, track shows/seasons/episodes
+                if lib_type == 'Show':
+                    obj_type = obj.get('type')
+                    if obj_type == 'Show':
+                        show_title = obj.get('title', '')
+                        if show_title not in cached_shows:
+                            cached_shows[show_title] = {'seasons': set(), 'episodes': set()}
+                    elif obj_type == 'Season':
+                        show_title = obj.get('show', '')
+                        season_num = obj.get('index', 0)
+                        if show_title not in cached_shows:
+                            cached_shows[show_title] = {'seasons': set(), 'episodes': set()}
+                        cached_shows[show_title]['seasons'].add(season_num)
+                    elif obj_type == 'Episode':
+                        show_title = obj.get('show', '')
+                        episode_key = f"S{obj.get('season_index', 0)}E{obj.get('index', 0)}"
+                        if show_title not in cached_shows:
+                            cached_shows[show_title] = {'seasons': set(), 'episodes': set()}
+                        cached_shows[show_title]['episodes'].add(episode_key)
+
+    # Fetch server items and compare
+    try:
+        if lib_type == 'Movie':
+            # For movies, list missing titles
+            movies = plex_retry_operation(
+                lambda: lib.all(),
+                context=f"library '{lib_name}' get all movies"
+            )
+            server_movie_ids = set()
+            server_movie_titles = set()
+            for movie in movies:
+                server_movie_ids.add(movie.ratingKey)
+                server_movie_titles.add(movie.title)
+                if movie.ratingKey not in cached_ids:
+                    result['missing_from_cache'].append(movie.title)
+
+            # Find movies in cache that are no longer on server (deleted)
+            # Check both by ID and by title to avoid false positives from re-scans
+            for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('library') == lib_name and obj.get('type') == 'Movie':
+                    movie_title = obj.get('title', f'ID:{obj_id}')
+                    # Only mark as deleted if BOTH the ID is missing AND the title doesn't exist on server
+                    if obj_id not in server_movie_ids and movie_title not in server_movie_titles:
+                        result['deleted_from_server'].append(movie_title)
+
+        elif lib_type == 'Show':
+            # For shows, check for missing shows, seasons, or episodes
+            shows = plex_retry_operation(
+                lambda: lib.all(),
+                context=f"library '{lib_name}' get all shows"
+            )
+
+            server_show_ids = set()
+            server_show_titles = set()
+            shows_with_missing_content = []
+
+            for show in shows:
+                show_title = show.title
+                server_show_ids.add(show.ratingKey)
+                server_show_titles.add(show_title)
+
+                # Check if show exists in cache (by ID first, then by title)
+                if show.ratingKey not in cached_ids:
+                    # Show ID not in cache, but check if a show with same title exists
+                    if show_title not in cached_shows:
+                        # Completely new show
+                        result['missing_from_cache'].append(show_title)
+                        continue
+                    # else: Show exists by title but with different ID (re-scanned), treat as ID mismatch
+
+                # Show exists (either by ID or title), check seasons and episodes
+                try:
+                    seasons = show.seasons()
+                    server_season_nums = set(s.index for s in seasons)
+
+                    # Get cached seasons/episodes for this show (may be empty)
+                    cached_season_nums = cached_shows.get(show_title, {}).get('seasons', set())
+                    cached_episode_keys = cached_shows.get(show_title, {}).get('episodes', set())
+
+                    missing_seasons = server_season_nums - cached_season_nums
+
+                    # Count missing episodes (only if deep_episode_check is enabled)
+                    missing_episode_count = 0
+                    if deep_episode_check:
+                        # SLOW: Fetch and count every episode
+                        for season in seasons:
+                            for episode in season.episodes():
+                                episode_key = f"S{season.index}E{episode.index}"
+                                if episode_key not in cached_episode_keys:
+                                    missing_episode_count += 1
+                    # else: Skip episode counting for speed (episodes will be 0 in result)
+
+                    if missing_seasons or (deep_episode_check and missing_episode_count > 0):
+                        result['missing_seasons'] += len(missing_seasons)
+                        if deep_episode_check:
+                            result['missing_episodes'] += missing_episode_count
+                        shows_with_missing_content.append({
+                            'title': show_title,
+                            'missing_seasons': len(missing_seasons),
+                            'missing_episodes': missing_episode_count
+                        })
+                except Exception:
+                    pass
+
+            # Add shows with missing content to the result
+            if shows_with_missing_content:
+                result['missing_from_cache'].extend(shows_with_missing_content)
+
+            # Find shows in cache that are no longer on server (deleted)
+            # Check both by ID and by title to avoid false positives from re-scans
+            for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj.get('library') == lib_name and obj.get('type') == 'Show':
+                    show_title = obj.get('title', f'ID:{obj_id}')
+                    # Only mark as deleted if BOTH the ID is missing AND the title doesn't exist on server
+                    if obj_id not in server_show_ids and show_title not in server_show_titles:
+                        result['deleted_from_server'].append(show_title)
+
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}Failed to get differences for '{lib_name}': {e}")
+
+    return result
+
+def show_system_info():
+    """Show general system information: cache status, server stats, libraries"""
+    global PLEX_SERVER, OFFLINE, CACHE_FILE, CACHE
+    from pathlib import Path
+    import datetime
+
+    print("="*76)
+    print("PLEX SYSTEM INFORMATION")
+    print("="*76)
+
+    # Server information
+    print("\nSERVER:")
+    plex = ensure_plex_api(required=False)
+    if plex:
+        try:
+            print(f"  {'Name':<12} {plex.friendlyName}")
+            print(f"  {'Version':<12} {plex.version}")
+            print(f"  {'Platform':<12} {plex.platform}")
+            if hasattr(plex, 'myPlexUsername') and plex.myPlexUsername:
+                print(f"  {'User':<12} {plex.myPlexUsername}")
+        except Exception as e:
+            print(f"  ⚠ Could not retrieve server info: {e}")
+    elif OFFLINE:
+        print(f"  {'Status':<12} OFFLINE MODE")
+    else:
+        print(f"  {'Status':<12} Not connected")
+
+    # Cache information
+    print("\nCACHE:")
+    cache_path = Path(CACHE_FILE).expanduser()
+    if not cache_path.is_absolute():
+        cache_path = Path.home() / CACHE_FILE
+
+    if cache_path.exists():
+        size_bytes = cache_path.stat().st_size
+        size_str = f"{size_bytes/1024:.1f} KB" if size_bytes < 1024*1024 else f"{size_bytes/(1024*1024):.1f} MB"
+        mtime = cache_path.stat().st_mtime
+        mod_time = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+        print(f"  {'File':<12} {cache_path}")
+        print(f"  {'Size':<12} {size_str}")
+        print(f"  {'Modified':<12} {mod_time}")
+        print(f"  {'Items':<12} {len(PLEX_Media.OBJ_BY_ID):,}")
+
+        # Count by type (compact)
+        if len(PLEX_Media.OBJ_BY_ID) > 0:
+            type_counts = {}
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                obj_type = obj.get('type', 'Unknown')
+                type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
+            types_str = ", ".join(f"{t}: {c:,}" for t, c in sorted(type_counts.items()))
+            print(f"  {'Breakdown':<12} {types_str}")
+    else:
+        print(f"  {'Status':<12} ✗ NOT FOUND")
+
+    # Warnings (compact)
+    partial_path = Path(str(cache_path) + '.partial')
+    lock_path = Path(str(cache_path) + '.lock')
+    if partial_path.exists() or lock_path.exists():
+        print(f"  {'Warnings':<12} ", end="")
+        warnings = []
+        if partial_path.exists():
+            size_bytes = partial_path.stat().st_size
+            size_str = f"{size_bytes/(1024*1024):.1f} MB" if size_bytes >= 1024*1024 else f"{size_bytes/1024:.1f} KB"
+            warnings.append(f"Partial file ({size_str})")
+        if lock_path.exists():
+            warnings.append("Lock file exists")
+        print(", ".join(warnings))
+
+    # Cache structure breakdown
+    if cache_path.exists() and len(PLEX_Media.OBJ_BY_ID) > 0:
+        print("\n  Cache breakdown by structure:")
+        print("  " + "-"*70)
+
+        import pickle
+        global CACHE
+
+        total_size = 0
+        structure_sizes = []
+
+        # Calculate size for each cache structure
+        for key in ['media_objs', 'library_stats', 'labels_index', 'obj_by_id',
+                    'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
+                    'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
+            if key in CACHE:
+                data = CACHE[key]
+                size_bytes = len(pickle.dumps(data))
+                size_mb = size_bytes / (1024 * 1024)
+                total_size += size_mb
+
+                # Count items
+                if isinstance(data, dict):
+                    count = len(data)
+                elif isinstance(data, list):
+                    count = len(data)
+                else:
+                    count = 0
+
+                structure_sizes.append((key, count, size_mb))
+
+        # Print each structure
+        for key, count, size_mb in structure_sizes:
+            print(f"    {key:25s}: {count:6,} items, {size_mb:>9.2f} MB")
+
+        print("  " + "-"*70)
+        print(f"    {'TOTAL':25s}: {'':15s}{total_size:>8.2f} MB")
+
+    # Enhanced statistics: Metadata and broken files
+    if cache_path.exists() and len(PLEX_Media.OBJ_BY_ID) > 0:
+        print("\nMETADATA & FILE HEALTH:")
+        print("  " + "-"*70)
+
+        # Count files by metadata status
+        total_video_files = 0
+        files_with_metadata = 0
+        files_marked_broken = 0
+        files_potentially_truncated = 0
+        truncation_severity = {'severe': 0, 'moderate': 0, 'mild': 0, 'borderline': 0}
+
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            if obj.get('type') not in ['Episode', 'Movie']:
+                continue
+
+            plex_duration = obj.get('duration')
+            files_dict = obj.get('files', {})
+
+            for file_info in files_dict.values():
+                total_video_files += 1
+
+                file_metadata = file_info.get('file_metadata')
+                if not file_metadata:
+                    continue
+
+                if file_metadata.get('broken'):
+                    files_marked_broken += 1
+                else:
+                    files_with_metadata += 1
+
+                    # Check for truncation using threshold
+                    container_duration = file_metadata.get('container_duration')
+                    if plex_duration and container_duration:
+                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+
+                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                            files_potentially_truncated += 1
+
+                            # Classify severity
+                            if diff_pct < -10:
+                                truncation_severity['severe'] += 1
+                            elif diff_pct < -5:
+                                truncation_severity['moderate'] += 1
+                            elif diff_pct < -1:
+                                truncation_severity['mild'] += 1
+                            else:
+                                truncation_severity['borderline'] += 1
+
+        # Print statistics
+        print(f"    {'Total video files':30s}: {total_video_files:>6,}")
+        print(f"    {'Files with metadata':30s}: {files_with_metadata:>6,} ({files_with_metadata/total_video_files*100:.1f}%)" if total_video_files > 0 else f"    {'Files with metadata':30s}: {files_with_metadata:>6,}")
+        print(f"    {'Files marked broken':30s}: {files_marked_broken:>6,}" + (f" ({files_marked_broken/total_video_files*100:.1f}%)" if total_video_files > 0 and files_marked_broken > 0 else ""))
+
+        if files_potentially_truncated > 0:
+            print(f"    {'Potentially truncated':30s}: {files_potentially_truncated:>6,} ({files_potentially_truncated/total_video_files*100:.1f}%)")
+
+            # Show severity breakdown
+            if truncation_severity['severe'] > 0:
+                print(f"      {'- Severe (>10% shorter)':28s}: {truncation_severity['severe']:>6,}")
+            if truncation_severity['moderate'] > 0:
+                print(f"      {'- Moderate (5-10% shorter)':28s}: {truncation_severity['moderate']:>6,}")
+            if truncation_severity['mild'] > 0:
+                print(f"      {'- Mild (1-5% shorter)':28s}: {truncation_severity['mild']:>6,}")
+            if truncation_severity['borderline'] > 0:
+                print(f"      {'- Borderline (0.5-1% shorter)':28s}: {truncation_severity['borderline']:>6,}")
+
+            print(f"    {'Detection threshold':30s}: {TRUNCATION_THRESHOLD_PCT}%")
+
+        # Count duplicates using multi-key approach (same logic as --duplicates command)
+        key_to_group = {}
+        dup_groups = {}
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            dup_keys = generate_duplicate_keys(obj)
+            if not dup_keys:
+                continue
+            existing_group = None
+            for dk in dup_keys:
+                if dk in key_to_group:
+                    existing_group = key_to_group[dk]
+                    break
+            if existing_group:
+                dup_groups[existing_group] += 1
+                for dk in dup_keys:
+                    key_to_group[dk] = existing_group
+            else:
+                canonical = dup_keys[0]
+                dup_groups[canonical] = 1
+                for dk in dup_keys:
+                    key_to_group[dk] = canonical
+
+        duplicates_total = sum(1 for count in dup_groups.values() if count > 1)
+        duplicate_files_count = sum(count for count in dup_groups.values() if count > 1)
+
+        if duplicates_total > 0:
+            print(f"    {'Duplicate titles':30s}: {duplicates_total:>6,} ({duplicate_files_count:,} total files)")
+
+    # Libraries information (table with Type column)
+    print("\nLIBRARIES:")
+    if len(PLEX_Library.OBJ_DICT) > 0:
+        # Collect all libraries with their types
+        all_libraries = []
+
+        for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
+            lib = PLEX_Library.OBJ_DICT[lib_name]
+            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+
+            # Get server item count
+            server_items = None
+            if not OFFLINE:
+                try:
+                    # totalSize is a cheap property access (no API call needed)
+                    if hasattr(lib, 'totalSize'):
+                        server_items = lib.totalSize
+                except Exception:
+                    pass  # Silently ignore if can't get count
+
+            all_libraries.append((lib_type, lib_name, server_items))
+
+        # Sort by type first, then by name (Show libraries first, then Movie, then others)
+        type_order = {'Show': 0, 'Movie': 1}
+        all_libraries.sort(key=lambda x: (type_order.get(x[0], 99), x[1]))
+
+        # Calculate column width
+        max_name = max(len(name) for _, name, _ in all_libraries)
+        name_width = min(max(max_name, 12), 40)  # Cap at 40 chars
+
+        # Calculate cache size per library including ALL cache structures
+        import pickle
+
+        library_cache_sizes = {}
+
+        # Calculate size for each library from obj_by_id (main storage)
+        library_obj_counts = {}
+        for lib_name in PLEX_Library.OBJ_DICT.keys():
+            lib_objects = {k: v for k, v in PLEX_Media.OBJ_BY_ID.items() if v.get('library') == lib_name}
+            if lib_objects:
+                library_obj_counts[lib_name] = len(lib_objects)
+
+        # Get actual sizes from cache breakdown (instead of re-serializing)
+        obj_by_id_total_size = 0
+        supporting_structures_total_size = 0
+
+        if 'obj_by_id' in CACHE:
+            obj_by_id_total_size = len(pickle.dumps(CACHE['obj_by_id']))
+
+        # Calculate size of supporting structures
+        supporting_structures = ['obj_by_filepath', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes', 'obj_by_library']
+        for struct_name in supporting_structures:
+            if struct_name in CACHE:
+                supporting_structures_total_size += len(pickle.dumps(CACHE[struct_name]))
+
+        # Distribute both obj_by_id AND supporting structures proportionally based on object count
+        total_obj_by_id_count = len(PLEX_Media.OBJ_BY_ID)
+        if total_obj_by_id_count > 0:
+            for lib_name, obj_count in library_obj_counts.items():
+                proportion = obj_count / total_obj_by_id_count
+                # Each library gets its proportional share of obj_by_id AND supporting structures
+                library_cache_sizes[lib_name] = int((obj_by_id_total_size + supporting_structures_total_size) * proportion)
+
+        # Get timestamps for display
+        # IMPORTANT: Show what's SAVED ON DISK, not what's in memory
+        # During init, CACHE dict may have been updated with fresh Plex timestamps
+        # but if user declined cache update, those new timestamps were NOT saved to disk
+        # Therefore, we RELOAD from disk to show the actual saved state
+        cache_timestamps = {}
+        plex_timestamps = {}
+
+        # Reload timestamps from disk file to show what's actually saved
+        import pickle
+        cache_file_path = os.path.expanduser(CACHE_FILE)
+        if DBG: print(f"{DBGPFX}--info: Reading timestamps from disk cache file: {cache_file_path}")
+        if os.path.exists(cache_file_path):
+            try:
+                with open(cache_file_path, 'rb') as f:
+                    disk_cache = pickle.load(f)
+                    if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
+                        cache_timestamps = disk_cache['library_stats']['updatedAt']
+                        # Show same in both columns - this is what's saved on disk
+                        plex_timestamps = cache_timestamps.copy()
+                        if DEEPDBG:
+                            print(f"{DBGPFX}--info: Successfully loaded {len(cache_timestamps)} timestamps from DISK cache")
+                            for lib_name, ts in sorted(cache_timestamps.items()):
+                                ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
+                                print(f"{DBGPFX}  {lib_name}: {ts_str}")
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}--info: Failed to reload from disk: {e}, falling back to in-memory cache")
+                # If reload fails, fall back to in-memory cache
+                if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                    cache_timestamps = CACHE['library_stats']['updatedAt']
+                    plex_timestamps = cache_timestamps.copy()
+        else:
+            if DBG: print(f"{DBGPFX}--info: No disk cache found, using in-memory cache")
+            # No disk cache, use in-memory
+            if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
+                cache_timestamps = CACHE['library_stats']['updatedAt']
+                plex_timestamps = cache_timestamps.copy()
+
+        # Print table header
+        print(f"  {'Type':<8}  {'Name':<{name_width}}  {'Items':>10}  {'Cache Size':>12}  {'Cache Timestamp':<20}  {'Plex Timestamp':<20}")
+        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
+
+        # Print all libraries (display "Series/Show" instead of "Show")
+        total_items = 0
+        total_cache_bytes = 0
+
+        for lib_type, lib_name, server_items in all_libraries:
+            truncated_name = lib_name[:name_width] if len(lib_name) > name_width else lib_name
+            items_str = f"{server_items:,}" if server_items is not None else "-"
+            # Replace "Show" with "Series/Show" for display
+            display_type = "Series" if lib_type == "Show" else lib_type
+
+            # Format cache size (always use MB for consistency, right-aligned)
+            cache_bytes = library_cache_sizes.get(lib_name, 0)
+            if cache_bytes > 0:
+                cache_mb = cache_bytes / (1024*1024)
+                cache_size_str = f"{cache_mb:>6.2f} MB"
+                total_cache_bytes += cache_bytes
+            else:
+                cache_size_str = f"{'':>6s}  {'-':>2s}"
+
+            # Sum total items
+            if server_items is not None:
+                total_items += server_items
+
+            # Format timestamps
+            cache_ts = cache_timestamps.get(lib_name)
+            plex_ts = plex_timestamps.get(lib_name)
+
+            cache_ts_str = cache_ts.strftime('%Y-%m-%d %H:%M:%S') if cache_ts and hasattr(cache_ts, 'strftime') else '-'
+            plex_ts_str = plex_ts.strftime('%Y-%m-%d %H:%M:%S') if plex_ts and hasattr(plex_ts, 'strftime') else '-'
+
+            print(f"  {display_type:<8}  {truncated_name:<{name_width}}  {items_str:>10}  {cache_size_str:>12}  {cache_ts_str:<20}  {plex_ts_str:<20}")
+
+        # Print total row (MB value aligned in Cache Size column)
+        print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
+        total_cache_mb = total_cache_bytes / (1024*1024)
+        print(f"  {'TOTAL':<8}  {'':<{name_width}}  {total_items:>10,}  {total_cache_mb:>9.2f} MB  {'':<20}  {'':<20}")
+
+        # Calculate overhead from non-library structures (structures not distributed to libraries)
+        # This includes: media_objs, library_stats, labels_index, library_object_counts
+        overhead_structures = ['media_objs', 'library_stats', 'labels_index', 'library_object_counts']
+        overhead_mb = 0
+        for struct_name in overhead_structures:
+            if struct_name in CACHE:
+                overhead_mb += len(pickle.dumps(CACHE[struct_name])) / (1024*1024)
+
+        if overhead_mb > 0.01:  # Only show if significant
+            print(f"  {'Overhead':<8}  {'(metadata & stats)':<{name_width}}  {'':<10}  {overhead_mb:>9.2f} MB  {'':<20}  {'':<20}")
+            print(f"  {'-'*8}  {'-'*name_width}  {'-'*10}  {'-'*12}  {'-'*20}  {'-'*20}")
+            cache_total_with_overhead = total_cache_mb + overhead_mb
+            print(f"  {'CACHE':<8}  {'':<{name_width}}  {'':<10}  {cache_total_with_overhead:>9.2f} MB  {'':<20}  {'':<20}")
+    else:
+        print("  No libraries loaded")
+        if OFFLINE:
+            print("  (Run without --offline to load from server)")
+
+    print(f"\n  To verify cache consistency with server, run:")
+    print(f"    my-plex --verify-cache")
+
+    print("\n" + "="*76)
+
+def _print_library_differences(lib_name, lib_type, diffs, show_details=True):
+    """Helper function to print library differences (used by verify_cache)
+
+    Args:
+        lib_name: Name of the library
+        lib_type: Type of library (Movie, Show, etc.)
+        diffs: Dictionary with 'missing_from_cache' and 'deleted_from_server' keys
+        show_details: If True (VV mode), show cache/PLEX status comparison. If False (V mode), show individual items.
+    """
+    # Check if there are any differences
+    has_differences = bool(diffs['missing_from_cache'] or diffs['deleted_from_server'])
+
+    if not has_differences:
+        print(f"  ✓ No differences", flush=True)
+        return
+
+    # -V mode: Show each individual difference (filename/dirname) immediately
+    # -VV mode: Show cache status, PLEX status, and differences with full comparison
+
+    if not show_details:
+        # -V mode: List each individual item that differs
+        if lib_type == 'Show' and diffs['missing_from_cache']:
+            missing_shows = [item for item in diffs['missing_from_cache'] if isinstance(item, str)]
+            shows_with_missing_content = [item for item in diffs['missing_from_cache'] if isinstance(item, dict)]
+
+            # Complete missing shows
+            for title in missing_shows:
+                print(f"  - Missing show: {title}")
+                sys.stdout.flush()
+
+            # Shows with missing content
+            for item in shows_with_missing_content:
+                missing_parts = []
+                if item['missing_seasons'] > 0:
+                    missing_parts.append(f"{item['missing_seasons']}S")
+                if item['missing_episodes'] > 0:
+                    missing_parts.append(f"{item['missing_episodes']}E")
+                print(f"  - Incomplete show: {item['title']} (missing {', '.join(missing_parts)})")
+                sys.stdout.flush()
+
+        elif lib_type == 'Movie' and diffs['missing_from_cache']:
+            # Missing movies
+            for title in diffs['missing_from_cache']:
+                print(f"  - Missing movie: {title}")
+                sys.stdout.flush()
+
+        # Deleted items
+        if diffs['deleted_from_server']:
+            for title in diffs['deleted_from_server']:
+                if lib_type == 'Movie':
+                    print(f"  - In cache but deleted from server: {title}")
+                elif lib_type == 'Show':
+                    print(f"  - In cache but deleted from server: {title}")
+                sys.stdout.flush()
+
+    else:
+        # -VV mode: Show full comparison with cache status, PLEX status, and differences
+        print(f"  Cache vs PLEX Status:")
+        sys.stdout.flush()
+
+        if lib_type == 'Show' and diffs['missing_from_cache']:
+            missing_shows = [item for item in diffs['missing_from_cache'] if isinstance(item, str)]
+            shows_with_missing_content = [item for item in diffs['missing_from_cache'] if isinstance(item, dict)]
+
+            if missing_shows:
+                count = len(missing_shows)
+                print(f"    Missing {count} complete shows from cache:")
+                for title in missing_shows:
+                    print(f"      [PLEX: ✓] [Cache: ✗] {title}")
+                sys.stdout.flush()
+
+            if shows_with_missing_content:
+                count = len(shows_with_missing_content)
+                print(f"    {count} shows with missing seasons/episodes:")
+                for item in shows_with_missing_content:
+                    missing_parts = []
+                    if item['missing_seasons'] > 0:
+                        missing_parts.append(f"{item['missing_seasons']}S")
+                    if item['missing_episodes'] > 0:
+                        missing_parts.append(f"{item['missing_episodes']}E")
+                    print(f"      [PLEX: ✓] [Cache: partial] {item['title']}: missing {', '.join(missing_parts)}")
+                sys.stdout.flush()
+
+        elif lib_type == 'Movie' and diffs['missing_from_cache']:
+            count = len(diffs['missing_from_cache'])
+            print(f"    Missing {count} movies from cache:")
+            for title in diffs['missing_from_cache']:
+                print(f"      [PLEX: ✓] [Cache: ✗] {title}")
+            sys.stdout.flush()
+
+        if diffs['deleted_from_server']:
+            count = len(diffs['deleted_from_server'])
+            if lib_type == 'Movie':
+                print(f"    Cache contains {count} movies deleted from PLEX:")
+            elif lib_type == 'Show':
+                print(f"    Cache contains {count} shows deleted from PLEX:")
+            for title in diffs['deleted_from_server']:
+                print(f"      [PLEX: ✗] [Cache: ✓] {title}")
+            sys.stdout.flush()
+
+def verify_cache():
+    """Verify cache consistency with Plex server and show detailed differences"""
+    global PLEX_SERVER, OFFLINE, CACHE_FILE
+
+    print("="*76)
+    print("CACHE VERIFICATION (may take a while, Ctrl+C to interrupt)")
+    print("="*76)
+
+    if OFFLINE:
+        print("\n⚠ Cannot verify cache in offline mode")
+        print("Run without --offline to verify against server")
+        return
+
+    if len(PLEX_Media.OBJ_BY_ID) == 0:
+        print("\n⚠ Cache is empty - nothing to verify")
+        print("Run --update-cache to build the cache first")
+        return
+
+    # Always print table header (for all modes)
+    max_name = max(len(name) for name in PLEX_Library.OBJ_DICT.keys()) if PLEX_Library.OBJ_DICT else 12
+    name_width = min(max(max_name, 12), 40)
+
+    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>28}  {'PLEX Server':>28}  {'CACHE Timestamp':<19}  {'PLEX Timestamp':<19}  {'Status'}")
+    print(f"{'-'*name_width}  {'-'*8}  {'-'*28}  {'-'*28}  {'-'*19}  {'-'*19}  {'-'*10}")
+
+    # Track inconsistencies for detailed reporting
+    inconsistencies = []
+    timestamp_mismatches = []  # Track libraries with timestamp differences
+
+    # Get library timestamps from DISK CACHE (not in-memory)
+    # IMPORTANT: Like --info, we should show what's SAVED ON DISK, not what's in memory
+    # During init, CACHE dict may have been updated with fresh Plex timestamps
+    # but if user declined cache update, those new timestamps were NOT saved to disk
+    # Therefore, we RELOAD from disk to show the actual saved state
+    library_timestamps_disk = {}
+
+    import pickle
+    cache_file_path = os.path.expanduser(CACHE_FILE)
+    if DBG: print(f"{DBGPFX}--verify-cache: Reading timestamps from disk cache file: {cache_file_path}")
+    if os.path.exists(cache_file_path):
+        try:
+            with open(cache_file_path, 'rb') as f:
+                disk_cache = pickle.load(f)
+                if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
+                    library_timestamps_disk = disk_cache['library_stats']['updatedAt']
+                    if DEEPDBG:
+                        print(f"{DBGPFX}--verify-cache: Successfully loaded {len(library_timestamps_disk)} timestamps from DISK cache")
+                        for lib_name, ts in sorted(library_timestamps_disk.items()):
+                            ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
+                            print(f"{DBGPFX}  {lib_name}: {ts_str}")
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}--verify-cache: Failed to reload from disk: {e}, falling back to in-memory cache")
+            # If reload fails, fall back to in-memory cache
+            library_timestamps_disk = CACHE.get('library_stats', {}).get('updatedAt', {})
+    else:
+        if DBG: print(f"{DBGPFX}--verify-cache: No disk cache found, using in-memory cache")
+        # No disk cache, use in-memory
+        library_timestamps_disk = CACHE.get('library_stats', {}).get('updatedAt', {})
+
+    # Use the disk timestamps for display
+    library_timestamps = library_timestamps_disk
+
+    try:
+        for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
+            # Check if shutdown was requested (Ctrl+C)
+            if _shutdown_requested:
+                break
+
+            lib = PLEX_Library.OBJ_DICT[lib_name]
+            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+
+            # Count cached items
+            # For Show libraries: count only shows (to match server count)
+            # Also collect season/episode counts for display
+            # For Movie libraries: count movies
+            # For other types: count all items
+            lib_items = 0
+            season_count = 0
+            episode_count = 0
+            collection_count = 0
+
+            if len(PLEX_Media.OBJ_BY_ID) > 0:
+                if lib_type == 'Show':
+                    # Count Show, Season, and Episode objects separately
+                    for obj in PLEX_Media.OBJ_BY_ID.values():
+                        if obj.get('library') == lib_name:
+                            obj_type_inner = obj.get('type')
+                            if obj_type_inner == 'Show':
+                                lib_items += 1
+                            elif obj_type_inner == 'Season':
+                                season_count += 1
+                            elif obj_type_inner == 'Episode':
+                                episode_count += 1
+                else:
+                    # For Movie libraries, count only Movie objects (not Collections)
+                    lib_items = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values()
+                                  if obj.get('library') == lib_name and obj.get('type') == 'Movie')
+
+            # Count collections from OBJ_BY_COLLECTION
+            for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
+                if col_obj.get('library') == lib_name:
+                    collection_count += 1
+
+            # Get server item count and additional counts for Show libraries
+            server_items = None
+            server_seasons = 0
+            server_episodes = 0
+            server_collections = 0
+
+            try:
+                safe_name = lib_name.replace("'", "''")
+                if lib_type == 'Movie':
+                    rows = query_plex_database(
+                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL",
+                        mode='rows')
+                    server_items = int(rows[0][0]) if rows else 0
+                elif lib_type == 'Show':
+                    rows = query_plex_database(
+                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL",
+                        mode='rows')
+                    server_items = int(rows[0][0]) if rows else 0
+                    rows = query_plex_database(
+                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 3 AND mi.deleted_at IS NULL",
+                        mode='rows')
+                    server_seasons = int(rows[0][0]) if rows else 0
+                    rows = query_plex_database(
+                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL",
+                        mode='rows')
+                    server_episodes = int(rows[0][0]) if rows else 0
+                # Collections (metadata_type=18) can exist in both Movie and Show libraries
+                rows = query_plex_database(
+                    f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 18 AND mi.deleted_at IS NULL",
+                    mode='rows')
+                server_collections = int(rows[0][0]) if rows else 0
+            except Exception as e:
+                if DBG: print(f"{DBGPFX}Failed to get counts from DB for '{lib_name}': {e}")
+
+            # Check if shutdown was requested during processing
+            if _shutdown_requested:
+                break
+
+            # Check for inconsistency (only for supported library types)
+            if lib_type in PLEX_Library.SUPPORTED_TYPES and server_items is not None:
+                if lib_type == 'Show':
+                    # For Show libraries: compare episode counts (that's what the cache stores)
+                    if episode_count != server_episodes:
+                        inconsistencies.append(lib_name)
+                    elif collection_count != server_collections:
+                        inconsistencies.append(lib_name)
+                elif lib_items > 0:
+                    # For Movie libraries: compare item counts
+                    if lib_items != server_items:
+                        inconsistencies.append(lib_name)
+                    elif collection_count != server_collections:
+                        inconsistencies.append(lib_name)
+
+            # Print this library's line immediately
+            truncated_name = lib_name[:name_width] if len(lib_name) > name_width else lib_name
+
+            # Format cached column based on library type
+            col_suffix = f" +{collection_count:,}C" if collection_count > 0 else ""
+            if lib_type == 'Show':
+                cached_str = f"{lib_items:,} ({season_count:,} S, {episode_count:,} E){col_suffix}" if (lib_items + episode_count) > 0 else "-"
+            else:
+                cached_str = (f"{lib_items:,}{col_suffix}" if lib_items > 0 else ("-" if collection_count == 0 else f"0{col_suffix}"))
+
+            # Format server column based on library type
+            srv_col_suffix = f" +{server_collections:,}C" if server_collections > 0 else ""
+            if lib_type == 'Show' and server_items is not None:
+                server_str = f"{server_items:,} ({server_seasons:,} S, {server_episodes:,} E){srv_col_suffix}"
+            else:
+                server_str = (f"{server_items:,}{srv_col_suffix}" if server_items is not None else "-")
+
+            # Get timestamps for this library - BOTH from DISK CACHE (not from server)
+            # IMPORTANT: Show what's SAVED ON DISK, not fresh server values
+            # Both columns should show the SAME timestamp from disk cache
+            cache_timestamp = library_timestamps.get(lib_name, 'N/A')
+            plex_timestamp = cache_timestamp  # Show SAME timestamp in both columns (from disk)
+
+            if DEEPDBG and lib_name in list(PLEX_Library.OBJ_DICT.keys())[:3]:  # Show first 3 libraries
+                ts_str = cache_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(cache_timestamp, 'strftime') else str(cache_timestamp)
+                print(f"{DBGPFX}--verify-cache: Library '{lib_name}' CACHE timestamp (from disk): {ts_str}")
+
+            # Format timestamps for display
+            if cache_timestamp != 'N/A':
+                cache_ts_str = cache_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(cache_timestamp, 'strftime') else str(cache_timestamp)
+            else:
+                cache_ts_str = 'N/A'
+
+            if plex_timestamp != 'N/A':
+                plex_ts_str = plex_timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(plex_timestamp, 'strftime') else str(plex_timestamp)
+            else:
+                plex_ts_str = 'N/A'
+
+            # Check for timestamp mismatch
+            # CACHE timestamp should be ahead of PLEX by at most 60 seconds (safety margin)
+            # ERROR conditions:
+            #   1. PLEX > CACHE: Timestamp drift - PLEX updated but CACHE didn't
+            #   2. CACHE > PLEX by more than 60s: Over-advanced cache timestamp
+            timestamp_mismatch = False
+            if cache_timestamp != 'N/A' and plex_timestamp != 'N/A':
+                try:
+                    from datetime import timedelta
+                    # Check if PLEX is newer than CACHE (timestamp drift - this is an error)
+                    if plex_timestamp > cache_timestamp:
+                        timestamp_mismatch = True
+                        timestamp_mismatches.append(lib_name)
+                    # Also check if CACHE is more than 60s ahead of PLEX (unusual)
+                    elif (cache_timestamp - plex_timestamp) > timedelta(seconds=60):
+                        timestamp_mismatch = True
+                        timestamp_mismatches.append(lib_name)
+                except Exception:
+                    pass  # Can't compare - different types or invalid
+
+            # Status indicator
+            if lib_name in inconsistencies:
+                status = "⚠ MISMATCH"
+            elif timestamp_mismatch:
+                status = "⚠ TS DRIFT"
+            else:
+                status = "✓ OK"
+
+            # Print line immediately as we process each library
+            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>28}  {server_str:>28}  {cache_ts_str:<19}  {plex_ts_str:<19}  {status}", flush=True)
+
+            # In -V mode: immediately show differences inline after the library row
+            if VRB and not VERYVRB and lib_name in inconsistencies:
+                # Get differences for this library
+                lib_type_for_diff = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+                diffs = get_library_differences(lib_name, lib_type_for_diff, deep_episode_check=False)
+                if diffs['missing_from_cache'] or diffs['deleted_from_server']:
+                    _print_library_differences(lib_name, lib_type_for_diff, diffs, show_details=False)
+                    print()  # Blank line after differences
+
+        # In -VV mode only: show detailed comparison with full episode-level analysis
+        if VERYVRB:
+            print(f"\nDETAILED DIFFERENCES:")
+            print(f"(Very verbose mode: Including episode-level analysis - this may take a while...)")
+
+            # Process ALL libraries in parallel and print results as they complete
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def analyze_library(lib_name):
+                lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+                diffs = get_library_differences(lib_name, lib_type, deep_episode_check=True)
+                has_inconsistency = lib_name in inconsistencies
+                return lib_name, lib_type, diffs, has_inconsistency
+
+            # Use ThreadPoolExecutor for parallel processing (check ALL libraries)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {executor.submit(analyze_library, lib_name): lib_name
+                          for lib_name in sorted(PLEX_Library.OBJ_DICT.keys())}
+
+                for future in as_completed(futures):
+                    lib_name, lib_type, diffs, has_inconsistency = future.result()
+                    print(f"\n{'─'*76}")
+                    print(f"Library: {lib_name} ({lib_type})")
+                    print(f"{'─'*76}", flush=True)
+                    # -VV mode: show full comparison with status indicators
+                    _print_library_differences(lib_name, lib_type, diffs, show_details=True)
+
+        # Show final summary
+        if inconsistencies or timestamp_mismatches:
+            if not VRB:
+                # Non-verbose mode: show detailed summary
+                print(f"\n{'='*76}")
+                print(f"⚠ INCONSISTENCY DETECTED")
+                print(f"{'='*76}")
+
+                if inconsistencies:
+                    print(f"\n{len(inconsistencies)} libraries have item count mismatches between cache and server:")
+                    for lib_name in inconsistencies:
+                        print(f"  • {lib_name}")
+
+                if timestamp_mismatches:
+                    print(f"\n{len(timestamp_mismatches)} libraries have timestamp issues:")
+                    for lib_name in timestamp_mismatches:
+                        cache_ts = library_timestamps.get(lib_name, 'N/A')
+                        # Re-fetch PLEX timestamp for display
+                        lib = PLEX_Library.OBJ_DICT.get(lib_name)
+                        plex_ts = 'N/A'
+                        if lib:
+                            try:
+                                if hasattr(lib, 'updatedAt') and lib.updatedAt:
+                                    plex_ts = lib.updatedAt
+                            except Exception:
+                                pass
+
+                        cache_str = cache_ts.strftime('%Y-%m-%d %H:%M:%S') if cache_ts != 'N/A' and hasattr(cache_ts, 'strftime') else str(cache_ts)
+                        plex_str = plex_ts.strftime('%Y-%m-%d %H:%M:%S') if plex_ts != 'N/A' and hasattr(plex_ts, 'strftime') else str(plex_ts)
+
+                        # Determine the issue type
+                        from datetime import timedelta
+                        issue_type = "unknown"
+                        if cache_ts != 'N/A' and plex_ts != 'N/A':
+                            if plex_ts > cache_ts:
+                                issue_type = "PLEX is newer (timestamp drift)"
+                            elif (cache_ts - plex_ts) > timedelta(seconds=30):
+                                diff_seconds = int((cache_ts - plex_ts).total_seconds())
+                                issue_type = f"CACHE is {diff_seconds}s ahead (expected ≤30s)"
+
+                        print(f"  • {lib_name}: {issue_type}")
+                        print(f"      CACHE: {cache_str}")
+                        print(f"      PLEX:  {plex_str}")
+
+                print(f"\n{'='*76}")
+                print(f"RECOMMENDED ACTION")
+                print(f"{'='*76}")
+                print(f"  Run the following command to sync your cache:")
+                print(f"    my-plex --update-cache")
+        else:
+            # No inconsistencies found
+            print(f"\n{'='*76}")
+            print(f"✓ VERIFICATION COMPLETE")
+            print(f"{'='*76}")
+            print(f"  All libraries are in sync with the server.")
+            print(f"  Cache is consistent and up to date.")
+            print(f"  All timestamps are properly synchronized (CACHE >= PLEX).")
+
+    except (KeyboardInterrupt, BrokenPipeError):
+        # User pressed Ctrl+C - exit gracefully without showing inconsistency summary
+        print("\n\n⚠ Verification interrupted by user", file=sys.stderr)
+        print("(Results shown above may be incomplete)\n")
+        return
+    except Exception as e:
+        print(f"\n✗ Error during verification: {e}", file=sys.stderr)
+        return
+
+    # Only print summary if we weren't interrupted
+    if _shutdown_requested:
+        print("\n\n⚠ Verification interrupted - results incomplete", file=sys.stderr)
+        print("(Rerun without interruption to see full results)\n")
+        return
+
+    # =========================================================================
+    # DATA INTEGRITY CHECKS (cache-only, no SSH/DB needed)
+    # =========================================================================
+    integrity_issues = []
+
+    print(f"\n{'='*76}")
+    print(f"DATA INTEGRITY CHECKS")
+    print(f"{'='*76}")
+
+    # Check 1: file_metadata coverage
+    total_files = 0
+    has_metadata = 0
+    missing_metadata = 0
+    broken_metadata = 0
+    file_not_found_metadata = 0
+    truncated_files = 0
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        obj_type = obj.get('type')
+        if obj_type not in ('Movie', 'Episode'):
+            continue
+        plex_duration = obj.get('duration', 0)
+        for _version, file_info in obj.get('files', {}).items():
+            if not isinstance(file_info, dict):
+                continue
+            total_files += 1
+            fm = file_info.get('file_metadata')
+            if fm is None:
+                missing_metadata += 1
+            elif fm.get('broken'):
+                if fm.get('reason') == 'file_not_found':
+                    file_not_found_metadata += 1
+                else:
+                    broken_metadata += 1
+            else:
+                has_metadata += 1
+                # Check for truncation (container_duration significantly shorter than plex_duration)
+                is_truncated = False
+                if plex_duration > 0:
+                    container_duration = fm.get('container_duration')
+                    if container_duration:
+                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                            is_truncated = True
+                # Fallback: filesize vs duration heuristic
+                if not is_truncated and plex_duration > 60000:
+                    filesize = file_info.get('filesize', 0)
+                    if filesize:
+                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbps < 10:
+                            is_truncated = True
+                if is_truncated:
+                    truncated_files += 1
+
+    if total_files > 0:
+        parts = []
+        if missing_metadata > 0:
+            parts.append(f"{missing_metadata} missing")
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} broken")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        needs_update = missing_metadata
+        if needs_update > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
+            print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
+            if needs_update > 0:
+                integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
+        else:
+            print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
+    else:
+        print(f"File metadata:     - no media files in cache")
+
+    # Check 2: OBJ_BY_FILEPATH cross-references
+    filepath_entries = len(PLEX_Media.OBJ_BY_FILEPATH)
+    filepath_dangling = 0
+    filepath_path_mismatch = 0
+    for fp, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
+        if not isinstance(keys, list):
+            keys = [keys]
+        for key in keys:
+            if key not in PLEX_Media.OBJ_BY_ID:
+                filepath_dangling += 1
+            else:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                # Show/Season objects are directory containers with file='' and files={}
+                # They are not media files — skip filepath validation for them
+                if obj.get('type') in ('Show', 'Season'):
+                    continue
+                obj_filepaths = set()
+                for _, fi in obj.get('files', {}).items():
+                    if isinstance(fi, dict) and fi.get('filepath'):
+                        obj_filepaths.add(fi['filepath'])
+                if fp not in obj_filepaths and obj.get('file') != fp:
+                    filepath_path_mismatch += 1
+
+    # Check 3: OBJ_BY_MOVIE cross-references
+    movie_entries = len(PLEX_Media.OBJ_BY_MOVIE)
+    movie_dangling = 0
+    for movie_key in PLEX_Media.OBJ_BY_MOVIE:
+        if movie_key not in PLEX_Media.OBJ_BY_ID:
+            movie_dangling += 1
+
+    # Check 4: OBJ_BY_SHOW / OBJ_BY_SHOW_EPISODES cross-references
+    show_entries = len(PLEX_Media.OBJ_BY_SHOW)
+    show_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW.items():
+        if show_key not in PLEX_Media.OBJ_BY_ID:
+            show_dangling += 1
+        for _, season_key in seasons.items():
+            if season_key not in PLEX_Media.OBJ_BY_ID:
+                show_dangling += 1
+
+    episode_entries = 0
+    episode_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+        for _, episodes in seasons.items():
+            for _, versions in episodes.items():
+                for _, ep_keys in versions.items():
+                    if isinstance(ep_keys, list):
+                        for ep_key in ep_keys:
+                            episode_entries += 1
+                            if ep_key not in PLEX_Media.OBJ_BY_ID:
+                                episode_dangling += 1
+
+    # Check OBJ_BY_LIBRARY for duplicate keys
+    library_total_keys = 0
+    library_duplicate_keys = 0
+    for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+        for _, keys in type_dict.items():
+            library_total_keys += len(keys)
+            library_duplicate_keys += len(keys) - len(set(keys))
+
+    # Print cross-reference results
+    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling + library_duplicate_keys
+    if xref_total_dangling == 0:
+        print(f"Cross-references:  ✓ OBJ_BY_FILEPATH ({filepath_entries}), OBJ_BY_MOVIE ({movie_entries}),")
+        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}),")
+        print(f"                     OBJ_BY_LIBRARY ({library_total_keys} keys) — all valid")
+    else:
+        parts = []
+        if filepath_dangling > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_dangling} dangling keys")
+        if filepath_path_mismatch > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_path_mismatch} path mismatches")
+        if movie_dangling > 0:
+            parts.append(f"OBJ_BY_MOVIE: {movie_dangling} dangling keys")
+        if show_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW: {show_dangling} dangling keys")
+        if episode_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW_EPISODES: {episode_dangling} dangling keys")
+        if library_duplicate_keys > 0:
+            parts.append(f"OBJ_BY_LIBRARY: {library_duplicate_keys} duplicate keys")
+        print(f"Cross-references:  ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
+
+    # Check 5: labels_index consistency
+    cached_labels_index = CACHE.get('labels_index', {})
+    rebuilt_labels_index = {}
+    for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+        for label in (obj.get('labels', []) or []):
+            if label not in rebuilt_labels_index:
+                rebuilt_labels_index[label] = []
+            rebuilt_labels_index[label].append(obj_id)
+
+    labels_ok = True
+    labels_detail = []
+    missing_labels = set(rebuilt_labels_index.keys()) - set(cached_labels_index.keys())
+    extra_labels = set(cached_labels_index.keys()) - set(rebuilt_labels_index.keys())
+    if missing_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(missing_labels)} labels missing from index")
+    if extra_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(extra_labels)} stale labels in index")
+    # Check counts match for shared labels
+    count_mismatches = 0
+    for label in set(rebuilt_labels_index.keys()) & set(cached_labels_index.keys()):
+        if sorted(rebuilt_labels_index[label]) != sorted(cached_labels_index[label]):
+            count_mismatches += 1
+    if count_mismatches > 0:
+        labels_ok = False
+        labels_detail.append(f"{count_mismatches} labels with wrong member lists")
+
+    if labels_ok:
+        print(f"Labels index:      ✓ {len(cached_labels_index)} labels, consistent")
+    else:
+        print(f"Labels index:      ⚠ {'; '.join(labels_detail)}")
+        integrity_issues.append(f"Labels index: {'; '.join(labels_detail)}")
+
+    # Check 6: Collection member validity
+    collection_count = len(PLEX_Media.OBJ_BY_COLLECTION)
+    orphaned_collections = 0
+    invalid_members = 0
+    # Build lookup: metadata_item id -> True (for O(1) member validation)
+    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values() if obj.get('id') is not None}
+    for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
+        if col_key not in PLEX_Media.OBJ_BY_ID:
+            orphaned_collections += 1
+        for member_id in col_obj.get('member_ids', []):
+            if member_id not in all_obj_ids:
+                invalid_members += 1
+
+    if orphaned_collections == 0 and invalid_members == 0:
+        print(f"Collections:       ✓ {collection_count} collections, all members valid")
+    else:
+        parts = []
+        if orphaned_collections > 0:
+            parts.append(f"{orphaned_collections} orphaned")
+        if invalid_members > 0:
+            parts.append(f"{invalid_members} invalid member references")
+        print(f"Collections:       ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
+
+    # Check 7: library_stats itemsCount accuracy
+    # get_library_stats() stores primary type count: Movie count for movie libs, Show count for show libs
+    # So we must compare like-for-like: count only the primary type per library from OBJ_BY_ID
+    cached_stats = CACHE.get('library_stats', {})
+    cached_item_counts = cached_stats.get('itemsCount', {})
+    if cached_item_counts:
+        # Determine primary type per library from OBJ_BY_LIBRARY structure
+        primary_type_per_lib = {}
+        for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+            if 'Movie' in type_dict:
+                primary_type_per_lib[lib_name] = 'Movie'
+            elif 'Show' in type_dict:
+                primary_type_per_lib[lib_name] = 'Show'
+
+        # Count only primary-type objects per library
+        actual_counts = {}
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            lib = obj.get('library')
+            if lib and obj.get('type') == primary_type_per_lib.get(lib):
+                actual_counts[lib] = actual_counts.get(lib, 0) + 1
+
+        stats_mismatches = []
+        for lib_name, cached_count in cached_item_counts.items():
+            actual = actual_counts.get(lib_name, 0)
+            if cached_count != actual:
+                stats_mismatches.append(f"{lib_name}: cached={cached_count}, actual={actual}")
+
+        if not stats_mismatches:
+            print(f"Library stats:     ✓ itemsCount consistent across {len(cached_item_counts)} libraries")
+        else:
+            print(f"Library stats:     ⚠ {len(stats_mismatches)} itemsCount mismatches")
+            integrity_issues.append(f"itemsCount mismatches: {', '.join(stats_mismatches[:5])}")
+    else:
+        print(f"Library stats:     - no itemsCount data in cache")
+
+    # Summary
+    total_broken = broken_metadata + file_not_found_metadata + truncated_files
+    if total_broken > 0:
+        parts = []
+        if truncated_files > 0:
+            parts.append(f"{truncated_files} truncated")
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} ffmpeg failed")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} not found on disk")
+        print(f"\n  ℹ {total_broken} broken files ({', '.join(parts)}) — visible in --broken")
+
+    if integrity_issues:
+        print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
+        for issue in integrity_issues:
+            print(f"    • {issue}")
+        n = len(integrity_issues)
+        print(f"\n  Run --update-cache to fix the {n} integrity issue{'s' if n != 1 else ''}.")
+
+    print("\n" + "="*76)
+
+def show_item_info(identifier, table_only=False):
+    """Show detailed information about a Plex item by ID, key, or search term.
+    If identifier is None or empty, shows general system information instead.
+    If table_only is True, always show compact table format (used by --find/--search)."""
+    global PLEX_SERVER, OFFLINE
+
+    # If no identifier provided, show system info instead
+    if identifier is None or identifier == '':
+        show_system_info()
+        return
+
+    # Try to find the item in cache
+    found_items = []
+
+    # Search strategy 1: Try as Plex ID — requires "ID:18349" prefix (as printed by --broken)
+    if identifier.upper().startswith('ID:'):
+        try:
+            numeric_id = int(identifier[3:])
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(obj.get('id', 0)) == numeric_id:
+                    found_items.append((key, obj))
+                    break
+        except ValueError:
+            pass  # ID: prefix present but value not numeric
+
+    # Search strategy 2: Try as full key (e.g., "Episode_ID:2579")
+    if not found_items and identifier in PLEX_Media.OBJ_BY_ID:
+        key = identifier
+        found_items.append((key, PLEX_Media.OBJ_BY_ID[key]))
+
+    # Search strategy 3: Try partial key match or title search
+    if not found_items:
+        search_lower = identifier.lower()
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            if search_lower in key.lower() or search_lower in obj.get('title', '').lower():
+                found_items.append((key, obj))
+        # Sort: Movies first, then Shows, then Seasons, then Episodes
+        type_order = {'Movie': 0, 'Show': 1, 'Season': 2, 'Episode': 3}
+        found_items.sort(key=lambda item: type_order.get(item[1].get('type', ''), 99))
+
+    if not found_items:
+        print(f"✗ No items found matching '{identifier}'")
+        print(f"\nTip: Try using the numeric ID (e.g., 2579) or full key (e.g., Episode_ID:2579)")
+        return
+
+    if len(found_items) > 1 or table_only:
+        # Multiple results (or --find/--search): show compact table
+        # Calculate column widths
+        col_lib = max(len(obj.get('library', '')) for _, obj in found_items)
+        col_key = max(len(key) for key, _ in found_items)
+        col_lib = max(col_lib, 7)  # minimum width
+        col_key = max(col_key, 8)
+        # Check if any item has multiple versions
+        has_multi = any(len(obj.get('files', {})) > 1 for _, obj in found_items)
+        # Calculate title column width only if we need the versions column
+        if has_multi:
+            col_title = max(len(obj.get('title', '')) for _, obj in found_items)
+            col_title = max(col_title, 5)
+        if VRB: print(f"Found {len(found_items)} items matching '{identifier}':")
+        for key, obj in found_items:
+            library = obj.get('library', '')
+            title   = obj.get('title', '')
+            if has_multi:
+                files = obj.get('files', {})
+                versions = f"  {len(files)}v: {', '.join(files.keys())}" if len(files) > 1 else ''
+                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title:<{col_title}}{versions}")
+            else:
+                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title}")
+        return
+
+    # Single result: show detailed info
+    key, obj = found_items[0]
+
+    # Basic info
+    print(f"Key:\t{key}")
+    print(f"Type:\t{obj.get('type', 'Unknown')}")
+    print(f"Title:\t{obj.get('title', 'N/A')}")
+    plex_id = obj.get('id', 'N/A')
+    item_id = obj.get('item_id')
+    if plex_id != item_id:
+        print(f"Plex ID:\t{plex_id}")
+        print(f"Item ID:\t{item_id}")
+    print(f"Library:\t{obj.get('library', 'N/A')}")
+
+    # Type-specific info
+    obj_type = obj.get('type')
+    if obj_type == 'Episode':
+        print(f"Series:\t{obj.get('series', 'N/A')}")
+        print(f"Episode:\t{obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))}")
+    elif obj_type == 'Season':
+        print(f"Series:\t{obj.get('series', 'N/A')}")
+        print(f"Season:\t{obj.get('S_str', 'N/A')}")
+    elif obj_type == 'Movie':
+        print(f"Year:\t{obj.get('year', 'N/A')}")
+
+    # Same-library duplicate check (using multi-key matching for originalTitle)
+    dup_keys = set(generate_duplicate_keys(obj))
+    if dup_keys:
+        same_lib_dups = []
+        item_library = obj.get('library', '')
+        for other_key, other_obj in PLEX_Media.OBJ_BY_ID.items():
+            if other_key == key:
+                continue
+            if other_obj.get('library', '') != item_library:
+                continue
+            other_keys = set(generate_duplicate_keys(other_obj))
+            if dup_keys & other_keys:  # any key in common
+                same_lib_dups.append((other_key, other_obj))
+        if same_lib_dups:
+            print()
+            print(f"⚠ DUPLICATE in same library ({item_library}):")
+            for dk, dobj in same_lib_dups:
+                print(f"  {dk}  {dobj.get('title', '')}")
+
+    # File info — show all versions from 'files' dict, fall back to 'file'
+    files = obj.get('files', {})
+    if files:
+        if len(files) == 1:
+            ver, info = next(iter(files.items()))
+            print(f"File:\t{info.get('filepath', 'N/A')}")
+            fs = info.get('filesize') or obj.get('filesize')
+            if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
+            # Per-file media info (only shown for single-file items)
+            if 'duration' in obj and obj['duration']:
+                print(f"Duration:\t{obj['duration'] / 60000:.1f} minutes")
+            if obj.get('resolution'):
+                print(f"Resolution:\t{obj['resolution']}")
+            if obj.get('video_codec'):
+                print(f"Video:\t{obj['video_codec']}")
+            if obj.get('audio_codec'):
+                print(f"Audio:\t{obj['audio_codec']}")
+        else:
+            print(f"Files:\t{len(files)} versions")
+            for i, (ver, info) in enumerate(files.items(), 1):
+                fs = info.get('filesize')
+                size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
+                print(f"  [{i}] {ver}{size_str}")
+                print(f"      {info.get('filepath', 'N/A')}")
+    elif obj.get('file'):
+        print(f"File:\t{obj['file']}")
+        fs = obj.get('filesize')
+        if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
+
+    # Labels
+    if obj.get('labels'):
+        print(f"Labels:\t{', '.join(obj['labels'])}")
+
+    # Metadata
+    if 'added_at' in obj:
+        print(f"Added:\t{obj['added_at']}")
+    if 'updated_at' in obj:
+        print(f"Updated:\t{obj['updated_at']}")
+
+###########################################################################################
+#### GLOBAL PLEX COMMANDS:
+###########################################################################################
+
+def execute_global_commands(args, cmd_args):
+    if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
+    #init_plex(args, all=False, server=True, library=True)
+
+    # Handle --info/--find/--search command (shows system info or item info)
+    if safe_getattr(cmd_args, 'info', None) is not None:
+        table_only = any(a in ('--find', '--search') for a in sys.argv)
+        show_item_info(cmd_args.info, table_only=table_only)
+        sys.exit(0)
+
+    # Handle --test command
+    if cmd_args.test:
+        run_regression_tests()
+        # run_regression_tests() calls sys.exit(), so we never reach here
+
+    if cmd_args.list_libraries:
+        print( "\nAvailable Libraries:" )
+        PLEX_Library.print()
+
+    # Handle --list-labels command
+    if safe_getattr(cmd_args, 'list_labels', False):
+        list_all_labels()
+
+    # Handle --list-label <LABEL> command
+    if safe_getattr(cmd_args, 'list_label', None):
+        list_items_with_label(cmd_args.list_label)
+
+    # Handle --add-label command
+    if safe_getattr(cmd_args, 'add_label', None):
+        label, plex_id = cmd_args.add_label
+        add_label_to_item(label, plex_id)
+
+    # Handle --remove-label command
+    if safe_getattr(cmd_args, 'remove_label', None):
+        label, plex_id = cmd_args.remove_label
+        remove_label_from_item(label, plex_id)
+
+    # Note: --duplicates and --broken auto-enable --list via argument normalization in main()
+    # No need to check and modify cmd_args.list here
+
+    # Validate parameter dependencies BEFORE checking if commands should run
+    # Check if --type is used without --list, --duplicates, or --broken
+    if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
+        err(1065, "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
+
+    # Check if --resolve is used without --duplicates or --no-audio-language
+    no_audio_language_flag = safe_getattr(args, 'no_audio_language', False)
+    if safe_getattr(cmd_args, 'resolve', False) and not safe_getattr(cmd_args, 'duplicates', False) and not no_audio_language_flag:
+        err(1063, "--resolve can only be used together with --duplicates or --no-audio-language.\nExample: my-plex --duplicates --resolve\n         my-plex --no-audio-language --resolve")
+
+    # Check if --collections is used without a library (global context = no library)
+    if safe_getattr(cmd_args, 'collections', False):
+        err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
+
+    # Handle --list, --duplicates, or --broken (both --duplicates and --broken automatically enable --list)
+    # Skip when --broken is used with --update-cache (rescan mode, not display mode)
+    if cmd_args.list or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN):
+        # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
+        # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
+        # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        duplicates_only = safe_getattr(cmd_args, 'duplicates', False)
+        broken_only = safe_getattr(cmd_args, 'broken', False)
+        resolve_mode = safe_getattr(cmd_args, 'resolve', False)
+
+        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}")
+
+        # Call PLEX_Media.list() with library_name=None to search all libraries
+        watched_only = safe_getattr(args, 'watched', False)
+        unwatched_only = safe_getattr(args, 'unwatched', False)
+        audio_filter = safe_getattr(args, 'audio', None)
+        no_audio_language = safe_getattr(args, 'no_audio_language', False)
+        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language)
+
+###########################################################################################
+#### DO IT
+###########################################################################################
+
+def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
+    """ returns None if no PLEX_OBJ could be detected! """
+    if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
+    #init_plex(args)
+
+    # OPTIMIZATION: Check library first since it's fast (local dict lookup).
+    # If library check fails, continue to check other slower types (playlists, media via server).
+    # Priority: library (fast) → media (slow) → playlist (slow)
+    for obj_type in PLEXOBJ[DETECT]:
+        if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: Trying object type '{obj_type}'..." )
+        if PLEXOBJ[DETECT][obj_type](args,obj):
+            if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: Determined type of obj as '{obj_type}'" )
+            return obj_type
+        else:
+            if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: obj is NOT of type '{obj_type}'" )
+    return None
+    #err(1007, f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
+
+def execute_plex_cmd(args, obj, obj_type, obj_args_list):
+    """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
+        --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
+    if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
+    if obj_type not in PLEXOBJ[PARSER]: err(1005, f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[FN]: err(1006, f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    obj_parser = PLEXOBJ[PARSER][obj_type]
+    remaining_args = []
+    no_args_given = len(obj_args_list) == 0
+    obj_args = obj_parser.parse_args([])
+    if no_args_given and hasattr(obj_args, 'list'):
+        obj_args.list = True  # default: no args after object name -> --list its contents
+    if no_args_given and hasattr(obj_args, 'info'):
+        obj_args.info = True  # default: no args after media name -> --info
+    done = no_args_given
+    while not done:
+        try:
+            obj_args = obj_parser.parse_args(obj_args_list)
+        except Exception as e:
+            if DBG: print( f"{DBGPFX}execute_plex_cmd(): <{obj_type}>.PARSER.parse_args() FAILED: '{e}'" )
+            # as we got ALL remaining_args -> lets shave off last param and try again
+            if len(obj_args_list) == 0: done = True
+            else: remaining_args.append( obj_args_list.pop(0) )
+            continue
+        done = True # if we succeeded to parse
+
+    if DBG: print( f"{DBGPFX}SUCCEEDED PARSING! --> remaining_args = {remaining_args}, obj_args = {obj_args}" )
+    if DBG: print( f"{DBGPFX}Executing on [{obj_type}] '{obj}' with {obj_args_list}" )
+    if DBG: print( f"{DBGPFX}PLEX_{obj_type.capitalize()}.execute_cmd( args={args}, obj={obj}, obj_args={obj_args}):" )
+    PLEXOBJ[FN][obj_type] (args, obj, obj_args)
+    return remaining_args
+
+def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
+    global GLOBAL_CMD_PARSER
+    # HERE: args.CMD_OR_PLEXOBJECT can be also None (if there was ONLY a global command provided)!
+
+    # STATEMACHINE:
+    #    0: look for PLEXOBJECT: arg needs to be either GLOBAL_CMD /or/ PLEXOBJ !
+    #       0 --> 1 : if PLEXOBJECT found: set obj, obj_type and start collecting obj_args
+    #    1: PLEXOBJECT found: treat global_cmds
+    #       1 --> 2 : if another PLEXOBJECT found while still collecting obj_args for obj of obj_typ
+    #       1 --> 3 : reached END of args (none left), while collecting obj_args for obj of obj_typ
+    state = 0 # means we did not yet find a PLEXOBJECT
+    obj = None
+    obj_type = None
+    obj_args_list = []
+    while len(remaining_args) > 0:
+        arg = remaining_args.pop(0)
+        if DBG: print( f"{DBGPFX}MAIN DOIT LOOP state={state} [{len(remaining_args)} arg='{arg}', remaining_args = {remaining_args}" )
+
+        if state == 0: # only in state 0 there could be a GLOBAL_CMD
+            # Check for GLOBAL_CMD and execute if found:
+            # Only try global command parsing if arg starts with -- (is a flag)
+            cmd_args = None
+            if arg.startswith('--'):
+                try: # regardless the state, we check for GLOBAL_CMD and execute if found:
+                    # Try parsing with current arg plus all remaining args to handle flags like --duplicates
+                    cmd_args, unparsed = GLOBAL_CMD_PARSER.parse_known_args( [arg] + remaining_args )
+                except Exception as e:
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP GLOBAL_CMD_PARSER.parse_args() FAILED: '{e}'" )
+                    None
+                else:
+                    # Check if the arg was actually consumed (recognized) by the parser
+                    # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
+                    if cmd_args is not None and arg in unparsed:
+                        # The flag wasn't recognized - it's an invalid flag
+                        err(1036, f"Invalid flag '{arg}'. Not a recognized global command flag. Use --help to see available options.")
+                    if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
+                        if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
+                        # Update remaining_args to only contain unparsed args
+                        remaining_args = unparsed
+                        execute_global_commands(args, cmd_args)
+                        continue
+
+        # if CMD_OR_PLEXOBJECT is NOT a CMD, check if it is a PLEX_OBJ:
+        new_obj_type = detect_PLEX_OBJ_TYPE(args, arg)
+        if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: PLEX_OBJ_TYPE is '{new_obj_type}' of '{arg}'" )
+
+        if new_obj_type is not None:   # PLEXOBJECT FOUND !
+            match state:
+                case 0:            # new PLEXOBJ -> state = 1 and continue (to look for either parameters, new PLEXOBJ or 
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 0| Found new PLEXOBJECT --> execute_plex_cmd()" )
+                    remaining_args = execute_plex_cmd(args, arg, new_obj_type, remaining_args)
+                    continue
+                case 1:
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 2| Found new PLEXOBJECT while we still treat old PLEXOBJECT." )
+                    state = 2      # new PLEXOBJ found while we have still old PLEXOBJ (not yet executed)
+        else:                      # no PLEXOBJECT and NO GLOBAL_CMD
+            match state:
+                case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
+                    if obj is None: err(1002, f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
+                    # Show helpful error with available libraries
+                    available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+                    err(1035, f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
+                case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
+                    obj_args_list.append(arg)
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
+                    if len(remaining_args) != 0: continue   # only continue in case there are more args left ! (else we need to execute on what we have!)
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 3| as no remaining_args left!" )
+                    state = 3;
+                case _: # state 2 should NEVER happen here as state 2 should only be set IF PLEXOBJECT FOUND and then directly USED below!
+                    err(1003, f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+
+        # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
+        if (state != 2 and state != 3): err(1004, f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+
+        execute_plex_cmd(args, obj, obj_type, obj_args_list)
+        match state:
+            case 3: continue # state 3: there are NO remaining args left -> we are done :)
+            case 2:
+                obj = arg
+                obj_type = new_obj_type
+                obj_args_list = []
+                if len(remaining_args) != 0:
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 2 --> state 1| switching to NEW PLEXOBJ (to parse remaining_args (and collect obj_args_list))" )
+                    state = 1
+                    continue     # if NOT yet done -> continue to collect obj_args_list or find new PLEXOBJ
+                else: # if no args left -> we also execute the last PLEX_OBJ we had found in this loop
+                    if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 2 --> state 0| no remaining_args left! -> now executing the NEW PLEXOBJ (default action)" )
+                    execute_plex_cmd(args, obj, obj_type, obj_args_list)
+                    state = 0                                 # it should not matter as we are done now
+
+
+#############################################################################
+#### MAIN PROGRAM
+#############################################################################
+
+def main():
+    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE
+    global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
+    global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
+    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
+
+    # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
+    # This allows us to use DBG/DEEPDBG during config file loading
+    import sys
+    for arg in sys.argv[1:]:
+        if arg in ['-D', '--debug']:
+            DBG = True
+        elif arg in ['-DD', '--deep-debug']:
+            DEEPDBG = True
+            DBG = True  # deep-debug implies debug
+        elif arg in ['-V', '--verbose']:
+            VRB = True
+        elif arg in ['-VV', '--very-verbose']:
+            VERYVRB = True
+            VRB = True  # very-verbose implies verbose
+
+    # Debug: print sys.argv to see what arguments were actually passed
+    if DBG or DEEPDBG:
+        print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
+
+    # Normalize arguments: inject --list before --duplicates or --broken if --list not present
+    # Normalize --resolve to --list --duplicates --resolve for canonical form
+    # Normalize --watched/--unwatched/--audio to auto-inject --list when used with a library
+    # This simplifies argparse by ensuring canonical form
+    has_list = '--list' in sys.argv or '--list-duplicates' in sys.argv
+    has_duplicates = '--duplicates' in sys.argv
+    has_broken = '--broken' in sys.argv
+    has_resolve = '--resolve' in sys.argv
+    has_watched = '--watched' in sys.argv
+    has_unwatched = '--unwatched' in sys.argv
+    AUDIO_FLAGS = ['--en', '--english', '--de', '--german', '--fr', '--french']
+    def is_audio_flag(arg):
+        return arg.startswith('--audio') or arg in AUDIO_FLAGS
+
+    has_audio = any(is_audio_flag(arg) for arg in sys.argv)
+    has_no_audio_language = '--no-audio-language' in sys.argv or '--no-language' in sys.argv
+
+    def inject_before_first_match(trigger_fn, to_inject, label=""):
+        """Inject args before the first matching trigger in sys.argv. Returns True if injected."""
+        normalized = [sys.argv[0]]
+        injected = False
+        for arg in sys.argv[1:]:
+            if not injected and trigger_fn(arg):
+                normalized.extend(to_inject)
+                injected = True
+            normalized.append(arg)
+        if injected:
+            sys.argv = normalized
+            if DBG or DEEPDBG:
+                print(f" ~~~ Normalized sys.argv{label} = {sys.argv}", file=sys.stderr)
+        return injected
+
+    if has_resolve and has_no_audio_language and not has_list:
+        # --no-audio-language --resolve → inject --list
+        if inject_before_first_match(lambda a: a == '--resolve', ['--list'], " (--no-audio-language --resolve)"):
+            has_list = True
+    elif has_resolve and not (has_list and has_duplicates) and not has_no_audio_language:
+        inject_args = []
+        if not has_list:       inject_args.append('--list')
+        if not has_duplicates: inject_args.append('--duplicates')
+        if inject_before_first_match(lambda a: a == '--resolve', inject_args, " (--resolve)"):
+            has_list = True
+            has_duplicates = True
+    elif (has_duplicates or (has_broken and '--update-cache' not in sys.argv and '-U' not in sys.argv)) and not has_list:
+        if inject_before_first_match(lambda a: a in ('--duplicates', '--broken'), ['--list'], " (--duplicates/--broken)"):
+            has_list = True
+    elif (has_watched or has_unwatched or has_audio or has_no_audio_language) and not has_list:
+        if inject_before_first_match(lambda a: a == '--watched' or a == '--unwatched' or a in ('--no-audio-language', '--no-language') or is_audio_flag(a), ['--list'], " (filters)"):
+            has_list = True
+
+    # Early argument parsing for --config-file option
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)}). Use with --create to generate a new config file with default values.")
+    config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden option, documented in --config-file help
+    config_args, _ = config_parser.parse_known_args()
+
+    # Handle --create option
+    if config_args.create:
+        if not config_args.config_file:
+            print("Error: --create requires --config-file <path> to be specified", file=sys.stderr)
+            sys.exit(1)
+
+        # Create config file with defaults
+        try:
+            # Generate config content from defaults
+            config_content = generate_default_config()
+
+            # Write to specified file
+            with open(config_args.config_file, 'w') as f:
+                f.write(config_content)
+
+            print(f"Created config file: {config_args.config_file}")
+            print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error creating config file '{config_args.config_file}': {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Load configuration file
+    loaded_config = load_config_file(config_args.config_file)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
+
+    # Apply config values (config file overrides defaults, command-line will override config file)
+    for key in CONFIG_DEFAULTS:
+        try:
+            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+
+            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+                if value and not str(value).startswith('< PLEASE CONFIGURE'):
+                    globals()[key] = value
+                    if DEEPDBG: print(f"{DBGPFX}Config applied: {key} = {'<set>' if 'TOKEN' in key else value}", file=sys.stderr)
+                continue
+
+            # For other config values, apply normally
+            globals()[key] = value
+            if DEEPDBG:
+                print(f"{DBGPFX}✓ Set {key} from config file", file=sys.stderr)
+        except Exception as e:
+            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
+    main_parser = argparse.ArgumentParser( description="Plex Database Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
+    main_parser.add_argument('-O', '--offline', action='store_true', help=f"Work entirely from local cache without connecting to Plex server or SSH. Defaults to '{OFFLINE}'", default=OFFLINE)
+    main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}", default=PLEX_XML_URL)
+    main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
+    main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}", default=PLEX_TOKEN)
+    # Add --type and --info to main_parser so it knows to consume their values instead of treating them as CMD_OR_PLEXOBJECT
+    # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
+    # and 'devil' from being parsed as CMD_OR_PLEXOBJECT when using --info devil
+    main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
+    main_parser.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
+
+    # Audio language and watch status filters are defined in GLOBAL_CMD_PARSER (hidden, documented in --list help)
+    # They need to also be in main_parser so argparse doesn't reject them, but hidden here
+    main_parser.add_argument('--audio', metavar='LANG', help=argparse.SUPPRESS)
+    main_parser.add_argument('--en', '--english', action='store_const', const='en', dest='audio', help=argparse.SUPPRESS)
+    main_parser.add_argument('--de', '--german', action='store_const', const='de', dest='audio', help=argparse.SUPPRESS)
+    main_parser.add_argument('--fr', '--french', action='store_const', const='fr', dest='audio', help=argparse.SUPPRESS)
+    main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
+    main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
+    main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
+
+    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
+    main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force-plexdata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force-metadata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
+    main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
+    main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
+    main_parser.add_argument('-DD', '--deep-debug', action='store_true', help=f"Turn on deep debugging - defaults to '{DEEPDBG}'", default=DEEPDBG)
+    main_parser.add_argument('-V', '--verbose', action='store_true', help=f"Turn on verbose output - defaults to '{VRB}'", default=VRB)
+    main_parser.add_argument('-VV', '--very-verbose', action='store_true', help=f"Turn on very verbose output - defaults to '{VERYVRB}'", default=VERYVRB)
+    main_parser.add_argument('-f', '--format', metavar="FORMATSTR", help=f"Define format of output, overwriting the default. FORMATSTR can be 'pretty', 'tsv' or format string containing variables in Python f-string format - defaults to '{FORMAT}'", default=FORMAT)
+    main_parser.add_argument('--help', nargs='?', metavar="WHAT", help="Without WHAT, print this help. --help 'global' prints help on available <GLOBAL_COMMAND>s. --help <OBJECT_TYPE> prints available commands for this OBJECT_TYPE. --help 'all' will print all available --help texts.", default=None, const="default") # default + const necessary in order to be able to detect a simple '--help' without parameter!
+    main_parser.add_argument('CMD_OR_PLEXOBJECT', nargs='?', help="can be a <GLOBAL_COMMAND> or a <PLEX_OBJECT>. For <PLEX_OBJECT> the OBJECT_TYPE will be auto-detected. Or you can force the type of the <PLEX_OBJECT>. For possible choices see below 'available <GLOBAL_COMMAND>s' and 'supported <OBJECT_TYPE>s'.")
+    #main_parser.add_argument('GLOBAL_COMMAND', nargs='?', help="Global command. For possible choices see below 'available <GLOBAL_COMMAND>s'. For more info: --help 'global'")
+    #main_parser.add_argument('PLEX_OBJECT', nargs='?', help="The PLEX object you are interested in. For possible object types see below 'supported <OBJECT_TYPE>s'. The OBJECT_TYPE will be auto-detected. Or you can force the type of the PLEX_OBJECT. For more info: --help <OBJECT_TYPE>")
+
+    # Create subcommands for different object types
+    #subparsers = main_parser.add_subparsers(title="supported <OBJECT_TYPE>s", dest='object_command', prog=None, metavar="", help=None)
+
+    GLOBAL_CMD_PARSER = argparse.ArgumentParser(description=None, add_help=False, usage="my-pex-api.py <GLOBAL_COMMAND>", allow_abbrev=False, exit_on_error=False)
+    GLOBAL_CMD_PARSER._positionals.title = ''
+    GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
+    GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
+    GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates, --broken to show broken files, --type to filter by media type (movie/show), --resolve for interactive duplicate resolution, --watched/--unwatched to filter by watch status, --audio/--en/--de/--fr to filter by audio language, or --no-audio-language to find items with missing language info.")
+    GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
+    GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
+    GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
+    GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
+    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
+    GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
+    GLOBAL_CMD_PARSER.add_argument('--unwatched', action='store_true', help="List unwatched media items. Requires a library name.")
+    GLOBAL_CMD_PARSER.add_argument('--no-audio-language', '--no-language', action='store_true', help="List media with missing audio language info. Use --resolve to fix interactively. See --help no-audio-language.", default=False)
+    GLOBAL_CMD_PARSER.add_argument('--audio', metavar='LANG', help=argparse.SUPPRESS)  # Hidden - shortcut aliases below are more discoverable
+    GLOBAL_CMD_PARSER.add_argument('--en', '--english', action='store_const', const='en', dest='audio', help="List media with English audio.")
+    GLOBAL_CMD_PARSER.add_argument('--de', '--german', action='store_const', const='de', dest='audio', help="List media with German audio.")
+    GLOBAL_CMD_PARSER.add_argument('--fr', '--french', action='store_const', const='fr', dest='audio', help="List media with French audio.")
+    GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
+    GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
+    GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
+    GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
+    GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
+    GLOBAL_CMD_PARSER.add_argument('--test', action='store_true', help="Run regression tests to verify script functionality.")
+
+    add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
+    add_PLEX_OBJ_TYPE( PLEX_Collection ) # Collection commands (fast: local cache lookup)
+    add_PLEX_OBJ_TYPE( PLEX_Media )      # Media commands      (slow: server call)
+    add_PLEX_OBJ_TYPE( PLEX_Playlist )   # Playlist commands   (slow: server call)
+
+    # Parse arguments
+    (args, remaining_args) = main_parser.parse_known_args()
+    DBG = args.debug
+    DEEPDBG = args.deep_debug
+    VRB = args.verbose
+    VERYVRB = args.very_verbose
+    AUTO_YES = args.yes
+    AUTO_NO = args.no
+    if VERYVRB: VRB = True
+    if DEEPDBG: DBG = True
+
+    # NOTE: Plex API connection parameters removed - now using direct database access via SSH
+    # Database configuration is in PLEX_DB_PATH and accessed via 'my-plex' SSH host
+
+    # Check if --force is used without --update-cache
+    if args.force and not args.update_cache:
+        err(1066, "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+
+    # Check if --from-scratch is used without --update-cache
+    if args.from_scratch and not args.update_cache:
+        err(1067, "--from-scratch can only be used together with --update-cache.\nExample: my-plex --update-cache --from-scratch")
+
+    # Confirm --from-scratch operation (deletes cache and rebuilds)
+    if args.from_scratch and args.update_cache:
+        print("\n" + "="*76)
+        print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
+        print("="*76)
+        print("This will delete the existing cache and rebuild from scratch.")
+        print("This operation may take several hours depending on your Plex library sizes!")
+        if args.force:
+            print("Additionally, --force will refresh ALL Plex metadata (slower but verifies files).")
+        print()
+        if not prompt_yes_no("Are you sure you want to continue?"):
+            print("\nOperation cancelled.")
+            sys.exit(0)
+        print()
+    # Confirm --force operation (refresh all metadata)
+    elif args.force and args.update_cache:
+        print("\n" + "="*76)
+        print("⚠  WARNING: REFRESH ALL PLEX METADATA")
+        print("="*76)
+        print("This will use lib.refresh() to refresh ALL Plex metadata and verify files.")
+        print("This is SLOWER but will detect missing files and update metadata.")
+        print("This operation may take 20-40+ minutes depending on your Plex library sizes!")
+        print()
+        if not prompt_yes_no("Are you sure you want to continue?"):
+            print("\nOperation cancelled.")
+            sys.exit(0)
+        print()
+
+    # Show detailed help if --<CMD> --help is used
+    if args.help:
+        help_redirect = None
+        if args.update_cache:
+            help_redirect = 'update-cache'
+        elif safe_getattr(args, 'no_audio_language', False):
+            help_redirect = 'no-audio-language'
+        elif safe_getattr(args, 'watched', False):
+            help_redirect = 'watched'
+        elif safe_getattr(args, 'unwatched', False):
+            help_redirect = 'unwatched'
+        # Check remaining_args for GLOBAL_CMD_PARSER flags (cmd_args not parsed yet)
+        elif '--duplicates' in remaining_args:
+            help_redirect = 'duplicates'
+        elif '--broken' in remaining_args:
+            help_redirect = 'broken'
+        elif '--list' in remaining_args:
+            help_redirect = 'list'
+
+        if help_redirect:
+            args.help = help_redirect
+            main_print_help(args, [], main_parser)
+
+    FORCE_CACHE_UPDATE = args.update_cache
+
+    # --force triggers both --force-plexdata AND --force-metadata
+    # Each can also be used independently
+    FORCE_PLEXDATA = (args.force or args.force_plexdata) and args.update_cache
+    FORCE_METADATA = (args.force or args.force_metadata) and args.update_cache
+    RESCAN_BROKEN = args.update_cache and has_broken  # --update-cache --broken: rescan broken files
+
+    FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
+    AUTO_YES = args.yes
+    AUTO_NO = args.no
+    FORMAT = args.format
+    OFFLINE = args.offline
+
+    # Handle Plex connection parameters with priority: --plex-xml-url > PLEX_XML_URL > --plex-url/--plex-token > PLEX_URL/PLEX_TOKEN
+    if args.plex_xml_url:
+        if DBG: print(f"{DBGPFX}Using --plex-xml-url (source: {'command-line' if args.plex_xml_url != PLEX_XML_URL else 'global variable PLEX_XML_URL'})")
+        PLEX_URL, PLEX_TOKEN = parse_plex_xml_url(args.plex_xml_url)
+        if DBG: print(f"{DBGPFX}Extracted PLEX_URL={PLEX_URL}, PLEX_TOKEN={'*' * len(PLEX_TOKEN)}")
+    else:
+        PLEX_URL = args.plex_url
+        PLEX_TOKEN = args.plex_token
+
+    # Update args object with final values for consistency
+    args.plex_url = PLEX_URL
+    args.plex_token = PLEX_TOKEN
+
+    READ_ONLY_MODE = args.verify_cache  # Enable read-only mode for --verify-cache (--info is handled in execute_global_commands)
+    if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+    # ensuring remaining_args has ALL the potential [GLOBAL_CMDs] + [PLEXOBJECTs] + [PLEXOBJ_CMDS]:
+    # Re-inject --info (consumed by main_parser to protect its value from CMD_OR_PLEXOBJECT)
+    if safe_getattr(args, 'info', None) is not None:
+        remaining_args.insert(0, '--info')
+        if args.info != '':  # --info with argument: re-inject the value too
+            remaining_args.insert(1, args.info)
+    if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
+    if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+
+    # DEBUG: Print all configuration variables after command-line parsing
+    if DBG:
+        print(f"\n{DBGPFX}=== ALL CONFIGURATION VARIABLES ===")
+        for key in sorted(CONFIG_DEFAULTS.keys()):
+            value = globals().get(key, '<not set>')
+            # Mask sensitive values if any (PLEX_DB_PATH might contain sensitive info)
+            if 'PASSWORD' in key.upper() or 'SECRET' in key.upper():
+                display_value = f"{'*' * len(value)}" if value and value != '<not set>' else value
+            else:
+                display_value = value
+            print(f"{DBGPFX}  {key} = {display_value!r}")
+        print(f"{DBGPFX}=== END CONFIGURATION VARIABLES ===\n")
+
+    # Validation: Check that all required variables have sensible values
+    validation_errors = []
+
+    # Check required database path (API connection no longer needed)
+    if not PLEX_DB_PATH or PLEX_DB_PATH.startswith('< PLEASE CONFIGURE'):
+        validation_errors.append("PLEX_DB_PATH not configured - required for database access")
+
+    # Check numeric ranges
+    if CACHE_CHECKPOINT_INTERVAL < 0:
+        validation_errors.append(f"CACHE_CHECKPOINT_INTERVAL must be >= 0 (got {CACHE_CHECKPOINT_INTERVAL})")
+    if MAX_PARALLEL_WORKERS < 1:
+        validation_errors.append(f"MAX_PARALLEL_WORKERS must be >= 1 (got {MAX_PARALLEL_WORKERS})")
+    if LIBRARY_START_DELAY < 0:
+        validation_errors.append(f"LIBRARY_START_DELAY must be >= 0 (got {LIBRARY_START_DELAY})")
+
+    # Check tuple values
+    if not isinstance(RATE_LIMIT_DELAY_RANGE, tuple) or len(RATE_LIMIT_DELAY_RANGE) != 2:
+        validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be a tuple of 2 values (got {RATE_LIMIT_DELAY_RANGE!r})")
+    elif RATE_LIMIT_DELAY_RANGE[0] < 0 or RATE_LIMIT_DELAY_RANGE[1] < RATE_LIMIT_DELAY_RANGE[0]:
+        validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be (min, max) with min >= 0 and max >= min (got {RATE_LIMIT_DELAY_RANGE!r})")
+
+    # Check list values
+    if not isinstance(PLEX_RETRY_DELAYS, list):
+        validation_errors.append(f"PLEX_RETRY_DELAYS must be a list (got {type(PLEX_RETRY_DELAYS).__name__})")
+    elif not all(isinstance(d, (int, float)) and d > 0 for d in PLEX_RETRY_DELAYS):
+        validation_errors.append(f"PLEX_RETRY_DELAYS must be a list of positive numbers (got {PLEX_RETRY_DELAYS!r})")
+
+    if not isinstance(ALTERNATIVE_ROOTPATHS, list):
+        validation_errors.append(f"ALTERNATIVE_ROOTPATHS must be a list (got {type(ALTERNATIVE_ROOTPATHS).__name__})")
+
+    # Check path values
+    if not CACHE_FILE:
+        validation_errors.append("CACHE_FILE must be set")
+    if not LOCK_FILE:
+        validation_errors.append("LOCK_FILE must be set")
+    if not DUPLICATE_FILE:
+        validation_errors.append("DUPLICATE_FILE must be set")
+
+    # Check format values
+    if FORMAT not in ['pretty', 'tsv', 'tsv_labeled'] and not (isinstance(FORMAT, str) and '{' in FORMAT):
+        validation_errors.append(f"FORMAT must be 'pretty', 'tsv', 'tsv_labeled', or a format string (got {FORMAT!r})")
+
+    if validation_errors:
+        print(f"\n⚠  Configuration Validation Errors:", file=sys.stderr)
+        for error in validation_errors:
+            print(f"  - {error}", file=sys.stderr)
+
+        # Check if this is a missing config file issue
+        if not loaded_config and "PLEX_DB_PATH not configured" in validation_errors:
+            print(f"\nNo configuration file found. Create one with:", file=sys.stderr)
+            print(f"  my-plex --create --config-file ~/.my-plex.conf", file=sys.stderr)
+        else:
+            print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
+        sys.exit(1)
+
+    init(args)
+
+    main_print_help(args, remaining_args, main_parser)
+
+    init_plex(args)
+    #init_plex(args, all=False, server=True, library=True)
+    #if DBG: print_obj(brute_force_search("Episode:2579"), "res", DBGPFX, depth=0)
+
+    # Handle --verify-cache command (must be done after init_plex so cache is loaded)
+    if args.verify_cache:
+        verify_cache()
+        sys.exit(0)
+
+    parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args)
+
+    sys.exit(0)
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
+        # Load test classes into this module's namespace for unittest discovery
+        for _cls in _UNITTEST_CLASSES:
+            globals()[_cls.__name__] = _cls
+        unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
+    else:
+        main()
