@@ -17279,7 +17279,6 @@ def show_item_info(identifier, table_only=False):
     print(f"Type:\t{obj.get('type', 'Unknown')}")
     print(f"Title:\t{obj.get('title', 'N/A')}")
     print(f"Plex ID:\t{obj.get('id', 'N/A')}")
-    print(f"Item ID:\t{obj.get('item_id', 'N/A')}")
     print(f"Library:\t{obj.get('library', 'N/A')}")
 
     # Type-specific info
