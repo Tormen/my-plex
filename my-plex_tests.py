@@ -2078,6 +2078,69 @@ class TestProblems(unittest.TestCase):
         self.assertIn("return len(excess_files), entry_count", body, "Must return (file_count, entry_count)")
 
 
+class TestExcessVersionsMainParser(unittest.TestCase):
+    """--excess-versions LIMIT must be consumed by main_parser to prevent LIMIT being eaten as CMD_OR_PLEXOBJECT."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_excess_versions_in_main_parser(self):
+        """main_parser must define --excess-versions to protect LIMIT value."""
+        content = self._read_script()
+        self.assertIn("main_parser.add_argument('--excess-versions'", content,
+            "--excess-versions must be in main_parser to prevent LIMIT from being parsed as CMD_OR_PLEXOBJECT")
+
+    def test_excess_versions_reinjected(self):
+        """--excess-versions must be re-injected into remaining_args after main_parser consumes it."""
+        content = self._read_script()
+        self.assertIn("'--excess-versions'", content)
+        import re
+        match = re.search(r"Re-inject --excess-versions.*?remaining_args\.insert.*?'--excess-versions'", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must re-inject --excess-versions into remaining_args")
+
+
+class TestEndToEnd(unittest.TestCase):
+    """End-to-end tests: run actual commands as subprocesses to verify they work."""
+
+    def _run_cmd(self, *extra_args):
+        import subprocess
+        cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result
+
+    def test_excess_versions_runs(self):
+        """my-plex --excess-versions 3 must run without error."""
+        result = self._run_cmd('--excess-versions', '3')
+        self.assertEqual(result.returncode, 0, f"--excess-versions 3 failed: {result.stderr}")
+        # Must produce output (either results or "No entries" message)
+        self.assertTrue(len(result.stdout) > 0, "Must produce output")
+
+    def test_excess_versions_2_runs(self):
+        """my-plex --excess-versions 2 must run without error."""
+        result = self._run_cmd('--excess-versions', '2')
+        self.assertEqual(result.returncode, 0, f"--excess-versions 2 failed: {result.stderr}")
+
+    def test_problems_runs(self):
+        """my-plex --problems must run without error and show SUMMARY."""
+        result = self._run_cmd('--problems')
+        self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
+        self.assertIn("SUMMARY", result.stdout, "--problems must print SUMMARY section")
+        self.assertIn("Broken/truncated files:", result.stdout)
+        self.assertIn("Excess version entries:", result.stdout)
+
+    def test_broken_runs(self):
+        """my-plex --broken must run without error."""
+        result = self._run_cmd('--broken')
+        self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
+
+    def test_help_problems_runs(self):
+        """my-plex --help problems must show detailed help."""
+        result = self._run_cmd('--help', 'problems')
+        self.assertEqual(result.returncode, 0, f"--help problems failed: {result.stderr}")
+        self.assertIn("PROBLEMS HELP", result.stdout)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2090,7 +2153,7 @@ _UNITTEST_CLASSES = [
     TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
-    TestProblems,
+    TestProblems, TestExcessVersionsMainParser, TestEndToEnd,
 ]
 
 # ---------------------------------------------------------------------------
