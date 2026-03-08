@@ -528,14 +528,11 @@ HELP_SUFFIX="""
 supported <OBJECT_TYPE>s:
 
     library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>.
-                      To force this OBJECT_TYPE call with: --library <library_name>
-                      For more info: --help library
+                      To force this OBJECT_TYPE call with: --library <library_name>. For more info: --help library
     media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title>, <media_filename>, or ID:<PLEX-ID>.
-                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>
-                      For more info: --help media
+                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>. For more info: --help media
     playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>.
-                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>
-                      For more info: --help playlist
+                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>. For more info: --help playlist
 """
 
 ###########################################################################################
