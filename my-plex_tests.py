@@ -1888,6 +1888,123 @@ class TestUpdateCacheSplit(unittest.TestCase):
             "Inline cache save must be in _finalize_and_save_cache, not update_cache")
 
 
+class TestBrokenHeaderOrder(unittest.TestCase):
+    """Verify --broken output has DURATION before LIBRARY in header."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_header_duration_before_library(self):
+        """--broken header must have DURATION before LIBRARY."""
+        content = self._read_script()
+        import re
+        match = re.search(r"'PLEX-ID'.*?'SEVERITY'.*?'DIFF%'.*?'(DURATION|LIBRARY)'.*?'(DURATION|LIBRARY)'", content)
+        self.assertIsNotNone(match, "Must find --broken header line")
+        self.assertEqual(match.group(1), 'DURATION', "DURATION must come before LIBRARY in --broken header")
+        self.assertEqual(match.group(2), 'LIBRARY', "LIBRARY must come after DURATION in --broken header")
+
+    def test_data_line_matches_header_order(self):
+        """--broken data format must output dur_str before library."""
+        content = self._read_script()
+        import re
+        # Find the actual data print line (single line with plex_id_str, severity_str, diff_str)
+        match = re.search(r'print\(f".*plex_id_str.*severity_str.*diff_str.*(dur_str).*(library).*filepath', content)
+        self.assertIsNotNone(match, "Must find --broken data print line")
+        self.assertEqual(match.group(1), 'dur_str', "dur_str must come before library in data line")
+        self.assertEqual(match.group(2), 'library', "library must come after dur_str in data line")
+
+
+class TestExcessVersions(unittest.TestCase):
+    """Verify --excess-versions feature."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_list_excess_versions_exists(self):
+        """_list_excess_versions must exist."""
+        content = self._read_script()
+        self.assertIn("def _list_excess_versions(", content)
+
+    def test_excess_versions_arg_defined(self):
+        """--excess-versions must be defined in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        self.assertIn("'--excess-versions'", content)
+
+    def test_excess_versions_accepts_limit(self):
+        """_list_excess_versions must accept a version_limit parameter."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\((.*?)\)', content)
+        self.assertIsNotNone(match)
+        self.assertIn("version_limit", match.group(1))
+
+    def test_excess_versions_filters_by_limit(self):
+        """_list_excess_versions must compare file count against version_limit."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("version_limit", body)
+        self.assertIn("total", body, "Must track total version count")
+
+    def test_excess_versions_output_has_version_fraction(self):
+        """Output must show version as 'x / y' format."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("idx", body, "Must track version index")
+        self.assertIn("total", body, "Must track total count")
+        # Check for x / y format string
+        self.assertRegex(body, r'f".*idx.*total', "Must format version as x / y")
+
+    def test_excess_versions_header_columns(self):
+        """Output header must have PLEX-ID, ENTRY TITLE, VERSION, LIBRARY, FILEPATH."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        for col in ['PLEX-ID', 'ENTRY TITLE', 'VERSION', 'LIBRARY', 'FILEPATH']:
+            self.assertIn(col, body, f"Header must include {col}")
+
+    def test_excess_versions_one_line_per_file(self):
+        """Must iterate over files_dict to produce one output line per file."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("files_dict", body, "Must access files_dict for per-file iteration")
+        self.assertIn("enumerate(", body, "Must enumerate files for version numbering")
+
+    def test_excess_versions_wired_in_list(self):
+        """PLEX_Media.list() must accept and dispatch excess_versions."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def list\(args, obj_args.*?\)', content)
+        self.assertIsNotNone(match)
+        self.assertIn("excess_versions", match.group(0), "list() must accept excess_versions parameter")
+
+    def test_excess_versions_wired_in_global_commands(self):
+        """execute_global_commands must pass excess_versions to PLEX_Media.list()."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def execute_global_commands\(.*?\n(.*?)(?=\n###)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("excess_versions", body)
+
+    def test_excess_versions_choices_restricted(self):
+        """--excess-versions must only accept 2 or 3."""
+        content = self._read_script()
+        self.assertIn("choices=[2, 3]", content, "--excess-versions must restrict to choices [2, 3]")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -1899,7 +2016,7 @@ _UNITTEST_CLASSES = [
     TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
     TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
-    TestUpdateCacheSplit,
+    TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
 ]
 
 # ---------------------------------------------------------------------------
