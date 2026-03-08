@@ -11721,9 +11721,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def delete(media_identifier, library_name=None):
         # API required: deletes item from Plex via HTTP API
         try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.delete()
-                print(f"Deleted Plex entry '{media.title}'.")
+            plex = ensure_plex_api()
+            # For ID: lookups, fetch the item directly (faster and returns the correct plexapi object)
+            if media_identifier.upper().startswith('ID:'):
+                item_id = int(media_identifier[3:])
+                item = plex.fetchItem(item_id)
+                title = getattr(item, 'title', media_identifier)
+                item.delete()
+                print(f"Deleted Plex entry '{title}'.")
+            else:
+                for media in resolve_plex_media_obj(media_identifier, library_name):
+                    media.delete()
+                    print(f"Deleted Plex entry '{media.title}'.")
         except Exception as e:
             err(1023, f"Error deleting media: {e}")
 
@@ -11874,31 +11883,45 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         global PLEX_SERVER
         if DBG: print( f"{DBGPFX}retrieve_media_and_part() OBJ = {obj}" )
 
-        try: library = PLEX_Library.OBJ_DICT[ obj['library'] ]
+        # Ensure API is connected — this function needs live plexapi objects
+        plex = ensure_plex_api()
+
+        # Get real plexapi library object (cache objects lack fetchItem)
+        try: library = plex.library.section( obj['library'] )
         except Exception as e: err(1013, f"section with library name not found: {e}\nOBJ = {obj}") if must_exist else next
 
-        try: item = library.fetchItem( obj['item_id'] )
+        try: item = library.fetchItem( int(obj['item_id']) )
         except Exception as e: err(1014, f"Item with ID not found: {e}\nOBJ = {obj}") if must_exist else next
         #except Exception as e: err(xxxx, f"Item with ID {obj['item_id']} not found: {e}\nOBJ = {obj}")
 
-        match library.type:
-            case "Movie":
+        obj_media_id = int(obj['media_id'])
+        obj_part_id = int(obj['part_id'])
+        match library.type.lower():
+            case "movie":
                 for media in item.media:
-                    if media.id != obj['media_id']: continue
+                    if media.id != obj_media_id: continue
                     for part in media.parts:
-                        if part.id != obj['part_id']: continue
+                        if part.id != obj_part_id: continue
                         return (media, part)
-            case "Show":
-                for season in plex_get_seasons(item, obj['library']):
-                    if season.index != obj['S_idx']: continue
-                    for episode in plex_get_episodes(season, obj['library'], item.title):
-                        if episode.index != obj['E_idx']: continue
-                        for media in episode.media:
-                            if media.id != obj['media_id']: continue
-                            for part in media.parts:
-                                if part.id != obj['part_id']: continue
-                                return (media, part)
-            case "Artist": pass
+            case "show":
+                # fetchItem may return Episode directly (if item_id is an episode ID)
+                if hasattr(item, 'type') and item.type == 'episode':
+                    for media in item.media:
+                        if media.id != obj_media_id: continue
+                        for part in media.parts:
+                            if part.id != obj_part_id: continue
+                            return (media, part)
+                else:
+                    for season in plex_get_seasons(item, obj['library']):
+                        if season.index != obj['S_idx']: continue
+                        for episode in plex_get_episodes(season, obj['library'], item.title):
+                            if episode.index != obj['E_idx']: continue
+                            for media in episode.media:
+                                if media.id != obj_media_id: continue
+                                for part in media.parts:
+                                    if part.id != obj_part_id: continue
+                                    return (media, part)
+            case "artist": pass
             case _: err(1015, f"UNSUPPORTED library.type '{library.type}'.")
 
         if must_exist: err( 1010, f"OBJ not fund in PLEX db. This should not happen. Please contact maintainer.\nOBJ = {obj}")
