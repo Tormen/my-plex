@@ -2136,14 +2136,22 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertNotIn("os.remove(", body, "Must NOT use os.remove — use move_to_trash")
         self.assertNotIn("os.unlink(", body, "Must NOT use os.unlink — use move_to_trash")
 
-    def test_remove_uses_determine_remote_host(self):
-        """remove() must use determine_remote_host for remote file support."""
+    def test_remove_always_uses_ssh_to_plex_server(self):
+        """remove() must always use SSH to Plex server, not determine_remote_host (which gets confused by local mounts)."""
         content = self._read_script()
         import re
-        match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("determine_remote_host(", body)
+        # Strip comments — we only care about actual code, not comments mentioning the function
+        code_lines = [l for l in body.split('\n') if not l.strip().startswith('#')]
+        code_only = '\n'.join(code_lines)
+        # Must NOT call determine_remote_host — local network mounts cause wrong trash location
+        self.assertNotIn("determine_remote_host(", code_only,
+            "remove() must NOT call determine_remote_host — file paths are from Plex server's perspective")
+        # Must use PLEX_DB_REMOTE_HOST (configurable SSH alias, defaults to 'my-plex')
+        self.assertIn("PLEX_DB_REMOTE_HOST", code_only,
+            "remove() must use PLEX_DB_REMOTE_HOST for SSH file operations")
 
     def test_execute_cmd_calls_remove_before_delete(self):
         """execute_cmd must call remove BEFORE delete (trash files before removing entry)."""

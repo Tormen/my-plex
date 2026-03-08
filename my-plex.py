@@ -99,7 +99,9 @@ CONFIG_DEFAULTS = {
     'PLEX_TIMEOUT': 42,
 
     # Direct Database Access (via SSH)
-    # Database path on the Plex server (accessed via SSH using 'my-plex' remote_host)
+    # SSH host alias for the Plex server (used for DB queries, file operations, ffprobe, etc.)
+    'PLEX_DB_REMOTE_HOST': 'my-plex',
+    # Database path on the Plex server (accessed via SSH using PLEX_DB_REMOTE_HOST)
     'PLEX_DB_PATH': '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db',
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
 
@@ -203,14 +205,19 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # No PLEX_URL or PLEX_TOKEN needed for cache updates.
 # Configure database access instead:
 
+# PLEX_DB_REMOTE_HOST: SSH host alias for the Plex server (default: 'my-plex')
+# Used for DB queries, file operations (trash/rename/move), ffprobe, etc.
+# PLEX_DB_REMOTE_HOST = {CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST']!r}
+
 # PLEX_DB_PATH: Path to Plex database on the server (accessed via SSH)
 # PLEX_DB_PATH = {CONFIG_DEFAULTS['PLEX_DB_PATH']!r}
 
 # Example with real values (uncomment and customize):
+# PLEX_DB_REMOTE_HOST = 'my-plex'
 # PLEX_DB_PATH = '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
 
 # NOTE: SSH access to the Plex server is required. Database is accessed via:
-#   ssh my-plex "sqlite3 '<PLEX_DB_PATH>' '<query>'"
+#   ssh PLEX_DB_REMOTE_HOST "sqlite3 '<PLEX_DB_PATH>' '<query>'"
 
 ###############################################################################
 # Path Configuration
@@ -418,7 +425,7 @@ PLEX_TIMEOUT = CONFIG_DEFAULTS['PLEX_TIMEOUT']
 # This provides complete data (including audio/subtitle languages) and is much faster
 # Database is accessed via SSH using the existing 'my-plex' remote_host
 PLEX_DB_PATH = CONFIG_DEFAULTS['PLEX_DB_PATH']
-PLEX_DB_REMOTE_HOST = 'my-plex'  # Reuse existing SSH infrastructure  # Path to Plex database on remote server
+PLEX_DB_REMOTE_HOST = CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST']
 
 # Here we will list all duplicates that were found during scanning of library
 # (that happens for caching purposes):
@@ -1648,6 +1655,15 @@ def get_trash_dir(remote_host=None, file_path=None):
         system = platform.system()
 
         if system == 'Darwin':  # macOS
+            # If file is on a mounted volume (/Volumes/X/...), use per-volume trash
+            # to avoid slow cross-volume copy and to keep files recoverable via Finder
+            if file_path:
+                path_parts = file_path.split('/')
+                if len(path_parts) >= 3 and path_parts[1] == 'Volumes':
+                    uid = os.getuid()
+                    volume_trash = f"/Volumes/{path_parts[2]}/.Trashes/{uid}"
+                    os.makedirs(volume_trash, exist_ok=True)
+                    return volume_trash
             trash_dir = os.path.expanduser('~/.Trash')
         elif system == 'Linux':
             trash_dir = os.path.expanduser('~/.local/share/Trash/files')
@@ -1981,7 +1997,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         elif operation == 'TRASH':
             trash_dir = kwargs.get('trash_dir')
             if not trash_dir:
-                trash_dir = get_trash_dir(None)
+                trash_dir = get_trash_dir(None, file_path=filepath)
 
             filename = os.path.basename(filepath)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3175,8 +3191,8 @@ def determine_remote_host(filepath):
             print(f"{DBGPFX}  -> Returning (None, True, '{local_resolved_path}') - file found LOCALLY")
         return (None, True, local_resolved_path)
 
-    # Try SSH
-    remote_host = 'my-plex'
+    # Try SSH to Plex server
+    remote_host = PLEX_DB_REMOTE_HOST
     if DBG:
         print(f"{DBGPFX}  Step 2: File not local, checking REMOTE host '{remote_host}'...")
     remote_exists, remote_resolved_path = check_file_exists_with_path(filepath, remote_host)
@@ -11765,25 +11781,30 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if not found_items:
             err(1080, f"Cannot remove: no cached item found for '{media_identifier}'")
 
+        # File paths in cache are from the Plex server's perspective.
+        # Always use SSH to the Plex server for file operations — do NOT use
+        # determine_remote_host() which gets confused by local network mounts
+        # (e.g. /Volumes/2/ mounted locally via SMB would be treated as "local",
+        # causing slow cross-volume copies to local ~/.Trash instead of fast
+        # same-volume moves to /Volumes/X/.Trashes/<uid>/ on the server).
+        remote_host = PLEX_DB_REMOTE_HOST
+
         for key, obj in found_items:
             files_dict = obj.get('files', {})
             if not files_dict:
                 print(f"No files found in cache for '{obj.get('title', key)}'")
                 continue
-            library_name_obj = obj.get('library')
             for version, file_info in files_dict.items():
                 filepath = file_info.get('filepath', '')
                 if not filepath:
                     continue
-                remote_host, exists, resolved_path = determine_remote_host(filepath)
-                actual_path = resolved_path if resolved_path else filepath
-                success, trash_path = move_to_trash(actual_path, remote_host)
+                success, trash_path = move_to_trash(filepath, remote_host)
                 if success:
-                    print(f"Trashed: {actual_path}")
+                    print(f"Trashed: {filepath}")
                     if trash_path:
                         print(f"  -> {trash_path}")
                 else:
-                    print(f"Failed to trash: {actual_path}")
+                    print(f"Failed to trash: {filepath}")
 
     ###### Metadata management ---------------------------------------------------
 
