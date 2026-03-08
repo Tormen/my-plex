@@ -13535,6 +13535,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
+        # Fast path: check if obj is a numeric ID or ID:<num> that matches cache — no API needed
+        numeric_str = obj
+        if numeric_str.upper().startswith('ID:'):
+            numeric_str = numeric_str[3:]
+        try:
+            numeric_id = int(numeric_str)
+            for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(cached_obj.get('id', 0)) == numeric_id:
+                    return True
+            return False
+        except (ValueError, TypeError):
+            pass
         return (len(resolve_plex_media_obj(obj)) > 0)
 
     @staticmethod
