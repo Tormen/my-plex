@@ -2362,17 +2362,15 @@ class TestNoAPIFallbacks(unittest.TestCase):
         self.assertIn("No API fallback", content,
             "PLEX_Library.init must have 'No API fallback' comment confirming API path removed")
 
-    def test_info_server_check_uses_db(self):
-        """--info server check must use DB query, not API fetchItem."""
+    def test_info_does_not_use_api(self):
+        """--info must not use API fetchItem — cache only."""
         content = self._read_script()
         import re
         match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("query_plex_database", func_body,
-            "--info server check must use DB query")
         self.assertNotIn("fetchItem", func_body,
-            "--info server check must NOT use API fetchItem")
+            "--info must NOT use API fetchItem")
 
     def test_playlist_detection_uses_db(self):
         """PLEX_Playlist.detect_if_of_OBJ_TYPE must use DB query, not API."""
@@ -17287,11 +17285,10 @@ def show_item_info(identifier, table_only=False):
     # Type-specific info
     obj_type = obj.get('type')
     if obj_type == 'Episode':
-        print(f"Series:\t{obj.get('show_title', 'N/A')}")
-        print(f"Season:\t{obj.get('season_title', 'N/A')}")
-        print(f"Episode:\tS{obj.get('S_str', '?')}E{obj.get('E_str', '?')}")
+        print(f"Series:\t{obj.get('series', 'N/A')}")
+        print(f"Episode:\t{obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))}")
     elif obj_type == 'Season':
-        print(f"Series:\t{obj.get('show_title', 'N/A')}")
+        print(f"Series:\t{obj.get('series', 'N/A')}")
         print(f"Season:\t{obj.get('S_str', 'N/A')}")
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
@@ -17322,7 +17319,16 @@ def show_item_info(identifier, table_only=False):
             ver, info = next(iter(files.items()))
             print(f"File:\t{info.get('filepath', 'N/A')}")
             fs = info.get('filesize') or obj.get('filesize')
-            if fs: print(f"File Size:\t{fs / (1024*1024):.1f} MB")
+            if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
+            # Per-file media info (only shown for single-file items)
+            if 'duration' in obj and obj['duration']:
+                print(f"Duration:\t{obj['duration'] / 60000:.1f} minutes")
+            if obj.get('resolution'):
+                print(f"Resolution:\t{obj['resolution']}")
+            if obj.get('video_codec'):
+                print(f"Video:\t{obj['video_codec']}")
+            if obj.get('audio_codec'):
+                print(f"Audio:\t{obj['audio_codec']}")
         else:
             print(f"Files:\t{len(files)} versions")
             for i, (ver, info) in enumerate(files.items(), 1):
@@ -17333,18 +17339,7 @@ def show_item_info(identifier, table_only=False):
     elif obj.get('file'):
         print(f"File:\t{obj['file']}")
         fs = obj.get('filesize')
-        if fs: print(f"File Size:\t{fs / (1024*1024):.1f} MB")
-
-    # Media info
-    if 'duration' in obj:
-        duration_min = obj['duration'] / 60000
-        print(f"Duration:\t{duration_min:.1f} minutes")
-    if 'resolution' in obj:
-        print(f"Resolution:\t{obj['resolution']}")
-    if 'video_codec' in obj:
-        print(f"Video:\t{obj['video_codec']}")
-    if 'audio_codec' in obj:
-        print(f"Audio:\t{obj['audio_codec']}")
+        if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
 
     # Labels
     if obj.get('labels'):
@@ -17355,30 +17350,6 @@ def show_item_info(identifier, table_only=False):
         print(f"Added:\t{obj['added_at']}")
     if 'updated_at' in obj:
         print(f"Updated:\t{obj['updated_at']}")
-
-    # Cache status
-    print()
-    print(f"Cache:\t✓ in cache ({CACHE_FILE})")
-
-    # Check if item exists on Plex server via DB query (no API needed)
-    if not OFFLINE:
-        try:
-            item_id = int(obj['item_id'])
-            safe_id = int(item_id)  # Ensure integer to prevent SQL injection
-            query = f"SELECT id, title FROM metadata_items WHERE id = {safe_id} AND deleted_at IS NULL"
-            rows = query_plex_database(query, mode='rows')
-            if rows:
-                server_title = rows[0][1]
-                if server_title:
-                    print(f"Server:\t✓ exists (title: {server_title})")
-                else:
-                    print(f"Server:\t✓ exists")
-            else:
-                print(f"Server:\t✗ NOT FOUND (may have been deleted)")
-        except Exception as e:
-            print(f"Server:\t(check failed: {e})")
-    else:
-        print(f"Server:\t(skipped - offline mode)")
 
 ###########################################################################################
 #### GLOBAL PLEX COMMANDS:
