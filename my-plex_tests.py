@@ -2100,6 +2100,83 @@ class TestExcessVersionsMainParser(unittest.TestCase):
         self.assertIsNotNone(match, "Must re-inject --excess-versions into remaining_args")
 
 
+class TestRemoveCommand(unittest.TestCase):
+    """Verify --remove/--rm command and its interaction with --delete."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_remove_arg_defined(self):
+        """--remove and --rm must be defined as media commands."""
+        content = self._read_script()
+        self.assertIn("'--remove'", content)
+        self.assertIn("'--rm'", content)
+
+    def test_delete_alias_defined(self):
+        """--del must be an alias for --delete."""
+        content = self._read_script()
+        self.assertIn("'--del'", content)
+
+    def test_remove_method_exists(self):
+        """PLEX_Media.remove() must exist."""
+        content = self._read_script()
+        import re
+        match = re.search(r'class PLEX_Media.*?def remove\(', content, re.DOTALL)
+        self.assertIsNotNone(match, "PLEX_Media must have a remove() method")
+
+    def test_remove_uses_move_to_trash(self):
+        """remove() must use move_to_trash (safe deletion)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("move_to_trash(", body, "Must use move_to_trash, not os.remove/unlink")
+        self.assertNotIn("os.remove(", body, "Must NOT use os.remove — use move_to_trash")
+        self.assertNotIn("os.unlink(", body, "Must NOT use os.unlink — use move_to_trash")
+
+    def test_remove_uses_determine_remote_host(self):
+        """remove() must use determine_remote_host for remote file support."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("determine_remote_host(", body)
+
+    def test_execute_cmd_calls_remove_before_delete(self):
+        """execute_cmd must call remove BEFORE delete (trash files before removing entry)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def execute_cmd\(args, obj, obj_args\).*?\n(.*?)(?=\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        remove_pos = body.find('.remove(')
+        delete_pos = body.find('.delete(')
+        self.assertGreater(remove_pos, 0, "Must call remove()")
+        self.assertGreater(delete_pos, 0, "Must call delete()")
+        self.assertLess(remove_pos, delete_pos, "remove() must be called BEFORE delete()")
+
+    def test_remove_does_not_delete_plex_entry(self):
+        """remove() must NOT call media.delete() — that's --delete's job."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("media.delete()", body, "remove() must NOT delete the Plex entry")
+
+    def test_delete_does_not_trash_files(self):
+        """delete() must NOT trash files — that's --remove's job."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def delete\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("move_to_trash(", body, "delete() must NOT trash files")
+
+
 class TestEndToEnd(unittest.TestCase):
     """End-to-end tests: run actual commands as subprocesses to verify they work."""
 
@@ -2305,7 +2382,7 @@ _UNITTEST_CLASSES = [
     TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
-    TestProblems, TestExcessVersionsMainParser, TestEndToEnd,
+    TestProblems, TestExcessVersionsMainParser, TestRemoveCommand, TestEndToEnd,
 ]
 
 # ---------------------------------------------------------------------------
