@@ -11,7 +11,7 @@ import inspect
 import pickle
 import io
 
-MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '52')
+MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'my-plex.py')
 
 ############################################################
 #### REGRESSION TESTING
@@ -1321,8 +1321,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         """--broken must show every broken file version, not just one per object."""
         content = self._read_script()
         import re
-        match = re.search(r'(if broken_only:\n\s+broken_files = \[\].*?)(?=\n            if not broken_files:)', content, re.DOTALL)
-        self.assertIsNotNone(match, "Must find broken_only block")
+        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
         # Must NOT break after first broken file per object
         self.assertNotIn("break  # Only add the key once", broken_block,
@@ -1335,8 +1335,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         """--broken must include PROBE ERR/NOT FOUND files even when plex duration is None."""
         content = self._read_script()
         import re
-        match = re.search(r'(if broken_only:\n\s+broken_files = \[\].*?)(?=\n            if not broken_files:)', content, re.DOTALL)
-        self.assertIsNotNone(match, "Must find broken_only block")
+        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
         # Must NOT skip objects with no plex duration (they may have PROBE ERR / NOT FOUND files)
         self.assertNotIn("if not plex_duration:\n                    continue", broken_block,
@@ -1544,6 +1544,350 @@ class TestResolveMediaByNumericID(unittest.TestCase):
             "show_item_info must require 'ID:' prefix for Plex ID lookup")
 
 
+class TestRefactoredMethodNames(unittest.TestCase):
+    """Verify method name fixes and dead code removal from refactoring session."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_set_watched_exists(self):
+        """set_watched must exist (renamed from set_watched_status)."""
+        content = self._read_script()
+        self.assertIn("def set_watched(", content)
+
+    def test_set_unwatched_exists(self):
+        """set_unwatched must exist (renamed from set_unwatched_status)."""
+        content = self._read_script()
+        self.assertIn("def set_unwatched(", content)
+
+    def test_old_method_names_removed(self):
+        """Old method names set_watched_status/set_unwatched_status must not exist."""
+        content = self._read_script()
+        self.assertNotIn("def set_watched_status(", content,
+            "set_watched_status was renamed to set_watched")
+        self.assertNotIn("def set_unwatched_status(", content,
+            "set_unwatched_status was renamed to set_unwatched")
+
+    def test_get_user_rating_exists(self):
+        """get_user_rating must exist (was missing, referenced by argparse)."""
+        content = self._read_script()
+        self.assertIn("def get_user_rating(", content)
+
+    def test_execute_cmd_uses_correct_names(self):
+        """execute_cmd must call set_watched/set_unwatched (not old _status variants)."""
+        content = self._read_script()
+        import re
+        # Find PLEX_Media.execute_cmd
+        match = re.search(r'(class PLEX_Media.*?def execute_cmd.*?)(?=\n    #+\n)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find PLEX_Media.execute_cmd")
+        cmd_block = match.group(1)
+        self.assertIn(".set_watched(", cmd_block)
+        self.assertIn(".set_unwatched(", cmd_block)
+        self.assertNotIn(".set_watched_status(", cmd_block)
+        self.assertNotIn(".set_unwatched_status(", cmd_block)
+
+
+class TestDeadCodeRemoval(unittest.TestCase):
+    """Verify removed dead functions stay removed."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_get_mkv_header_duration_removed(self):
+        """get_mkv_header_duration was dead code — must stay removed."""
+        content = self._read_script()
+        self.assertNotIn("def get_mkv_header_duration(", content)
+
+    def test_trigger_library_scan_removed(self):
+        """trigger_library_scan was dead code — must stay removed."""
+        content = self._read_script()
+        self.assertNotIn("def trigger_library_scan(", content)
+
+    def test_generate_metadata_filelist_removed(self):
+        """generate_metadata_filelist was dead code — must stay removed."""
+        content = self._read_script()
+        self.assertNotIn("def generate_metadata_filelist(", content)
+
+
+class TestMediaApiActionConsolidation(unittest.TestCase):
+    """Verify _media_api_action helper and all 9 wrapper methods."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_media_api_action_exists(self):
+        """_media_api_action helper must exist."""
+        content = self._read_script()
+        self.assertIn("def _media_api_action(", content)
+
+    def test_media_api_action_has_error_handling(self):
+        """_media_api_action must catch exceptions and call err()."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _media_api_action\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("except Exception", body)
+        self.assertIn("err(err_code", body)
+
+    def test_all_wrappers_use_media_api_action(self):
+        """All setter/getter methods must delegate to _media_api_action."""
+        content = self._read_script()
+        for method in ['set_watched', 'set_unwatched', 'set_watched_date', 'set_view_offset',
+                       'get_view_offset', 'get_user_rating', 'set_user_rating', 'clear_user_rating',
+                       'get_watched_status']:
+            import re
+            pattern = rf'def {method}\(.*?\n(.*?)(?=\n    @staticmethod|\n    #+)'
+            match = re.search(pattern, content, re.DOTALL)
+            self.assertIsNotNone(match, f"{method} must exist")
+            body = match.group(1)
+            self.assertIn("_media_api_action(", body,
+                f"{method} must delegate to _media_api_action")
+
+    def test_no_duplicate_error_handling_in_wrappers(self):
+        """Wrapper methods must NOT have their own try/except (handled by _media_api_action)."""
+        content = self._read_script()
+        import re
+        for method in ['set_watched', 'set_unwatched', 'get_user_rating', 'clear_user_rating']:
+            pattern = rf'def {method}\(.*?\n(.*?)(?=\n    @staticmethod|\n    #+)'
+            match = re.search(pattern, content, re.DOTALL)
+            self.assertIsNotNone(match, f"{method} must exist")
+            body = match.group(1)
+            self.assertNotIn("try:", body,
+                f"{method} must not have its own try/except — _media_api_action handles errors")
+
+
+class TestListMethodSplit(unittest.TestCase):
+    """Verify PLEX_Media.list() was properly split into helper methods."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_normalize_list_args_exists(self):
+        """_normalize_list_args must exist as a static method."""
+        content = self._read_script()
+        self.assertIn("def _normalize_list_args(", content)
+
+    def test_normalize_list_args_handles_series_alias(self):
+        """_normalize_list_args must map 'Series' to 'Show'."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('"Series"', body)
+        self.assertIn('"Show"', body)
+
+    def test_normalize_list_args_validates_media_type(self):
+        """_normalize_list_args must reject invalid media types with err(1043)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("1043", body, "Must error 1043 on invalid media_type")
+
+    def test_print_list_header_exists(self):
+        """_print_list_header must exist."""
+        content = self._read_script()
+        self.assertIn("def _print_list_header(", content)
+
+    def test_list_broken_files_exists(self):
+        """_list_broken_files must exist as extracted helper."""
+        content = self._read_script()
+        self.assertIn("def _list_broken_files(", content)
+
+    def test_find_duplicates_exists(self):
+        """_find_duplicates must exist."""
+        content = self._read_script()
+        self.assertIn("def _find_duplicates(", content)
+
+    def test_sort_duplicates_exists(self):
+        """_sort_duplicates must exist."""
+        content = self._read_script()
+        self.assertIn("def _sort_duplicates(", content)
+
+    def test_print_duplicate_list_exists(self):
+        """_print_duplicate_list must exist."""
+        content = self._read_script()
+        self.assertIn("def _print_duplicate_list(", content)
+
+    def test_filter_by_watch_and_audio_exists(self):
+        """_filter_by_watch_and_audio must exist."""
+        content = self._read_script()
+        self.assertIn("def _filter_by_watch_and_audio(", content)
+
+    def test_list_calls_helpers(self):
+        """PLEX_Media.list() must call the extracted helper methods."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def list\(args, obj_args.*?\n.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find PLEX_Media.list()")
+        body = match.group(1)
+        self.assertIn("_normalize_list_args(", body)
+        self.assertIn("_list_broken_files(", body)
+        self.assertIn("_find_duplicates(", body)
+
+    def test_iso639_in_normalize(self):
+        """Audio language normalization must be in _normalize_list_args."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("'english'", body.lower(), "Must normalize 'english' to ISO code")
+        self.assertIn("'german'", body.lower(), "Must normalize 'german' to ISO code")
+        self.assertIn("'french'", body.lower(), "Must normalize 'french' to ISO code")
+
+
+class TestExecuteTrashAndMoveSplit(unittest.TestCase):
+    """Verify execute_resolution_action choices 5/6 were unified into _execute_trash_and_move."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_execute_trash_and_move_exists(self):
+        """_execute_trash_and_move must exist."""
+        content = self._read_script()
+        self.assertIn("def _execute_trash_and_move(", content)
+
+    def test_handles_both_choices(self):
+        """_execute_trash_and_move must handle choice 5 with else branch for choice 6."""
+        content = self._read_script()
+        import re
+        match = re.search(r"def _execute_trash_and_move\(.*?\n(.*?)(?=\ndef )", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("'5'", body, "Must handle choice 5")
+        # Choice 6 is the else branch — verify both index orderings exist
+        self.assertIn("trash_idx, keep_idx = 0, 1", body, "Choice 5: trash first, keep second")
+        self.assertIn("trash_idx, keep_idx = 1, 0", body, "Choice 6: trash second, keep first")
+
+    def test_resolution_action_delegates(self):
+        """execute_resolution_action must delegate choices 5/6 to _execute_trash_and_move."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def execute_resolution_action\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("_execute_trash_and_move(", body)
+
+
+class TestVerifyCacheSplit(unittest.TestCase):
+    """Verify verify_cache() was split: data integrity checks moved to _verify_data_integrity."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_verify_data_integrity_exists(self):
+        """_verify_data_integrity must exist as standalone function."""
+        content = self._read_script()
+        self.assertIn("def _verify_data_integrity(", content)
+
+    def test_verify_cache_calls_integrity(self):
+        """verify_cache() must call _verify_data_integrity()."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def verify_cache\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("_verify_data_integrity()", body)
+
+    def test_integrity_checks_collection_members(self):
+        """_verify_data_integrity must check OBJ_BY_COLLECTION member references."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _verify_data_integrity\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("OBJ_BY_COLLECTION", body)
+
+    def test_integrity_checks_obj_by_filepath(self):
+        """_verify_data_integrity must validate OBJ_BY_FILEPATH consistency."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _verify_data_integrity\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("OBJ_BY_FILEPATH", body)
+
+
+class TestUpdateCacheSplit(unittest.TestCase):
+    """Verify PLEX_Library.update_cache() finalize code was extracted to _finalize_and_save_cache."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_finalize_and_save_cache_exists(self):
+        """_finalize_and_save_cache must exist."""
+        content = self._read_script()
+        self.assertIn("def _finalize_and_save_cache(", content)
+
+    def test_finalize_accepts_old_read_only(self):
+        """_finalize_and_save_cache must accept old_read_only parameter."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _finalize_and_save_cache\((.*?)\)', content)
+        self.assertIsNotNone(match)
+        params = match.group(1)
+        self.assertIn("old_read_only", params, "Must accept old_read_only to restore READ_ONLY_MODE")
+
+    def test_finalize_saves_cache(self):
+        """_finalize_and_save_cache must call update_and_save_cache."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _finalize_and_save_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("update_and_save_cache(", body)
+        self.assertIn("build_media_cache_dict(", body)
+
+    def test_finalize_rebuilds_library_object_counts(self):
+        """_finalize_and_save_cache must rebuild library_object_counts."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _finalize_and_save_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("updated_library_object_counts", body)
+
+    def test_update_cache_calls_finalize(self):
+        """PLEX_Library.update_cache() must call _finalize_and_save_cache."""
+        content = self._read_script()
+        import re
+        # Find PLEX_Library.update_cache specifically (not PLEX_Media.update_cache)
+        match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("_finalize_and_save_cache(", body)
+
+    def test_old_read_only_passed_correctly(self):
+        """update_cache must pass old_read_only to _finalize_and_save_cache."""
+        content = self._read_script()
+        import re
+        match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("old_read_only", body, "Must pass old_read_only to _finalize_and_save_cache")
+
+    def test_no_inline_save_in_update_cache(self):
+        """update_cache must NOT have inline cache save logic (moved to _finalize_and_save_cache)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("update_and_save_cache(build_media_cache_dict(", body,
+            "Inline cache save must be in _finalize_and_save_cache, not update_cache")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -1553,6 +1897,9 @@ _UNITTEST_CLASSES = [
     TestLongHelp, TestPlexUpdatedAtTracking, TestCacheSkipLogic,
     TestNoAPIFallbacks, TestVerifyCacheIntegrity, TestResolveMediaByNumericID,
     TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
+    TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
+    TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
+    TestUpdateCacheSplit,
 ]
 
 # ---------------------------------------------------------------------------
@@ -2220,7 +2567,7 @@ def run_regression_tests(main_globals):
         # Bug fixed: Cache wasn't being saved immediately after resolution operations
         import inspect
 
-        if 'update_and_save_cache' in globals():
+        if 'update_and_save_cache' in locals():
             sig = inspect.signature(update_and_save_cache)
             params = list(sig.parameters.keys())
 
@@ -2277,7 +2624,7 @@ def run_regression_tests(main_globals):
         # Bug fixed: Undo needed to support multiple sequential undos
         import inspect
 
-        if 'undo_operation' in globals():
+        if 'undo_operation' in locals():
             sig = inspect.signature(undo_operation)
             params = list(sig.parameters.keys())
 
@@ -2313,7 +2660,7 @@ def run_regression_tests(main_globals):
 
         # Test that determine_remote_host returns a 3-tuple
         import inspect
-        if 'determine_remote_host' in globals():
+        if 'determine_remote_host' in locals():
             sig = inspect.signature(determine_remote_host)
             params = list(sig.parameters.keys())
 
@@ -2343,7 +2690,7 @@ def run_regression_tests(main_globals):
             failed += 1
 
         # Test that resolve_filepath_with_alternatives uses os.path.isfile() not os.path.exists()
-        if 'resolve_filepath_with_alternatives' in globals():
+        if 'resolve_filepath_with_alternatives' in locals():
             import inspect
             source = inspect.getsource(resolve_filepath_with_alternatives)
 
@@ -2499,13 +2846,13 @@ def run_regression_tests(main_globals):
         import inspect
         test_ok = True
 
-        # 16a: PLEX_Media.list() should validate --watched/--unwatched/--audio require library_name
-        source = inspect.getsource(PLEX_Media.list)
+        # 16a: _normalize_list_args() should validate --watched/--unwatched/--audio require library_name
+        source = inspect.getsource(PLEX_Media._normalize_list_args)
         for flag in ['watched_only', 'unwatched_only', 'audio_filter']:
             if f'library_name is None' in source and flag in source:
-                print(f"✓ PASS: PLEX_Media.list() validates {flag} requires library_name")
+                print(f"✓ PASS: PLEX_Media._normalize_list_args() validates {flag} requires library_name")
             else:
-                print(f"✗ FAIL: PLEX_Media.list() missing validation for {flag} without library_name")
+                print(f"✗ FAIL: PLEX_Media._normalize_list_args() missing validation for {flag} without library_name")
                 test_ok = False
 
         # 16b: --collections error in execute_global_commands
@@ -2597,7 +2944,7 @@ def run_regression_tests(main_globals):
         test_ok = True
 
         # 19a: build_media_cache_dict exists and returns correct keys
-        if 'build_media_cache_dict' not in globals():
+        if 'build_media_cache_dict' not in locals():
             print(f"✗ FAIL: build_media_cache_dict function not found")
             test_ok = False
         else:
@@ -2629,7 +2976,7 @@ def run_regression_tests(main_globals):
                 test_ok = False
 
         # 19b: load_media_cache exists and sets all attributes
-        if 'load_media_cache' not in globals():
+        if 'load_media_cache' not in locals():
             print(f"✗ FAIL: load_media_cache function not found")
             test_ok = False
         else:
