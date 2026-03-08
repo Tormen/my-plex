@@ -10351,7 +10351,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
     argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
     argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
-    argparser.add_argument('--delete', action='store_true',           help="Delete a specific media entry by title or file path.")
+    argparser.add_argument('--delete', action='store_true',           help="Delete a media entry from Plex (metadata only, files on disk are NOT deleted). Plex will re-add the entry on next library scan if the file still exists.")
     argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
     argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
     argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
