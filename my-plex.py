@@ -10507,7 +10507,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if not broken_files:
             print(f"No broken/truncated files{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
-            return
+            return 0
 
         severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
         broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
@@ -10528,6 +10528,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+        return len(broken_files)
 
     @staticmethod
     def _list_excess_versions(obj_keys, library_name, version_limit):
@@ -10556,7 +10557,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if not excess_files:
             print(f"No entries with {version_limit}+ versions{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
-            return
+            return 0, 0
 
         excess_files.sort(key=lambda x: (x[1].lower(), x[2]))  # sort by title, then version nr
 
@@ -10570,6 +10571,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"{plex_id_str:<10} | {title_str:<40} | {version_str:<9} | {library_str:<15} | {filepath}")
         entry_count = len(set((plex_id, title) for plex_id, title, _, _, _, _ in excess_files))
         print(f"\nTotal: {len(excess_files)} files across {entry_count} entries with {version_limit}+ versions")
+        return len(excess_files), entry_count
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -12308,6 +12310,45 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print(f"  my-plex ,unsorted --{lang}            # List items with {lang_names.get(lang, lang)} audio")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'problems':
+            print()
+            print("=" * 76)
+            print("PROBLEMS HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --problems")
+            print()
+            print("Runs all problem detection checks and prints a summary at the end.")
+            print("Currently equivalent to running:")
+            print()
+            print("  1. --broken           Detect broken/truncated media files")
+            print("                        (file not found, probe error, truncated duration,")
+            print("                        suspiciously low bitrate)")
+            print()
+            print("  2. --excess-versions 3  Detect entries with 3+ file versions")
+            print("                          (likely accidental duplicates merged under one entry)")
+            print()
+            print("EXCESS VERSIONS (--excess-versions LIMIT):")
+            print()
+            print("  my-plex --excess-versions 3")
+            print()
+            print("  Lists every file belonging to entries with LIMIT or more versions.")
+            print("  A movie or episode should normally have 1 or 2 versions (e.g. 720p + 4K).")
+            print("  Having 3+ versions is often a sign of accidental duplicate imports.")
+            print()
+            print("  Output (one line per file):")
+            print("    PLEX-ID | ENTRY TITLE | VERSION (x / y) | LIBRARY | FILEPATH")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --problems              # Run all checks")
+            print("  my-plex --excess-versions 2     # Show entries with 2+ versions")
+            print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
+            print("  my-plex --broken                # Show broken/truncated files only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -14072,6 +14113,38 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'collections', False):
         err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
 
+    # Handle --problems: run all problem detection checks with summary
+    if safe_getattr(cmd_args, 'problems', False):
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+
+        print("\n" + "=" * 76)
+        print("PROBLEM DETECTION")
+        print("=" * 76)
+
+        # 1. Broken files
+        print("\n--- Broken / Truncated Files ---")
+        broken_count = PLEX_Media._list_broken_files(obj_keys, None) or 0
+
+        # 2. Excess versions
+        print("\n--- Excess Versions (3+) ---")
+        result = PLEX_Media._list_excess_versions(obj_keys, None, 3)
+        excess_file_count, excess_entry_count = result if result else (0, 0)
+
+        # Summary
+        print("\n" + "=" * 76)
+        print("SUMMARY")
+        print("=" * 76)
+        print(f"  Broken/truncated files:   {broken_count}")
+        print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
+        total_problems = broken_count + excess_entry_count
+        if total_problems == 0:
+            print("\n  No problems found.")
+        else:
+            print(f"\n  Total: {total_problems} problem(s) found.")
+        print("=" * 76)
+        return
+
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
     # Skip when --broken is used with --update-cache (rescan mode, not display mode)
     excess_versions = safe_getattr(cmd_args, 'excess_versions', None)
@@ -14422,7 +14495,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
-    GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, choices=[2, 3], help="List entries with LIMIT or more file versions (2 or 3). One line per file.")
+    GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3). Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")

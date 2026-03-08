@@ -1999,10 +1999,83 @@ class TestExcessVersions(unittest.TestCase):
         body = match.group(1)
         self.assertIn("excess_versions", body)
 
-    def test_excess_versions_choices_restricted(self):
-        """--excess-versions must only accept 2 or 3."""
+    def test_excess_versions_accepts_int(self):
+        """--excess-versions must accept an integer limit."""
         content = self._read_script()
-        self.assertIn("choices=[2, 3]", content, "--excess-versions must restrict to choices [2, 3]")
+        self.assertIn("type=int", content, "--excess-versions must accept integer type")
+
+
+class TestProblems(unittest.TestCase):
+    """Verify --problems flag runs all problem checks with summary."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_problems_arg_defined(self):
+        """--problems must be defined in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        self.assertIn("'--problems'", content)
+
+    def test_problems_runs_broken(self):
+        """--problems must call _list_broken_files."""
+        content = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find --problems handler block")
+        body = match.group(1)
+        self.assertIn("_list_broken_files(", body)
+
+    def test_problems_runs_excess_versions(self):
+        """--problems must call _list_excess_versions with limit 3."""
+        content = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("_list_excess_versions(", body)
+        self.assertIn(", 3)", body, "Must use limit 3 for excess versions")
+
+    def test_problems_prints_summary(self):
+        """--problems must print a SUMMARY section."""
+        content = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("SUMMARY", body)
+
+    def test_problems_has_detailed_help(self):
+        """--help problems must provide detailed help."""
+        content = self._read_script()
+        self.assertIn("case 'problems':", content, "Must have --help problems case")
+        import re
+        match = re.search(r"case 'problems':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("PROBLEMS HELP", body)
+        self.assertIn("--broken", body)
+        self.assertIn("--excess-versions", body)
+
+    def test_broken_returns_count(self):
+        """_list_broken_files must return a count for --problems summary."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_broken_files\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("return 0", body, "Must return 0 when no broken files")
+        self.assertIn("return len(broken_files)", body, "Must return count of broken files")
+
+    def test_excess_versions_returns_counts(self):
+        """_list_excess_versions must return file and entry counts for --problems summary."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("return 0, 0", body, "Must return (0, 0) when no excess versions")
+        self.assertIn("return len(excess_files), entry_count", body, "Must return (file_count, entry_count)")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -2017,6 +2090,7 @@ _UNITTEST_CLASSES = [
     TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
+    TestProblems,
 ]
 
 # ---------------------------------------------------------------------------
