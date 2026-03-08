@@ -10351,7 +10351,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
     argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
     argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
-    argparser.add_argument('--delete', action='store_true',           help="Delete a media entry from Plex (metadata only, files on disk are NOT deleted). Plex will re-add the entry on next library scan if the file still exists.")
+    argparser.add_argument('--delete', '--del', action='store_true',  help="Delete a media entry from Plex (metadata only, files on disk are NOT deleted). Plex will re-add the entry on next library scan if the file still exists. Combine with --remove to also trash files from disk.")
+    argparser.add_argument('--remove', '--rm', action='store_true',  help="Remove (trash) media files from disk. Does NOT delete the Plex entry. Combine with --delete to also remove the Plex entry.")
     argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
     argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
     argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
@@ -10379,6 +10380,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
         if obj_args.info:               PLEX_Media.get_info(obj)
         if obj_args.refresh:            PLEX_Media.refresh(obj)
+        if obj_args.remove:             PLEX_Media.remove(obj)
         if obj_args.delete:             PLEX_Media.delete(obj)
         if obj_args.get_watched:        PLEX_Media.get_watched_status(obj)
         if obj_args.get_view_offset:    PLEX_Media.get_view_offset(obj)
@@ -11721,9 +11723,58 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.delete()
-                print(f"Deleted '{media.title}'.")
+                print(f"Deleted Plex entry '{media.title}'.")
         except Exception as e:
             err(1023, f"Error deleting media: {e}")
+
+    @staticmethod
+    def remove(media_identifier, library_name=None):
+        """Remove (trash) media files from disk. Looks up file paths from cache."""
+        # Find matching items in cache
+        found_items = []
+        if media_identifier.upper().startswith('ID:'):
+            try:
+                numeric_id = int(media_identifier[3:])
+                for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                    if int(obj.get('id', 0)) == numeric_id:
+                        found_items.append((key, obj))
+                        break
+            except (ValueError, TypeError):
+                pass
+        if not found_items:
+            search_lower = media_identifier.lower()
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                title = obj.get('title', '')
+                if search_lower == title.lower() or search_lower in key.lower():
+                    found_items.append((key, obj))
+                # Also match by filepath
+                for file_info in obj.get('files', {}).values():
+                    if search_lower in file_info.get('filepath', '').lower():
+                        found_items.append((key, obj))
+                        break
+
+        if not found_items:
+            err(1080, f"Cannot remove: no cached item found for '{media_identifier}'")
+
+        for key, obj in found_items:
+            files_dict = obj.get('files', {})
+            if not files_dict:
+                print(f"No files found in cache for '{obj.get('title', key)}'")
+                continue
+            library_name_obj = obj.get('library')
+            for version, file_info in files_dict.items():
+                filepath = file_info.get('filepath', '')
+                if not filepath:
+                    continue
+                remote_host, exists, resolved_path = determine_remote_host(filepath)
+                actual_path = resolved_path if resolved_path else filepath
+                success, trash_path = move_to_trash(actual_path, remote_host)
+                if success:
+                    print(f"Trashed: {actual_path}")
+                    if trash_path:
+                        print(f"  -> {trash_path}")
+                else:
+                    print(f"Failed to trash: {actual_path}")
 
     ###### Metadata management ---------------------------------------------------
 
