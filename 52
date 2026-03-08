@@ -14944,11 +14944,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def get_info(media_identifier, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                print_details(media)
-        except Exception as e:
-            err(1021, f"Error fetching media details: {e}")
+        # Uses cache-based show_item_info() — no API needed for read-only info display
+        show_item_info(media_identifier)
 
     @staticmethod
     def refresh(media_identifier, library_name=None):
