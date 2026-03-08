@@ -1135,7 +1135,7 @@ import unittest
 # To merge tests back inline, replace this section with contents of 52_tests.py
 
 from importlib.util import spec_from_file_location, module_from_spec as _mfs
-_test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.abspath(__file__)), "52_tests.py"))
+_test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.abspath(__file__)), "my-plex_tests.py"))
 _test_mod = _mfs(_test_spec)
 _test_spec.loader.exec_module(_test_mod)
 _UNITTEST_CLASSES = _test_mod._UNITTEST_CLASSES
@@ -3063,83 +3063,6 @@ def get_media_description(obj):
         what = f"{obj_type}: {obj['title']}"
     return what
 
-def get_mkv_header_duration(filepath):
-    """Read duration from MKV file header
-
-    Parses the MKV EBML header to extract the duration metadata.
-    This represents the duration claimed in the container header,
-    which may differ from actual playable duration if file is truncated.
-
-    Args:
-        filepath: Full path to MKV file (local or remote)
-
-    Returns:
-        Duration in minutes (float) or None if unable to read
-    """
-    try:
-        import struct
-
-        # Determine if file is local or remote
-        remote_host, exists, resolved_path = determine_remote_host(filepath)
-        if not exists:
-            if DEEPDBG:
-                print(f"{DBGPFX}get_mkv_header_duration: File not found: {filepath}")
-            return None
-
-        # Use resolved path if available
-        if resolved_path:
-            filepath = resolved_path
-
-        # Read first 4096 bytes of file (sufficient for MKV header)
-        if remote_host:
-            # Remote file: use SSH to read header bytes
-            escaped_path = escape_path_for_ssh(filepath)
-            cmd = f'ssh {remote_host} "dd if=\\"{escaped_path}\\" bs=4096 count=1 2>/dev/null"'
-            result = subprocess.run(cmd, shell=True, capture_output=True)
-            if result.returncode != 0:
-                if DEEPDBG:
-                    print(f"{DBGPFX}get_mkv_header_duration: Failed to read remote file header")
-                return None
-            header_data = result.stdout
-        else:
-            # Local file: read directly
-            with open(filepath, 'rb') as f:
-                header_data = f.read(4096)
-
-        # Search for duration element in MKV header
-        # MKV duration is stored as a float64 in milliseconds
-        # The EBML ID for Duration is 0x4489 (2 bytes: 0x44, 0x89)
-        duration_id = b'\x44\x89'
-        pos = header_data.find(duration_id)
-
-        if pos == -1:
-            if DEEPDBG:
-                print(f"{DBGPFX}get_mkv_header_duration: Duration element not found in header")
-            return None
-
-        # Skip ID (2 bytes) and size byte(s)
-        # MKV uses variable-length encoding for element sizes
-        # For duration (8-byte float), size is usually 0x88 (meaning 8 bytes)
-        pos += 2  # Skip ID
-        size_byte = header_data[pos]
-        pos += 1  # Skip size byte
-
-        # If size indicates 8 bytes (0x88), read the float64 value
-        if size_byte == 0x88 and pos + 8 <= len(header_data):
-            # Read 8 bytes as big-endian float64
-            duration_ms = struct.unpack('>d', header_data[pos:pos+8])[0]
-            duration_min = duration_ms / 1000.0 / 60.0  # Convert ms to minutes
-            return duration_min
-        else:
-            if DEEPDBG:
-                print(f"{DBGPFX}get_mkv_header_duration: Unexpected size byte {hex(size_byte)}")
-            return None
-
-    except Exception as e:
-        if DEEPDBG:
-            print(f"{DBGPFX}get_mkv_header_duration: Exception reading MKV header: {e}")
-        return None
-
 def display_duplicate_details(nr, obj):
     """Display detailed information about a duplicate media file
 
@@ -3392,55 +3315,6 @@ def play_media_file(filepath, remote_host=None):
     print("ERROR: No suitable media player found!")
     print("Please install one of: mpv (brew install mpv), Plex app, or Infuse app")
     return False
-
-def trigger_library_scan(library_name, immediate=True):
-    """Trigger a Plex library scan and optionally wait for completion
-
-    Args:
-        library_name: Name of the library to scan
-        immediate: If True, wait for scan to complete; if False, just trigger the scan
-
-    Returns:
-        True if scan was triggered successfully, False otherwise
-    """
-    global OFFLINE
-
-    if OFFLINE:
-        return False
-
-    if not library_name or library_name not in PLEX_Library.OBJ_DICT:
-        return False
-
-    try:
-        import time
-        lib = PLEX_Library.OBJ_DICT[library_name]
-        print(f"  Scanning Plex library '{library_name}'...", end=' ', flush=True)
-        lib.update()
-
-        if immediate:
-            # Wait for scan to complete
-            max_wait = 60  # Maximum 60 seconds
-            waited = 0
-            while waited < max_wait:
-                lib.reload()  # Refresh library object
-                if not lib.refreshing:
-                    break
-                time.sleep(1)
-                waited += 1
-                if waited % 5 == 0:
-                    print(".", end='', flush=True)
-
-            if waited >= max_wait:
-                print(f" ⚠ (timeout after {max_wait}s, scan may still be running)")
-            else:
-                print(f" ✓ (completed in {waited}s)")
-        else:
-            print(" ✓ (triggered)")
-
-        return True
-    except Exception as e:
-        print(f"  ⚠ Warning: Could not scan library: {e}")
-        return False
 
 def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed_files):
     """Update cache after successful resolution action
@@ -5689,6 +5563,127 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
     print(summary)
 
 
+def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, operation_log, resolution_log_data):
+    """Unified handler for choices 5 and 6: trash one file's directory and move the other to its library.
+    Choice 5: trash [1], move [2] to library of [1].  Choice 6: trash [2], move [1] to library of [2]."""
+    # Determine which is trashed (src) and which is moved (dst)
+    if choice == '5':
+        trash_idx, keep_idx = 0, 1
+        src_file, dst_file = file1, file2
+    else:
+        trash_idx, keep_idx = 1, 0
+        src_file, dst_file = file2, file1
+
+    lib_trash = PLEX_Media.OBJ_BY_ID[keys[trash_idx]]['library'] if keys and len(keys) > trash_idx else None
+    lib_keep  = PLEX_Media.OBJ_BY_ID[keys[keep_idx]]['library'] if keys and len(keys) > keep_idx else None
+    movie_dir_trash = get_movie_dir_from_path(src_file, lib_trash) if lib_trash else src_file
+    movie_dir_keep  = get_movie_dir_from_path(dst_file, lib_keep) if lib_keep else dst_file
+    target_lib_dir  = get_library_dir_from_path(src_file, lib_trash) if lib_trash else os.path.dirname(src_file)
+
+    # Capture cache entries for undo
+    deleted_cache_entry = None
+    if keys and len(keys) > trash_idx and keys[trash_idx] in PLEX_Media.OBJ_BY_ID:
+        deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[trash_idx]])
+    kept_cache_entry_before = None
+    if keys and len(keys) > keep_idx and keys[keep_idx] in PLEX_Media.OBJ_BY_ID:
+        kept_cache_entry_before = dict(PLEX_Media.OBJ_BY_ID[keys[keep_idx]])
+
+    if operation_log:
+        operation_log["files"][f"file{trash_idx+1}"] = {
+            "path": src_file, "movie_directory": movie_dir_trash, "library": lib_trash,
+            "plex_id": PLEX_Media.OBJ_BY_ID[keys[trash_idx]].get('id') if keys else None,
+            "cache_entry": deleted_cache_entry
+        }
+        operation_log["files"][f"file{keep_idx+1}"] = {
+            "path": dst_file, "movie_directory": movie_dir_keep, "library": lib_keep,
+            "target_library_directory": target_lib_dir,
+            "plex_id": PLEX_Media.OBJ_BY_ID[keys[keep_idx]].get('id') if keys and len(keys) > keep_idx else None,
+            "cache_entry_before": kept_cache_entry_before
+        }
+
+    print(f"Trash movie [{trash_idx+1}] and move movie [{keep_idx+1}] to library of [{trash_idx+1}]: {os.path.basename(movie_dir_trash)} && mv {os.path.basename(movie_dir_keep)} \"{target_lib_dir}/\"")
+
+    # Merge metadata from trashed item to kept item
+    print(f"Merging metadata (watched status, labels, ratings) from [{trash_idx+1}] to [{keep_idx+1}]...")
+    metadata_result = merge_metadata_from_duplicates(keys[trash_idx], keys[keep_idx])
+    if operation_log:
+        operation_log["actions"].append({
+            "action": "merge_metadata",
+            "from": f"file{trash_idx+1}",
+            "from_plex_id": PLEX_Media.OBJ_BY_ID[keys[trash_idx]].get('id') if keys else None,
+            "to": f"file{keep_idx+1}",
+            "to_plex_id": PLEX_Media.OBJ_BY_ID[keys[keep_idx]].get('id') if keys and len(keys) > keep_idx else None,
+            "status": "success" if metadata_result.get('success') else "failed",
+            "metadata_changes": metadata_result.get('changes'),
+            "error": metadata_result.get('error')
+        })
+
+    # Extract [vu] markers from trashed directory/file
+    vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir_trash))
+    vu_marker_file = extract_vu_marker(os.path.basename(src_file))
+
+    success, trash_path = move_to_trash(movie_dir_trash, remote_host)
+    if not success:
+        print(f"✗ Failed to move movie directory #{trash_idx+1} to trash.")
+        if operation_log:
+            operation_log["actions"].append({"action": "trash", "target": f"movie_directory_{trash_idx+1}", "original_path": movie_dir_trash, "status": "failed", "error": "Could not trash directory"})
+            operation_log["result"] = "failed"
+            resolution_log_data["operations"].append(operation_log)
+        return False
+
+    print(f"✓ Movie directory [{trash_idx+1}] moved to trash successfully.")
+    if operation_log:
+        operation_log["actions"].append({"action": "trash", "target": f"movie_directory_{trash_idx+1}", "original_path": movie_dir_trash, "trash_path": trash_path, "deleted_cache_entry": deleted_cache_entry, "deleted_cache_key": keys[trash_idx] if keys else None, "status": "success"})
+
+    new_location = os.path.join(target_lib_dir, os.path.basename(movie_dir_keep))
+    if not move_file(movie_dir_keep, target_lib_dir, remote_host):
+        print(f"✗ Failed to move movie directory #{keep_idx+1}.")
+        if operation_log:
+            operation_log["actions"].append({"action": "move", "target": f"movie_directory_{keep_idx+1}", "original_path": movie_dir_keep, "destination": target_lib_dir, "status": "failed", "error": "Could not move to target library"})
+            operation_log["result"] = "failed"
+            resolution_log_data["operations"].append(operation_log)
+        return False
+
+    print(f"✓ Movie directory [{keep_idx+1}] moved to {target_lib_dir} successfully.")
+
+    # Transfer [vu] marker from trashed directory to kept directory
+    if vu_marker_dir:
+        dir_basename = os.path.basename(new_location)
+        new_dir_name = dir_basename.rstrip('/') + ' ' + vu_marker_dir
+        vu_success, renamed_dir = rename_file(new_location, new_dir_name, remote_host)
+        if vu_success:
+            print(f"✓ Directory [{keep_idx+1}] appended with \"{vu_marker_dir}\" marker and moved to {target_lib_dir}")
+            new_location = renamed_dir
+            dst_file = os.path.join(renamed_dir, os.path.basename(dst_file))
+            if operation_log:
+                operation_log["actions"].append({"action": "add_vu_marker", "target": f"movie_directory_{keep_idx+1}", "marker": vu_marker_dir, "old_path": new_location, "new_path": renamed_dir, "status": "success"})
+
+    # Transfer [vu] marker from trashed file to kept file
+    if vu_marker_file:
+        moved_dst = os.path.join(new_location, os.path.basename(dst_file))
+        vu_success, new_dst_path = add_vu_marker_to_file(moved_dst, vu_marker_file, remote_host)
+        if vu_success and new_dst_path != moved_dst:
+            print(f"✓ File [{keep_idx+1}] appended with \"{vu_marker_file}\" marker")
+            dst_file = new_dst_path
+            if operation_log:
+                operation_log["actions"].append({"action": "add_vu_marker", "target": f"file{keep_idx+1}", "marker": vu_marker_file, "old_path": moved_dst, "new_path": new_dst_path, "status": "success"})
+
+    if operation_log:
+        operation_log["actions"].append({"action": "move", "target": f"movie_directory_{keep_idx+1}", "original_path": movie_dir_keep, "new_path": new_location, "status": "success"})
+        operation_log["result"] = "success"
+
+    # Update file1/file2 for cache update (choice 5: file2 moved, choice 6: file1 moved)
+    if choice == '5':
+        file2 = dst_file
+    else:
+        file1 = dst_file
+    modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+
+    if operation_log and resolution_log_data is not None:
+        resolution_log_data["operations"].append(operation_log)
+    return True
+
+
 def execute_resolution_action(choice, file1, file2, remote_host, all_files=None, keys=None, resolution_log_data=None, operation_number=None, same_file=False, is_multi_version=False):
     """Execute the chosen resolution action for duplicate files
 
@@ -6201,317 +6196,8 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     resolution_log_data["operations"].append(operation_log)
                 return False
 
-    elif choice == '5':
-        # Get movie directories and library directory
-        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
-        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
-        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else file1
-        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else file2
-        lib_dir1 = get_library_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
-
-        # Capture cache entry before deletion (for undo)
-        deleted_cache_entry = None
-        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
-            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[0]])  # Make a copy
-
-        # Capture file2's cache entry before modification (for undo)
-        file2_cache_entry_before = None
-        if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID:
-            file2_cache_entry_before = dict(PLEX_Media.OBJ_BY_ID[keys[1]])  # Make a copy
-
-        if operation_log:
-            operation_log["files"]["file1"] = {
-                "path": file1,
-                "movie_directory": movie_dir1,
-                "library": lib1,
-                "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
-                "cache_entry": deleted_cache_entry
-            }
-            operation_log["files"]["file2"] = {
-                "path": file2,
-                "movie_directory": movie_dir2,
-                "library": lib2,
-                "target_library_directory": lib_dir1,
-                "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
-                "cache_entry_before": file2_cache_entry_before
-            }
-
-        print(f"Trash movie [1] and move movie [2] to library of [1]: {os.path.basename(movie_dir1)} && mv {os.path.basename(movie_dir2)} \"{lib_dir1}/\"")
-
-        # Merge metadata from [1] (being deleted) to [2] (being kept)
-        print("Merging metadata (watched status, labels, ratings) from [1] to [2]...")
-        metadata_result = merge_metadata_from_duplicates(keys[0], keys[1])
-        if operation_log:
-            operation_log["actions"].append({
-                "action": "merge_metadata",
-                "from": "file1",
-                "from_plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
-                "to": "file2",
-                "to_plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
-                "status": "success" if metadata_result.get('success') else "failed",
-                "metadata_changes": metadata_result.get('changes'),
-                "error": metadata_result.get('error')
-            })
-
-        # Check if [vu] marker exists on directory or file [1]
-        vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir1))
-        vu_marker_file = extract_vu_marker(os.path.basename(file1))
-
-        success1, trash_path1 = move_to_trash(movie_dir1, remote_host)
-        if success1:
-            print("✓ Movie directory [1] moved to trash successfully.")
-            if operation_log:
-                operation_log["actions"].append({
-                    "action": "trash",
-                    "target": "movie_directory_1",
-                    "original_path": movie_dir1,
-                    "trash_path": trash_path1,
-                    "deleted_cache_entry": deleted_cache_entry,
-                    "deleted_cache_key": keys[0] if keys and len(keys) > 0 else None,
-                    "status": "success"
-                })
-
-            new_location = os.path.join(lib_dir1, os.path.basename(movie_dir2))
-            if move_file(movie_dir2, lib_dir1, remote_host):
-                print(f"✓ Movie directory [2] moved to {lib_dir1} successfully.")
-
-                # Transfer [vu] marker from directory [1] to directory [2]
-                if vu_marker_dir:
-                    dir_basename = os.path.basename(new_location)
-                    new_dir_name = dir_basename.rstrip('/') + ' ' + vu_marker_dir
-
-                    vu_success, renamed_dir = rename_file(new_location, new_dir_name, remote_host)
-                    if vu_success:
-                        print(f"✓ Directory [2] appended with \"{vu_marker_dir}\" marker and moved to {lib_dir1}")
-                        new_location = renamed_dir
-                        # Update file2 path to reflect the renamed directory
-                        file2 = os.path.join(renamed_dir, os.path.basename(file2))
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "movie_directory_2",
-                                "marker": vu_marker_dir,
-                                "old_path": new_location,
-                                "new_path": renamed_dir,
-                                "status": "success"
-                            })
-
-                # Transfer [vu] marker from file [1] to file [2]
-                if vu_marker_file:
-                    moved_file2 = os.path.join(new_location, os.path.basename(file2))
-                    vu_success, new_file2_path = add_vu_marker_to_file(moved_file2, vu_marker_file, remote_host)
-                    if vu_success and new_file2_path != moved_file2:
-                        print(f"✓ File [2] appended with \"{vu_marker_file}\" marker")
-                        file2 = new_file2_path
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "file2",
-                                "marker": vu_marker_file,
-                                "old_path": moved_file2,
-                                "new_path": new_file2_path,
-                                "status": "success"
-                            })
-
-                if operation_log:
-                    operation_log["actions"].append({
-                        "action": "move",
-                        "target": "movie_directory_2",
-                        "original_path": movie_dir2,
-                        "new_path": new_location,
-                        "status": "success"
-                    })
-                    operation_log["result"] = "success"
-
-                # Update cache (library scans will be done at end when applying all operations)
-                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
-
-                if operation_log and resolution_log_data is not None:
-                    resolution_log_data["operations"].append(operation_log)
-                return True
-            else:
-                print("✗ Failed to move movie directory #2.")
-                if operation_log:
-                    operation_log["actions"].append({
-                        "action": "move",
-                        "target": "movie_directory_2",
-                        "original_path": movie_dir2,
-                        "destination": lib_dir1,
-                        "status": "failed",
-                        "error": "Could not move to target library"
-                    })
-                    operation_log["result"] = "failed"
-                    resolution_log_data["operations"].append(operation_log)
-                return False
-        else:
-            print("✗ Failed to move movie directory #1 to trash.")
-            if operation_log:
-                operation_log["actions"].append({
-                    "action": "trash",
-                    "target": "movie_directory_1",
-                    "original_path": movie_dir1,
-                    "status": "failed",
-                    "error": "Could not trash directory"
-                })
-                operation_log["result"] = "failed"
-                resolution_log_data["operations"].append(operation_log)
-            return False
-
-    elif choice == '6':
-        # Get movie directories and library directory
-        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
-        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 else None
-        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else file1
-        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else file2
-        lib_dir2 = get_library_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
-
-        # Capture cache entry before deletion (for undo)
-        deleted_cache_entry = None
-        if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID:
-            deleted_cache_entry = dict(PLEX_Media.OBJ_BY_ID[keys[1]])  # Make a copy
-
-        # Capture file1's cache entry before modification (for undo)
-        file1_cache_entry_before = None
-        if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID:
-            file1_cache_entry_before = dict(PLEX_Media.OBJ_BY_ID[keys[0]])  # Make a copy
-
-        if operation_log:
-            operation_log["files"]["file1"] = {
-                "path": file1,
-                "movie_directory": movie_dir1,
-                "library": lib1,
-                "target_library_directory": lib_dir2,
-                "plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
-                "cache_entry_before": file1_cache_entry_before
-            }
-            operation_log["files"]["file2"] = {
-                "path": file2,
-                "movie_directory": movie_dir2,
-                "library": lib2,
-                "plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
-                "cache_entry": deleted_cache_entry
-            }
-
-        print(f"Trash movie [2] and move movie [1] to library of [2]: {os.path.basename(movie_dir2)} && mv {os.path.basename(movie_dir1)} \"{lib_dir2}/\"")
-
-        # Merge metadata from [2] (being deleted) to [1] (being kept)
-        print("Merging metadata (watched status, labels, ratings) from [2] to [1]...")
-        metadata_result = merge_metadata_from_duplicates(keys[1], keys[0])
-        if operation_log:
-            operation_log["actions"].append({
-                "action": "merge_metadata",
-                "from": "file2",
-                "from_plex_id": PLEX_Media.OBJ_BY_ID[keys[1]].get('id') if keys and len(keys) > 1 else None,
-                "to": "file1",
-                "to_plex_id": PLEX_Media.OBJ_BY_ID[keys[0]].get('id') if keys else None,
-                "status": "success" if metadata_result.get('success') else "failed",
-                "metadata_changes": metadata_result.get('changes'),
-                "error": metadata_result.get('error')
-            })
-
-        # Check if [vu] marker exists on directory or file [2]
-        vu_marker_dir = extract_vu_marker(os.path.basename(movie_dir2))
-        vu_marker_file = extract_vu_marker(os.path.basename(file2))
-
-        success2, trash_path2 = move_to_trash(movie_dir2, remote_host)
-        if success2:
-            print("✓ Movie directory [2] moved to trash successfully.")
-            if operation_log:
-                operation_log["actions"].append({
-                    "action": "trash",
-                    "target": "movie_directory_2",
-                    "original_path": movie_dir2,
-                    "trash_path": trash_path2,
-                    "deleted_cache_entry": deleted_cache_entry,
-                    "deleted_cache_key": keys[1] if keys and len(keys) > 1 else None,
-                    "status": "success"
-                })
-
-            new_location = os.path.join(lib_dir2, os.path.basename(movie_dir1))
-            if move_file(movie_dir1, lib_dir2, remote_host):
-                print(f"✓ Movie directory [1] moved to {lib_dir2} successfully.")
-
-                # Transfer [vu] marker from directory [2] to directory [1]
-                if vu_marker_dir:
-                    dir_basename = os.path.basename(new_location)
-                    new_dir_name = dir_basename.rstrip('/') + ' ' + vu_marker_dir
-
-                    vu_success, renamed_dir = rename_file(new_location, new_dir_name, remote_host)
-                    if vu_success:
-                        print(f"✓ Directory [1] appended with \"{vu_marker_dir}\" marker and moved to {lib_dir2}")
-                        new_location = renamed_dir
-                        # Update file1 path to reflect the renamed directory
-                        file1 = os.path.join(renamed_dir, os.path.basename(file1))
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "movie_directory_1",
-                                "marker": vu_marker_dir,
-                                "old_path": new_location,
-                                "new_path": renamed_dir,
-                                "status": "success"
-                            })
-
-                # Transfer [vu] marker from file [2] to file [1]
-                if vu_marker_file:
-                    moved_file1 = os.path.join(new_location, os.path.basename(file1))
-                    vu_success, new_file1_path = add_vu_marker_to_file(moved_file1, vu_marker_file, remote_host)
-                    if vu_success and new_file1_path != moved_file1:
-                        print(f"✓ File [1] appended with \"{vu_marker_file}\" marker")
-                        file1 = new_file1_path
-                        if operation_log:
-                            operation_log["actions"].append({
-                                "action": "add_vu_marker",
-                                "target": "file1",
-                                "marker": vu_marker_file,
-                                "old_path": moved_file1,
-                                "new_path": new_file1_path,
-                                "status": "success"
-                            })
-
-                if operation_log:
-                    operation_log["actions"].append({
-                        "action": "move",
-                        "target": "movie_directory_1",
-                        "original_path": movie_dir1,
-                        "new_path": new_location,
-                        "status": "success"
-                    })
-                    operation_log["result"] = "success"
-
-                # Update cache (library scans will be done at end when applying all operations)
-                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
-
-                if operation_log and resolution_log_data is not None:
-                    resolution_log_data["operations"].append(operation_log)
-                return True
-            else:
-                print("✗ Failed to move movie directory #1.")
-                if operation_log:
-                    operation_log["actions"].append({
-                        "action": "move",
-                        "target": "movie_directory_1",
-                        "original_path": movie_dir1,
-                        "destination": lib_dir2,
-                        "status": "failed",
-                        "error": "Could not move to target library"
-                    })
-                    operation_log["result"] = "failed"
-                    resolution_log_data["operations"].append(operation_log)
-                return False
-        else:
-            print("✗ Failed to move movie directory #2 to trash.")
-            if operation_log:
-                operation_log["actions"].append({
-                    "action": "trash",
-                    "target": "movie_directory_2",
-                    "original_path": movie_dir2,
-                    "status": "failed",
-                    "error": "Could not trash directory"
-                })
-                operation_log["result"] = "failed"
-                resolution_log_data["operations"].append(operation_log)
-            return False
+    elif choice in ('5', '6'):
+        return _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, operation_log, resolution_log_data)
 
     elif choice == '7':
         # Rename all files using directory name
@@ -8854,6 +8540,92 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         return True  # Library was updated
 
     @staticmethod
+    def _finalize_and_save_cache(cache_needs_save, current_library_stats, old_read_only=None):
+        """Save cache to disk, restore READ_ONLY_MODE, and print summary."""
+        global CACHE, READ_ONLY_MODE
+
+        # PERFORMANCE OPTIMIZATION: Save cache only ONCE at the end instead of after each library
+        # NOTE: We always save cache (not just when cache_needs_save) to ensure library_stats
+        # and itemsCount_by_item_id are persisted even when no libraries were updated
+        if VRB and cache_needs_save: print(f"{VRBPFX}Saving updated cache to disk (libraries changed)...")
+        elif VRB: print(f"{VRBPFX}Saving cache to disk (updating library_stats)...")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Saving cache to disk...")
+
+        # Rebuild library_object_counts after all updates are complete
+        updated_library_object_counts = {}
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            lib = obj['library']
+            obj_type = obj['type']
+            if lib not in updated_library_object_counts:
+                updated_library_object_counts[lib] = {}
+            if obj_type == 'Show':
+                updated_library_object_counts[lib]['shows'] = updated_library_object_counts[lib].get('shows', 0) + 1
+            elif obj_type == 'Season':
+                updated_library_object_counts[lib]['seasons'] = updated_library_object_counts[lib].get('seasons', 0) + 1
+            elif obj_type == 'Episode':
+                updated_library_object_counts[lib]['episodes'] = updated_library_object_counts[lib].get('episodes', 0) + 1
+            elif obj_type == 'Movie':
+                updated_library_object_counts[lib]['movies'] = updated_library_object_counts[lib].get('movies', 0) + 1
+
+        if DBG:
+            print(f"{DBGPFX}Saving cache with updated library_object_counts:")
+            for lib, counts in updated_library_object_counts.items():
+                lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib, 'Unknown')
+                count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
+                print(f"{DBGPFX}  Library '{lib}' ({lib_type}): {count_str}")
+
+        # Update progress for cache rebuild
+        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
+
+        # Save cache to disk
+        if DBG:
+            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
+        update_and_save_cache(build_media_cache_dict(
+            library_stats=current_library_stats,
+            library_object_counts=updated_library_object_counts
+        ))
+        if DBG:
+            print(f"{DBGPFX}AFTER save: CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items")
+
+        # Restore READ_ONLY_MODE if it was temporarily disabled for user-approved incremental update
+        if old_read_only is not None:
+            READ_ONLY_MODE = old_read_only
+
+        # Store current_library_stats for SUMMARY display
+        PLEX_Library.current_library_stats = CACHE.get('library_stats', current_library_stats)
+
+        # Count objects by type
+        total_count = len(PLEX_Media.OBJ_BY_ID)
+        movie_count = len(PLEX_Media.OBJ_BY_MOVIE)
+        show_count = len(PLEX_Media.OBJ_BY_SHOW)
+        season_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Season')
+        episode_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Episode')
+
+        def format_count(n):
+            return f"{n:,}".replace(',', ' ')
+
+        max_width = max(len(format_count(total_count)),
+                       len(format_count(movie_count)),
+                       len(format_count(show_count)),
+                       len(format_count(season_count)),
+                       len(format_count(episode_count)))
+
+        if VRB:
+            print(f"{PRINTPFX}      {format_count(movie_count):>{max_width}} Plex movie objects")
+            print(f"{PRINTPFX}      {format_count(show_count):>{max_width}} Plex show/series objects")
+            print(f"{PRINTPFX}      {format_count(season_count):>{max_width}} Plex season objects")
+            print(f"{PRINTPFX}      {format_count(episode_count):>{max_width}} Plex episode objects")
+            print(f"{PRINTPFX}{'-' * 60}")
+            print(f"{PRINTPFX}TOTAL {format_count(total_count):>{max_width}} Plex media objects")
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_MOVIE, var_name="PLEX_Media.OBJ_BY_MOVIE", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW, var_name="PLEX_Media.OBJ_BY_SHOW", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW_EPISODES, var_name="PLEX_Media.OBJ_BY_SHOW_EPISODES", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+
+    @staticmethod
     def update_cache():
         """
         Update PLEX_Library cache objects.
@@ -9593,98 +9365,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if not FORCE_CACHE_UPDATE and not cache_needs_save:
                 if VRB: print("Cache still up-to-date")
 
-        # PERFORMANCE OPTIMIZATION: Save cache only ONCE at the end instead of after each library
-        # This dramatically reduces I/O for multi-library setups (5-10x faster)
-        # NOTE: We always save cache (not just when cache_needs_save) to ensure library_stats
-        # and itemsCount_by_item_id are persisted even when no libraries were updated
-        if VRB and cache_needs_save: print(f"{VRBPFX}Saving updated cache to disk (libraries changed)...")
-        elif VRB: print(f"{VRBPFX}Saving cache to disk (updating library_stats)...")
-
-        # Update progress for cache rebuild
-        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
-            PLEX_Media.cache_rebuild_lock.write_progress("Saving cache to disk...")
-
-        # Rebuild library_object_counts after all updates are complete
-        # Store detailed counts: {'shows': N, 'seasons': M, 'episodes': K} for show libraries
-        # and {'movies': N} for movie libraries
-        updated_library_object_counts = {}
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            lib = obj['library']
-            obj_type = obj['type']
-
-            # Initialize library entry if needed
-            if lib not in updated_library_object_counts:
-                updated_library_object_counts[lib] = {}
-
-            # Count by type
-            if obj_type == 'Show':
-                updated_library_object_counts[lib]['shows'] = updated_library_object_counts[lib].get('shows', 0) + 1
-            elif obj_type == 'Season':
-                updated_library_object_counts[lib]['seasons'] = updated_library_object_counts[lib].get('seasons', 0) + 1
-            elif obj_type == 'Episode':
-                updated_library_object_counts[lib]['episodes'] = updated_library_object_counts[lib].get('episodes', 0) + 1
-            elif obj_type == 'Movie':
-                updated_library_object_counts[lib]['movies'] = updated_library_object_counts[lib].get('movies', 0) + 1
-
-        if DBG:
-            print(f"{DBGPFX}Saving cache with updated library_object_counts:")
-            for lib, counts in updated_library_object_counts.items():
-                lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib, 'Unknown')
-                count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
-                print(f"{DBGPFX}  Library '{lib}' ({lib_type}): {count_str}")
-
-        # Update progress for cache rebuild
-        if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
-            PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
-
-        # Save cache to disk (timestamps will be updated to current time inside update_and_save_cache())
-        if DBG:
-            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
-        update_and_save_cache(build_media_cache_dict(
-            library_stats=current_library_stats,
-            library_object_counts=updated_library_object_counts
-        ))
-        if DBG:
-            print(f"{DBGPFX}AFTER save: CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items")
-
-        # Restore READ_ONLY_MODE if it was temporarily disabled for user-approved incremental update
-        if 'old_read_only' in locals():
-            READ_ONLY_MODE = old_read_only
-
-        # Store current_library_stats (now with updated timestamps) for SUMMARY display
-        # The timestamps in CACHE['library_stats'] were just updated to current time
-        PLEX_Library.current_library_stats = CACHE.get('library_stats', current_library_stats)
-
-        # Count objects by type
-        total_count = len(PLEX_Media.OBJ_BY_ID)
-        movie_count = len(PLEX_Media.OBJ_BY_MOVIE)
-        show_count = len(PLEX_Media.OBJ_BY_SHOW)
-        season_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Season')
-        episode_count = sum(1 for obj in PLEX_Media.OBJ_BY_ID.values() if obj['type'] == 'Episode')
-
-        # Format numbers with thousand separator (non-breaking space)
-        def format_count(n):
-            return f"{n:,}".replace(',', ' ')
-
-        # Calculate max width for alignment
-        max_width = max(len(format_count(total_count)),
-                       len(format_count(movie_count)),
-                       len(format_count(show_count)),
-                       len(format_count(season_count)),
-                       len(format_count(episode_count)))
-
-        # Only print media object counts in verbose mode
-        if VRB:
-            print(f"{PRINTPFX}      {format_count(movie_count):>{max_width}} Plex movie objects")
-            print(f"{PRINTPFX}      {format_count(show_count):>{max_width}} Plex show/series objects")
-            print(f"{PRINTPFX}      {format_count(season_count):>{max_width}} Plex season objects")
-            print(f"{PRINTPFX}      {format_count(episode_count):>{max_width}} Plex episode objects")
-            print(f"{PRINTPFX}{'-' * 60}")
-            print(f"{PRINTPFX}TOTAL {format_count(total_count):>{max_width}} Plex media objects")
-        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_MOVIE, var_name="PLEX_Media.OBJ_BY_MOVIE", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
-        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW, var_name="PLEX_Media.OBJ_BY_SHOW", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
-        # OBJ_BY_SHOW contains the SEASONS :)
-        if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW_EPISODES, var_name="PLEX_Media.OBJ_BY_SHOW_EPISODES", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
+        PLEX_Library._finalize_and_save_cache(cache_needs_save, current_library_stats,
+                                                old_read_only=locals().get('old_read_only'))
 
 
     @staticmethod
@@ -10702,8 +10384,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if obj_args.get_view_offset:    PLEX_Media.get_view_offset(obj)
         if obj_args.get_user_rating:    PLEX_Media.get_user_rating(obj)
         if obj_args.clear_user_rating:  PLEX_Media.clear_user_rating(obj)
-        if obj_args.set_unwatched:      PLEX_Media.set_unwatched_status(obj)
-        if obj_args.set_watched:        PLEX_Media.set_watched_status(obj, obj_args.set_watched)
+        if obj_args.set_unwatched:      PLEX_Media.set_unwatched(obj)
+        if obj_args.set_watched:        PLEX_Media.set_watched(obj)
         if obj_args.set_view_offset:    PLEX_Media.set_view_offset(obj, int(obj_args.set_view_offset))
         if obj_args.set_user_rating:    PLEX_Media.set_user_rating(obj, float(obj_args.set_user_rating))
 
@@ -10711,11 +10393,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False):
-        global FORMAT
-        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language} )")
-
-        # Normalize audio filter to ISO 639-1 code
+    def _normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language):
         if audio_filter:
             lang_map = {
                 'en': 'en', 'english': 'en', 'eng': 'en',
@@ -10723,30 +10401,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'
             }
             audio_filter = lang_map.get(audio_filter.lower(), audio_filter.lower())
-
-        # Normalize media type
         if media_type is not None:
-            # Capitalize first letter for case-insensitive matching
             media_type = media_type.capitalize()
-            # Map user-friendly names to Plex types
             if media_type == "Series":
-                media_type = "Show"  # "Show" = official PLEX type for a TV series
-
-        # Validate media type
+                media_type = "Show"
         if media_type is not None and media_type not in ["Show", "Movie"]:
             err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
-
-        # Validate library_name
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
-
-        # Make --list without library a synonym for --list-libraries (unless filtering is requested)
         if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language:
             print("\nAvailable Libraries:")
             PLEX_Library.print()
-            return
-
-        # These filters require a library name
+            return audio_filter, media_type, False  # False = should not continue
         if library_name is None:
             if watched_only:
                 err(1069, "--watched requires a library name.\nExample: my-plex ,unsorted --watched")
@@ -10754,65 +10420,320 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 err(1070, "--unwatched requires a library name.\nExample: my-plex ,unsorted --unwatched")
             if audio_filter:
                 err(1071, "--audio/--en/--de/--fr requires a library name.\nExample: my-plex ,unsorted --en")
+        return audio_filter, media_type, True  # True = continue
 
-        # Print appropriate header
+    @staticmethod
+    def _print_list_header(library_name, media_type, broken_only, duplicates_only, watched_only, unwatched_only, audio_filter, no_audio_language):
+        def _build_filters():
+            filters = []
+            if media_type:      filters.append(media_type)
+            if watched_only:    filters.append("watched")
+            elif unwatched_only: filters.append("unwatched")
+            if audio_filter:    filters.append(f"audio: {audio_filter}")
+            if no_audio_language: filters.append("no audio language")
+            return filters
+
         if library_name is None:
             if broken_only:
                 print(f"\nSearching for potentially truncated/broken files in all libraries:")
             elif duplicates_only:
-                if media_type is None:
-                    print(f"\nSearching for duplicates in all libraries:")
-                else:
-                    print(f"\nMedia of type '{media_type}' (duplicates only):")
+                print(f"\nSearching for duplicates in all libraries:" if media_type is None else f"\nMedia of type '{media_type}' (duplicates only):")
             else:
-                # Build header with optional filters
-                filters = []
-                if media_type:
-                    filters.append(media_type)
-                if watched_only:
-                    filters.append("watched")
-                elif unwatched_only:
-                    filters.append("unwatched")
-                if audio_filter:
-                    filters.append(f"audio: {audio_filter}")
-                if no_audio_language:
-                    filters.append("no audio language")
-
+                filters = _build_filters()
                 filter_str = ", ".join(filters) if filters else "all"
-                if not filters:
-                    print(f"\nAll media:")
-                else:
-                    print(f"\nAll media ({filter_str}):")
+                print(f"\nAll media:" if not filters else f"\nAll media ({filter_str}):")
         else:
             if broken_only:
-                if media_type is None:
-                    print(f"\nSearching for potentially truncated/broken files in library '{library_name}':")
-                else:
-                    print(f"\nSearching for potentially truncated/broken files of type '{media_type}' in library '{library_name}':")
+                lib_suffix = f" in library '{library_name}'"
+                type_prefix = f" of type '{media_type}'" if media_type else ""
+                print(f"\nSearching for potentially truncated/broken files{type_prefix}{lib_suffix}:")
             elif duplicates_only:
-                if media_type is None:
-                    print(f"\nSearching for duplicates in library '{library_name}':")
-                else:
-                    print(f"\nSearching for duplicates of type '{media_type}' in library '{library_name}':")
+                lib_suffix = f" in library '{library_name}'"
+                type_prefix = f" of type '{media_type}'" if media_type else ""
+                print(f"\nSearching for duplicates{type_prefix}{lib_suffix}:")
             else:
-                # Build header with optional filters
-                filters = []
-                if media_type:
-                    filters.append(media_type)
-                if watched_only:
-                    filters.append("watched")
-                elif unwatched_only:
-                    filters.append("unwatched")
-                if audio_filter:
-                    filters.append(f"audio: {audio_filter}")
-                if no_audio_language:
-                    filters.append("no audio language")
-
+                filters = _build_filters()
                 filter_str = ", ".join(filters) if filters else "all"
-                if media_type is None and not watched_only and not unwatched_only and not audio_filter and not no_audio_language:
+                if not filters:
                     if VRB: print(f"\nMedia in '{library_name}':")
                 else:
                     if VRB: print(f"\nMedia in '{library_name}' ({filter_str}):")
+
+    @staticmethod
+    def _list_broken_files(obj_keys, library_name):
+        broken_files = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            if obj.get('type') not in ['Episode', 'Movie']:
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            plex_duration = obj.get('duration') or 0
+            files_dict = obj.get('files', {})
+            for file_info in files_dict.values():
+                file_metadata = file_info.get('file_metadata')
+                is_broken = False
+                diff_pct = None
+                severity = None
+                if file_metadata:
+                    if file_metadata.get('broken'):
+                        is_broken = True
+                        reason = file_metadata.get('reason', '')
+                        severity = 'NOT FOUND' if reason == 'file_not_found' else 'PROBE ERR'
+                    elif plex_duration > 0:
+                        container_duration = file_metadata.get('container_duration')
+                        if container_duration:
+                            diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+                            if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                                is_broken = True
+                                if diff_pct < -10:      severity = 'severe'
+                                elif diff_pct < -5:     severity = 'moderate'
+                                elif diff_pct < -1:     severity = 'mild'
+                                else:                   severity = 'borderline'
+                if not is_broken and plex_duration > 60000:
+                    filesize = file_info.get('filesize', 0)
+                    if filesize:
+                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbps < 10:
+                            is_broken = True
+                            severity = 'severe'
+                if is_broken:
+                    filepath = file_info.get('filepath', '')
+                    broken_files.append((key, diff_pct, severity, filepath))
+
+        if not broken_files:
+            print(f"No broken/truncated files{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
+            return
+
+        severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
+        broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
+
+        print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
+        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
+        print("-" * 150)
+        for key, diff_pct, severity, filepath in broken_files:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            library = obj.get('library', 'Unknown')[:15]
+            plex_duration_raw = obj.get('duration') or 0
+            plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
+            severity_str = severity.upper() if severity else 'BROKEN'
+            diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
+            dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
+            plex_id = obj.get('id', 'N/A')
+            plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
+            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
+        print(f"\nTotal: {len(broken_files)} broken/truncated files found")
+        print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+
+    @staticmethod
+    def _find_duplicates(obj_keys, library_name):
+        key_to_group = {}
+        items_with_duplicates = {}
+        for okey in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID[okey]
+            dup_keys = generate_duplicate_keys(obj)
+            if not dup_keys:
+                continue
+            existing_group = None
+            for dk in dup_keys:
+                if dk in key_to_group:
+                    existing_group = key_to_group[dk]
+                    break
+            if existing_group:
+                items_with_duplicates[existing_group].append(okey)
+                for dk in dup_keys:
+                    key_to_group[dk] = existing_group
+            else:
+                canonical = dup_keys[0]
+                items_with_duplicates[canonical] = [okey]
+                for dk in dup_keys:
+                    key_to_group[dk] = canonical
+
+        multi_version_keys = set()
+        true_multiversion_keys = set()
+        for key in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            files_dict = obj.get('files', {})
+            if len(files_dict) > 1:
+                classification = classify_multi_version(obj)
+                if classification == 'true_multiversion':
+                    true_multiversion_keys.add(key)
+                    continue
+                multi_version_keys.add(key)
+                duplicate_key = generate_duplicate_key(obj)
+                if duplicate_key and duplicate_key not in items_with_duplicates:
+                    items_with_duplicates[duplicate_key] = [key]
+
+        if library_name is not None:
+            filtered_duplicates = {}
+            for dup_key, keys in items_with_duplicates.items():
+                if len(keys) > 1:
+                    all_in_library = all(PLEX_Media.OBJ_BY_ID[k].get('library') == library_name for k in keys)
+                    if all_in_library:
+                        filtered_duplicates[dup_key] = keys
+                elif len(keys) == 1 and keys[0] in multi_version_keys:
+                    if PLEX_Media.OBJ_BY_ID[keys[0]].get('library') == library_name:
+                        filtered_duplicates[dup_key] = keys
+            items_with_duplicates = filtered_duplicates
+        else:
+            items_with_duplicates = {
+                dup_key: keys for dup_key, keys in items_with_duplicates.items()
+                if len(keys) > 1 or (len(keys) == 1 and keys[0] in multi_version_keys)
+            }
+
+        ignored_count = 0
+        if DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
+            filtered = {}
+            for dup_key, keys in items_with_duplicates.items():
+                if len(keys) <= 1:
+                    filtered[dup_key] = keys
+                    continue
+                libs = set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)
+                should_ignore = False
+                for ignore_group in DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
+                    if libs.issubset(set(ignore_group)):
+                        should_ignore = True
+                        break
+                if should_ignore:
+                    ignored_count += 1
+                else:
+                    filtered[dup_key] = keys
+            items_with_duplicates = filtered
+
+        return items_with_duplicates, multi_version_keys, true_multiversion_keys, ignored_count
+
+    @staticmethod
+    def _print_duplicate_list(sorted_duplicates, multi_version_keys, true_multiversion_keys, ignored_count):
+        print(f"\n{'PLEX-ID':<10} | {'ORIGINAL TITLE':<60} |{'LANG':^4}| {'NR':<3} | {'FILESIZE':<10} | {'CODEC':<10} | {'RESOLUTION':<12} | {'FILETYPE':<10} | FILEPATH")
+        print("-" * 220)
+        for dup_key, keys in sorted_duplicates:
+            nr = 0
+            group_titles = set(PLEX_Media.OBJ_BY_ID[k].get('title', '') for k in keys)
+            if len(group_titles) > 1:
+                ot = None
+                for k in keys:
+                    ot = PLEX_Media.OBJ_BY_ID[k].get('originalTitle')
+                    if ot: break
+                if ot:
+                    libs = ', '.join(sorted(set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)))
+                    print(f"{'':10} | >>> originalTitle: {ot:<38} |{'':4}| {'':3} | {'':10} | {'':10} | {'':12} | {'':10} | libraries: {libs}")
+            for key in keys:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                files_dict = obj.get('files', {})
+                if len(files_dict) > 1 and key in multi_version_keys:
+                    sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath') if isinstance(x[1], dict) else x[1])
+                    for version_str, file_info in sorted_files:
+                        nr += 1
+                        what = get_media_description_original(obj)
+                        lang = get_media_language(obj)
+                        plex_id = obj.get('id')
+                        if plex_id is None:
+                            err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
+                        if isinstance(file_info, str):
+                            filepath = file_info
+                            size_bytes = None
+                        elif isinstance(file_info, dict):
+                            filepath = file_info.get('filepath', 'N/A')
+                            size_bytes = file_info.get('filesize', None)
+                        else:
+                            filepath = 'N/A'
+                            size_bytes = None
+                            if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}")
+                        resolution = 'N/A'
+                        codec = 'N/A'
+                        if version_str:
+                            import re
+                            res_match = re.search(r'(\d+x\d+)', version_str)
+                            if res_match: resolution = res_match.group(1)
+                            codec_match = re.search(r'\((\w+)', version_str)
+                            if codec_match: codec = codec_match.group(1)
+                        filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
+                        filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
+                        if len(what) > 60: what = what[:57] + "..."
+                        print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
+                else:
+                    nr += 1
+                    what = get_media_description_original(obj)
+                    lang = get_media_language(obj)
+                    plex_id = obj.get('id')
+                    if plex_id is None:
+                        err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
+                    filepath = obj.get('file') or 'N/A'
+                    codec = obj.get('video_codec') or 'N/A'
+                    resolution = obj.get('resolution_full') or 'N/A'
+                    size_bytes = obj.get('filesize', None)
+                    filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
+                    filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
+                    if len(what) > 60: what = what[:57] + "..."
+                    print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
+        if true_multiversion_keys or ignored_count:
+            print()
+        if true_multiversion_keys:
+            print(f"({len(true_multiversion_keys)} true multi-version item(s) excluded — genuinely different content, not duplicates)")
+        if ignored_count:
+            print(f"({ignored_count} cross-library duplicate(s) excluded — matching DUPLICATES_IGNORE_LIBRARY_COMBINATIONS)")
+
+    @staticmethod
+    def _sort_duplicates(items_with_duplicates):
+        def sort_duplicate_keys(dup_item):
+            dup_key, keys = dup_item
+            sorted_keys = sorted(keys, key=lambda k: (
+                PLEX_Media.OBJ_BY_ID[k].get('library', ''),
+                PLEX_Media.OBJ_BY_ID[k].get('id', 0)
+            ))
+            return (dup_key, sorted_keys)
+        return [sort_duplicate_keys(item) for item in sorted(items_with_duplicates.items())]
+
+    @staticmethod
+    def _filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language):
+        filtered_keys = []
+        for key in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID[key]
+            obj_type = obj.get('type')
+            if obj_type in ('Show', 'Season'):
+                continue
+            if watched_only or unwatched_only:
+                view_count = obj.get('viewCount', 0)
+                if watched_only and view_count == 0:
+                    continue
+                if unwatched_only and view_count > 0:
+                    continue
+            if audio_filter:
+                audio_languages = obj.get('audio_languages', [])
+                if not audio_languages or audio_filter not in audio_languages:
+                    continue
+            if no_audio_language:
+                audio_languages = obj.get('audio_languages', [])
+                if audio_languages:
+                    continue
+            filtered_keys.append(key)
+
+        if not filtered_keys:
+            filter_parts = []
+            if watched_only:        filter_parts.append("watched")
+            elif unwatched_only:    filter_parts.append("unwatched")
+            if audio_filter:        filter_parts.append(f"{audio_filter} audio")
+            if no_audio_language:   filter_parts.append("no-audio-language")
+            filter_desc = " ".join(filter_parts)
+            scope = f" in library '{library_name}'" if library_name else ""
+            print(f"No {filter_desc} items found{scope}.")
+            return None
+        return filtered_keys
+
+    @staticmethod
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False):
+        global FORMAT
+        if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language} )")
+
+        audio_filter, media_type, should_continue = PLEX_Media._normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language)
+        if not should_continue:
+            return
+
+        PLEX_Media._print_list_header(library_name, media_type, broken_only, duplicates_only, watched_only, unwatched_only, audio_filter, no_audio_language)
 
         # Collect keys
         # When checking duplicates or broken files, always collect from ALL libraries so we can filter properly
@@ -10825,339 +10746,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Filter for broken files if requested
         if broken_only:
-            broken_files = []
-            seen_keys = set()
-            for key in obj_keys:
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                obj = PLEX_Media.OBJ_BY_ID[key]
-
-                # Only check Episode and Movie types
-                if obj.get('type') not in ['Episode', 'Movie']:
-                    continue
-
-                # Filter by library if specified
-                if library_name and obj.get('library') != library_name:
-                    continue
-
-                plex_duration = obj.get('duration') or 0
-
-                files_dict = obj.get('files', {})
-                for file_info in files_dict.values():
-                    file_metadata = file_info.get('file_metadata')
-
-                    # Include files marked as broken OR potentially truncated
-                    is_broken = False
-                    diff_pct = None
-                    severity = None
-
-                    if file_metadata:
-                        if file_metadata.get('broken'):
-                            is_broken = True
-                            reason = file_metadata.get('reason', '')
-                            severity = 'NOT FOUND' if reason == 'file_not_found' else 'PROBE ERR'
-                        elif plex_duration > 0:
-                            container_duration = file_metadata.get('container_duration')
-                            if container_duration:
-                                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
-
-                                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                                    is_broken = True
-
-                                    # Classify severity
-                                    if diff_pct < -10:
-                                        severity = 'severe'
-                                    elif diff_pct < -5:
-                                        severity = 'moderate'
-                                    elif diff_pct < -1:
-                                        severity = 'mild'
-                                    else:
-                                        severity = 'borderline'
-
-                    # Fallback: filesize vs duration heuristic (catches truncated files
-                    # even without ffmpeg metadata, e.g. 36MB for a 90min movie)
-                    if not is_broken and plex_duration > 60000:
-                        filesize = file_info.get('filesize', 0)
-                        if filesize:
-                            # Average bitrate in KB/s
-                            avg_kbps = filesize / 1024 / (plex_duration / 1000)
-                            # A real video file at any quality should be >10 KB/s
-                            if avg_kbps < 10:
-                                is_broken = True
-                                severity = 'severe'
-
-                    if is_broken:
-                        filepath = file_info.get('filepath', '')
-                        broken_files.append((key, diff_pct, severity, filepath))
-
-            if not broken_files:
-                if library_name:
-                    print(f"No broken/truncated files in '{library_name}' found.")
-                else:
-                    print(f"No broken/truncated files found.")
-                return
-
-            # Sort by severity (severe first), then by diff_pct (worst first)
-            severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
-            broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
-
-            # Print broken files with details
-            print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-            print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'LIBRARY':<15} | {'DURATION':<10} | FILEPATH")
-            print("-" * 150)
-
-            for key, diff_pct, severity, filepath in broken_files:
-                obj = PLEX_Media.OBJ_BY_ID[key]
-                library = obj.get('library', 'Unknown')[:15]
-                plex_duration_raw = obj.get('duration') or 0
-                plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
-
-                severity_str = severity.upper() if severity else 'BROKEN'
-                diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
-                dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
-                plex_id = obj.get('id', 'N/A')
-                plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
-
-                print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {library:<15} | {dur_str} | {filepath}")
-
-            print(f"\nTotal: {len(broken_files)} broken/truncated files found")
-            print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+            PLEX_Media._list_broken_files(obj_keys, library_name)
             return
 
         # Filter for duplicates if requested
         elif duplicates_only:
-            # Group keys by content identity to find duplicate items
-            # Uses generate_duplicate_keys() which returns multiple keys per item
-            # (title + originalTitle) to catch cross-language duplicates
-            key_to_group = {}  # maps duplicate_key -> canonical group key
-            items_with_duplicates = {}  # maps canonical group key -> [obj_keys]
+            items_with_duplicates, multi_version_keys, true_multiversion_keys, ignored_count = PLEX_Media._find_duplicates(obj_keys, library_name)
 
-            for okey in obj_keys:
-                obj = PLEX_Media.OBJ_BY_ID[okey]
-                dup_keys = generate_duplicate_keys(obj)
-                if not dup_keys:
-                    continue
-
-                # Find if any of this item's keys already belong to a group
-                existing_group = None
-                for dk in dup_keys:
-                    if dk in key_to_group:
-                        existing_group = key_to_group[dk]
-                        break
-
-                if existing_group:
-                    # Add to existing group and register all keys
-                    items_with_duplicates[existing_group].append(okey)
-                    for dk in dup_keys:
-                        key_to_group[dk] = existing_group
-                else:
-                    # Create new group using first key as canonical
-                    canonical = dup_keys[0]
-                    items_with_duplicates[canonical] = [okey]
-                    for dk in dup_keys:
-                        key_to_group[dk] = canonical
-
-            # Also include items with multiple versions (same Plex entry with 720p + 1080p etc.)
-            # These are stored in obj['files'] dict (version -> filepath) and represent files in the same directory
-            # BUT skip true multi-version items (genuinely different content like east/west coast, theatrical/director's cut)
-            multi_version_keys = set()
-            true_multiversion_keys = set()
-            for key in obj_keys:
-                obj = PLEX_Media.OBJ_BY_ID[key]
-                files_dict = obj.get('files', {})
-                if len(files_dict) > 1:
-                    classification = classify_multi_version(obj)
-                    if classification == 'true_multiversion':
-                        true_multiversion_keys.add(key)
-                        continue  # Skip — genuinely different content, not a duplicate
-                    multi_version_keys.add(key)
-                    # Add to duplicates dict if not already there
-                    duplicate_key = generate_duplicate_key(obj)
-                    if duplicate_key and duplicate_key not in items_with_duplicates:
-                        items_with_duplicates[duplicate_key] = [key]
-
-            # Filter based on mode:
-            # - Global mode (library_name is None): show cross-library duplicates (2+ copies anywhere)
-            # - Specific library mode: show only duplicates where ALL copies are in that library
-            if library_name is not None:
-                # Specific library mode: filter to keep only duplicates where ALL versions are in the same library
-                filtered_duplicates = {}
-                for dup_key, keys in items_with_duplicates.items():
-                    # Include if: multiple Plex entries OR single entry with multiple versions
-                    if len(keys) > 1:
-                        # Check if all copies are in the specified library
-                        all_in_library = all(PLEX_Media.OBJ_BY_ID[k].get('library') == library_name for k in keys)
-                        if all_in_library:
-                            filtered_duplicates[dup_key] = keys
-                    elif len(keys) == 1 and keys[0] in multi_version_keys:
-                        # Single entry with multiple versions
-                        if PLEX_Media.OBJ_BY_ID[keys[0]].get('library') == library_name:
-                            filtered_duplicates[dup_key] = keys
-                items_with_duplicates = filtered_duplicates
-            else:
-                # Global mode: show all duplicates (cross-library) OR multi-version items
-                items_with_duplicates = {
-                    dup_key: keys for dup_key, keys in items_with_duplicates.items()
-                    if len(keys) > 1 or (len(keys) == 1 and keys[0] in multi_version_keys)
-                }
-
-            # Filter out duplicates where ALL copies are within a single ignore group.
-            # Only if every library in the duplicate group is listed in the same
-            # ignore group is the duplicate excluded. Any copy outside the group
-            # makes it a real duplicate.
-            #
-            # Example: klaus.avi in movies.de, movies.fr, movies.en
-            #   ignore group = ['movies.de', 'movies.en', 'movies.fr']
-            #   → ALL libraries within group → NOT a duplicate
-            # Example: klaus.avi in movies.de, movies.fr, ,unsorted, movies.en
-            #   ignore group = ['movies.de', 'movies.en', 'movies.fr']
-            #   → ,unsorted is NOT in the group → IS a duplicate
-            ignored_count = 0
-            if DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
-                filtered = {}
-                for dup_key, keys in items_with_duplicates.items():
-                    if len(keys) <= 1:
-                        # Single-entry multi-version items are not cross-library — keep them
-                        filtered[dup_key] = keys
-                        continue
-                    # Get the set of libraries this duplicate group spans
-                    libs = set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)
-                    # Check if ALL libraries fall within a single ignore group
-                    should_ignore = False
-                    for ignore_group in DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:
-                        if libs.issubset(set(ignore_group)):
-                            should_ignore = True
-                            break
-                    if should_ignore:
-                        ignored_count += 1
-                    else:
-                        filtered[dup_key] = keys
-                items_with_duplicates = filtered
-
-            # Check if any duplicates were found
             if not items_with_duplicates:
-                if library_name:
-                    print(f"No duplicates in '{library_name}' found.")
-                else:
-                    print(f"No duplicates found.")
+                print(f"No duplicates{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
                 return
 
-            # Sort items_with_duplicates by key to keep same items grouped together
-            # Within each duplicate group, sort by library name (a-z)
-            def sort_duplicate_keys(dup_item):
-                dup_key, keys = dup_item
-                # For each duplicate group, sort the keys by library name alphabetically
-                # Secondary sort by Plex ID for stable, consistent ordering
-                sorted_keys = sorted(keys, key=lambda k: (
-                    PLEX_Media.OBJ_BY_ID[k].get('library', ''),
-                    PLEX_Media.OBJ_BY_ID[k].get('id', 0)
-                ))
-                return (dup_key, sorted_keys)
+            sorted_duplicates = PLEX_Media._sort_duplicates(items_with_duplicates)
 
-            sorted_duplicates = [sort_duplicate_keys(item) for item in sorted(items_with_duplicates.items())]
-
-            # Print duplicate list only if NOT in resolve mode
             if not resolve_mode:
-                # Print header for duplicate listing
-                print(f"\n{'PLEX-ID':<10} | {'ORIGINAL TITLE':<60} |{'LANG':^4}| {'NR':<3} | {'FILESIZE':<10} | {'CODEC':<10} | {'RESOLUTION':<12} | {'FILETYPE':<10} | FILEPATH")
-                print("-" * 220)
-
-                # Print each duplicate item with all its versions
-                for dup_key, keys in sorted_duplicates:
-                    nr = 0
-                    # Check if items in this group have different titles (matched via originalTitle)
-                    group_titles = set(PLEX_Media.OBJ_BY_ID[k].get('title', '') for k in keys)
-                    if len(group_titles) > 1:
-                        # Different titles — show originalTitle as group header
-                        ot = None
-                        for k in keys:
-                            ot = PLEX_Media.OBJ_BY_ID[k].get('originalTitle')
-                            if ot: break
-                        if ot:
-                            libs = ', '.join(sorted(set(PLEX_Media.OBJ_BY_ID[k].get('library', '') for k in keys)))
-                            print(f"{'':10} | >>> originalTitle: {ot:<38} |{'':4}| {'':3} | {'':10} | {'':10} | {'':12} | {'':10} | libraries: {libs}")
-
-                    for key in keys:
-                        obj = PLEX_Media.OBJ_BY_ID[key]
-                        files_dict = obj.get('files', {})
-
-                        # For multi-version items, show each version
-                        # For regular duplicates (multiple Plex entries), show the single file
-                        if len(files_dict) > 1 and key in multi_version_keys:
-                            # Multi-version item: display each version from obj['files'] dict
-                            # Sort alphabetically by filepath to match --duplicates --resolve ordering (line 8972)
-                            sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath') if isinstance(x[1], dict) else x[1])
-                            for version_str, file_info in sorted_files:
-                                nr += 1
-                                what = get_media_description_original(obj)
-                                lang = get_media_language(obj)
-                                plex_id = obj.get('id')
-                                if plex_id is None:
-                                    err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
-
-                                # BUG FIX: Handle both old and new cache formats
-                                # Old format: files_dict[version] = filepath_string
-                                # New format: files_dict[version] = {'filepath': ..., 'filesize': ...}
-                                if isinstance(file_info, str):
-                                    # Old cache format: file_info is just a filepath string
-                                    filepath = file_info
-                                    size_bytes = None
-                                elif isinstance(file_info, dict):
-                                    # New cache format: file_info is a dict with filepath and filesize
-                                    filepath = file_info.get('filepath', 'N/A')
-                                    size_bytes = file_info.get('filesize', None)
-                                else:
-                                    # Unexpected format
-                                    filepath = 'N/A'
-                                    size_bytes = None
-                                    if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}")
-
-                                # Parse version string for codec/resolution (format: "120.5min 1920x1080 (h264 aac)")
-                                resolution = 'N/A'
-                                codec = 'N/A'
-                                if version_str:
-                                    import re
-                                    res_match = re.search(r'(\d+x\d+)', version_str)
-                                    if res_match:
-                                        resolution = res_match.group(1)
-                                    codec_match = re.search(r'\((\w+)', version_str)
-                                    if codec_match:
-                                        codec = codec_match.group(1)
-
-                                filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
-                                filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
-
-                                if len(what) > 60:
-                                    what = what[:57] + "..."
-
-                                print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
-                        else:
-                            # Regular duplicate entry (different Plex entries)
-                            nr += 1
-                            what = get_media_description_original(obj)
-                            lang = get_media_language(obj)
-                            plex_id = obj.get('id')
-                            if plex_id is None:
-                                err(1061, f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
-                            filepath = obj.get('file') or 'N/A'
-                            codec = obj.get('video_codec') or 'N/A'
-                            resolution = obj.get('resolution_full') or 'N/A'
-                            size_bytes = obj.get('filesize', None)
-                            filesize = format_filesize(size_bytes, force_unit='MB') if size_bytes else 'N/A'
-                            filetype = os.path.splitext(filepath)[1][1:].upper() or 'N/A' if filepath != 'N/A' else 'N/A'
-
-                            if len(what) > 60:
-                                what = what[:57] + "..."
-
-                            print(f"{plex_id:<10} | {what:<60} |{lang:^4}| {nr:<3} | {filesize:<10} | {codec:<10} | {resolution:<12} | {filetype:<10} | {filepath}")
-
-                if true_multiversion_keys or ignored_count:
-                    print()
-                if true_multiversion_keys:
-                    print(f"({len(true_multiversion_keys)} true multi-version item(s) excluded — genuinely different content, not duplicates)")
-                if ignored_count:
-                    print(f"({ignored_count} cross-library duplicate(s) excluded — matching DUPLICATES_IGNORE_LIBRARY_COMBINATIONS)")
+                PLEX_Media._print_duplicate_list(sorted_duplicates, multi_version_keys, true_multiversion_keys, ignored_count)
 
             # Interactive resolution mode
             if resolve_mode:
@@ -11853,61 +11456,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         print(f"\n   No operations were performed.")
         else:
-            # Filter by watched/unwatched status and/or language if requested
             if watched_only or unwatched_only or audio_filter or no_audio_language:
-                filtered_keys = []
-                for key in obj_keys:
-                    obj = PLEX_Media.OBJ_BY_ID[key]
-
-                    # Skip non-media types (Show/Season have no files/audio)
-                    obj_type = obj.get('type')
-                    if obj_type in ('Show', 'Season'):
-                        continue
-
-                    # Check watched/unwatched filter
-                    if watched_only or unwatched_only:
-                        view_count = obj.get('viewCount', 0)
-                        if watched_only and view_count == 0:
-                            continue  # Skip unwatched items
-                        if unwatched_only and view_count > 0:
-                            continue  # Skip watched items
-
-                    # Check language filter
-                    if audio_filter:
-                        audio_languages = obj.get('audio_languages', [])
-                        if not audio_languages or audio_filter not in audio_languages:
-                            continue  # Skip items without matching language
-
-                    # Check no-audio-language filter
-                    if no_audio_language:
-                        audio_languages = obj.get('audio_languages', [])
-                        if audio_languages:
-                            continue  # Skip items that HAVE audio language
-
-                    filtered_keys.append(key)
-
-                if not filtered_keys:
-                    # Build descriptive message
-                    filter_parts = []
-                    if watched_only:
-                        filter_parts.append("watched")
-                    elif unwatched_only:
-                        filter_parts.append("unwatched")
-                    if audio_filter:
-                        filter_parts.append(f"{audio_filter} audio")
-                    if no_audio_language:
-                        filter_parts.append("no-audio-language")
-
-                    filter_desc = " ".join(filter_parts)
-                    if library_name:
-                        print(f"No {filter_desc} items found in library '{library_name}'.")
-                    else:
-                        print(f"No {filter_desc} items found.")
+                filtered = PLEX_Media._filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language)
+                if filtered is None:
                     return
+                obj_keys = filtered
 
-                obj_keys = filtered_keys
-
-            # Use compact format for --no-audio-language unless user specified a custom format
             saved_format = None
             if no_audio_language and FORMAT in ('tsv_labeled', 'tsv'):
                 saved_format = FORMAT
@@ -11918,7 +11472,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if saved_format is not None:
                 FORMAT = saved_format
 
-            # Interactive resolution mode for --no-audio-language
             if no_audio_language and resolve_mode:
                 resolve_no_audio_language(obj_keys, args)
 
@@ -12126,83 +11679,60 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### Metadata management ---------------------------------------------------
 
     @staticmethod
-    def get_watched_status(media_identifier, library_name=None):
-        # API required: reads live watch status from Plex server
+    def _media_api_action(media_identifier, action_fn, err_code, err_msg, library_name=None):
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
-                print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
-                print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
-                print(f"View count: {media.viewCount}")
+                action_fn(media)
         except Exception as e:
-            err(1024, f"Error fetching watched status: {e}")
+            err(err_code, f"{err_msg}: {e}")
+
+    @staticmethod
+    def get_watched_status(media_identifier, library_name=None):
+        def action(media):
+            print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
+            print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
+            print(f"View count: {media.viewCount}")
+        PLEX_Media._media_api_action(media_identifier, action, 1024, "Error fetching watched status", library_name)
 
     @staticmethod
     def set_watched(media_identifier, library_name=None):
-        # API required: modifies watch status via Plex HTTP API
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.markWatched()
-                print(f"Media '{media.title}' marked as watched.")
-        except Exception as e:
-            err(1025, f"Error setting watched status: {e}")
+        def action(media): media.markWatched(); print(f"Media '{media.title}' marked as watched.")
+        PLEX_Media._media_api_action(media_identifier, action, 1025, "Error setting watched status", library_name)
 
     @staticmethod
     def set_unwatched(media_identifier, library_name=None):
-        # API required: modifies watch status via Plex HTTP API
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.markUnwatched()
-                print(f"Media '{media.title}' marked as unwatched.")
-        except Exception as e:
-            err(1026, f"Error setting unwatched status: {e}")
+        def action(media): media.markUnwatched(); print(f"Media '{media.title}' marked as unwatched.")
+        PLEX_Media._media_api_action(media_identifier, action, 1026, "Error setting unwatched status", library_name)
 
     @staticmethod
     def set_watched_date(media_identifier, watched_date, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.markWatched()
-                media.lastViewedAt = watched_date
-                media.save()
-                print(f"Watched date set to {watched_date} for '{media.title}'.")
-        except Exception as e:
-            err(1027, f"Error setting watched date: {e}")
+        def action(media): media.markWatched(); media.lastViewedAt = watched_date; media.save(); print(f"Watched date set to {watched_date} for '{media.title}'.")
+        PLEX_Media._media_api_action(media_identifier, action, 1027, "Error setting watched date", library_name)
 
     @staticmethod
     def set_view_offset(media_identifier, offset, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.updateProgress(viewOffset=offset, viewCount=media.viewCount)
-                print(f"View offset set to {offset} milliseconds for '{media.title}'.")
-        except Exception as e:
-            err(1028, f"Error setting view offset: {e}")
+        def action(media): media.updateProgress(viewOffset=offset, viewCount=media.viewCount); print(f"View offset set to {offset} milliseconds for '{media.title}'.")
+        PLEX_Media._media_api_action(media_identifier, action, 1028, "Error setting view offset", library_name)
 
     @staticmethod
     def get_view_offset(media_identifier, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
-        except Exception as e:
-            err(1029, f"Error fetching view offset: {e}")
+        def action(media): print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
+        PLEX_Media._media_api_action(media_identifier, action, 1029, "Error fetching view offset", library_name)
+
+    @staticmethod
+    def get_user_rating(media_identifier, library_name=None):
+        def action(media): print(f"User rating of '{media.title}': {media.userRating if media.userRating is not None else 'N/A'}")
+        PLEX_Media._media_api_action(media_identifier, action, 1032, "Error fetching user rating", library_name)
 
     @staticmethod
     def set_user_rating(media_identifier, rating, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.userRating = rating
-                media.save()
-                print(f"User rating set to {rating} for '{media.title}'.")
-        except Exception as e:
-            err(1030, f"Error setting user rating: {e}")
+        def action(media): media.userRating = rating; media.save(); print(f"User rating set to {rating} for '{media.title}'.")
+        PLEX_Media._media_api_action(media_identifier, action, 1030, "Error setting user rating", library_name)
 
     @staticmethod
     def clear_user_rating(media_identifier, library_name=None):
-        try:
-            for media in resolve_plex_media_obj(media_identifier, library_name):
-                media.userRating = None
-                media.save()
-                print(f"User rating cleared for '{media.title}'.")
-        except Exception as e:
-            err(1031, f"Error clearing user rating: {e}")
+        def action(media): media.userRating = None; media.save(); print(f"User rating cleared for '{media.title}'.")
+        PLEX_Media._media_api_action(media_identifier, action, 1031, "Error clearing user rating", library_name)
 
     @staticmethod
     def update_cache():
@@ -12899,59 +12429,6 @@ def integrate_metadata_from_json(json_file):
 
     if filesize_mismatch_count > 0 or not_in_cache_count > 0:
         print(f"\n⚠ Some files were skipped. Consider running --update-cache to refresh the cache.")
-
-def generate_metadata_filelist(output_file):
-    """Generate file list for metadata collection on Plex server
-
-    Extracts all video file paths from cache and writes them to a text file.
-    This file can be transferred to the Plex server for metadata collection.
-
-    Args:
-        output_file: Path to output text file
-    """
-    load_cache()
-
-    if not PLEX_Media.OBJ_BY_ID:
-        print("✗ Error: No media found in cache. Run --update-cache first.")
-        sys.exit(1)
-
-    # Collect all unique file paths from all objects and all versions
-    all_filepaths = set()
-
-    for obj in PLEX_Media.OBJ_BY_ID.values():
-        # Get all file versions
-        files_dict = obj.get('files', {})
-        for file_info in files_dict.values():
-            filepath = file_info.get('filepath')
-            if filepath:
-                all_filepaths.add(filepath)
-
-    if not all_filepaths:
-        print("✗ Error: No video files found in cache.")
-        sys.exit(1)
-
-    # Sort for consistent output
-    sorted_filepaths = sorted(all_filepaths)
-
-    # Write to output file
-    try:
-        with open(output_file, 'w') as f:
-            for filepath in sorted_filepaths:
-                f.write(f"{filepath}\n")
-
-        print(f"✓ Generated metadata file list: {output_file}")
-        print(f"  Total files: {len(sorted_filepaths)}")
-        print(f"  File size: {os.path.getsize(output_file):,} bytes")
-        print(f"\nNext steps:")
-        print(f"  1. Deploy collector: ./test-playground/deploy_metadata_collector.sh")
-        print(f"  2. Copy file list to server: scp {output_file} home:/tmp/video_files.txt")
-        print(f"  3. Run on server: ssh home 'python3 /tmp/collect_video_metadata.py --file-list /tmp/video_files.txt --output /tmp/video_metadata.json'")
-        print(f"  4. Copy results back: scp home:/tmp/video_metadata.json /tmp/")
-        print(f"  5. Integrate into cache: my-plex --integrate-metadata /tmp/video_metadata.json")
-
-    except Exception as e:
-        print(f"✗ Error writing file list: {e}")
-        sys.exit(1)
 
 def list_all_labels():
     """List all labels and the count of media items for each"""
@@ -13742,6 +13219,263 @@ def _print_library_differences(lib_name, lib_type, diffs, show_details=True):
                 print(f"      [PLEX: ✗] [Cache: ✓] {title}")
             sys.stdout.flush()
 
+def _verify_data_integrity():
+    """Run data integrity checks on cache (no SSH/DB needed)"""
+    integrity_issues = []
+
+    print(f"\n{'='*76}")
+    print(f"DATA INTEGRITY CHECKS")
+    print(f"{'='*76}")
+
+    # Check 1: file_metadata coverage
+    total_files = 0
+    has_metadata = 0
+    missing_metadata = 0
+    broken_metadata = 0
+    file_not_found_metadata = 0
+    truncated_files = 0
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        obj_type = obj.get('type')
+        if obj_type not in ('Movie', 'Episode'):
+            continue
+        plex_duration = obj.get('duration', 0)
+        for _version, file_info in obj.get('files', {}).items():
+            if not isinstance(file_info, dict):
+                continue
+            total_files += 1
+            fm = file_info.get('file_metadata')
+            if fm is None:
+                missing_metadata += 1
+            elif fm.get('broken'):
+                if fm.get('reason') == 'file_not_found':
+                    file_not_found_metadata += 1
+                else:
+                    broken_metadata += 1
+            else:
+                has_metadata += 1
+                is_truncated = False
+                if plex_duration > 0:
+                    container_duration = fm.get('container_duration')
+                    if container_duration:
+                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                            is_truncated = True
+                if not is_truncated and plex_duration > 60000:
+                    filesize = file_info.get('filesize', 0)
+                    if filesize:
+                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbps < 10:
+                            is_truncated = True
+                if is_truncated:
+                    truncated_files += 1
+
+    if total_files > 0:
+        parts = []
+        if missing_metadata > 0:
+            parts.append(f"{missing_metadata} missing")
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} broken")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        needs_update = missing_metadata
+        if needs_update > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
+            print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
+            if needs_update > 0:
+                integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
+        else:
+            print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
+    else:
+        print(f"File metadata:     - no media files in cache")
+
+    # Check 2: OBJ_BY_FILEPATH cross-references
+    filepath_entries = len(PLEX_Media.OBJ_BY_FILEPATH)
+    filepath_dangling = 0
+    filepath_path_mismatch = 0
+    for fp, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
+        if not isinstance(keys, list):
+            keys = [keys]
+        for key in keys:
+            if key not in PLEX_Media.OBJ_BY_ID:
+                filepath_dangling += 1
+            else:
+                obj = PLEX_Media.OBJ_BY_ID[key]
+                if obj.get('type') in ('Show', 'Season'):
+                    continue
+                obj_filepaths = set()
+                for _, fi in obj.get('files', {}).items():
+                    if isinstance(fi, dict) and fi.get('filepath'):
+                        obj_filepaths.add(fi['filepath'])
+                if fp not in obj_filepaths and obj.get('file') != fp:
+                    filepath_path_mismatch += 1
+
+    # Check 3: OBJ_BY_MOVIE cross-references
+    movie_entries = len(PLEX_Media.OBJ_BY_MOVIE)
+    movie_dangling = 0
+    for movie_key in PLEX_Media.OBJ_BY_MOVIE:
+        if movie_key not in PLEX_Media.OBJ_BY_ID:
+            movie_dangling += 1
+
+    # Check 4: OBJ_BY_SHOW / OBJ_BY_SHOW_EPISODES cross-references
+    show_entries = len(PLEX_Media.OBJ_BY_SHOW)
+    show_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW.items():
+        if show_key not in PLEX_Media.OBJ_BY_ID:
+            show_dangling += 1
+        for _, season_key in seasons.items():
+            if season_key not in PLEX_Media.OBJ_BY_ID:
+                show_dangling += 1
+
+    episode_entries = 0
+    episode_dangling = 0
+    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+        for _, episodes in seasons.items():
+            for _, versions in episodes.items():
+                for _, ep_keys in versions.items():
+                    if isinstance(ep_keys, list):
+                        for ep_key in ep_keys:
+                            episode_entries += 1
+                            if ep_key not in PLEX_Media.OBJ_BY_ID:
+                                episode_dangling += 1
+
+    # Check OBJ_BY_LIBRARY for duplicate keys
+    library_total_keys = 0
+    library_duplicate_keys = 0
+    for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+        for _, keys in type_dict.items():
+            library_total_keys += len(keys)
+            library_duplicate_keys += len(keys) - len(set(keys))
+
+    # Print cross-reference results
+    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling + library_duplicate_keys
+    if xref_total_dangling == 0:
+        print(f"Cross-references:  ✓ OBJ_BY_FILEPATH ({filepath_entries}), OBJ_BY_MOVIE ({movie_entries}),")
+        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}),")
+        print(f"                     OBJ_BY_LIBRARY ({library_total_keys} keys) — all valid")
+    else:
+        parts = []
+        if filepath_dangling > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_dangling} dangling keys")
+        if filepath_path_mismatch > 0:
+            parts.append(f"OBJ_BY_FILEPATH: {filepath_path_mismatch} path mismatches")
+        if movie_dangling > 0:
+            parts.append(f"OBJ_BY_MOVIE: {movie_dangling} dangling keys")
+        if show_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW: {show_dangling} dangling keys")
+        if episode_dangling > 0:
+            parts.append(f"OBJ_BY_SHOW_EPISODES: {episode_dangling} dangling keys")
+        if library_duplicate_keys > 0:
+            parts.append(f"OBJ_BY_LIBRARY: {library_duplicate_keys} duplicate keys")
+        print(f"Cross-references:  ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
+
+    # Check 5: labels_index consistency
+    cached_labels_index = CACHE.get('labels_index', {})
+    rebuilt_labels_index = {}
+    for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
+        for label in (obj.get('labels', []) or []):
+            if label not in rebuilt_labels_index:
+                rebuilt_labels_index[label] = []
+            rebuilt_labels_index[label].append(obj_id)
+
+    labels_ok = True
+    labels_detail = []
+    missing_labels = set(rebuilt_labels_index.keys()) - set(cached_labels_index.keys())
+    extra_labels = set(cached_labels_index.keys()) - set(rebuilt_labels_index.keys())
+    if missing_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(missing_labels)} labels missing from index")
+    if extra_labels:
+        labels_ok = False
+        labels_detail.append(f"{len(extra_labels)} stale labels in index")
+    count_mismatches = 0
+    for label in set(rebuilt_labels_index.keys()) & set(cached_labels_index.keys()):
+        if sorted(rebuilt_labels_index[label]) != sorted(cached_labels_index[label]):
+            count_mismatches += 1
+    if count_mismatches > 0:
+        labels_ok = False
+        labels_detail.append(f"{count_mismatches} labels with wrong member lists")
+
+    if labels_ok:
+        print(f"Labels index:      ✓ {len(cached_labels_index)} labels, consistent")
+    else:
+        print(f"Labels index:      ⚠ {'; '.join(labels_detail)}")
+        integrity_issues.append(f"Labels index: {'; '.join(labels_detail)}")
+
+    # Check 6: Collection member validity
+    collection_count = len(PLEX_Media.OBJ_BY_COLLECTION)
+    orphaned_collections = 0
+    invalid_members = 0
+    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values() if obj.get('id') is not None}
+    for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
+        if col_key not in PLEX_Media.OBJ_BY_ID:
+            orphaned_collections += 1
+        for member_id in col_obj.get('member_ids', []):
+            if member_id not in all_obj_ids:
+                invalid_members += 1
+
+    if orphaned_collections == 0 and invalid_members == 0:
+        print(f"Collections:       ✓ {collection_count} collections, all members valid")
+    else:
+        parts = []
+        if orphaned_collections > 0:
+            parts.append(f"{orphaned_collections} orphaned")
+        if invalid_members > 0:
+            parts.append(f"{invalid_members} invalid member references")
+        print(f"Collections:       ⚠ {'; '.join(parts)}")
+        integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
+
+    # Check 7: library_stats itemsCount accuracy
+    cached_stats = CACHE.get('library_stats', {})
+    cached_item_counts = cached_stats.get('itemsCount', {})
+    if cached_item_counts:
+        primary_type_per_lib = {}
+        for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+            if 'Movie' in type_dict:
+                primary_type_per_lib[lib_name] = 'Movie'
+            elif 'Show' in type_dict:
+                primary_type_per_lib[lib_name] = 'Show'
+
+        actual_counts = {}
+        for obj in PLEX_Media.OBJ_BY_ID.values():
+            lib = obj.get('library')
+            if lib and obj.get('type') == primary_type_per_lib.get(lib):
+                actual_counts[lib] = actual_counts.get(lib, 0) + 1
+
+        stats_mismatches = []
+        for lib_name, cached_count in cached_item_counts.items():
+            actual = actual_counts.get(lib_name, 0)
+            if cached_count != actual:
+                stats_mismatches.append(f"{lib_name}: cached={cached_count}, actual={actual}")
+
+        if not stats_mismatches:
+            print(f"Library stats:     ✓ itemsCount consistent across {len(cached_item_counts)} libraries")
+        else:
+            print(f"Library stats:     ⚠ {len(stats_mismatches)} itemsCount mismatches")
+            integrity_issues.append(f"itemsCount mismatches: {', '.join(stats_mismatches[:5])}")
+    else:
+        print(f"Library stats:     - no itemsCount data in cache")
+
+    # Summary
+    total_broken = broken_metadata + file_not_found_metadata + truncated_files
+    if total_broken > 0:
+        parts = []
+        if truncated_files > 0:
+            parts.append(f"{truncated_files} truncated")
+        if broken_metadata > 0:
+            parts.append(f"{broken_metadata} ffmpeg failed")
+        if file_not_found_metadata > 0:
+            parts.append(f"{file_not_found_metadata} not found on disk")
+        print(f"\n  ℹ {total_broken} broken files ({', '.join(parts)}) — visible in --broken")
+
+    if integrity_issues:
+        print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
+        for issue in integrity_issues:
+            print(f"    • {issue}")
+        n = len(integrity_issues)
+        print(f"\n  Run --update-cache to fix the {n} integrity issue{'s' if n != 1 else ''}.")
+
+
 def verify_cache():
     """Verify cache consistency with Plex server and show detailed differences"""
     global PLEX_SERVER, OFFLINE, CACHE_FILE
@@ -14076,272 +13810,7 @@ def verify_cache():
         print("(Rerun without interruption to see full results)\n")
         return
 
-    # =========================================================================
-    # DATA INTEGRITY CHECKS (cache-only, no SSH/DB needed)
-    # =========================================================================
-    integrity_issues = []
-
-    print(f"\n{'='*76}")
-    print(f"DATA INTEGRITY CHECKS")
-    print(f"{'='*76}")
-
-    # Check 1: file_metadata coverage
-    total_files = 0
-    has_metadata = 0
-    missing_metadata = 0
-    broken_metadata = 0
-    file_not_found_metadata = 0
-    truncated_files = 0
-    for obj in PLEX_Media.OBJ_BY_ID.values():
-        obj_type = obj.get('type')
-        if obj_type not in ('Movie', 'Episode'):
-            continue
-        plex_duration = obj.get('duration', 0)
-        for _version, file_info in obj.get('files', {}).items():
-            if not isinstance(file_info, dict):
-                continue
-            total_files += 1
-            fm = file_info.get('file_metadata')
-            if fm is None:
-                missing_metadata += 1
-            elif fm.get('broken'):
-                if fm.get('reason') == 'file_not_found':
-                    file_not_found_metadata += 1
-                else:
-                    broken_metadata += 1
-            else:
-                has_metadata += 1
-                # Check for truncation (container_duration significantly shorter than plex_duration)
-                is_truncated = False
-                if plex_duration > 0:
-                    container_duration = fm.get('container_duration')
-                    if container_duration:
-                        diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
-                        if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                            is_truncated = True
-                # Fallback: filesize vs duration heuristic
-                if not is_truncated and plex_duration > 60000:
-                    filesize = file_info.get('filesize', 0)
-                    if filesize:
-                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
-                        if avg_kbps < 10:
-                            is_truncated = True
-                if is_truncated:
-                    truncated_files += 1
-
-    if total_files > 0:
-        parts = []
-        if missing_metadata > 0:
-            parts.append(f"{missing_metadata} missing")
-        if broken_metadata > 0:
-            parts.append(f"{broken_metadata} broken")
-        if file_not_found_metadata > 0:
-            parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
-        detail = f" ({', '.join(parts)})" if parts else ""
-        needs_update = missing_metadata
-        if needs_update > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
-            print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
-            if needs_update > 0:
-                integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
-        else:
-            print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
-    else:
-        print(f"File metadata:     - no media files in cache")
-
-    # Check 2: OBJ_BY_FILEPATH cross-references
-    filepath_entries = len(PLEX_Media.OBJ_BY_FILEPATH)
-    filepath_dangling = 0
-    filepath_path_mismatch = 0
-    for fp, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
-        if not isinstance(keys, list):
-            keys = [keys]
-        for key in keys:
-            if key not in PLEX_Media.OBJ_BY_ID:
-                filepath_dangling += 1
-            else:
-                obj = PLEX_Media.OBJ_BY_ID[key]
-                # Show/Season objects are directory containers with file='' and files={}
-                # They are not media files — skip filepath validation for them
-                if obj.get('type') in ('Show', 'Season'):
-                    continue
-                obj_filepaths = set()
-                for _, fi in obj.get('files', {}).items():
-                    if isinstance(fi, dict) and fi.get('filepath'):
-                        obj_filepaths.add(fi['filepath'])
-                if fp not in obj_filepaths and obj.get('file') != fp:
-                    filepath_path_mismatch += 1
-
-    # Check 3: OBJ_BY_MOVIE cross-references
-    movie_entries = len(PLEX_Media.OBJ_BY_MOVIE)
-    movie_dangling = 0
-    for movie_key in PLEX_Media.OBJ_BY_MOVIE:
-        if movie_key not in PLEX_Media.OBJ_BY_ID:
-            movie_dangling += 1
-
-    # Check 4: OBJ_BY_SHOW / OBJ_BY_SHOW_EPISODES cross-references
-    show_entries = len(PLEX_Media.OBJ_BY_SHOW)
-    show_dangling = 0
-    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW.items():
-        if show_key not in PLEX_Media.OBJ_BY_ID:
-            show_dangling += 1
-        for _, season_key in seasons.items():
-            if season_key not in PLEX_Media.OBJ_BY_ID:
-                show_dangling += 1
-
-    episode_entries = 0
-    episode_dangling = 0
-    for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
-        for _, episodes in seasons.items():
-            for _, versions in episodes.items():
-                for _, ep_keys in versions.items():
-                    if isinstance(ep_keys, list):
-                        for ep_key in ep_keys:
-                            episode_entries += 1
-                            if ep_key not in PLEX_Media.OBJ_BY_ID:
-                                episode_dangling += 1
-
-    # Check OBJ_BY_LIBRARY for duplicate keys
-    library_total_keys = 0
-    library_duplicate_keys = 0
-    for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
-        for _, keys in type_dict.items():
-            library_total_keys += len(keys)
-            library_duplicate_keys += len(keys) - len(set(keys))
-
-    # Print cross-reference results
-    xref_total_dangling = filepath_dangling + filepath_path_mismatch + movie_dangling + show_dangling + episode_dangling + library_duplicate_keys
-    if xref_total_dangling == 0:
-        print(f"Cross-references:  ✓ OBJ_BY_FILEPATH ({filepath_entries}), OBJ_BY_MOVIE ({movie_entries}),")
-        print(f"                     OBJ_BY_SHOW ({show_entries}), OBJ_BY_SHOW_EPISODES ({episode_entries}),")
-        print(f"                     OBJ_BY_LIBRARY ({library_total_keys} keys) — all valid")
-    else:
-        parts = []
-        if filepath_dangling > 0:
-            parts.append(f"OBJ_BY_FILEPATH: {filepath_dangling} dangling keys")
-        if filepath_path_mismatch > 0:
-            parts.append(f"OBJ_BY_FILEPATH: {filepath_path_mismatch} path mismatches")
-        if movie_dangling > 0:
-            parts.append(f"OBJ_BY_MOVIE: {movie_dangling} dangling keys")
-        if show_dangling > 0:
-            parts.append(f"OBJ_BY_SHOW: {show_dangling} dangling keys")
-        if episode_dangling > 0:
-            parts.append(f"OBJ_BY_SHOW_EPISODES: {episode_dangling} dangling keys")
-        if library_duplicate_keys > 0:
-            parts.append(f"OBJ_BY_LIBRARY: {library_duplicate_keys} duplicate keys")
-        print(f"Cross-references:  ⚠ {'; '.join(parts)}")
-        integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
-
-    # Check 5: labels_index consistency
-    cached_labels_index = CACHE.get('labels_index', {})
-    rebuilt_labels_index = {}
-    for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
-        for label in (obj.get('labels', []) or []):
-            if label not in rebuilt_labels_index:
-                rebuilt_labels_index[label] = []
-            rebuilt_labels_index[label].append(obj_id)
-
-    labels_ok = True
-    labels_detail = []
-    missing_labels = set(rebuilt_labels_index.keys()) - set(cached_labels_index.keys())
-    extra_labels = set(cached_labels_index.keys()) - set(rebuilt_labels_index.keys())
-    if missing_labels:
-        labels_ok = False
-        labels_detail.append(f"{len(missing_labels)} labels missing from index")
-    if extra_labels:
-        labels_ok = False
-        labels_detail.append(f"{len(extra_labels)} stale labels in index")
-    # Check counts match for shared labels
-    count_mismatches = 0
-    for label in set(rebuilt_labels_index.keys()) & set(cached_labels_index.keys()):
-        if sorted(rebuilt_labels_index[label]) != sorted(cached_labels_index[label]):
-            count_mismatches += 1
-    if count_mismatches > 0:
-        labels_ok = False
-        labels_detail.append(f"{count_mismatches} labels with wrong member lists")
-
-    if labels_ok:
-        print(f"Labels index:      ✓ {len(cached_labels_index)} labels, consistent")
-    else:
-        print(f"Labels index:      ⚠ {'; '.join(labels_detail)}")
-        integrity_issues.append(f"Labels index: {'; '.join(labels_detail)}")
-
-    # Check 6: Collection member validity
-    collection_count = len(PLEX_Media.OBJ_BY_COLLECTION)
-    orphaned_collections = 0
-    invalid_members = 0
-    # Build lookup: metadata_item id -> True (for O(1) member validation)
-    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values() if obj.get('id') is not None}
-    for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
-        if col_key not in PLEX_Media.OBJ_BY_ID:
-            orphaned_collections += 1
-        for member_id in col_obj.get('member_ids', []):
-            if member_id not in all_obj_ids:
-                invalid_members += 1
-
-    if orphaned_collections == 0 and invalid_members == 0:
-        print(f"Collections:       ✓ {collection_count} collections, all members valid")
-    else:
-        parts = []
-        if orphaned_collections > 0:
-            parts.append(f"{orphaned_collections} orphaned")
-        if invalid_members > 0:
-            parts.append(f"{invalid_members} invalid member references")
-        print(f"Collections:       ⚠ {'; '.join(parts)}")
-        integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
-
-    # Check 7: library_stats itemsCount accuracy
-    # get_library_stats() stores primary type count: Movie count for movie libs, Show count for show libs
-    # So we must compare like-for-like: count only the primary type per library from OBJ_BY_ID
-    cached_stats = CACHE.get('library_stats', {})
-    cached_item_counts = cached_stats.get('itemsCount', {})
-    if cached_item_counts:
-        # Determine primary type per library from OBJ_BY_LIBRARY structure
-        primary_type_per_lib = {}
-        for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
-            if 'Movie' in type_dict:
-                primary_type_per_lib[lib_name] = 'Movie'
-            elif 'Show' in type_dict:
-                primary_type_per_lib[lib_name] = 'Show'
-
-        # Count only primary-type objects per library
-        actual_counts = {}
-        for obj in PLEX_Media.OBJ_BY_ID.values():
-            lib = obj.get('library')
-            if lib and obj.get('type') == primary_type_per_lib.get(lib):
-                actual_counts[lib] = actual_counts.get(lib, 0) + 1
-
-        stats_mismatches = []
-        for lib_name, cached_count in cached_item_counts.items():
-            actual = actual_counts.get(lib_name, 0)
-            if cached_count != actual:
-                stats_mismatches.append(f"{lib_name}: cached={cached_count}, actual={actual}")
-
-        if not stats_mismatches:
-            print(f"Library stats:     ✓ itemsCount consistent across {len(cached_item_counts)} libraries")
-        else:
-            print(f"Library stats:     ⚠ {len(stats_mismatches)} itemsCount mismatches")
-            integrity_issues.append(f"itemsCount mismatches: {', '.join(stats_mismatches[:5])}")
-    else:
-        print(f"Library stats:     - no itemsCount data in cache")
-
-    # Summary
-    total_broken = broken_metadata + file_not_found_metadata + truncated_files
-    if total_broken > 0:
-        parts = []
-        if truncated_files > 0:
-            parts.append(f"{truncated_files} truncated")
-        if broken_metadata > 0:
-            parts.append(f"{broken_metadata} ffmpeg failed")
-        if file_not_found_metadata > 0:
-            parts.append(f"{file_not_found_metadata} not found on disk")
-        print(f"\n  ℹ {total_broken} broken files ({', '.join(parts)}) — visible in --broken")
-
-    if integrity_issues:
-        print(f"\n  ⚠ {len(integrity_issues)} integrity issue(s) found:")
-        for issue in integrity_issues:
-            print(f"    • {issue}")
-        n = len(integrity_issues)
-        print(f"\n  Run --update-cache to fix the {n} integrity issue{'s' if n != 1 else ''}.")
+    _verify_data_integrity()
 
     print("\n" + "="*76)
 
