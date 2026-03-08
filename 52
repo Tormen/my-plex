@@ -17499,6 +17499,8 @@ def execute_plex_cmd(args, obj, obj_type, obj_args_list):
     obj_args = obj_parser.parse_args([])
     if no_args_given and hasattr(obj_args, 'list'):
         obj_args.list = True  # default: no args after object name -> --list its contents
+    if no_args_given and hasattr(obj_args, 'info'):
+        obj_args.info = True  # default: no args after media name -> --info
     done = no_args_given
     while not done:
         try:
