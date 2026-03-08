@@ -17276,29 +17276,25 @@ def show_item_info(identifier, table_only=False):
     # Single result: show detailed info
     key, obj = found_items[0]
 
-    print("="*76)
-    print(f"PLEX ITEM INFORMATION")
-    print("="*76)
-
     # Basic info
-    print(f"Key:        {key}")
-    print(f"Type:       {obj.get('type', 'Unknown')}")
-    print(f"Title:      {obj.get('title', 'N/A')}")
-    print(f"Plex ID:    {obj.get('id', 'N/A')}")
-    print(f"Item ID:    {obj.get('item_id', 'N/A')}")
-    print(f"Library:    {obj.get('library', 'N/A')}")
+    print(f"Key:\t{key}")
+    print(f"Type:\t{obj.get('type', 'Unknown')}")
+    print(f"Title:\t{obj.get('title', 'N/A')}")
+    print(f"Plex ID:\t{obj.get('id', 'N/A')}")
+    print(f"Item ID:\t{obj.get('item_id', 'N/A')}")
+    print(f"Library:\t{obj.get('library', 'N/A')}")
 
     # Type-specific info
     obj_type = obj.get('type')
     if obj_type == 'Episode':
-        print(f"Series:     {obj.get('show_title', 'N/A')}")
-        print(f"Season:     {obj.get('season_title', 'N/A')}")
-        print(f"Episode:    S{obj.get('S_str', '?')}E{obj.get('E_str', '?')}")
+        print(f"Series:\t{obj.get('show_title', 'N/A')}")
+        print(f"Season:\t{obj.get('season_title', 'N/A')}")
+        print(f"Episode:\tS{obj.get('S_str', '?')}E{obj.get('E_str', '?')}")
     elif obj_type == 'Season':
-        print(f"Series:     {obj.get('show_title', 'N/A')}")
-        print(f"Season:     {obj.get('S_str', 'N/A')}")
+        print(f"Series:\t{obj.get('show_title', 'N/A')}")
+        print(f"Season:\t{obj.get('S_str', 'N/A')}")
     elif obj_type == 'Movie':
-        print(f"Year:       {obj.get('year', 'N/A')}")
+        print(f"Year:\t{obj.get('year', 'N/A')}")
 
     # Same-library duplicate check (using multi-key matching for originalTitle)
     dup_keys = set(generate_duplicate_keys(obj))
@@ -17324,49 +17320,45 @@ def show_item_info(identifier, table_only=False):
     if files:
         if len(files) == 1:
             ver, info = next(iter(files.items()))
-            print(f"File:       {info.get('filepath', 'N/A')}")
+            print(f"File:\t{info.get('filepath', 'N/A')}")
             fs = info.get('filesize') or obj.get('filesize')
-            if fs: print(f"File Size:  {fs / (1024*1024):.1f} MB")
+            if fs: print(f"File Size:\t{fs / (1024*1024):.1f} MB")
         else:
-            print(f"Files:      {len(files)} versions")
+            print(f"Files:\t{len(files)} versions")
             for i, (ver, info) in enumerate(files.items(), 1):
                 fs = info.get('filesize')
                 size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
                 print(f"  [{i}] {ver}{size_str}")
                 print(f"      {info.get('filepath', 'N/A')}")
     elif obj.get('file'):
-        print(f"File:       {obj['file']}")
+        print(f"File:\t{obj['file']}")
         fs = obj.get('filesize')
-        if fs: print(f"File Size:  {fs / (1024*1024):.1f} MB")
+        if fs: print(f"File Size:\t{fs / (1024*1024):.1f} MB")
 
     # Media info
     if 'duration' in obj:
         duration_min = obj['duration'] / 60000
-        print(f"Duration:   {duration_min:.1f} minutes")
+        print(f"Duration:\t{duration_min:.1f} minutes")
     if 'resolution' in obj:
-        print(f"Resolution: {obj['resolution']}")
+        print(f"Resolution:\t{obj['resolution']}")
     if 'video_codec' in obj:
-        print(f"Video:      {obj['video_codec']}")
+        print(f"Video:\t{obj['video_codec']}")
     if 'audio_codec' in obj:
-        print(f"Audio:      {obj['audio_codec']}")
+        print(f"Audio:\t{obj['audio_codec']}")
 
     # Labels
     if obj.get('labels'):
-        print(f"Labels:     {', '.join(obj['labels'])}")
+        print(f"Labels:\t{', '.join(obj['labels'])}")
 
     # Metadata
     if 'added_at' in obj:
-        print(f"Added:      {obj['added_at']}")
+        print(f"Added:\t{obj['added_at']}")
     if 'updated_at' in obj:
-        print(f"Updated:    {obj['updated_at']}")
+        print(f"Updated:\t{obj['updated_at']}")
 
     # Cache status
     print()
-    print("-"*76)
-    print("CACHE STATUS")
-    print("-"*76)
-    print(f"✓ Item IS in cache")
-    print(f"  Cache file: {CACHE_FILE}")
+    print(f"Cache:\t✓ in cache ({CACHE_FILE})")
 
     # Check if item exists on Plex server via DB query (no API needed)
     if not OFFLINE:
@@ -17376,16 +17368,17 @@ def show_item_info(identifier, table_only=False):
             query = f"SELECT id, title FROM metadata_items WHERE id = {safe_id} AND deleted_at IS NULL"
             rows = query_plex_database(query, mode='rows')
             if rows:
-                print(f"✓ Item EXISTS on Plex server")
-                print(f"  Server item title: {rows[0][1]}")
+                server_title = rows[0][1]
+                if server_title:
+                    print(f"Server:\t✓ exists (title: {server_title})")
+                else:
+                    print(f"Server:\t✓ exists")
             else:
-                print(f"✗ Item NOT FOUND on server (may have been deleted)")
+                print(f"Server:\t✗ NOT FOUND (may have been deleted)")
         except Exception as e:
-            print(f"  (Server check failed: {e})")
+            print(f"Server:\t(check failed: {e})")
     else:
-        print(f"  (Server check skipped - offline mode)")
-
-    print("="*76)
+        print(f"Server:\t(skipped - offline mode)")
 
 ###########################################################################################
 #### GLOBAL PLEX COMMANDS:
