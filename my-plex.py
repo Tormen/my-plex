@@ -14465,6 +14465,7 @@ def main():
     main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
+    main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
 
     main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
@@ -14626,6 +14627,10 @@ def main():
         remaining_args.insert(0, '--info')
         if args.info != '':  # --info with argument: re-inject the value too
             remaining_args.insert(1, args.info)
+    # Re-inject --excess-versions (consumed by main_parser to protect LIMIT from CMD_OR_PLEXOBJECT)
+    if safe_getattr(args, 'excess_versions', None) is not None:
+        remaining_args.insert(0, '--excess-versions')
+        remaining_args.insert(1, str(args.excess_versions))
     if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
     if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
 
