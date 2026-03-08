@@ -2109,36 +2109,162 @@ class TestEndToEnd(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return result
 
-    def test_excess_versions_runs(self):
+    # --- Help commands ---
+
+    def test_help_default(self):
+        """my-plex --help must show main help."""
+        result = self._run_cmd('--help')
+        self.assertEqual(result.returncode, 0, f"--help failed: {result.stderr}")
+        self.assertIn("OBJECT_TYPE", result.stdout)
+
+    def test_help_global(self):
+        """my-plex --help global must show global command help."""
+        result = self._run_cmd('--help', 'global')
+        self.assertEqual(result.returncode, 0, f"--help global failed: {result.stderr}")
+        self.assertIn("--list", result.stdout)
+
+    def test_help_all(self):
+        """my-plex --help all must show all help."""
+        result = self._run_cmd('--help', 'all')
+        self.assertEqual(result.returncode, 0, f"--help all failed: {result.stderr}")
+
+    def test_help_library(self):
+        """my-plex --help library must show library help."""
+        result = self._run_cmd('--help', 'library')
+        self.assertEqual(result.returncode, 0, f"--help library failed: {result.stderr}")
+
+    def test_help_media(self):
+        """my-plex --help media must show media help."""
+        result = self._run_cmd('--help', 'media')
+        self.assertEqual(result.returncode, 0, f"--help media failed: {result.stderr}")
+
+    def test_help_playlist(self):
+        """my-plex --help playlist must show playlist help."""
+        result = self._run_cmd('--help', 'playlist')
+        self.assertEqual(result.returncode, 0, f"--help playlist failed: {result.stderr}")
+
+    def test_help_problems(self):
+        """my-plex --help problems must show detailed problems help."""
+        result = self._run_cmd('--help', 'problems')
+        self.assertEqual(result.returncode, 0, f"--help problems failed: {result.stderr}")
+        self.assertIn("PROBLEMS HELP", result.stdout)
+
+    def test_help_update_cache(self):
+        """my-plex --help update-cache must show cache update help."""
+        result = self._run_cmd('--help', 'update-cache')
+        self.assertEqual(result.returncode, 0, f"--help update-cache failed: {result.stderr}")
+        self.assertIn("CACHE UPDATE HELP", result.stdout)
+
+    def test_help_duplicates(self):
+        """my-plex --help duplicates must show duplicates help."""
+        result = self._run_cmd('--help', 'duplicates')
+        self.assertEqual(result.returncode, 0, f"--help duplicates failed: {result.stderr}")
+        self.assertIn("DUPLICATES HELP", result.stdout)
+
+    def test_help_no_audio_language(self):
+        """my-plex --help no-audio-language must show no-audio-language help."""
+        result = self._run_cmd('--help', 'no-audio-language')
+        self.assertEqual(result.returncode, 0, f"--help no-audio-language failed: {result.stderr}")
+
+    def test_help_offline_verbose(self):
+        """my-plex --help --offline must show verbose help with extra options."""
+        result = self._run_cmd('--help', '--offline')
+        self.assertEqual(result.returncode, 0, f"--help --offline failed: {result.stderr}")
+
+    # --- List commands (read-only, from cache) ---
+
+    def test_list_libraries(self):
+        """my-plex --list-libraries must list available libraries."""
+        result = self._run_cmd('--list-libraries')
+        self.assertEqual(result.returncode, 0, f"--list-libraries failed: {result.stderr}")
+        self.assertTrue(len(result.stdout) > 0, "Must produce output")
+
+    def test_list_no_library(self):
+        """my-plex --list without library must show available libraries."""
+        result = self._run_cmd('--list')
+        self.assertEqual(result.returncode, 0, f"--list failed: {result.stderr}")
+        self.assertIn("Available Libraries", result.stdout)
+
+    def test_duplicates(self):
+        """my-plex --duplicates must list duplicate media."""
+        result = self._run_cmd('--duplicates')
+        self.assertEqual(result.returncode, 0, f"--duplicates failed: {result.stderr}")
+
+    def test_duplicates_type_movie(self):
+        """my-plex --duplicates --type movie must filter by type."""
+        result = self._run_cmd('--duplicates', '--type', 'movie')
+        self.assertEqual(result.returncode, 0, f"--duplicates --type movie failed: {result.stderr}")
+
+    def test_broken(self):
+        """my-plex --broken must list broken files."""
+        result = self._run_cmd('--broken')
+        self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
+
+    def test_excess_versions_3(self):
         """my-plex --excess-versions 3 must run without error."""
         result = self._run_cmd('--excess-versions', '3')
         self.assertEqual(result.returncode, 0, f"--excess-versions 3 failed: {result.stderr}")
-        # Must produce output (either results or "No entries" message)
         self.assertTrue(len(result.stdout) > 0, "Must produce output")
 
-    def test_excess_versions_2_runs(self):
+    def test_excess_versions_2(self):
         """my-plex --excess-versions 2 must run without error."""
         result = self._run_cmd('--excess-versions', '2')
         self.assertEqual(result.returncode, 0, f"--excess-versions 2 failed: {result.stderr}")
 
-    def test_problems_runs(self):
-        """my-plex --problems must run without error and show SUMMARY."""
+    def test_problems(self):
+        """my-plex --problems must run all checks and show SUMMARY."""
         result = self._run_cmd('--problems')
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
-        self.assertIn("SUMMARY", result.stdout, "--problems must print SUMMARY section")
+        self.assertIn("SUMMARY", result.stdout)
         self.assertIn("Broken/truncated files:", result.stdout)
         self.assertIn("Excess version entries:", result.stdout)
 
-    def test_broken_runs(self):
-        """my-plex --broken must run without error."""
-        result = self._run_cmd('--broken')
-        self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
+    def test_list_labels(self):
+        """my-plex --list-labels must list labels."""
+        result = self._run_cmd('--list-labels')
+        self.assertEqual(result.returncode, 0, f"--list-labels failed: {result.stderr}")
 
-    def test_help_problems_runs(self):
-        """my-plex --help problems must show detailed help."""
-        result = self._run_cmd('--help', 'problems')
-        self.assertEqual(result.returncode, 0, f"--help problems failed: {result.stderr}")
-        self.assertIn("PROBLEMS HELP", result.stdout)
+    def test_no_audio_language(self):
+        """my-plex --no-audio-language must list items with missing audio language."""
+        result = self._run_cmd('--no-audio-language')
+        self.assertEqual(result.returncode, 0, f"--no-audio-language failed: {result.stderr}")
+
+    # --- Info/search ---
+
+    def test_info_with_plex_id(self):
+        """my-plex --info ID:1 must show item info or error gracefully."""
+        result = self._run_cmd('--info', 'ID:1')
+        # May return 0 (found) or non-zero (not found) — just verify it doesn't crash
+        self.assertNotIn("Traceback", result.stderr, "--info must not crash with traceback")
+
+    # --- Verify cache (read-only) ---
+
+    def test_verify_cache(self):
+        """my-plex --verify-cache must run without crashing."""
+        result = self._run_cmd('--verify-cache')
+        # May fail if no server connection, but must not crash
+        self.assertNotIn("Traceback", result.stderr, "--verify-cache must not crash with traceback")
+
+    # --- Error handling ---
+
+    def test_invalid_flag_errors(self):
+        """my-plex --nonexistent must produce an error, not crash."""
+        result = self._run_cmd('--nonexistent')
+        self.assertNotEqual(result.returncode, 0, "Invalid flag must produce non-zero exit")
+        self.assertNotIn("Traceback", result.stderr, "Invalid flag must not crash with traceback")
+
+    def test_excess_versions_without_value_errors(self):
+        """my-plex --excess-versions without a number must produce an error."""
+        result = self._run_cmd('--excess-versions')
+        self.assertNotEqual(result.returncode, 0, "--excess-versions without value must error")
+
+    # --- Output format ---
+
+    def test_list_with_format(self):
+        """my-plex --list with a library must accept --format."""
+        # Use --list without library — should show library list
+        result = self._run_cmd('--list', '-f', 'pretty')
+        self.assertEqual(result.returncode, 0, f"--list -f pretty failed: {result.stderr}")
 
 
 # List of all unittest classes for run_regression_tests()
