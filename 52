@@ -2759,27 +2759,20 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         with open(__file__, 'r') as f:
             return f.read()
 
-    def test_resolve_has_numeric_id_stage(self):
-        """resolve_plex_media_obj must have a numeric ID lookup stage."""
-        content = self._read_script()
-        import re
-        match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
-        self.assertIsNotNone(match)
-        func_body = match.group(1)
-        self.assertIn("int(numeric_str)", func_body,
-            "resolve_plex_media_obj must try parsing media_identifier as numeric ID")
-        self.assertIn("int(obj.get('id', 0)) == numeric_id", func_body,
-            "resolve_plex_media_obj must match numeric ID against obj['id'] with type coercion")
-
-    def test_resolve_supports_id_prefix(self):
-        """resolve_plex_media_obj must accept 'ID:<num>' format (as printed by --broken)."""
+    def test_resolve_requires_id_prefix(self):
+        """resolve_plex_media_obj must REQUIRE 'ID:<num>' prefix — bare numbers must NOT match as Plex IDs."""
         content = self._read_script()
         import re
         match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("startswith('ID:')", func_body,
-            "resolve_plex_media_obj must strip 'ID:' prefix for --broken compatibility")
+            "resolve_plex_media_obj must require 'ID:' prefix for numeric ID lookup")
+        self.assertIn("int(obj.get('id', 0)) == numeric_id", func_body,
+            "resolve_plex_media_obj must match numeric ID against obj['id'] with type coercion")
+        # Must NOT have bare numeric fallback (no stripping ID: and then trying int())
+        self.assertNotIn("int(numeric_str)", func_body,
+            "resolve_plex_media_obj must NOT accept bare numeric IDs — require ID: prefix")
 
     def test_full_key_passes_list_to_helper(self):
         """Full cache key path must pass a list (not bare dict) to get_media_list_from_PLEX_OBJ_list."""
@@ -2798,15 +2791,15 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         self.assertIn('f"ID:{plex_id}"', content,
             "--broken must format PLEX-ID column as ID:<num>")
 
-    def test_show_item_info_supports_id_prefix(self):
-        """show_item_info must accept 'ID:<num>' format."""
+    def test_show_item_info_requires_id_prefix(self):
+        """show_item_info must REQUIRE 'ID:<num>' prefix — bare numbers must NOT match as Plex IDs."""
         content = self._read_script()
         import re
         match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("startswith('ID:')", func_body,
-            "show_item_info must strip 'ID:' prefix for --broken compatibility")
+            "show_item_info must require 'ID:' prefix for Plex ID lookup")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -3228,8 +3221,8 @@ def run_regression_tests():
             except Exception as e:
                 print(f"  ✗ System info (--info without parameter): FAIL - {e}")
 
-            # Test 1: Call show_item_info() with numeric ID
-            print(f"  Testing: show_item_info({test_id})")
+            # Test 1: Call show_item_info() with ID: prefix (required format)
+            print(f"  Testing: show_item_info('ID:{test_id}')")
             try:
                 import io
                 from contextlib import redirect_stdout
@@ -3237,18 +3230,18 @@ def run_regression_tests():
                 # Capture output
                 f = io.StringIO()
                 with redirect_stdout(f):
-                    show_item_info(str(test_id))
+                    show_item_info(f'ID:{test_id}')
                 output = f.getvalue()
 
                 # Verify output contains expected information
                 if test_key in output and str(test_id) in output:
-                    print(f"  ✓ Search by numeric ID ({test_id}): PASS")
+                    print(f"  ✓ Search by ID:{test_id}: PASS")
                     tests_passed += 1
                 else:
-                    print(f"  ✗ Search by numeric ID ({test_id}): FAIL - output missing key info")
+                    print(f"  ✗ Search by ID:{test_id}: FAIL - output missing key info")
                     if DBG: print(f"    Output: {output[:200]}...")
             except Exception as e:
-                print(f"  ✗ Search by numeric ID ({test_id}): FAIL - {e}")
+                print(f"  ✗ Search by ID:{test_id}: FAIL - {e}")
 
             # Test 2: Call show_item_info() with full key
             print(f"  Testing: show_item_info('{test_key}')")
@@ -3291,7 +3284,7 @@ def run_regression_tests():
             if tests_passed == tests_total:
                 print(f"✓ PASS: --info command works correctly ({tests_passed}/{tests_total})")
                 print(f"  Verified: my-plex --info (system info)")
-                print(f"  Verified: my-plex --info {test_id}")
+                print(f"  Verified: my-plex --info ID:{test_id}")
                 print(f"  Verified: my-plex --info {test_key}")
                 print(f"  Verified: my-plex --offline --info '{search_term if test_title else test_id}'")
                 passed += 1
@@ -11059,20 +11052,18 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
         return get_media_list_from_PLEX_OBJ_list( [PLEX_Media.OBJ_BY_ID[ media_identifier ]] )
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT FOUND '{media_identifier}' in PLEX_Media.OBJ_BY_ID")
 
-    # Check for numeric Plex ID — supports "ID:18349" (as printed by --broken) or bare "18349":
+    # Check for numeric Plex ID — requires "ID:18349" prefix (as printed by --broken):
     stage = "1b"
-    numeric_str = media_identifier
-    if numeric_str.upper().startswith('ID:'):
-        numeric_str = numeric_str[3:]
-    try:
-        numeric_id = int(numeric_str)
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if int(obj.get('id', 0)) == numeric_id:
-                if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
-                return get_media_list_from_PLEX_OBJ_list( [obj] )
-        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> numeric ID {numeric_id} NOT FOUND in PLEX_Media.OBJ_BY_ID")
-    except ValueError:
-        pass  # Not a numeric ID, continue to filepath/title stages
+    if media_identifier.upper().startswith('ID:'):
+        try:
+            numeric_id = int(media_identifier[3:])
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(obj.get('id', 0)) == numeric_id:
+                    if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
+                    return get_media_list_from_PLEX_OBJ_list( [obj] )
+            if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> numeric ID {numeric_id} NOT FOUND in PLEX_Media.OBJ_BY_ID")
+        except ValueError:
+            pass  # ID: prefix present but value not numeric
 
     # Check for FILEPATH:
     stage = "2nd"
@@ -13533,18 +13524,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
-        # Fast path: check if obj is a numeric ID or ID:<num> that matches cache — no API needed
-        numeric_str = obj
-        if numeric_str.upper().startswith('ID:'):
-            numeric_str = numeric_str[3:]
-        try:
-            numeric_id = int(numeric_str)
-            for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-                if int(cached_obj.get('id', 0)) == numeric_id:
-                    return True
-            return False
-        except (ValueError, TypeError):
-            pass
+        # Fast path: check if obj is ID:<num> that matches cache — no API needed
+        if obj.upper().startswith('ID:'):
+            try:
+                numeric_id = int(obj[3:])
+                for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+                    if int(cached_obj.get('id', 0)) == numeric_id:
+                        return True
+                return False
+            except (ValueError, TypeError):
+                pass
         return (len(resolve_plex_media_obj(obj)) > 0)
 
     @staticmethod
@@ -17213,18 +17202,16 @@ def show_item_info(identifier, table_only=False):
     # Try to find the item in cache
     found_items = []
 
-    # Search strategy 1: Try as numeric ID — supports "ID:18349" (as printed by --broken) or bare "18349"
-    numeric_str = identifier
-    if numeric_str.upper().startswith('ID:'):
-        numeric_str = numeric_str[3:]
-    try:
-        numeric_id = int(numeric_str)
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if int(obj.get('id', 0)) == numeric_id or f":{numeric_id}" in key:
-                found_items.append((key, obj))
-                break
-    except ValueError:
-        pass
+    # Search strategy 1: Try as Plex ID — requires "ID:18349" prefix (as printed by --broken)
+    if identifier.upper().startswith('ID:'):
+        try:
+            numeric_id = int(identifier[3:])
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(obj.get('id', 0)) == numeric_id:
+                    found_items.append((key, obj))
+                    break
+        except ValueError:
+            pass  # ID: prefix present but value not numeric
 
     # Search strategy 2: Try as full key (e.g., "Episode_ID:2579")
     if not found_items and identifier in PLEX_Media.OBJ_BY_ID:
@@ -17774,7 +17761,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
-    GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info 2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
+    GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
     GLOBAL_CMD_PARSER.add_argument('--test', action='store_true', help="Run regression tests to verify script functionality.")
 
     add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
