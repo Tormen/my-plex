@@ -2149,6 +2149,32 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--help problems failed: {result.stderr}")
         self.assertIn("PROBLEMS HELP", result.stdout)
 
+    # --- --help --XXX form (dashed topic) ---
+
+    def test_help_dashed_problems(self):
+        """my-plex --help --problems must work like --help problems."""
+        result = self._run_cmd('--help', '--problems')
+        self.assertEqual(result.returncode, 0, f"--help --problems failed: {result.stderr}")
+        self.assertIn("PROBLEMS HELP", result.stdout)
+
+    def test_help_dashed_duplicates(self):
+        """my-plex --help --duplicates must work like --help duplicates."""
+        result = self._run_cmd('--help', '--duplicates')
+        self.assertEqual(result.returncode, 0, f"--help --duplicates failed: {result.stderr}")
+        self.assertIn("DUPLICATES HELP", result.stdout)
+
+    def test_help_dashed_update_cache(self):
+        """my-plex --help --update-cache must work like --help update-cache."""
+        result = self._run_cmd('--help', '--update-cache')
+        self.assertEqual(result.returncode, 0, f"--help --update-cache failed: {result.stderr}")
+        self.assertIn("CACHE UPDATE HELP", result.stdout)
+
+    def test_help_reversed_problems(self):
+        """my-plex --problems --help must work like --help problems."""
+        result = self._run_cmd('--problems', '--help')
+        self.assertEqual(result.returncode, 0, f"--problems --help failed: {result.stderr}")
+        self.assertIn("PROBLEMS HELP", result.stdout)
+
     def test_help_update_cache(self):
         """my-plex --help update-cache must show cache update help."""
         result = self._run_cmd('--help', 'update-cache')
