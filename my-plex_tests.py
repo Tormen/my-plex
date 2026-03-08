@@ -2184,6 +2184,28 @@ class TestRemoveCommand(unittest.TestCase):
         body = match.group(1)
         self.assertNotIn("move_to_trash(", body, "delete() must NOT trash files")
 
+    def test_delete_syncs_cache(self):
+        """delete() must remove deleted entries from cache and save to disk."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def delete\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("_remove_from_cache_by_id(", body,
+            "delete() must call _remove_from_cache_by_id after successful API delete")
+
+    def test_remove_from_cache_by_id_exists(self):
+        """_remove_from_cache_by_id must exist and update all cache structures + save."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match, "_remove_from_cache_by_id method must exist")
+        body = match.group(1)
+        self.assertIn("OBJ_BY_ID", body, "Must update OBJ_BY_ID")
+        self.assertIn("OBJ_BY_FILEPATH", body, "Must update OBJ_BY_FILEPATH")
+        self.assertIn("OBJ_BY_LIBRARY", body, "Must update OBJ_BY_LIBRARY")
+        self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
+
 
 class TestEndToEnd(unittest.TestCase):
     """End-to-end tests: run actual commands as subprocesses to verify they work."""
