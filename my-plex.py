@@ -12001,7 +12001,7 @@ def main_print_help(args, remaining_args, main_parser):
         print(HELP_SUFFIX)
 
         if not verbose_help:
-            print("For verbose help with all options: my-plex --help --offline")
+            print("For verbose help with all options --XXX: my-plex --help --XXX /or/ --XXX --help")
             # Restore suppressed help texts
             for action in main_parser._actions:
                 for opt in verbose_only_args:
