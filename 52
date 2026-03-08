@@ -2770,8 +2770,8 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         func_body = match.group(1)
         self.assertIn("int(numeric_str)", func_body,
             "resolve_plex_media_obj must try parsing media_identifier as numeric ID")
-        self.assertIn("obj.get('id') == numeric_id", func_body,
-            "resolve_plex_media_obj must match numeric ID against obj['id']")
+        self.assertIn("int(obj.get('id', 0)) == numeric_id", func_body,
+            "resolve_plex_media_obj must match numeric ID against obj['id'] with type coercion")
 
     def test_resolve_supports_id_prefix(self):
         """resolve_plex_media_obj must accept 'ID:<num>' format (as printed by --broken)."""
@@ -11069,7 +11069,7 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
     try:
         numeric_id = int(numeric_str)
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if obj.get('id') == numeric_id:
+            if int(obj.get('id', 0)) == numeric_id:
                 if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND numeric ID {numeric_id} as '{key}' in PLEX_Media.OBJ_BY_ID")
                 return get_media_list_from_PLEX_OBJ_list( [obj] )
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> numeric ID {numeric_id} NOT FOUND in PLEX_Media.OBJ_BY_ID")
@@ -17213,7 +17213,7 @@ def show_item_info(identifier, table_only=False):
     try:
         numeric_id = int(numeric_str)
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if obj.get('id') == numeric_id or f":{numeric_id}" in key:
+            if int(obj.get('id', 0)) == numeric_id or f":{numeric_id}" in key:
                 found_items.append((key, obj))
                 break
     except ValueError:
