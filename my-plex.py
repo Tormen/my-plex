@@ -10380,7 +10380,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
     argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
     argparser.add_argument('--delete', '--del', action='store_true',  help="Delete a media entry from Plex (metadata only, files on disk are NOT deleted). Plex will re-add the entry on next library scan if the file still exists. Combine with --remove to also trash files from disk.")
-    argparser.add_argument('--remove', '--rm', action='store_true',  help="Remove (trash) media files from disk. Does NOT delete the Plex entry. Combine with --delete to also remove the Plex entry.")
+    argparser.add_argument('--remove', '--rm', nargs='?', const='ALL', default=None, help="Remove (trash) media files from disk. Without args: removes ALL files. With args: comma-separated version numbers/ranges to remove (e.g. --rm 2-25 or --rm 2,5,8). Use --help rm for details.")
     argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
     argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
     argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
@@ -10408,7 +10408,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
         if obj_args.info:               PLEX_Media.get_info(obj)
         if obj_args.refresh:            PLEX_Media.refresh(obj)
-        if obj_args.remove:             PLEX_Media.remove(obj)
+        if obj_args.remove:             PLEX_Media.remove(obj, rm_spec=obj_args.remove)
         if obj_args.delete:             PLEX_Media.delete(obj)
         if obj_args.get_watched:        PLEX_Media.get_watched_status(obj)
         if obj_args.get_view_offset:    PLEX_Media.get_view_offset(obj)
@@ -11821,8 +11821,34 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"Cache updated: removed {len(keys_to_remove)} entry/entries for ID {numeric_id}.")
 
     @staticmethod
-    def remove(media_identifier, library_name=None):
-        """Remove (trash) media files from disk. Looks up file paths from cache."""
+    def remove(media_identifier, library_name=None, rm_spec='ALL'):
+        """Remove (trash) media files from disk. Looks up file paths from cache.
+
+        Args:
+            rm_spec: 'ALL' to remove all files, or a string specifying which
+                     version indices to remove (e.g. '2-25', '2,5,8', '2-5,8').
+                     Numbers match [idx] as shown by 'my-plex ID:xxx'.
+        """
+        # Parse rm_spec into set of 1-based indices to remove
+        rm_indices = None  # None = remove all
+        if rm_spec and rm_spec != 'ALL':
+            rm_indices = set()
+            try:
+                for part in rm_spec.split(','):
+                    if '-' in part:
+                        start, end = part.split('-', 1)
+                        start, end = int(start), int(end)
+                        if start < 1 or end < start:
+                            err(1081, f"Invalid range '{part}' in --rm (must be START-END with START >= 1)")
+                        rm_indices.update(range(start, end + 1))
+                    else:
+                        idx = int(part)
+                        if idx < 1:
+                            err(1081, f"--rm indices must be >= 1, got: {idx}")
+                        rm_indices.add(idx)
+            except ValueError:
+                err(1081, f"--rm requires comma-separated numbers/ranges (e.g. --rm 2-25 or --rm 2,5,8), got: '{rm_spec}'")
+
         # Find matching items in cache
         found_items = []
         if media_identifier.upper().startswith('ID:'):
@@ -11862,17 +11888,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not files_dict:
                 print(f"No files found in cache for '{obj.get('title', key)}'")
                 continue
-            for version, file_info in files_dict.items():
+
+            if rm_indices is not None:
+                max_idx = len(files_dict)
+                invalid = [i for i in rm_indices if i > max_idx]
+                if invalid:
+                    err(1081, f"--rm index {','.join(str(i) for i in sorted(invalid))} out of range (entry has {max_idx} version{'s' if max_idx != 1 else ''})")
+
+            for idx, (version, file_info) in enumerate(files_dict.items(), 1):
                 filepath = file_info.get('filepath', '')
+                if rm_indices is not None and idx not in rm_indices:
+                    print(f"Keeping  [{idx}]: {filepath or 'N/A'}")
+                    continue
                 if not filepath:
                     continue
                 success, trash_path = move_to_trash(filepath, remote_host)
                 if success:
-                    print(f"Trashed: {filepath}")
+                    print(f"Trashed  [{idx}]: {filepath}")
                     if trash_path:
                         print(f"  -> {trash_path}")
                 else:
-                    print(f"Failed to trash: {filepath}")
+                    print(f"Failed   [{idx}]: {filepath}")
 
     ###### Metadata management ---------------------------------------------------
 
@@ -12522,6 +12558,39 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --excess-versions 2     # Show entries with 2+ versions")
             print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
             print("  my-plex --broken                # Show broken/truncated files only")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'remove' | 'rm':
+            print()
+            print("=" * 76)
+            print("REMOVE (--rm) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <MEDIA> --rm [INDICES]")
+            print()
+            print("  Trash media files from disk (moves to .Trashes on the Plex server).")
+            print("  Does NOT delete the Plex entry — combine with --del for that.")
+            print()
+            print("  Without arguments, --rm removes ALL files.")
+            print("  With arguments, only the specified version numbers are removed.")
+            print("  Version numbers match [idx] as shown by 'my-plex ID:xxx'.")
+            print()
+            print("  INDICES can be:")
+            print("    Single numbers:  --rm 2")
+            print("    Comma-separated: --rm 2,5,8")
+            print("    Ranges:          --rm 2-25")
+            print("    Mixed:           --rm 1,3-5,8")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex ID:4167                # Show info (lists versions with [idx])")
+            print("  my-plex ID:4167 --rm           # Trash ALL files")
+            print("  my-plex ID:4167 --rm 2-25      # Trash versions [2] through [25], keep [1]")
+            print("  my-plex ID:4167 --rm 2,5       # Trash versions [2] and [5]")
+            print("  my-plex ID:4167 --rm --del     # Trash ALL files AND delete Plex entry")
+            print("  my-plex ID:4167 --rm 2 --del   # Trash [2], keep [1], delete Plex entry")
             print()
             print("=" * 76)
             sys.exit(0)

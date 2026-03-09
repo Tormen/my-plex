@@ -2206,6 +2206,42 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("OBJ_BY_LIBRARY", body, "Must update OBJ_BY_LIBRARY")
         self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
 
+    def test_rm_accepts_version_spec(self):
+        """--rm must accept optional version indices/ranges argument."""
+        content = self._read_script()
+        self.assertIn("nargs='?'", content.split("'--remove'")[1].split('\n')[0],
+            "--rm must use nargs='?' for optional argument")
+
+    def test_rm_spec_passed_to_remove(self):
+        """execute_cmd must pass rm_spec= to PLEX_Media.remove()."""
+        content = self._read_script()
+        self.assertIn("PLEX_Media.remove(obj, rm_spec=obj_args.remove)", content)
+
+    def test_remove_parses_ranges(self):
+        """remove() must parse comma-separated numbers and ranges (e.g. '2-25', '2,5,8')."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match, "remove() must accept rm_spec parameter")
+        body = match.group(1)
+        self.assertIn("rm_indices", body, "Must parse rm_spec into indices")
+        self.assertIn("Keeping", body, "Must print which files are kept")
+        self.assertIn("split('-'", body, "Must support range syntax (e.g. 2-25)")
+
+    def test_remove_skips_non_matching_indices(self):
+        """remove() must skip files whose index is NOT in rm_indices."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("idx not in rm_indices", body, "Must check idx against rm_indices")
+
+    def test_rm_help_topic(self):
+        """--help rm must show help for --rm."""
+        content = self._read_script()
+        self.assertIn("case 'remove' | 'rm':", content)
+
 
 class TestListMethodsGuardMissingKeys(unittest.TestCase):
     """Regression: list methods must use OBJ_BY_ID.get(key) not OBJ_BY_ID[key].
