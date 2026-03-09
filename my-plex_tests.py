@@ -2550,6 +2550,41 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--list -f pretty failed: {result.stderr}")
 
 
+class TestNonFatalWarnings(unittest.TestCase):
+    """Ensure non-fatal failures use WARNING, not ERROR (ERROR = FATAL rule)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_print_ssh_error_uses_warning(self):
+        """print_ssh_error must print WARNING, not ERROR."""
+        src = self._read_script()
+        match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        self.assertIsNotNone(match, "print_ssh_error not found")
+        body = match.group(1)
+        self.assertIn('WARNING:', body, "print_ssh_error must use WARNING prefix")
+        self.assertNotIn("'ERROR:", body, "print_ssh_error must not use ERROR prefix")
+
+    def test_file_operation_failures_use_warning(self):
+        """Non-fatal file operation failures must use WARNING, not ERROR."""
+        src = self._read_script()
+        match = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)', src, re.DOTALL)
+        self.assertIsNotNone(match, "my_plex_file_operation not found")
+        body = match.group(1)
+        for msg in re.findall(r'print\(f"(ERROR|WARNING): Failed to \w+', body):
+            self.assertEqual(msg, 'WARNING', f"Found non-fatal '{msg}: Failed to...' — must be WARNING")
+
+    def test_no_verbose_ssh_banners(self):
+        """print_ssh_error must not contain verbose banners or instructions."""
+        src = self._read_script()
+        match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        body = match.group(1)
+        self.assertNotIn("='*", body, "print_ssh_error should not have separator banners")
+        self.assertNotIn('ssh/config', body, "print_ssh_error should not have SSH config instructions")
+        self.assertNotIn('Example', body, "print_ssh_error should not have example config")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2563,7 +2598,8 @@ _UNITTEST_CLASSES = [
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
     TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
-    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestEndToEnd,
+    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestNonFatalWarnings,
+    TestEndToEnd,
 ]
 
 # ---------------------------------------------------------------------------
