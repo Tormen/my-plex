@@ -2214,35 +2214,43 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_function_exists(self):
-        """wait_for_plex_scan_complete must be defined."""
+    def test_functions_exist(self):
+        """wait_for_plex_scan(s)_complete must be defined."""
         content = self._read_script()
+        self.assertIn("def wait_for_plex_scans_complete(", content)
         self.assertIn("def wait_for_plex_scan_complete(", content)
 
     def test_checks_activities(self):
         """Must poll plex.activities for library.update.section, not just lib.refreshing."""
         content = self._read_script()
         import re
-        match = re.search(r'def wait_for_plex_scan_complete\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        match = re.search(r'def wait_for_plex_scans_complete\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("activities", body, "Must check plex.activities for ongoing scan activities")
-        self.assertIn("library.update.section", body, "Must check for library.update.section activity type")
+        self.assertIn("active_sections", body, "Must check plex.activities for ongoing scan activities")
         self.assertIn("lib.refreshing", body, "Must still check lib.refreshing as first phase")
 
-    def test_update_cache_uses_helper(self):
-        """--update-cache scan waiting must use wait_for_plex_scan_complete, not raw lib.refreshing loop."""
+    def test_get_active_scan_section_ids(self):
+        """_get_active_scan_section_ids helper must check library.update.section activities."""
         content = self._read_script()
         import re
-        # Find the update_cache method's scan waiting section (between the print and the separator line)
+        match = re.search(r'def _get_active_scan_section_ids\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("library.update.section", body)
+        self.assertIn("activities", body)
+
+    def test_update_cache_uses_parallel_helper(self):
+        """--update-cache must use wait_for_plex_scans_complete (parallel), not sequential."""
+        content = self._read_script()
+        import re
         match = re.search(r"Waiting for all libraries to complete scanning.*?print\(f.*?=.*?76", content, re.DOTALL)
         self.assertIsNotNone(match, "Could not find scan waiting section in update_cache")
         body = match.group(0)
-        self.assertIn("wait_for_plex_scan_complete(", body,
-            "--update-cache must use wait_for_plex_scan_complete helper")
-        # Must NOT have raw lib.refreshing loop
+        self.assertIn("wait_for_plex_scans_complete(", body,
+            "--update-cache must use wait_for_plex_scans_complete (parallel)")
         self.assertNotIn("lib.refreshing", body,
-            "--update-cache must NOT use raw lib.refreshing — use wait_for_plex_scan_complete instead")
+            "--update-cache must NOT use raw lib.refreshing")
 
 
 class TestEndToEnd(unittest.TestCase):
