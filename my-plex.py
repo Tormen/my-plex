@@ -10497,8 +10497,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID[key]
-            if obj.get('type') not in ['Episode', 'Movie']:
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj or obj.get('type') not in ['Episode', 'Movie']:
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
@@ -10546,7 +10546,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':<10} | {'LIBRARY':<15} | FILEPATH")
         print("-" * 150)
         for key, diff_pct, severity, filepath in broken_files:
-            obj = PLEX_Media.OBJ_BY_ID[key]
+            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
             library = obj.get('library', 'Unknown')[:15]
             plex_duration_raw = obj.get('duration') or 0
             plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
@@ -10569,8 +10569,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID[key]
-            if obj.get('type') not in ['Episode', 'Movie']:
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj or obj.get('type') not in ['Episode', 'Movie']:
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
@@ -10608,7 +10608,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         key_to_group = {}
         items_with_duplicates = {}
         for okey in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID[okey]
+            obj = PLEX_Media.OBJ_BY_ID.get(okey)
+            if not obj: continue
             dup_keys = generate_duplicate_keys(obj)
             if not dup_keys:
                 continue
@@ -10630,7 +10631,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         multi_version_keys = set()
         true_multiversion_keys = set()
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID[key]
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj: continue
             files_dict = obj.get('files', {})
             if len(files_dict) > 1:
                 classification = classify_multi_version(obj)
@@ -10766,7 +10768,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def _filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language):
         filtered_keys = []
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID[key]
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj: continue
             obj_type = obj.get('type')
             if obj_type in ('Show', 'Season'):
                 continue
