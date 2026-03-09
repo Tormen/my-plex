@@ -1622,7 +1622,7 @@ def format_filesize(size_bytes, force_unit=None):
         return f"{size_bytes} B"
 
 def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context=None):
-    """Print concise SSH warning message
+    """Print detailed SSH error message with troubleshooting instructions
 
     Args:
         remote_host: SSH host that failed
@@ -1631,11 +1631,33 @@ def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context
         stderr: Optional stderr output
         extra_context: Optional dict with additional context (e.g., {'source': path, 'destination': path})
     """
-    ctx = ''
+    print(f"\n{'='*80}")
+    print(f"ERROR: Failed to {operation} on SSH host '{remote_host}'")
+    print(f"{'='*80}")
+
     if extra_context:
-        ctx = ' (' + ', '.join(f"{k}: {v}" for k, v in extra_context.items()) + ')'
-    stderr_msg = f" [{stderr.strip()}]" if stderr and stderr.strip() else ''
-    print(f"WARNING: SSH {operation} failed on '{remote_host}'{ctx}{stderr_msg}")
+        for key, value in extra_context.items():
+            print(f"{key.capitalize()}: {value}")
+
+    if cmd:
+        # Handle cmd as either string or list
+        cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        print(f"Command failed: {cmd_str}")
+    if stderr:
+        print(f"Error output: {stderr}")
+
+    print(f"\nTo fix this issue, please ensure:")
+    print(f"  1. The SSH host '{remote_host}' is configured in your ~/.ssh/config")
+    print(f"  2. You can connect with: ssh {remote_host}")
+    print(f"  3. SSH keys are properly set up (no password prompt)")
+    print(f"  4. The remote host is running and accessible")
+
+    print(f"\nExample ~/.ssh/config entry:")
+    print(f"  Host {remote_host}")
+    print(f"    HostName <your-server-ip-or-hostname>")
+    print(f"    User <your-username>")
+    print(f"    IdentityFile ~/.ssh/id_rsa")
+    print(f"{'='*80}\n")
 
 def get_trash_dir(remote_host=None, file_path=None):
     """Get or create trash directory for the current OS or remote host
@@ -1961,6 +1983,10 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             else:
                 print_ssh_error(remote_host, "move file to trash", cmd=cmd, stderr=result.stderr,
                                extra_context={'source file': filepath, 'target trash': trash_path})
+                print("Possible reasons:")
+                print("  - Source file doesn't exist on remote host")
+                print("  - Permission denied for moving the file")
+                print("  - Trash directory doesn't have write permissions\n")
                 return (False, None)
 
         elif operation == 'RENAME':
@@ -1981,6 +2007,10 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             else:
                 print_ssh_error(remote_host, "rename file", cmd=cmd, stderr=result.stderr,
                                extra_context={'source': filepath, 'new_name': new_filename})
+                print("Possible reasons:")
+                print(f"  - Source file doesn't exist: {filepath}")
+                print("  - Permission denied for renaming the file")
+                print(f"  - Target file already exists: {dst_path}\n")
                 return (False, None)
 
         elif operation == 'MOVE':
@@ -2056,7 +2086,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Moved to trash: {trash_path}")
                 return (True, trash_path)
             except Exception as e:
-                print(f"WARNING: Failed to move file to trash: {e}")
+                print(f"ERROR: Failed to move file to trash: {e}")
                 return (False, None)
 
         elif operation == 'RENAME':
@@ -2069,7 +2099,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
                 return (True, dst_path)
             except Exception as e:
-                print(f"WARNING: Failed to rename file: {e}")
+                print(f"ERROR: Failed to rename file: {e}")
                 return (False, None)
 
         elif operation == 'MOVE':
@@ -2079,7 +2109,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
                 return (True, dest_path)
             except Exception as e:
-                print(f"WARNING: Failed to move file: {e}")
+                print(f"ERROR: Failed to move file: {e}")
                 return (False, None)
 
         elif operation == 'REMOVE':
@@ -2088,7 +2118,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Removed: {filepath}")
                 return (True, None)
             except Exception as e:
-                print(f"WARNING: Failed to remove file: {e}")
+                print(f"ERROR: Failed to remove file: {e}")
                 return (False, None)
 
         elif operation == 'LIST_DIR':
@@ -3027,6 +3057,10 @@ def move_file(src_path, dst_dir, remote_host=None):
             else:
                 print_ssh_error(remote_host, "move file", cmd=cmd, stderr=result.stderr,
                                extra_context={'source': src_path, 'destination': dst_path})
+                print("Possible reasons:")
+                print(f"  - Source file doesn't exist: {src_path}")
+                print("  - Permission denied for moving the file")
+                print(f"  - Cannot create destination directory: {dst_dir}\n")
                 return False
         else:
             os.makedirs(dst_dir, exist_ok=True)
@@ -3034,7 +3068,7 @@ def move_file(src_path, dst_dir, remote_host=None):
             print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
             return True
     except Exception as e:
-        print(f"WARNING: Failed to move file: {e}")
+        print(f"ERROR: Failed to move file: {e}")
         return False
 
 def format_duration(duration_ms, unit='m'):
