@@ -125,6 +125,8 @@ _my-plex() {
         '--fr[List media with French audio]'
         '--watched[List watched media items]'
         '--unwatched[List unwatched media items]'
+        '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
+        '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--test[Run regression tests]'
         '(- -V -VV --verbose --very-verbose)'{-V,--verbose}'[Verbose output]'
         '(- -V -VV --verbose --very-verbose)'{-VV,--very-verbose}'[Very verbose output]'
