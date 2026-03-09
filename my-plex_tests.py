@@ -2254,6 +2254,16 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("OBJ_BY_FILEPATH", body, "Must clean up OBJ_BY_FILEPATH")
         self.assertIn("update_and_save_cache(", body, "Must save updated cache to disk")
 
+    def test_remove_does_not_blank_obj_by_library(self):
+        """remove() must NOT set OBJ_BY_LIBRARY = {} — that destroys cache integrity."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("OBJ_BY_LIBRARY = {}", body,
+            "remove() must NOT blank OBJ_BY_LIBRARY — surgically update instead")
+
     def test_remove_handles_already_gone_files(self):
         """remove() must detect files already gone from disk and still clean cache."""
         content = self._read_script()
