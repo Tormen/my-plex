@@ -14240,6 +14240,29 @@ def verify_cache():
 
     print("\n" + "="*76)
 
+def _get_broken_reason(file_info, plex_duration=0):
+    """Return a human-readable broken reason string, or None if file is not broken."""
+    fm = file_info.get('file_metadata')
+    if fm:
+        if fm.get('broken'):
+            reason = fm.get('reason', '')
+            if reason == 'file_not_found':
+                return 'file not found on disk'
+            return f"ffmpeg probe failed ({reason})" if reason else 'ffmpeg probe failed'
+        if plex_duration > 0:
+            container_duration = fm.get('container_duration')
+            if container_duration:
+                diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
+                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                    return f"truncated ({diff_pct:+.1f}% vs Plex duration)"
+    if plex_duration > 60000:
+        filesize = file_info.get('filesize', 0)
+        if filesize:
+            avg_kbps = filesize / 1024 / (plex_duration / 1000)
+            if avg_kbps < 10:
+                return f"suspiciously small ({avg_kbps:.1f} kbps)"
+    return None
+
 def show_item_info(identifier, table_only=False):
     """Show detailed information about a Plex item by ID, key, or search term.
     If identifier is None or empty, shows general system information instead.
@@ -14356,6 +14379,7 @@ def show_item_info(identifier, table_only=False):
 
     # File info — show all versions from 'files' dict, fall back to 'file'
     files = obj.get('files', {})
+    plex_duration = obj.get('duration') or 0
     if files:
         if len(files) == 1:
             ver, info = next(iter(files.items()))
@@ -14371,12 +14395,17 @@ def show_item_info(identifier, table_only=False):
                 print(f"Video:\t{obj['video_codec']}")
             if obj.get('audio_codec'):
                 print(f"Audio:\t{obj['audio_codec']}")
+            broken_reason = _get_broken_reason(info, plex_duration)
+            if broken_reason:
+                print(f"BROKEN:\t{broken_reason}")
         else:
             print(f"Files:\t{len(files)} versions")
             for i, (ver, info) in enumerate(files.items(), 1):
                 fs = info.get('filesize')
                 size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
-                print(f"  [{i}] {ver}{size_str}")
+                broken_reason = _get_broken_reason(info, plex_duration)
+                broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
+                print(f"  [{i}] {ver}{size_str}{broken_str}")
                 print(f"      {info.get('filepath', 'N/A')}")
     elif obj.get('file'):
         print(f"File:\t{obj['file']}")
