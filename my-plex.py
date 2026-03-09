@@ -11961,6 +11961,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     continue
                 if not filepath:
                     continue
+                # Check if file exists before attempting trash (avoids ERROR for already-gone files)
+                check_cmd = f'ssh {shlex.quote(remote_host)} [ -e {shlex.quote(filepath)} ] && echo EXISTS || echo GONE'
+                try:
+                    check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    file_exists = 'EXISTS' in check_result.stdout
+                except Exception:
+                    file_exists = True  # Assume exists if check fails, let move_to_trash handle it
+
+                if not file_exists:
+                    print(f"Gone     [{idx}]: {filepath} (already removed from disk)")
+                    removed_versions.append((version, filepath))
+                    continue
+
                 success, trash_path = move_to_trash(filepath, remote_host)
                 if success:
                     print(f"Trashed  [{idx}]: {filepath}")
@@ -11968,15 +11981,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"  -> {trash_path}")
                     removed_versions.append((version, filepath))
                 else:
-                    # File may already be gone (previous --rm, manual delete, etc.)
-                    # Check if file still exists on the server
-                    check_cmd = f'ssh {shlex.quote(remote_host)} [ -e {shlex.quote(filepath)} ] && echo EXISTS || echo GONE'
-                    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=10)
-                    if 'GONE' in result.stdout:
-                        print(f"Gone     [{idx}]: {filepath} (already removed from disk)")
-                        removed_versions.append((version, filepath))
-                    else:
-                        print(f"Failed   [{idx}]: {filepath}")
+                    print(f"Failed   [{idx}]: {filepath}")
 
             # Update cache: surgically remove trashed/gone files from all structures
             if removed_versions:

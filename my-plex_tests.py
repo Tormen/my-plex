@@ -2271,7 +2271,23 @@ class TestRemoveCommand(unittest.TestCase):
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("GONE", body, "Must check if file is gone from disk when trash fails")
+        self.assertIn("GONE", body, "Must check if file is gone from disk")
+
+    def test_remove_checks_existence_before_trash(self):
+        """remove() must check file existence BEFORE move_to_trash to avoid ERROR for gone files."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        # The GONE check must appear BEFORE move_to_trash call
+        gone_pos = body.find('GONE')
+        trash_pos = body.find('move_to_trash(')
+        self.assertGreater(gone_pos, 0, "Must have GONE check")
+        self.assertGreater(trash_pos, 0, "Must have move_to_trash call")
+        self.assertLess(gone_pos, trash_pos,
+            "File existence check (GONE) must happen BEFORE move_to_trash — "
+            "already-gone files must never trigger the ERROR banner")
 
 
 class TestListMethodsGuardMissingKeys(unittest.TestCase):
