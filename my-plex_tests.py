@@ -2242,6 +2242,27 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         self.assertIn("case 'remove' | 'rm':", content)
 
+    def test_remove_syncs_cache(self):
+        """remove() must update cache after trashing files (remove from files dict, save)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("removed_versions", body, "Must track removed versions")
+        self.assertIn("del files_dict[version]", body, "Must remove trashed versions from files dict")
+        self.assertIn("OBJ_BY_FILEPATH", body, "Must clean up OBJ_BY_FILEPATH")
+        self.assertIn("update_and_save_cache(", body, "Must save updated cache to disk")
+
+    def test_remove_handles_already_gone_files(self):
+        """remove() must detect files already gone from disk and still clean cache."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("GONE", body, "Must check if file is gone from disk when trash fails")
+
 
 class TestListMethodsGuardMissingKeys(unittest.TestCase):
     """Regression: list methods must use OBJ_BY_ID.get(key) not OBJ_BY_ID[key].

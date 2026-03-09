@@ -11895,6 +11895,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if invalid:
                     err(1081, f"--rm index {','.join(str(i) for i in sorted(invalid))} out of range (entry has {max_idx} version{'s' if max_idx != 1 else ''})")
 
+            removed_versions = []
             for idx, (version, file_info) in enumerate(files_dict.items(), 1):
                 filepath = file_info.get('filepath', '')
                 if rm_indices is not None and idx not in rm_indices:
@@ -11907,8 +11908,29 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"Trashed  [{idx}]: {filepath}")
                     if trash_path:
                         print(f"  -> {trash_path}")
+                    removed_versions.append((version, filepath))
                 else:
-                    print(f"Failed   [{idx}]: {filepath}")
+                    # File may already be gone (previous --rm, manual delete, etc.)
+                    # Check if file still exists on the server
+                    check_cmd = f'ssh {shlex.quote(remote_host)} [ -e {shlex.quote(filepath)} ] && echo EXISTS || echo GONE'
+                    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    if 'GONE' in result.stdout:
+                        print(f"Gone     [{idx}]: {filepath} (already removed from disk)")
+                        removed_versions.append((version, filepath))
+                    else:
+                        print(f"Failed   [{idx}]: {filepath}")
+
+            # Update cache: remove trashed/gone files from the object's files dict
+            if removed_versions:
+                for version, filepath in removed_versions:
+                    if version in files_dict:
+                        del files_dict[version]
+                    if filepath and filepath in PLEX_Media.OBJ_BY_FILEPATH:
+                        del PLEX_Media.OBJ_BY_FILEPATH[filepath]
+                # Clear derived structures so init() rebuilds them
+                PLEX_Media.OBJ_BY_LIBRARY = {}
+                update_and_save_cache(build_media_cache_dict())
+                print(f"Cache updated: removed {len(removed_versions)} file(s) from entry.")
 
     ###### Metadata management ---------------------------------------------------
 
