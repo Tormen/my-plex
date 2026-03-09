@@ -2550,39 +2550,36 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--list -f pretty failed: {result.stderr}")
 
 
-class TestNonFatalWarnings(unittest.TestCase):
-    """Ensure non-fatal failures use WARNING, not ERROR (ERROR = FATAL rule)."""
+class TestErrorOutputConventions(unittest.TestCase):
+    """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_print_ssh_error_uses_warning(self):
-        """print_ssh_error must print WARNING, not ERROR."""
+    def test_print_ssh_error_uses_error_not_warning(self):
+        """print_ssh_error must use ERROR prefix — SSH failures are fatal."""
         src = self._read_script()
         match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
         self.assertIsNotNone(match, "print_ssh_error not found")
         body = match.group(1)
-        self.assertIn('WARNING:', body, "print_ssh_error must use WARNING prefix")
-        self.assertNotIn("'ERROR:", body, "print_ssh_error must not use ERROR prefix")
+        self.assertIn('ERROR:', body, "print_ssh_error must use ERROR prefix")
 
-    def test_file_operation_failures_use_warning(self):
-        """Non-fatal file operation failures must use WARNING, not ERROR."""
+    def test_print_ssh_error_has_troubleshooting(self):
+        """print_ssh_error must include verbose troubleshooting guidance."""
+        src = self._read_script()
+        match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        body = match.group(1)
+        self.assertIn('ssh/config', body, "print_ssh_error must have SSH config instructions")
+        self.assertIn('Example', body, "print_ssh_error must have example config")
+
+    def test_trash_failure_has_possible_reasons(self):
+        """TRASH SSH failure path must include 'Possible reasons' block."""
         src = self._read_script()
         match = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)', src, re.DOTALL)
         self.assertIsNotNone(match, "my_plex_file_operation not found")
         body = match.group(1)
-        for msg in re.findall(r'print\(f"(ERROR|WARNING): Failed to \w+', body):
-            self.assertEqual(msg, 'WARNING', f"Found non-fatal '{msg}: Failed to...' — must be WARNING")
-
-    def test_no_verbose_ssh_banners(self):
-        """print_ssh_error must not contain verbose banners or instructions."""
-        src = self._read_script()
-        match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
-        body = match.group(1)
-        self.assertNotIn("='*", body, "print_ssh_error should not have separator banners")
-        self.assertNotIn('ssh/config', body, "print_ssh_error should not have SSH config instructions")
-        self.assertNotIn('Example', body, "print_ssh_error should not have example config")
+        self.assertIn('Possible reasons:', body, "SSH failure paths must have 'Possible reasons' guidance")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -2598,7 +2595,7 @@ _UNITTEST_CLASSES = [
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
     TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
-    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestNonFatalWarnings,
+    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestErrorOutputConventions,
     TestEndToEnd,
 ]
 
