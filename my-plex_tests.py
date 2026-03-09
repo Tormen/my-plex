@@ -1311,11 +1311,11 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         # Find the rebuild block and verify a save follows it (not before it)
         rebuild_pos = content.find("# Rebuild OBJ_BY_FILEPATH from OBJ_BY_ID")
         self.assertGreater(rebuild_pos, 0, "Must have OBJ_BY_FILEPATH rebuild block")
-        # Find the next update_and_save_cache call after the rebuild
+        # Find the next update_and_save_cache call after the rebuild — must use build_media_cache_dict
         after_rebuild = content[rebuild_pos:]
-        save_match = re.search(r"update_and_save_cache\(\{.*?'obj_by_filepath'.*?\}\)", after_rebuild)
+        save_match = re.search(r"update_and_save_cache\(build_media_cache_dict\(", after_rebuild)
         self.assertIsNotNone(save_match,
-            "Must call update_and_save_cache with 'obj_by_filepath' AFTER the rebuild block")
+            "Must call update_and_save_cache(build_media_cache_dict(...)) AFTER the rebuild block")
 
     def test_broken_shows_all_file_versions(self):
         """--broken must show every broken file version, not just one per object."""
@@ -2602,18 +2602,41 @@ class TestObjByLibraryDedup(unittest.TestCase):
     def test_show_episode_season_appends_have_dedup_check(self):
         """All OBJ_BY_LIBRARY .append() calls in show/episode/season processing must check for duplicates."""
         src = self._read_script()
-        # Find _store_shows_from_database function body
         match = re.search(r'def _process_shows_from_database\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
         self.assertIsNotNone(match, "_process_shows_from_database not found")
         body = match.group(1)
-        # Every lib_dict[type].append(key) must be preceded by "if key not in lib_dict[type]"
-        # Find all .append() lines that add to lib_dict (OBJ_BY_LIBRARY)
         append_lines = re.findall(r"lib_dict\['\w+'\]\.append\((\w+)\)", body)
         self.assertTrue(len(append_lines) >= 3, f"Expected at least 3 OBJ_BY_LIBRARY appends (Episode, Season, Show), found {len(append_lines)}")
-        # Check that each append has a dedup guard
         for var in append_lines:
             pattern = rf"if {var} not in lib_dict\['\w+'\]:\s*\n\s*lib_dict\['\w+'\]\.append\({var}\)"
             self.assertRegex(body, pattern, f"Missing dedup check before lib_dict append of '{var}'")
+
+    def test_update_cache_cleans_duplicate_library_keys(self):
+        """--update-cache must deduplicate OBJ_BY_LIBRARY lists."""
+        src = self._read_script()
+        self.assertIn('duplicate keys from OBJ_BY_LIBRARY', src,
+            "--update-cache must clean duplicate keys from OBJ_BY_LIBRARY")
+
+    def test_update_cache_cleans_dangling_show_keys(self):
+        """--update-cache must remove dangling keys from OBJ_BY_SHOW."""
+        src = self._read_script()
+        self.assertIn('dangling keys from OBJ_BY_SHOW', src,
+            "--update-cache must clean dangling keys from OBJ_BY_SHOW")
+
+    def test_update_cache_cleans_dangling_episode_keys(self):
+        """--update-cache must remove dangling keys from OBJ_BY_SHOW_EPISODES."""
+        src = self._read_script()
+        self.assertIn('dangling keys from OBJ_BY_SHOW_EPISODES', src,
+            "--update-cache must clean dangling keys from OBJ_BY_SHOW_EPISODES")
+
+    def test_update_cache_saves_all_structures(self):
+        """--update-cache final save must include all cache structures, not just labels/filepath."""
+        src = self._read_script()
+        match = re.search(r'# Save all rebuilt.*?\n\s*(update_and_save_cache\(.*?\))', src, re.DOTALL)
+        self.assertIsNotNone(match, "Final save must use build_media_cache_dict()")
+        save_call = match.group(1)
+        self.assertIn('build_media_cache_dict', save_call,
+            "Final save must use build_media_cache_dict() to persist all structures")
 
 
 # List of all unittest classes for run_regression_tests()

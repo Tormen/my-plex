@@ -9982,6 +9982,61 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         if key not in PLEX_Media.OBJ_BY_FILEPATH[fp]:
                             PLEX_Media.OBJ_BY_FILEPATH[fp].append(key)
 
+        # Clean up cross-reference integrity issues during --update-cache
+        if FORCE_CACHE_UPDATE:
+            # Deduplicate OBJ_BY_LIBRARY lists
+            deduped = 0
+            for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+                for type_key, keys in type_dict.items():
+                    unique = list(dict.fromkeys(keys))  # preserves order, removes duplicates
+                    if len(unique) < len(keys):
+                        deduped += len(keys) - len(unique)
+                        type_dict[type_key] = unique
+            if deduped > 0:
+                print(f"  Cleaned {deduped} duplicate keys from OBJ_BY_LIBRARY")
+
+            # Remove dangling keys from OBJ_BY_SHOW (show/season keys not in OBJ_BY_ID)
+            dangling_shows = 0
+            for show_key in list(PLEX_Media.OBJ_BY_SHOW.keys()):
+                if show_key not in PLEX_Media.OBJ_BY_ID:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                    dangling_shows += 1
+                else:
+                    for s_str, season_key in list(PLEX_Media.OBJ_BY_SHOW[show_key].items()):
+                        if season_key not in PLEX_Media.OBJ_BY_ID:
+                            del PLEX_Media.OBJ_BY_SHOW[show_key][s_str]
+                            dangling_shows += 1
+            if dangling_shows > 0:
+                print(f"  Cleaned {dangling_shows} dangling keys from OBJ_BY_SHOW")
+
+            # Remove dangling keys from OBJ_BY_SHOW_EPISODES
+            dangling_episodes = 0
+            for show_key in list(PLEX_Media.OBJ_BY_SHOW_EPISODES.keys()):
+                if show_key not in PLEX_Media.OBJ_BY_ID:
+                    del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+                    dangling_episodes += 1
+                else:
+                    for s_str, episodes in list(PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key].items()):
+                        for e_str, versions in list(episodes.items()):
+                            for ver, ep_keys in list(versions.items()):
+                                if isinstance(ep_keys, list):
+                                    cleaned = [k for k in ep_keys if k in PLEX_Media.OBJ_BY_ID]
+                                    removed = len(ep_keys) - len(cleaned)
+                                    if removed > 0:
+                                        dangling_episodes += removed
+                                        versions[ver] = cleaned
+            if dangling_episodes > 0:
+                print(f"  Cleaned {dangling_episodes} dangling keys from OBJ_BY_SHOW_EPISODES")
+
+            # Remove dangling keys from OBJ_BY_MOVIE
+            dangling_movies = 0
+            for movie_key in list(PLEX_Media.OBJ_BY_MOVIE.keys()):
+                if movie_key not in PLEX_Media.OBJ_BY_ID:
+                    del PLEX_Media.OBJ_BY_MOVIE[movie_key]
+                    dangling_movies += 1
+            if dangling_movies > 0:
+                print(f"  Cleaned {dangling_movies} dangling keys from OBJ_BY_MOVIE")
+
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
@@ -9993,8 +10048,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
 
-        # Save labels_index and rebuilt OBJ_BY_FILEPATH to cache
-        update_and_save_cache({'labels_index': labels_index, 'obj_by_filepath': PLEX_Media.OBJ_BY_FILEPATH})
+        # Save all rebuilt/cleaned structures to cache
+        update_and_save_cache(build_media_cache_dict(labels_index=labels_index))
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
