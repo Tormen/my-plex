@@ -2546,6 +2546,24 @@ class TestEndToEnd(unittest.TestCase):
         # May return 0 (found) or non-zero (not found) — just verify it doesn't crash
         self.assertNotIn("Traceback", result.stderr, "--info must not crash with traceback")
 
+    def test_info_shows_broken_status(self):
+        """my-plex ID:<broken_id> must show BROKEN status with reason."""
+        # Get first broken file from --broken output
+        result = self._run_cmd('--broken')
+        if result.returncode != 0:
+            self.skipTest("--broken failed")
+        lines = result.stdout.strip().split('\n')
+        broken_id = None
+        for line in lines:
+            if line.startswith('ID:'):
+                broken_id = line.split()[0]  # e.g. "ID:33885"
+                break
+        if not broken_id:
+            self.skipTest("No broken files found to test")
+        result2 = self._run_cmd(broken_id)
+        self.assertEqual(result2.returncode, 0, f"my-plex {broken_id} failed")
+        self.assertIn("BROKEN", result2.stdout, f"--info for broken item {broken_id} must show BROKEN status")
+
     # --- Verify cache (read-only) ---
 
     def test_verify_cache(self):
