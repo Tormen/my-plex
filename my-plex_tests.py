@@ -2207,6 +2207,53 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
 
 
+class TestListMethodsGuardMissingKeys(unittest.TestCase):
+    """Regression: list methods must use OBJ_BY_ID.get(key) not OBJ_BY_ID[key].
+
+    OBJ_BY_LIBRARY may contain Show keys that are not in OBJ_BY_ID (Shows are
+    container objects stored separately). collect_library_keys() returns these
+    keys, so all methods iterating obj_keys must guard against missing keys.
+    Bug: KeyError: 'Show:4392' in _list_broken_files.
+    """
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_list_broken_files_uses_get(self):
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_broken_files\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("OBJ_BY_ID[key]", body, "_list_broken_files must use .get(key) not [key]")
+
+    def test_list_excess_versions_uses_get(self):
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("OBJ_BY_ID[key]", body, "_list_excess_versions must use .get(key) not [key]")
+
+    def test_find_duplicates_uses_get(self):
+        content = self._read_script()
+        import re
+        match = re.search(r'def _find_duplicates\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("OBJ_BY_ID[okey]", body, "_find_duplicates must use .get(okey) not [okey]")
+        self.assertNotIn("OBJ_BY_ID[key]", body, "_find_duplicates must use .get(key) not [key]")
+
+    def test_filter_by_watch_and_audio_uses_get(self):
+        content = self._read_script()
+        import re
+        match = re.search(r'def _filter_by_watch_and_audio\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertNotIn("OBJ_BY_ID[key]", body, "_filter_by_watch_and_audio must use .get(key) not [key]")
+
+
 class TestWaitForPlexScanComplete(unittest.TestCase):
     """Verify wait_for_plex_scan_complete() exists and uses plex.activities (not just lib.refreshing)."""
 
@@ -2459,7 +2506,7 @@ _UNITTEST_CLASSES = [
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
     TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
-    TestWaitForPlexScanComplete, TestEndToEnd,
+    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestEndToEnd,
 ]
 
 # ---------------------------------------------------------------------------
