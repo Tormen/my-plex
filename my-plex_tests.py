@@ -2582,6 +2582,30 @@ class TestErrorOutputConventions(unittest.TestCase):
         self.assertIn('Possible reasons:', body, "SSH failure paths must have 'Possible reasons' guidance")
 
 
+class TestObjByLibraryDedup(unittest.TestCase):
+    """Ensure OBJ_BY_LIBRARY appends have dedup checks to prevent duplicate keys."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_show_episode_season_appends_have_dedup_check(self):
+        """All OBJ_BY_LIBRARY .append() calls in show/episode/season processing must check for duplicates."""
+        src = self._read_script()
+        # Find _store_shows_from_database function body
+        match = re.search(r'def _process_shows_from_database\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        self.assertIsNotNone(match, "_process_shows_from_database not found")
+        body = match.group(1)
+        # Every lib_dict[type].append(key) must be preceded by "if key not in lib_dict[type]"
+        # Find all .append() lines that add to lib_dict (OBJ_BY_LIBRARY)
+        append_lines = re.findall(r"lib_dict\['\w+'\]\.append\((\w+)\)", body)
+        self.assertTrue(len(append_lines) >= 3, f"Expected at least 3 OBJ_BY_LIBRARY appends (Episode, Season, Show), found {len(append_lines)}")
+        # Check that each append has a dedup guard
+        for var in append_lines:
+            pattern = rf"if {var} not in lib_dict\['\w+'\]:\s*\n\s*lib_dict\['\w+'\]\.append\({var}\)"
+            self.assertRegex(body, pattern, f"Missing dedup check before lib_dict append of '{var}'")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2596,6 +2620,7 @@ _UNITTEST_CLASSES = [
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
     TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
     TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestErrorOutputConventions,
+    TestObjByLibraryDedup,
     TestEndToEnd,
 ]
 

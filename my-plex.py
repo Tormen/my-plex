@@ -7687,7 +7687,8 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 # OBJ_BY_LIBRARY — {type: [keys]}
                 if 'Episode' not in lib_dict:
                     lib_dict['Episode'] = []
-                lib_dict['Episode'].append(episode_key)
+                if episode_key not in lib_dict['Episode']:
+                    lib_dict['Episode'].append(episode_key)
 
                 # OBJ_BY_SHOW_EPISODES — {version: [episode_keys]}
                 e_str = episode_dict['E_str']
@@ -7724,7 +7725,8 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             # OBJ_BY_LIBRARY — Season
             if 'Season' not in lib_dict:
                 lib_dict['Season'] = []
-            lib_dict['Season'].append(season_key)
+            if season_key not in lib_dict['Season']:
+                lib_dict['Season'].append(season_key)
 
             # OBJ_BY_FILEPATH — season directory
             if season_dir:
@@ -7763,7 +7765,8 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
         # OBJ_BY_LIBRARY — Show
         if 'Show' not in lib_dict:
             lib_dict['Show'] = []
-        lib_dict['Show'].append(show_key)
+        if show_key not in lib_dict['Show']:
+            lib_dict['Show'].append(show_key)
 
         # OBJ_BY_FILEPATH — show directory
         if show_dir:
