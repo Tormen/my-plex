@@ -1196,78 +1196,82 @@ def ensure_plex_api(required=True):
         err(1071, "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
     return PLEX_SERVER
 
-def wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=60, verbose=True):
-    """Wait for a Plex library scan to complete, including internal indexing.
+def _get_active_scan_section_ids(plex):
+    """Return set of library section IDs that have active library.update.section activities."""
+    active = set()
+    try:
+        for activity in plex.activities:
+            if getattr(activity, 'type', '') == 'library.update.section':
+                context = getattr(activity, 'Context', None)
+                if context is not None:
+                    sid = str(getattr(context, 'librarySectionID', ''))
+                    if sid: active.add(sid)
+                else:
+                    active.add('*')  # Unknown section — treat all as active
+    except Exception:
+        pass
+    return active
 
-    lib.refreshing only tracks the initial file-discovery scan phase.
-    After it goes False, Plex may still be processing new files internally.
-    We additionally poll plex.activities for 'library.update.section' activities
-    targeting this library's section ID to detect ongoing background processing.
+def wait_for_plex_scans_complete(plex, libraries, scan_start_times, max_wait=120):
+    """Wait for multiple Plex library scans to complete in parallel.
+
+    Checks both lib.refreshing (file discovery phase) and plex.activities
+    (internal indexing phase) for each library. Elapsed time is measured
+    from the original scan trigger, not from when we start checking.
+
+    Args:
+        plex: PlexServer instance
+        libraries: list of (lib_name, lib) tuples
+        scan_start_times: dict of {lib_name: start_timestamp}
+        max_wait: maximum seconds to wait per library (from its scan start)
+    """
+    pending = {name: lib for name, lib in libraries if name in scan_start_times}
+    # Phase 1 done = lib.refreshing went False; Phase 2 done = no activity in plex.activities
+    phase1_done = set()
+
+    while pending:
+        time.sleep(2)
+
+        # Batch-fetch active scan section IDs (one API call for all libraries)
+        active_sections = _get_active_scan_section_ids(plex)
+
+        for lib_name in list(pending.keys()):
+            lib = pending[lib_name]
+            elapsed = time.time() - scan_start_times[lib_name]
+
+            if elapsed > max_wait:
+                print(f"  ⚠ Timeout: {lib_name} (exceeded {max_wait}s)")
+                del pending[lib_name]
+                continue
+
+            # Phase 1: Wait for lib.refreshing to go False
+            if lib_name not in phase1_done:
+                try:
+                    lib.reload()
+                    if not lib.refreshing:
+                        phase1_done.add(lib_name)
+                    else:
+                        continue  # Still scanning
+                except Exception as e:
+                    print(f"  ✗ Error checking {lib_name}: {e}")
+                    del pending[lib_name]
+                    continue
+
+            # Phase 2: Check plex.activities for ongoing indexing
+            section_id = str(lib.key) if hasattr(lib, 'key') else ''
+            if section_id not in active_sections and '*' not in active_sections:
+                print(f"  ✓ Completed: {lib_name} ({elapsed:.0f}s)")
+                del pending[lib_name]
+
+def wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120, verbose=True):
+    """Wait for a single Plex library scan to complete (convenience wrapper).
 
     Returns: (completed: bool, elapsed: float)
     """
     start = time.time()
-    section_id = str(lib.key) if hasattr(lib, 'key') else ''
-
-    # Phase 1: Wait for lib.refreshing to go False
-    while True:
-        elapsed = time.time() - start
-        if elapsed > max_wait:
-            if verbose: print(f" ⚠ (timeout after {max_wait:.0f}s)")
-            return (False, elapsed)
-        try:
-            lib.reload()
-            if not lib.refreshing:
-                break
-        except Exception as e:
-            if verbose: print(f" ✗ Error checking {lib_name}: {e}")
-            return (False, elapsed)
-        time.sleep(2)
-        if verbose and int(elapsed) % 10 == 0 and int(elapsed) > 0:
-            print(".", end='', flush=True)
-
-    # Phase 2: Wait for plex.activities to clear library.update.section for this library
-    # This catches the async indexing that continues after refreshing goes False
-    stable_count = 0
-    required_stable = 3  # Require 3 consecutive checks with no activity (6 seconds)
-    while True:
-        elapsed = time.time() - start
-        if elapsed > max_wait:
-            if verbose: print(f" ⚠ (timeout after {max_wait:.0f}s)")
-            return (False, elapsed)
-        try:
-            activities = plex.activities
-            scan_active = False
-            for activity in activities:
-                if getattr(activity, 'type', '') == 'library.update.section':
-                    # Check if this activity is for our library section
-                    context = getattr(activity, 'Context', None)
-                    if context is not None:
-                        act_section_id = str(getattr(context, 'librarySectionID', ''))
-                        if act_section_id == section_id:
-                            scan_active = True
-                            break
-                    else:
-                        # No context info — assume it could be ours
-                        scan_active = True
-                        break
-        except Exception:
-            # If activities endpoint fails, fall back to just the refreshing check
-            break
-
-        if not scan_active:
-            stable_count += 1
-            if stable_count >= required_stable:
-                break
-        else:
-            stable_count = 0
-
-        time.sleep(2)
-        if verbose and int(elapsed) % 10 == 0 and int(elapsed) > 0:
-            print(".", end='', flush=True)
-
+    wait_for_plex_scans_complete(plex, [(lib_name, lib)], {lib_name: start}, max_wait=max_wait)
     elapsed = time.time() - start
-    return (True, elapsed)
+    return (elapsed <= max_wait, elapsed)
 
 def connect_to_plex(plex_url, plex_token):
     """ Infrastructure for API-dependent operations. Connect to plex server and return PLEX_SERVER object. """
@@ -4626,11 +4630,9 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             try:
                 if lib_name in PLEX_Library.OBJ_DICT:
                     lib = PLEX_Library.OBJ_DICT[lib_name]
-                    print(f"  Scanning: {lib_name}...", end='', flush=True)
                     lib.update()
-                    completed, elapsed = wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120, verbose=True)
+                    completed, _ = wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120)
                     if completed:
-                        print(f" ✓ ({elapsed:.0f}s)")
                         successfully_scanned_libraries.add(lib_name)
             except Exception as e:
                 print(f"✗ Error: {e}")
@@ -5068,14 +5070,9 @@ def undo_operation(operation_log, remote_host=None):
                 if library_name and library_name in PLEX_Library.OBJ_DICT:
                     try:
                         lib = PLEX_Library.OBJ_DICT[library_name]
-                        print(f"  Scanning Plex library '{library_name}'...", end='', flush=True)
                         lib.update()
                         plex = ensure_plex_api()
-                        completed, elapsed = wait_for_plex_scan_complete(plex, library_name, lib, max_wait=120, verbose=True)
-                        if completed:
-                            print(f" ✓ ({elapsed:.0f}s)")
-                        else:
-                            print(f" ⚠ (scan may still be running)")
+                        wait_for_plex_scan_complete(plex, library_name, lib, max_wait=120)
                     except Exception as e:
                         print(f"  ⚠ Warning: Could not scan library: {e}")
                         print(f"    You can trigger a scan manually from Plex web interface")
@@ -8804,15 +8801,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"\n  Waiting for all libraries to complete scanning...")
             max_wait = 3600 if FORCE_PLEXDATA else 120  # 1 hour for refresh, 2 min for update
             plex = ensure_plex_api()
-
-            for lib_name, lib in libraries_list:
-                if lib_name not in scan_start_times:
-                    continue
-                print(f"  Waiting: {lib_name}", end='', flush=True)
-                completed, elapsed = wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=max_wait, verbose=True)
-                if completed:
-                    print(f" ✓ ({elapsed:.0f}s)")
-                # timeout/error messages are printed by the helper
+            wait_for_plex_scans_complete(plex, libraries_list, scan_start_times, max_wait=max_wait)
 
             print(f"{'='*76}\n")
 
