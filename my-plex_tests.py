@@ -2207,6 +2207,44 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
 
 
+class TestWaitForPlexScanComplete(unittest.TestCase):
+    """Verify wait_for_plex_scan_complete() exists and uses plex.activities (not just lib.refreshing)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_function_exists(self):
+        """wait_for_plex_scan_complete must be defined."""
+        content = self._read_script()
+        self.assertIn("def wait_for_plex_scan_complete(", content)
+
+    def test_checks_activities(self):
+        """Must poll plex.activities for library.update.section, not just lib.refreshing."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def wait_for_plex_scan_complete\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("activities", body, "Must check plex.activities for ongoing scan activities")
+        self.assertIn("library.update.section", body, "Must check for library.update.section activity type")
+        self.assertIn("lib.refreshing", body, "Must still check lib.refreshing as first phase")
+
+    def test_update_cache_uses_helper(self):
+        """--update-cache scan waiting must use wait_for_plex_scan_complete, not raw lib.refreshing loop."""
+        content = self._read_script()
+        import re
+        # Find the update_cache method's scan waiting section (between the print and the separator line)
+        match = re.search(r"Waiting for all libraries to complete scanning.*?print\(f.*?=.*?76", content, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find scan waiting section in update_cache")
+        body = match.group(0)
+        self.assertIn("wait_for_plex_scan_complete(", body,
+            "--update-cache must use wait_for_plex_scan_complete helper")
+        # Must NOT have raw lib.refreshing loop
+        self.assertNotIn("lib.refreshing", body,
+            "--update-cache must NOT use raw lib.refreshing — use wait_for_plex_scan_complete instead")
+
+
 class TestEndToEnd(unittest.TestCase):
     """End-to-end tests: run actual commands as subprocesses to verify they work."""
 
@@ -2412,7 +2450,8 @@ _UNITTEST_CLASSES = [
     TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
     TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
     TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
-    TestProblems, TestExcessVersionsMainParser, TestRemoveCommand, TestEndToEnd,
+    TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
+    TestWaitForPlexScanComplete, TestEndToEnd,
 ]
 
 # ---------------------------------------------------------------------------
