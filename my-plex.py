@@ -11923,15 +11923,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         print(f"Failed   [{idx}]: {filepath}")
 
-            # Update cache: remove trashed/gone files from the object's files dict
+            # Update cache: surgically remove trashed/gone files from all structures
             if removed_versions:
                 for version, filepath in removed_versions:
                     if version in files_dict:
                         del files_dict[version]
                     if filepath and filepath in PLEX_Media.OBJ_BY_FILEPATH:
                         del PLEX_Media.OBJ_BY_FILEPATH[filepath]
-                # Clear derived structures so init() rebuilds them
-                PLEX_Media.OBJ_BY_LIBRARY = {}
+
+                # If ALL files removed, update the primary filepath reference too
+                if not files_dict:
+                    obj['file'] = ''
+
+                    # Remove from OBJ_BY_MOVIE if it's a movie
+                    if obj.get('type') == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                        del PLEX_Media.OBJ_BY_MOVIE[key]
+
+                # Update OBJ_BY_LIBRARY: remove version keys that no longer have files
+                # (OBJ_BY_LIBRARY lists cache_keys, not versions — one key per object)
+                # The entry stays in OBJ_BY_LIBRARY as long as it exists in OBJ_BY_ID
+
                 update_and_save_cache(build_media_cache_dict())
                 print(f"Cache updated: removed {len(removed_versions)} file(s) from entry.")
 
