@@ -113,6 +113,7 @@ _my-plex() {
         '--broken[Show only potentially truncated/broken files]'
         '--excess-versions[List entries with too many file versions]:limit:'
         '--problems[Run all problem detection checks]'
+        '--scan[Trigger Plex library scan + metadata refresh + cache update]'
         '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
         '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
         '--list-labels[List all labels and item counts]'
