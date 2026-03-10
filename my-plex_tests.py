@@ -2204,7 +2204,22 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("OBJ_BY_ID", body, "Must update OBJ_BY_ID")
         self.assertIn("OBJ_BY_FILEPATH", body, "Must update OBJ_BY_FILEPATH")
         self.assertIn("OBJ_BY_LIBRARY", body, "Must update OBJ_BY_LIBRARY")
+        self.assertIn("OBJ_BY_SHOW_EPISODES", body, "Must update OBJ_BY_SHOW_EPISODES for episodes")
+        self.assertIn("OBJ_BY_MOVIE", body, "Must update OBJ_BY_MOVIE for movies")
         self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
+
+    def test_remove_from_cache_cleans_episode_from_show_episodes(self):
+        """_remove_from_cache_by_id must remove episode keys from OBJ_BY_SHOW_EPISODES."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        # Must handle Episode type specifically with show_key/S_str/E_str lookups
+        self.assertIn("obj_type == 'Episode'", body,
+            "Must have specific Episode handling for OBJ_BY_SHOW_EPISODES cleanup")
+        self.assertIn("S_str", body, "Must use S_str to find season in OBJ_BY_SHOW_EPISODES")
+        self.assertIn("E_str", body, "Must use E_str to find episode in OBJ_BY_SHOW_EPISODES")
 
     def test_rm_accepts_version_spec(self):
         """--rm must accept optional version indices/ranges argument."""
