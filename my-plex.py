@@ -466,6 +466,7 @@ FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
 FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
 RESCAN_BROKEN = False   # When True with --update-cache, re-queues broken files (ffprobe_error) for metadata collection
+SCAN_LIBRARIES = None   # When set (list of library names), --scan restricts Plex scan + cache update to these libraries only
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
 AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
@@ -8172,6 +8173,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS) # Interactive resolution mode for duplicates
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
+    argparser.add_argument('--scan', action='store_true',   help="Trigger Plex filesystem scan for this library, wait for completion, then update cache. Use --help scan for details.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -8688,7 +8690,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         Now uses direct database access for 60x speed improvement!
         """
-        global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE, READ_ONLY_MODE
+        global CACHE, CACHE_FILE, EMPTY_LIBRARY_STATS, FORCE_CACHE_UPDATE, READ_ONLY_MODE, SCAN_LIBRARIES
 
         # VALIDATE DATABASE SCHEMA FIRST
         # This ensures we detect schema changes in future Plex versions early
@@ -8747,24 +8749,83 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # ONLY scan when --update-cache is explicitly used (not during --duplicates, etc.)
         # NOTE: Library scanning requires API connection
         if DBG: print(f"{DBGPFX}update_cache(): FORCE_CACHE_UPDATE={FORCE_CACHE_UPDATE}, OFFLINE={OFFLINE}, has_libraries={len(PLEX_Library.OBJ_DICT) if PLEX_Library.OBJ_DICT else 0}, PLEX_SERVER={'connected' if PLEX_SERVER else 'None'}")
+
+        # --scan: Resolve ID: references and file paths in SCAN_LIBRARIES to library names
+        # Must happen after cache is loaded (OBJ_BY_ID is available) but before scanning
+        if SCAN_LIBRARIES is not None:
+            resolved_libraries = set()
+            for candidate in SCAN_LIBRARIES:
+                # Already a known library name?
+                if candidate in PLEX_Library.OBJ_DICT_SUPPORTED:
+                    resolved_libraries.add(candidate)
+                    continue
+                # ID:12345 → look up in cache to find library
+                if candidate.upper().startswith('ID:'):
+                    try:
+                        numeric_id = int(candidate[3:])
+                        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                            if int(obj.get('id', 0)) == numeric_id:
+                                lib_name = obj.get('library')
+                                if lib_name:
+                                    resolved_libraries.add(lib_name)
+                                    print(f"  --scan: Resolved {candidate} → library '{lib_name}'")
+                                break
+                        else:
+                            err(1074, f"--scan: ID {candidate} not found in cache. Run --update-cache first or check the ID.")
+                    except ValueError:
+                        err(1074, f"--scan: Invalid ID format '{candidate}'. Expected 'ID:12345'.")
+                    continue
+                # Full cache key like Episode:12345
+                if candidate in PLEX_Media.OBJ_BY_ID:
+                    lib_name = PLEX_Media.OBJ_BY_ID[candidate].get('library')
+                    if lib_name:
+                        resolved_libraries.add(lib_name)
+                        print(f"  --scan: Resolved {candidate} → library '{lib_name}'")
+                    continue
+                # File path → look up in PLEX_Media.OBJ_BY_FILEPATH
+                if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') and candidate in PLEX_Media.OBJ_BY_FILEPATH:
+                    for key in PLEX_Media.OBJ_BY_FILEPATH[candidate]:
+                        lib_name = PLEX_Media.OBJ_BY_ID.get(key, {}).get('library')
+                        if lib_name:
+                            resolved_libraries.add(lib_name)
+                            print(f"  --scan: Resolved file path → library '{lib_name}'")
+                    continue
+                # Unknown — error
+                available = ', '.join(sorted(PLEX_Library.OBJ_DICT_SUPPORTED.keys()))
+                err(1074, f"--scan: '{candidate}' is not a known library, Plex ID, or file path.\n\nAvailable libraries: {available}\nTo scan by ID, use: my-plex ID:12345 --scan")
+            SCAN_LIBRARIES = list(resolved_libraries)
+            if DBG: print(f"{DBGPFX}update_cache(): --scan resolved SCAN_LIBRARIES={SCAN_LIBRARIES}")
+
         plex = ensure_plex_api(required=False) if (FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT) else None
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT and plex:
             global FORCE_PLEXDATA
 
-            # Use lib.refresh() with --force to verify all files exist and refresh metadata
+            # --scan always uses lib.refresh() to force Plex to re-read file metadata (fixes wrong durations)
+            use_refresh = FORCE_PLEXDATA or (SCAN_LIBRARIES is not None or '--scan' in sys.argv)
+
+            # Use lib.refresh() with --force/--scan to verify all files exist and refresh metadata
             # Use lib.update() without --force for quick scan of new/changed files only
-            scan_type = "REFRESHING ALL METADATA FOR" if FORCE_PLEXDATA else "TRIGGER PLEX SCANNING OF"
-            action_desc = "refresh all metadata and verify files" if FORCE_PLEXDATA else "detect filesystem changes"
+            scan_type = "REFRESHING ALL METADATA FOR" if use_refresh else "TRIGGER PLEX SCANNING OF"
+            action_desc = "refresh all metadata and verify files" if use_refresh else "detect filesystem changes"
 
             # Get real plexapi library objects for scanning
             # PLEX_Library.OBJ_DICT may contain cache-based lightweight objects without .update()/.reload()
             api_libraries = {lib.title: lib for lib in plex.library.sections()}
 
+            # --scan with specific libraries: filter to only those libraries
+            if SCAN_LIBRARIES is not None:
+                # Validate library names
+                for lib_name in SCAN_LIBRARIES:
+                    if lib_name not in api_libraries:
+                        available = ', '.join(sorted(api_libraries.keys()))
+                        err(1073, f"Library '{lib_name}' not found for --scan.\n\nAvailable libraries: {available}")
+                api_libraries = {name: lib for name, lib in api_libraries.items() if name in SCAN_LIBRARIES}
+
             print(f"\n{'='*76}")
-            print(f"{scan_type} {len(api_libraries)} LIBRARIES TO {action_desc.upper()}")
+            print(f"{scan_type} {len(api_libraries)} LIBRAR{'Y' if len(api_libraries) == 1 else 'IES'} TO {action_desc.upper()}")
             print(f"{'='*76}")
 
-            if FORCE_PLEXDATA:
+            if use_refresh:
                 print(f"⚠  Using lib.refresh() - this will verify ALL files and refresh metadata")
                 print(f"   This is SLOWER but will detect missing files and update metadata")
                 print(f"{'='*76}")
@@ -8775,9 +8836,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             libraries_list = sorted(api_libraries.items())
 
             # Phase 1: Start all library scans in parallel
-            # IMPORTANT: With --force, do BOTH update (scan for new files) AND refresh (verify existing files)
+            # IMPORTANT: With --force/--scan, do BOTH update (scan for new files) AND refresh (verify existing files)
             # Without --force, only do update (fast scan for new/changed files)
-            if FORCE_PLEXDATA:
+            if use_refresh:
                 print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update + refresh)...")
             else:
                 print(f"  Starting {len(libraries_list)} library scan{'s' if len(libraries_list) != 1 else ''} in parallel (update only)...")
@@ -8788,8 +8849,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     # CRITICAL: Always do update() first to scan for NEW files
                     lib.update()  # Scan filesystem for new/changed files
 
-                    # With --force, also do refresh() to verify existing files and update metadata
-                    if FORCE_PLEXDATA:
+                    # With --force/--scan, also do refresh() to verify existing files and update metadata
+                    if use_refresh:
                         lib.refresh()  # Verify all files exist and refresh metadata
                         action = "update+refresh"
                     else:
@@ -8802,7 +8863,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Phase 2: Wait for all libraries to complete (including internal indexing)
             print(f"\n  Waiting for all libraries to complete scanning...")
-            max_wait = 3600 if FORCE_PLEXDATA else 120  # 1 hour for refresh, 2 min for update
+            max_wait = 3600 if use_refresh else 120  # 1 hour for refresh, 2 min for update
             plex = ensure_plex_api()
             wait_for_plex_scans_complete(plex, libraries_list, scan_start_times, max_wait=max_wait)
 
@@ -8927,6 +8988,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 # This ensures large libraries start processing early, keeping all workers busy
                 # When resuming, filter out already-completed libraries first
                 all_libraries = list(PLEX_Library.OBJ_DICT_SUPPORTED.items())
+
+                # --scan with specific libraries: filter to only those libraries
+                if SCAN_LIBRARIES is not None:
+                    all_libraries = [(title, lib) for title, lib in all_libraries if title in SCAN_LIBRARIES]
+                    if DBG: print(f"{DBGPFX}update_cache(): --scan filtered all_libraries to {[t for t,_ in all_libraries]}")
 
                 # PERFORMANCE OPTIMIZATION: Always partition large Show and Movie libraries
                 # This allows workers that finish early to pick up partitions from large libraries
@@ -9418,6 +9484,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):      # Handling actions on libraries
+        # Handle --scan for specific library — actual work already done in update_cache()
+        if safe_getattr(obj_args, 'scan', False):
+            # Scanning and cache update already happened during init_plex() → update_cache()
+            # Just exit cleanly
+            sys.exit(0)
+
         # Auto-enable --list if --duplicates, --watched, --unwatched, or --audio is used
         # Note: watched/unwatched/audio are global filters from main parser (args), not library-specific (obj_args)
         watched_only = safe_getattr(args, 'watched', False)
@@ -12548,6 +12620,47 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
+        case 'scan':
+            print()
+            print("=" * 76)
+            print("SCAN HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex [<library_name> | ID:<plex_id>] --scan")
+            print("       my-plex --scan")
+            print()
+            print("Triggers a Plex library scan + metadata refresh, waits for completion,")
+            print("then updates the my-plex cache with the latest data.")
+            print()
+            print("This is useful when:")
+            print("  - Plex has stored wrong metadata (e.g. incorrect file duration)")
+            print("  - You've added/removed files and want Plex + cache to reflect changes")
+            print("  - Files show as --broken due to Plex duration mismatch (not actual truncation)")
+            print()
+            print("WHAT IT DOES:")
+            print()
+            print("  1. Triggers lib.update() — Plex scans the filesystem for new/changed files")
+            print("  2. Triggers lib.refresh() — Plex re-reads ALL file metadata (duration, codecs, etc.)")
+            print("  3. Waits for Plex to finish scanning")
+            print("  4. Runs a full cache update (--update-cache --force-metadata) for affected libraries")
+            print()
+            print("TARGETS:")
+            print()
+            print("  --scan                       Scan ALL libraries")
+            print("  <library_name> --scan        Scan a specific library")
+            print("  ID:<plex_id> --scan          Scan the library containing that Plex item")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --scan                     # Scan all libraries + update cache")
+            print("  my-plex series.en --scan           # Scan only series.en + update cache")
+            print("  my-plex ID:51862 --scan            # Scan the library containing ID:51862")
+            print()
+            print("NOTE: lib.refresh() forces Plex to re-analyze every file in the library.")
+            print("This is slower than a normal scan but fixes wrong metadata like incorrect durations.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
         case 'watched':
             print()
             print("=" * 76)
@@ -14515,6 +14628,12 @@ def execute_global_commands(args, cmd_args):
         label, plex_id = cmd_args.remove_label
         remove_label_from_item(label, plex_id)
 
+    # Handle --scan (global = scan all libraries) — actual work already done in update_cache()
+    if safe_getattr(cmd_args, 'scan', False):
+        # Scanning and cache update already happened during init_plex() → update_cache()
+        # Just exit cleanly
+        sys.exit(0)
+
     # Note: --duplicates and --broken auto-enable --list via argument normalization in main()
     # No need to check and modify cmd_args.list here
 
@@ -14885,6 +15004,7 @@ def main():
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
+    main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
     main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
@@ -14917,6 +15037,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
@@ -15000,6 +15121,8 @@ def main():
         elif safe_getattr(args, 'unwatched', False):
             help_redirect = 'unwatched'
         # Check remaining_args for GLOBAL_CMD_PARSER flags (cmd_args not parsed yet)
+        elif args.scan:
+            help_redirect = 'scan'
         elif '--duplicates' in remaining_args:
             help_redirect = 'duplicates'
         elif '--broken' in remaining_args:
@@ -15013,10 +15136,16 @@ def main():
 
     FORCE_CACHE_UPDATE = args.update_cache
 
+    # --scan implies --update-cache (scan + cache update) and --force-metadata (re-read file durations)
+    has_scan = args.scan
+    if has_scan:
+        FORCE_CACHE_UPDATE = True
+        args.update_cache = True  # So other code paths see it too
+
     # --force triggers both --force-plexdata AND --force-metadata
     # Each can also be used independently
     FORCE_PLEXDATA = (args.force or args.force_plexdata) and args.update_cache
-    FORCE_METADATA = (args.force or args.force_metadata) and args.update_cache
+    FORCE_METADATA = (args.force or args.force_metadata or has_scan) and args.update_cache
     RESCAN_BROKEN = args.update_cache and has_broken  # --update-cache --broken: rescan broken files
 
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
@@ -15122,6 +15251,21 @@ def main():
         sys.exit(1)
 
     init(args)
+
+    # --scan: determine which libraries to scan BEFORE init_plex triggers update_cache()
+    # SCAN_LIBRARIES=None means scan all; SCAN_LIBRARIES=[names] means scan only those
+    if has_scan:
+        # Collect library names from CMD_OR_PLEXOBJECT and remaining_args
+        # (remaining_args may contain the library name if --scan was parsed first)
+        scan_lib_candidates = []
+        if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT != '--scan':
+            scan_lib_candidates.append(args.CMD_OR_PLEXOBJECT)
+        for ra in remaining_args:
+            if not ra.startswith('--') and ra != '--scan':
+                scan_lib_candidates.append(ra)
+        # Will be validated against PLEX_Library.OBJ_DICT in update_cache() after cache is loaded
+        SCAN_LIBRARIES = scan_lib_candidates if scan_lib_candidates else None
+        if DBG: print(f"{DBGPFX}--scan: SCAN_LIBRARIES={SCAN_LIBRARIES}")
 
     main_print_help(args, remaining_args, main_parser)
 

@@ -723,7 +723,7 @@ class TestLongHelp(unittest.TestCase):
 
     HELP_TOPICS = [
         'no-audio-language', 'no-language', 'no_audio_language',
-        'duplicates', 'broken',
+        'duplicates', 'broken', 'scan',
         'watched', 'unwatched',
         'list',
         'en', 'de', 'fr',
@@ -2739,6 +2739,112 @@ class TestDeleteRequiresRemove(unittest.TestCase):
             "delete() must warn that Plex API also removes files")
 
 
+class TestScan(unittest.TestCase):
+    """Tests for --scan command."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def _run_cmd(self, *extra_args):
+        cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result
+
+    def test_scan_in_main_parser(self):
+        """--scan must be registered in main_parser."""
+        src = self._read_script()
+        self.assertIn("'--scan'", src, "--scan not found in main_parser arguments")
+
+    def test_scan_in_global_cmd_parser(self):
+        """--scan must be registered in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        # Find --scan in GLOBAL_CMD_PARSER context
+        self.assertRegex(src, r"GLOBAL_CMD_PARSER\.add_argument\('--scan'",
+            "--scan not found in GLOBAL_CMD_PARSER")
+
+    def test_scan_in_library_argparser(self):
+        """--scan must be registered in PLEX_Library.argparser."""
+        src = self._read_script()
+        self.assertRegex(src, r"argparser\.add_argument\('--scan'.*action='store_true'",
+            "--scan not found in PLEX_Library.argparser")
+
+    def test_scan_implies_force_cache_update(self):
+        """--scan must set FORCE_CACHE_UPDATE = True."""
+        src = self._read_script()
+        self.assertIn("FORCE_CACHE_UPDATE = True", src,
+            "--scan must set FORCE_CACHE_UPDATE = True")
+
+    def test_scan_implies_force_metadata(self):
+        """--scan must enable FORCE_METADATA so file durations are re-read."""
+        src = self._read_script()
+        self.assertIn("has_scan", src, "has_scan variable must exist")
+        self.assertRegex(src, r'FORCE_METADATA.*has_scan',
+            "--scan must enable FORCE_METADATA")
+
+    def test_scan_uses_lib_refresh(self):
+        """--scan must use lib.refresh() to force Plex to re-read file metadata."""
+        src = self._read_script()
+        self.assertRegex(src, r"use_refresh.*SCAN_LIBRARIES",
+            "--scan must set use_refresh based on SCAN_LIBRARIES")
+
+    def test_scan_help_exists(self):
+        """--help scan must show SCAN HELP."""
+        result = self._run_cmd('--help', 'scan')
+        self.assertEqual(result.returncode, 0, f"--help scan failed: {result.stderr}")
+        self.assertIn("SCAN HELP", result.stdout)
+
+    def test_scan_help_reversed(self):
+        """--scan --help must work like --help scan."""
+        result = self._run_cmd('--scan', '--help')
+        self.assertEqual(result.returncode, 0, f"--scan --help failed: {result.stderr}")
+        self.assertIn("SCAN HELP", result.stdout)
+
+    def test_scan_help_dashed(self):
+        """--help --scan must work like --help scan."""
+        result = self._run_cmd('--help', '--scan')
+        self.assertEqual(result.returncode, 0, f"--help --scan failed: {result.stderr}")
+        self.assertIn("SCAN HELP", result.stdout)
+
+    def test_scan_in_zsh_completions(self):
+        """--scan must be in zsh completion script."""
+        wrapper_path = os.path.join(os.path.dirname(MAIN_SCRIPT), 'my-plex')
+        with open(wrapper_path, 'r') as f:
+            wrapper = f.read()
+        self.assertIn("'--scan[", wrapper,
+            "--scan not found in zsh completion script")
+
+    def test_scan_libraries_global_exists(self):
+        """SCAN_LIBRARIES global variable must be declared."""
+        src = self._read_script()
+        self.assertIn("SCAN_LIBRARIES = None", src,
+            "SCAN_LIBRARIES global not found")
+
+    def test_scan_resolves_plex_id(self):
+        """--scan must support ID: prefix for resolving Plex IDs to library names."""
+        src = self._read_script()
+        self.assertRegex(src, r"candidate\.upper\(\)\.startswith\('ID:'\)",
+            "--scan must resolve ID: prefixes to library names")
+
+    def test_scan_filters_all_libraries(self):
+        """--scan with specific library must filter all_libraries in update_cache()."""
+        src = self._read_script()
+        self.assertIn("SCAN_LIBRARIES is not None", src,
+            "SCAN_LIBRARIES filtering not found in update_cache()")
+
+    def test_scan_exits_after_work(self):
+        """--scan in execute_global_commands must exit cleanly."""
+        src = self._read_script()
+        # Check that scan handler calls sys.exit(0) — look for the pattern in execute_global_commands
+        self.assertIn("'scan', False)", src,
+            "--scan handler with safe_getattr must exist")
+        # Verify sys.exit(0) appears after the scan check
+        scan_idx = src.index("'scan', False)")
+        exit_idx = src.index("sys.exit(0)", scan_idx)
+        self.assertLess(exit_idx - scan_idx, 200,
+            "--scan handler must call sys.exit(0) shortly after detection")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2755,6 +2861,7 @@ _UNITTEST_CLASSES = [
     TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestErrorOutputConventions,
     TestObjByLibraryDedup,
     TestDeleteRequiresRemove,
+    TestScan,
     TestEndToEnd,
 ]
 
