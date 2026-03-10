@@ -3216,29 +3216,36 @@ def display_duplicate_details(nr, obj):
 
                 # Check against threshold
                 if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                    # Classify severity
-                    if diff_pct < -10:
-                        severity = 'SEVERE'
-                        emoji = '🔴'
-                    elif diff_pct < -5:
-                        severity = 'MODERATE'
-                        emoji = '🟠'
-                    elif diff_pct < -1:
-                        severity = 'MILD'
-                        emoji = '🟡'
+                    # Cross-validate: if container and video stream durations agree
+                    # (within 2s), the file is internally consistent — Plex just
+                    # measured a different duration. Not a real truncation.
+                    video_duration = file_metadata.get('video_duration')
+                    if video_duration and abs(container_duration - video_duration) < 2000:
+                        pass  # File is healthy, Plex duration is just inaccurate
                     else:
-                        severity = 'BORDERLINE'
-                        emoji = '⚠️'
+                        # Classify severity
+                        if diff_pct < -10:
+                            severity = 'SEVERE'
+                            emoji = '🔴'
+                        elif diff_pct < -5:
+                            severity = 'MODERATE'
+                            emoji = '🟠'
+                        elif diff_pct < -1:
+                            severity = 'MILD'
+                            emoji = '🟡'
+                        else:
+                            severity = 'BORDERLINE'
+                            emoji = '⚠️'
 
-                    plex_min = plex_duration / 60000
-                    container_min = container_duration / 60000
-                    missing_min = (plex_duration - container_duration) / 60000
+                        plex_min = plex_duration / 60000
+                        container_min = container_duration / 60000
+                        missing_min = (plex_duration - container_duration) / 60000
 
-                    print(f"    {emoji} WARNING: File appears TRUNCATED ({severity})")
-                    print(f"       Plex expects:     {plex_min:.2f} min")
-                    print(f"       Container has:    {container_min:.2f} min")
-                    print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
-                    print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
+                        print(f"    {emoji} WARNING: File appears TRUNCATED ({severity})")
+                        print(f"       Plex expects:     {plex_min:.2f} min")
+                        print(f"       Container has:    {container_min:.2f} min")
+                        print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
+                        print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
 
 def determine_remote_host(filepath):
     """Determine if file is local or on remote SSH host
@@ -7003,9 +7010,13 @@ def _run_batch_metadata_collection():
 
     # Sequential collector script — parallelism is via multiple SSH workers
     # First stdin line = "worker_id total" (for progress reporting), rest = filepaths
+    # Derives ffprobe path from ffmpeg path to collect per-stream video duration
+    # for cross-validation (detecting false-positive broken files)
     collector_script = f'''import sys, json, subprocess, os, time, re
 from datetime import datetime
 ffmpeg = {repr(ffmpeg_path)}
+ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe") if os.path.dirname(ffmpeg) else "ffprobe"
+has_ffprobe = os.path.exists(ffprobe) if os.path.isabs(ffprobe) else bool(subprocess.run(["which", ffprobe], capture_output=True).returncode == 0)
 header = sys.stdin.readline().strip().split()
 wid, wtotal = header[0], int(header[1])
 n = 0
@@ -7025,14 +7036,23 @@ for line in sys.stdin:
             continue
         filesize = os.path.getsize(fp)
         ext = os.path.splitext(fp)[1].lower()
+        result = {{"path": fp, "n": n, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}
         r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, timeout=30)
         stderr_text = r.stderr.decode("utf-8", errors="replace")
         m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", stderr_text)
         if not m:
             print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": stderr_text.strip()[:200]}}), flush=True)
             continue
-        dur_ms = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
-        print(json.dumps({{"path": fp, "n": n, "container_duration": dur_ms, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}), flush=True)
+        result["container_duration"] = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
+        if has_ffprobe:
+            try:
+                p = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, timeout=30)
+                vdur = p.stdout.decode().strip()
+                if vdur and vdur != "N/A":
+                    result["video_duration"] = float(vdur) * 1000
+            except Exception:
+                pass
+        print(json.dumps(result), flush=True)
     except Exception as e:
         print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
         continue
@@ -7194,12 +7214,15 @@ for line in sys.stdin:
                         cache_filesize = file_info.get('filesize')
                         if cache_filesize and meta_filesize and cache_filesize != meta_filesize:
                             if VRB: print(f"  ⚠ Filesize mismatch for {filepath}: cache={cache_filesize}, disk={meta_filesize}")
-                        file_info['file_metadata'] = {
+                        metadata = {
                             'container_duration': entry['container_duration'],
                             'filesize': meta_filesize,
                             'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
                             'file_type': entry.get('file_type', '')
                         }
+                        if 'video_duration' in entry:
+                            metadata['video_duration'] = entry['video_duration']
+                        file_info['file_metadata'] = metadata
 
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
@@ -10659,11 +10682,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         if container_duration:
                             diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                             if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                                is_broken = True
-                                if diff_pct < -10:      severity = 'severe'
-                                elif diff_pct < -5:     severity = 'moderate'
-                                elif diff_pct < -1:     severity = 'mild'
-                                else:                   severity = 'borderline'
+                                # Cross-validate: if container and video stream durations agree
+                                # (within 2s), the file is internally consistent — Plex just
+                                # measured a different duration. Not a real truncation.
+                                video_duration = file_metadata.get('video_duration')
+                                if video_duration and abs(container_duration - video_duration) < 2000:
+                                    pass  # File is healthy, Plex duration is just inaccurate
+                                else:
+                                    is_broken = True
+                                    if diff_pct < -10:      severity = 'severe'
+                                    elif diff_pct < -5:     severity = 'moderate'
+                                    elif diff_pct < -1:     severity = 'mild'
+                                    else:                   severity = 'borderline'
                 if not is_broken and plex_duration > 60000:
                     filesize = file_info.get('filesize', 0)
                     if filesize:
@@ -13491,17 +13521,22 @@ def show_system_info():
                         diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
 
                         if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                            files_potentially_truncated += 1
-
-                            # Classify severity
-                            if diff_pct < -10:
-                                truncation_severity['severe'] += 1
-                            elif diff_pct < -5:
-                                truncation_severity['moderate'] += 1
-                            elif diff_pct < -1:
-                                truncation_severity['mild'] += 1
+                            # Cross-validate: skip if file is internally consistent
+                            video_duration = file_metadata.get('video_duration')
+                            if video_duration and abs(container_duration - video_duration) < 2000:
+                                pass  # File healthy, Plex duration inaccurate
                             else:
-                                truncation_severity['borderline'] += 1
+                                files_potentially_truncated += 1
+
+                                # Classify severity
+                                if diff_pct < -10:
+                                    truncation_severity['severe'] += 1
+                                elif diff_pct < -5:
+                                    truncation_severity['moderate'] += 1
+                                elif diff_pct < -1:
+                                    truncation_severity['mild'] += 1
+                                else:
+                                    truncation_severity['borderline'] += 1
 
         # Print statistics
         print(f"    {'Total video files':30s}: {total_video_files:>6,}")
@@ -13856,7 +13891,9 @@ def _verify_data_integrity():
                     if container_duration:
                         diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                         if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                            is_truncated = True
+                            video_duration = fm.get('video_duration')
+                            if not (video_duration and abs(container_duration - video_duration) < 2000):
+                                is_truncated = True
                 if not is_truncated and plex_duration > 60000:
                     filesize = file_info.get('filesize', 0)
                     if filesize:
@@ -14425,7 +14462,9 @@ def _get_broken_reason(file_info, plex_duration=0):
             if container_duration:
                 diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                 if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                    return f"truncated ({diff_pct:+.1f}% vs Plex duration)"
+                    video_duration = fm.get('video_duration')
+                    if not (video_duration and abs(container_duration - video_duration) < 2000):
+                        return f"truncated ({diff_pct:+.1f}% vs Plex duration)"
     if plex_duration > 60000:
         filesize = file_info.get('filesize', 0)
         if filesize:

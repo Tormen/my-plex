@@ -2878,6 +2878,83 @@ class TestScan(unittest.TestCase):
             "Metadata sweep must filter by SCAN_LIBRARIES")
 
 
+class TestBrokenCrossValidation(unittest.TestCase):
+    """Tests for cross-validation of container vs video stream duration in broken detection."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_collector_collects_video_duration(self):
+        """Collector script must collect video stream duration via ffprobe."""
+        src = self._read_script()
+        # Find collector script
+        collector_idx = src.index("collector_script = f'''")
+        collector_end = src.index("'''", collector_idx + 30)
+        collector = src[collector_idx:collector_end]
+        self.assertIn("video_duration", collector,
+            "Collector script must collect video_duration")
+        self.assertIn("ffprobe", collector,
+            "Collector script must use ffprobe for video stream duration")
+
+    def test_video_duration_stored_in_cache(self):
+        """Batch result parsing must store video_duration in file_metadata."""
+        src = self._read_script()
+        # Find the success result integration section
+        self.assertIn("'video_duration' in entry", src,
+            "Result parsing must check for video_duration in collector output")
+
+    def test_broken_list_cross_validates(self):
+        """_list_broken_files must cross-validate container vs video duration."""
+        src = self._read_script()
+        func_idx = src.index("def _list_broken_files(")
+        next_def_idx = src.index("\n    @staticmethod", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        self.assertIn("video_duration", func_body,
+            "_list_broken_files must use video_duration for cross-validation")
+        self.assertIn("abs(container_duration - video_duration) < 2000", func_body,
+            "_list_broken_files must check container vs video duration within 2s tolerance")
+
+    def test_info_display_cross_validates(self):
+        """show_item_info broken display must cross-validate container vs video duration."""
+        src = self._read_script()
+        # Find the show_item_info truncation check — it's in the elif plex_duration: block
+        # that contains "File appears TRUNCATED"
+        info_idx = src.index("File appears TRUNCATED")
+        # Find the cross-validation before it (in the same function)
+        check_idx = src.rindex("abs(container_duration - video_duration) < 2000", 0, info_idx)
+        self.assertGreater(check_idx, 0,
+            "show_item_info must cross-validate before reporting truncation")
+
+    def test_verify_cache_cross_validates(self):
+        """_verify_data_integrity must cross-validate broken detection."""
+        src = self._read_script()
+        func_idx = src.index("def _verify_data_integrity()")
+        next_def_idx = src.index("\ndef ", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        self.assertIn("video_duration", func_body,
+            "_verify_data_integrity must use video_duration cross-validation")
+
+    def test_get_broken_reason_cross_validates(self):
+        """_get_broken_reason must cross-validate before returning truncation."""
+        src = self._read_script()
+        func_idx = src.index("def _get_broken_reason(")
+        next_def_idx = src.index("\ndef ", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        self.assertIn("video_duration", func_body,
+            "_get_broken_reason must use video_duration cross-validation")
+
+    def test_info_stats_cross_validates(self):
+        """--info metadata stats must cross-validate broken counts."""
+        src = self._read_script()
+        # Find the METADATA & FILE HEALTH section
+        stats_idx = src.index("METADATA & FILE HEALTH:")
+        next_section = src.index("Print statistics", stats_idx)
+        stats_body = src[stats_idx:next_section]
+        self.assertIn("video_duration", stats_body,
+            "--info metadata stats must use video_duration cross-validation")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2895,6 +2972,7 @@ _UNITTEST_CLASSES = [
     TestObjByLibraryDedup,
     TestDeleteRequiresRemove,
     TestScan,
+    TestBrokenCrossValidation,
     TestEndToEnd,
 ]
 
