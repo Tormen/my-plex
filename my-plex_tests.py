@@ -2609,6 +2609,30 @@ class TestEndToEnd(unittest.TestCase):
         result = self._run_cmd('--list', '-f', 'pretty')
         self.assertEqual(result.returncode, 0, f"--list -f pretty failed: {result.stderr}")
 
+    def test_broken_no_false_positives_with_video_duration(self):
+        """my-plex --broken must not flag files where container and video stream durations agree.
+
+        Regression test: Modern Family episodes were false positives because Plex reported
+        a slightly different duration than ffprobe, but the files' container and video stream
+        durations agreed within 2s — meaning the files are healthy.
+        """
+        result = self._run_cmd('--broken')
+        self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
+        # If any Modern Family files with video_duration in cache still appear, the
+        # cross-validation is broken. Check specifically for the known false-positive episodes.
+        lines = result.stdout.strip().split('\n')
+        false_positive_ids = {'ID:31983', 'ID:32028', 'ID:32020', 'ID:32041', 'ID:32038',
+                              'ID:32032', 'ID:32026', 'ID:32143', 'ID:32027', 'ID:32023',
+                              'ID:31981', 'ID:32037', 'ID:31987', 'ID:31984', 'ID:31979',
+                              'ID:32031', 'ID:31978'}
+        flagged_fps = []
+        for line in lines:
+            for fp_id in false_positive_ids:
+                if line.startswith(fp_id):
+                    flagged_fps.append(fp_id)
+        self.assertEqual(flagged_fps, [],
+            f"Cross-validation failed: known false-positive IDs still flagged as broken: {flagged_fps}")
+
 
 class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
@@ -2953,6 +2977,54 @@ class TestBrokenCrossValidation(unittest.TestCase):
         stats_body = src[stats_idx:next_section]
         self.assertIn("video_duration", stats_body,
             "--info metadata stats must use video_duration cross-validation")
+
+    def test_collector_derives_ffprobe_from_ffmpeg(self):
+        """Collector script must derive ffprobe path from ffmpeg path."""
+        src = self._read_script()
+        collector_idx = src.index("collector_script = f'''")
+        collector_end = src.index("'''", collector_idx + 30)
+        collector = src[collector_idx:collector_end]
+        self.assertIn('os.path.join(os.path.dirname(ffmpeg), "ffprobe")', collector,
+            "Collector must derive ffprobe path from ffmpeg path")
+
+    def test_collector_uses_select_streams_v0(self):
+        """Collector must use -select_streams v:0 to get only the video stream duration."""
+        src = self._read_script()
+        collector_idx = src.index("collector_script = f'''")
+        collector_end = src.index("'''", collector_idx + 30)
+        collector = src[collector_idx:collector_end]
+        self.assertIn("-select_streams", collector,
+            "Collector must use -select_streams to target video stream")
+        self.assertIn("v:0", collector,
+            "Collector must target first video stream (v:0)")
+
+    def test_cross_validation_tolerance_2s(self):
+        """All cross-validation sites must use 2000ms (2s) tolerance."""
+        src = self._read_script()
+        # Count occurrences of the tolerance check
+        occurrences = src.count("abs(container_duration - video_duration) < 2000")
+        self.assertGreaterEqual(occurrences, 4,
+            f"Expected at least 4 cross-validation checks with 2s tolerance, found {occurrences}")
+
+    def test_collect_missing_file_metadata_respects_force_metadata(self):
+        """_collect_missing_file_metadata must not skip valid metadata when FORCE_METADATA is set.
+
+        Regression: --scan set FORCE_METADATA but _collect_missing_file_metadata still skipped
+        files with existing metadata, causing only ~30 files (with missing metadata) to be queued
+        instead of all files in the library.
+        """
+        src = self._read_script()
+        func_idx = src.index("def _collect_missing_file_metadata(")
+        next_def_idx = src.index("\ndef ", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        # The skip condition must include "not FORCE_METADATA"
+        self.assertIn("not FORCE_METADATA", func_body,
+            "_collect_missing_file_metadata must check FORCE_METADATA")
+        # The old buggy pattern was: "if existing_metadata and not existing_metadata.get('broken'):"
+        # without checking FORCE_METADATA. Verify the fix is in place.
+        self.assertNotRegex(func_body,
+            r"if existing_metadata and not existing_metadata\.get\('broken'\):\s*\n\s*continue",
+            "_collect_missing_file_metadata must NOT skip valid metadata without checking FORCE_METADATA")
 
 
 # List of all unittest classes for run_regression_tests()
