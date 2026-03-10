@@ -2844,6 +2844,39 @@ class TestScan(unittest.TestCase):
         self.assertLess(exit_idx - scan_idx, 200,
             "--scan handler must call sys.exit(0) shortly after detection")
 
+    def test_scan_force_metadata_in_collect_missing(self):
+        """_collect_missing_file_metadata must respect FORCE_METADATA to re-probe all files."""
+        src = self._read_script()
+        # Find _collect_missing_file_metadata function
+        func_idx = src.index("def _collect_missing_file_metadata(")
+        # Find the next function definition to scope our search
+        next_def_idx = src.index("\ndef ", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        # Must check FORCE_METADATA before skipping files with existing metadata
+        self.assertIn("not FORCE_METADATA", func_body,
+            "_collect_missing_file_metadata must check FORCE_METADATA before skipping files with valid metadata")
+
+    def test_scan_force_metadata_in_sweep(self):
+        """Metadata sweep must respect FORCE_METADATA to re-probe all files, not just missing."""
+        src = self._read_script()
+        # Find the sweep section (comment + code)
+        sweep_idx = src.index("Queue any files still missing metadata")
+        # Find the next major section
+        next_section = src.index("Batch-collect missing file metadata", sweep_idx)
+        sweep_body = src[sweep_idx:next_section]
+        # Must check FORCE_METADATA before skipping files with existing metadata
+        self.assertIn("not FORCE_METADATA", sweep_body,
+            "Metadata sweep must check FORCE_METADATA before skipping files with valid metadata")
+
+    def test_scan_sweep_filters_by_library(self):
+        """Metadata sweep must filter by SCAN_LIBRARIES when set."""
+        src = self._read_script()
+        sweep_idx = src.index("Queue any files still missing metadata")
+        next_section = src.index("Batch-collect missing file metadata", sweep_idx)
+        sweep_body = src[sweep_idx:next_section]
+        self.assertIn("SCAN_LIBRARIES", sweep_body,
+            "Metadata sweep must filter by SCAN_LIBRARIES")
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
