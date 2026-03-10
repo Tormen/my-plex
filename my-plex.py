@@ -10437,8 +10437,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
     argparser.add_argument('--info', action='store_true',             help="Get detailed information about media entry by title or file path.")
     argparser.add_argument('--refresh', action='store_true',          help="Refresh a specific media entry by title or file path.")
-    argparser.add_argument('--delete', '--del', action='store_true',  help="Delete a media entry from Plex (metadata only, files on disk are NOT deleted). Plex will re-add the entry on next library scan if the file still exists. Combine with --remove to also trash files from disk.")
-    argparser.add_argument('--remove', '--rm', nargs='?', const='ALL', default=None, help="Remove (trash) media files from disk. Without args: removes ALL files. With args: comma-separated version numbers/ranges to remove (e.g. --rm 2-25 or --rm 2,5,8). Use --help rm for details.")
+    argparser.add_argument('--delete', '--del', action='store_true',  help="Delete a media entry from Plex. WARNING: Plex ALSO deletes ALL associated files from disk! Use only with --rm to control which files are removed first. Use --help del for details.")
+    argparser.add_argument('--remove', '--rm', nargs='?', const='ALL', default=None, help="Remove (trash) media files from disk. WARNING: Both --rm and --del delete files! Without args: removes ALL files. With args: comma-separated version numbers/ranges to remove (e.g. --rm 2-25 or --rm 2,5,8). Use --help rm for details.")
     argparser.add_argument('--get-watched', action='store_true',      help="Get watched status of media.")
     argparser.add_argument('--get-view-offset', action='store_true',  help="Get view offset for media.")
     argparser.add_argument('--get-user-rating', action='store_true',  help="Get user rating for media.")
@@ -10464,6 +10464,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
+        if obj_args.delete and not obj_args.remove:
+            err(1082, "--del requires --rm (Plex API delete also removes files from disk).\n"
+                "  Use --rm --del to explicitly confirm file removal.\n"
+                "  See --help del for details.")
         if obj_args.info:               PLEX_Media.get_info(obj)
         if obj_args.refresh:            PLEX_Media.refresh(obj)
         if obj_args.remove:             PLEX_Media.remove(obj, rm_spec=obj_args.remove)
@@ -11809,6 +11813,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     @staticmethod
     def delete(media_identifier, library_name=None):
         # API required: deletes item from Plex via HTTP API
+        # WARNING: Plex API delete ALSO removes all associated media files from disk!
         try:
             plex = ensure_plex_api()
             # For ID: lookups, fetch the item directly (faster and returns the correct plexapi object)
@@ -12671,6 +12676,36 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'delete' | 'del':
+            print()
+            print("=" * 76)
+            print("DELETE (--del) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <MEDIA> --del --rm [INDICES]")
+            print()
+            print("  ⚠  WARNING: --del DELETES FILES FROM DISK!")
+            print()
+            print("  The Plex API's delete operation removes both the Plex library entry")
+            print("  AND all associated media files from disk. There is no 'metadata-only'")
+            print("  delete in Plex. Files are moved to the server's .Trashes folder.")
+            print()
+            print("  --del requires --rm to be specified as well, to make it explicit")
+            print("  that files will be removed from disk.")
+            print()
+            print("  Order of operations when using --rm --del together:")
+            print("    1. --rm trashes the specified files (or all files if no indices)")
+            print("    2. --del deletes the Plex entry (and any remaining files)")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex ID:4167 --rm --del     # Trash ALL files AND delete Plex entry")
+            print("  my-plex ID:4167 --rm 2 --del   # Trash [2], keep [1], delete Plex entry")
+            print("  my-plex ID:4167 --del          # ERROR: --del requires --rm")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'remove' | 'rm':
             print()
             print("=" * 76)
@@ -12681,6 +12716,10 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  Trash media files from disk (moves to .Trashes on the Plex server).")
             print("  Does NOT delete the Plex entry — combine with --del for that.")
+            print()
+            print("  ⚠  NOTE: Both --rm and --del delete files from disk!")
+            print("  --rm trashes files via SSH. --del uses the Plex API which also")
+            print("  deletes all associated files. See --help del for details.")
             print()
             print("  Without arguments, --rm removes ALL files.")
             print("  With arguments, only the specified version numbers are removed.")
