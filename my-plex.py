@@ -11866,13 +11866,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Remove from type-specific structures
             if obj_type == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
                 del PLEX_Media.OBJ_BY_MOVIE[key]
-            elif obj_type in ('Show', 'Season', 'Episode'):
+            elif obj_type == 'Show':
                 show_key = obj.get('show_key', key)
-                if obj_type == 'Show':
-                    if show_key in PLEX_Media.OBJ_BY_SHOW:
-                        del PLEX_Media.OBJ_BY_SHOW[show_key]
-                    if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
-                        del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+                if show_key in PLEX_Media.OBJ_BY_SHOW:
+                    del PLEX_Media.OBJ_BY_SHOW[show_key]
+                if show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                    del PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key]
+            elif obj_type == 'Episode':
+                show_key = obj.get('show_key')
+                s_str = obj.get('S_str')
+                e_str = obj.get('E_str')
+                if show_key and s_str and e_str and show_key in PLEX_Media.OBJ_BY_SHOW_EPISODES:
+                    season = PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key].get(s_str, {})
+                    if e_str in season:
+                        for ver, ep_keys in list(season[e_str].items()):
+                            if isinstance(ep_keys, list) and key in ep_keys:
+                                ep_keys.remove(key)
+                                if not ep_keys:
+                                    del season[e_str][ver]
+                        if not season[e_str]:
+                            del season[e_str]
 
         # Save updated cache to disk
         update_and_save_cache(build_media_cache_dict())
