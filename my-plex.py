@@ -6925,7 +6925,7 @@ def _collect_missing_file_metadata(cached_obj, display_title):
         if not isinstance(file_info, dict):
             continue
         existing_metadata = file_info.get('file_metadata')
-        if existing_metadata and not existing_metadata.get('broken'):
+        if existing_metadata and not existing_metadata.get('broken') and not FORCE_METADATA:
             continue  # Already has valid metadata
         if existing_metadata and existing_metadata.get('reason') == 'ffprobe_error':
             if not RESCAN_BROKEN:
@@ -10013,24 +10013,30 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             del PLEX_Media._preserved_file_metadata
 
         # Queue any files still missing metadata (covers --from-scratch full processing paths
-        # which don't call _collect_missing_file_metadata, and any other edge cases)
+        # which don't call _collect_missing_file_metadata, and any other edge cases).
+        # When FORCE_METADATA is set (e.g. --scan), queue ALL files for re-probing.
         if FORCE_CACHE_UPDATE:
             already_queued = set((fp, obj_key, ver) for fp, obj_key, ver, dt in _metadata_batch_queue)
             sweep_queued = 0
             for key, obj in PLEX_Media.OBJ_BY_ID.items():
                 if obj.get('type') not in ('Movie', 'Episode'):
                     continue
+                if SCAN_LIBRARIES is not None and obj.get('library') not in SCAN_LIBRARIES:
+                    continue
                 for version, file_info in obj.get('files', {}).items():
                     if not isinstance(file_info, dict):
                         continue
-                    if file_info.get('file_metadata') is not None:
+                    if file_info.get('file_metadata') is not None and not FORCE_METADATA:
                         continue
                     filepath = file_info.get('filepath')
                     if filepath and (filepath, key, version) not in already_queued:
                         _metadata_batch_queue.append((filepath, key, version, obj.get('library', '')))
                         sweep_queued += 1
             if sweep_queued > 0:
-                print(f"  Queued {sweep_queued} additional files missing metadata")
+                if FORCE_METADATA:
+                    print(f"  Queued {sweep_queued} files for metadata re-probe")
+                else:
+                    print(f"  Queued {sweep_queued} additional files missing metadata")
 
         # Batch-collect missing file metadata (ffmpeg) via single SSH call
         if FORCE_CACHE_UPDATE and _metadata_batch_queue:
