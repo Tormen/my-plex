@@ -10,6 +10,7 @@ import re
 import inspect
 import pickle
 import io
+import subprocess
 
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'my-plex.py')
 
@@ -2688,6 +2689,56 @@ class TestObjByLibraryDedup(unittest.TestCase):
             "Final save must use build_media_cache_dict() to persist all structures")
 
 
+class TestDeleteRequiresRemove(unittest.TestCase):
+    """Ensure --del refuses to run without --rm, and help text warns about file deletion."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_del_without_rm_is_rejected(self):
+        """--del without --rm must be rejected with an error."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--offline', 'ID:99999', '--del'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertNotEqual(result.returncode, 0, "--del without --rm should fail")
+        self.assertIn('--rm', result.stderr + result.stdout, "Error must mention --rm requirement")
+
+    def test_del_help_warns_about_file_deletion(self):
+        """--help del must warn that Plex API delete also removes files from disk."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'del'],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout + result.stderr
+        self.assertIn('DELETES FILES FROM DISK', output, "--help del must warn about file deletion")
+
+    def test_del_argparse_help_no_longer_says_metadata_only(self):
+        """--delete help text must NOT say 'files on disk are NOT deleted' — that was WRONG."""
+        src = self._read_script()
+        self.assertNotIn('files on disk are NOT deleted', src,
+            "Dangerously wrong help text must be removed")
+
+    def test_del_argparse_help_warns_about_files(self):
+        """--delete argparse help must mention that Plex also deletes files."""
+        src = self._read_script()
+        match = re.search(r"add_argument\('--delete', '--del'.*?help=\"(.*?)\"", src)
+        self.assertIsNotNone(match, "--delete/--del media argparse not found")
+        help_text = match.group(1)
+        self.assertIn('files', help_text.lower(), "--delete help must mention files")
+
+    def test_delete_method_comment_warns_about_files(self):
+        """delete() method must have a comment warning about file deletion."""
+        src = self._read_script()
+        match = re.search(r'def delete\(media_identifier.*?\n(.*?)\n', src)
+        self.assertIsNotNone(match, "PLEX_Media.delete() not found")
+        # Check the lines right after the def
+        after_def = src[match.start():match.start()+500]
+        self.assertIn('removes all associated media files', after_def.lower(),
+            "delete() must warn that Plex API also removes files")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -2703,6 +2754,7 @@ _UNITTEST_CLASSES = [
     TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
     TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestErrorOutputConventions,
     TestObjByLibraryDedup,
+    TestDeleteRequiresRemove,
     TestEndToEnd,
 ]
 
