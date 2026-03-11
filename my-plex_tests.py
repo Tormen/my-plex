@@ -3026,6 +3026,53 @@ class TestBrokenCrossValidation(unittest.TestCase):
             r"if existing_metadata and not existing_metadata\.get\('broken'\):\s*\n\s*continue",
             "_collect_missing_file_metadata must NOT skip valid metadata without checking FORCE_METADATA")
 
+    def test_broken_list_shows_version_count(self):
+        """_list_broken_files must show version count column (V) for multi-version entries."""
+        src = self._read_script()
+        func_idx = src.index("def _list_broken_files(")
+        next_def_idx = src.index("\n    @staticmethod", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        self.assertIn("ver_count", func_body,
+            "_list_broken_files must compute version count")
+        self.assertIn("'V'", func_body,
+            "_list_broken_files header must include V column")
+
+    def test_broken_list_version_count_e2e(self):
+        """--broken output must include V column header."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--broken'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
+        # Header must contain V column (right-aligned, so " V" with leading space)
+        self.assertIn("|  V |", result.stdout,
+            "--broken output must include V column in header")
+
+    def test_collector_falls_back_to_end_probe(self):
+        """Collector must fall back to ffmpeg -sseof probe when ffprobe stream duration is N/A."""
+        src = self._read_script()
+        collector_idx = src.index("collector_script = f'''")
+        collector_end = src.index("'''", collector_idx + 30)
+        collector = src[collector_idx:collector_end]
+        self.assertIn("-sseof", collector,
+            "Collector must use ffmpeg -sseof as fallback when stream duration is N/A")
+        self.assertIn("file_ends_cleanly", collector,
+            "Collector must set file_ends_cleanly flag from end-probe result")
+
+    def test_broken_detection_respects_file_ends_cleanly(self):
+        """Broken detection must skip files where file_ends_cleanly is True."""
+        src = self._read_script()
+        func_idx = src.index("def _list_broken_files(")
+        next_def_idx = src.index("\n    @staticmethod", func_idx + 1)
+        func_body = src[func_idx:next_def_idx]
+        self.assertIn("file_ends_cleanly", func_body,
+            "_list_broken_files must check file_ends_cleanly flag")
+
+    def test_file_ends_cleanly_stored_in_cache(self):
+        """Batch result parsing must store file_ends_cleanly in file_metadata."""
+        src = self._read_script()
+        # Find the success result integration section (where file_metadata is built)
+        self.assertIn("'file_ends_cleanly'", src,
+            "Result parsing must store file_ends_cleanly in file_metadata")
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [

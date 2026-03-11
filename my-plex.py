@@ -3222,6 +3222,8 @@ def display_duplicate_details(nr, obj):
                     video_duration = file_metadata.get('video_duration')
                     if video_duration and abs(container_duration - video_duration) < 2000:
                         pass  # File is healthy, Plex duration is just inaccurate
+                    elif file_metadata.get('file_ends_cleanly'):
+                        pass  # No stream duration but file decodes cleanly to end
                     else:
                         # Classify severity
                         if diff_pct < -10:
@@ -7052,6 +7054,12 @@ for line in sys.stdin:
                     result["video_duration"] = float(vdur) * 1000
             except Exception:
                 pass
+        if "video_duration" not in result:
+            try:
+                ep = subprocess.run([ffmpeg, "-sseof", "-3", "-i", fp, "-f", "null", "-"], capture_output=True, timeout=60)
+                result["file_ends_cleanly"] = (ep.returncode == 0)
+            except Exception:
+                pass
         print(json.dumps(result), flush=True)
     except Exception as e:
         print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
@@ -7222,6 +7230,8 @@ for line in sys.stdin:
                         }
                         if 'video_duration' in entry:
                             metadata['video_duration'] = entry['video_duration']
+                        if 'file_ends_cleanly' in entry:
+                            metadata['file_ends_cleanly'] = entry['file_ends_cleanly']
                         file_info['file_metadata'] = metadata
 
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
@@ -10688,6 +10698,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 video_duration = file_metadata.get('video_duration')
                                 if video_duration and abs(container_duration - video_duration) < 2000:
                                     pass  # File is healthy, Plex duration is just inaccurate
+                                elif file_metadata.get('file_ends_cleanly'):
+                                    pass  # No stream duration but file decodes cleanly to end
                                 else:
                                     is_broken = True
                                     if diff_pct < -10:      severity = 'severe'
@@ -10713,8 +10725,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
         print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':<10} | {'LIBRARY':<15} | FILEPATH")
-        print("-" * 150)
+        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':<10} | {'V':>2} | {'LIBRARY':<15} | FILEPATH")
+        print("-" * 155)
         for key, diff_pct, severity, filepath in broken_files:
             obj = PLEX_Media.OBJ_BY_ID.get(key, {})
             library = obj.get('library', 'Unknown')[:15]
@@ -10725,7 +10737,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
             plex_id = obj.get('id', 'N/A')
             plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
-            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str} | {library:<15} | {filepath}")
+            ver_count = len(obj.get('files', {}))
+            ver_str = f"{ver_count:>2}" if ver_count > 1 else "  "
+            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
         return len(broken_files)
@@ -13525,6 +13539,8 @@ def show_system_info():
                             video_duration = file_metadata.get('video_duration')
                             if video_duration and abs(container_duration - video_duration) < 2000:
                                 pass  # File healthy, Plex duration inaccurate
+                            elif file_metadata.get('file_ends_cleanly'):
+                                pass  # No stream duration but file decodes cleanly to end
                             else:
                                 files_potentially_truncated += 1
 
@@ -13892,7 +13908,8 @@ def _verify_data_integrity():
                         diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                         if diff_pct < -TRUNCATION_THRESHOLD_PCT:
                             video_duration = fm.get('video_duration')
-                            if not (video_duration and abs(container_duration - video_duration) < 2000):
+                            if not (video_duration and abs(container_duration - video_duration) < 2000) \
+                                    and not fm.get('file_ends_cleanly'):
                                 is_truncated = True
                 if not is_truncated and plex_duration > 60000:
                     filesize = file_info.get('filesize', 0)
@@ -14463,7 +14480,8 @@ def _get_broken_reason(file_info, plex_duration=0):
                 diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                 if diff_pct < -TRUNCATION_THRESHOLD_PCT:
                     video_duration = fm.get('video_duration')
-                    if not (video_duration and abs(container_duration - video_duration) < 2000):
+                    if not (video_duration and abs(container_duration - video_duration) < 2000) \
+                            and not fm.get('file_ends_cleanly'):
                         return f"truncated ({diff_pct:+.1f}% vs Plex duration)"
     if plex_duration > 60000:
         filesize = file_info.get('filesize', 0)
