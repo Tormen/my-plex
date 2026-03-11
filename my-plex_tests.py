@@ -1202,8 +1202,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
             "Must track file-not-found separately from ffprobe errors")
         self.assertIn("file_not_found", func_body,
             "Must mark missing files with reason='file_not_found' in cache")
-        self.assertIn("not found on server", func_body,
-            "Must report missing file count at end of batch collection")
+        self.assertIn("last_metadata_broken_details", func_body,
+            "Must store broken details for JSON update log")
 
     def test_batch_metadata_falls_back_to_db_host(self):
         """Batch metadata must fall back to PLEX_DB_REMOTE_HOST when files not found."""
@@ -1237,8 +1237,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         # Must mark errors as broken in cache
         self.assertIn("ffprobe_error", func_body,
             "Must mark failures with reason='ffprobe_error'")
-        self.assertIn("marked as BROKEN", func_body,
-            "Must report broken file count at end of batch collection")
+        self.assertIn("metadata_broken_details", func_body,
+            "Must collect broken file details for JSON update log")
 
     def test_filepath_check_skips_show_season(self):
         """OBJ_BY_FILEPATH check must skip Show/Season directory container objects."""
@@ -3080,13 +3080,136 @@ class TestBrokenCrossValidation(unittest.TestCase):
             "Cache summary must include broken file count string")
         self.assertIn("_get_broken_reason", src,
             "Cache summary must use _get_broken_reason to count all broken files")
-        # Verify the broken count appears in all 3 summary print paths
-        # Find the summary section
-        summary_idx = src.index("Show detailed summary")
-        next_section = src.index("Print per-library summary", summary_idx)
-        summary_body = src[summary_idx:next_section]
-        self.assertEqual(summary_body.count("broken_str"), 4,
-            "broken_str must appear in all 3 summary print paths plus the definition")
+        self.assertIn("_write_cache_update_log", src,
+            "Cache update must write JSON update log")
+        self.assertIn("CACHE_UPDATES_FILE", src,
+            "Must reference CACHE_UPDATES_FILE config variable")
+
+
+class TestCacheUpdateLog(unittest.TestCase):
+    """Tests for the JSON cache update log feature (CACHE_UPDATES_FILE)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_cache_updates_file_config_exists(self):
+        """CACHE_UPDATES_FILE must be defined in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'CACHE_UPDATES_FILE'", src,
+            "CONFIG_DEFAULTS must include CACHE_UPDATES_FILE")
+        self.assertIn("/tmp/my-plex.cache-updates.json", src,
+            "Default value must be /tmp/my-plex.cache-updates.json")
+
+    def test_cache_updates_file_global_variable(self):
+        """CACHE_UPDATES_FILE must be initialized as a global variable."""
+        src = self._read_script()
+        self.assertIn("CACHE_UPDATES_FILE = CONFIG_DEFAULTS['CACHE_UPDATES_FILE']", src,
+            "Must initialize CACHE_UPDATES_FILE from CONFIG_DEFAULTS")
+
+    def test_write_cache_update_log_function_exists(self):
+        """_write_cache_update_log function must exist and write JSON."""
+        src = self._read_script()
+        self.assertIn("def _write_cache_update_log(", src,
+            "Must define _write_cache_update_log function")
+        import re
+        match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("json.dump", func_body,
+            "Must write JSON to file")
+        self.assertIn("CACHE_UPDATES_FILE", func_body,
+            "Must use CACHE_UPDATES_FILE path")
+
+    def test_log_includes_library_changes(self):
+        """JSON log must include per-library change details."""
+        src = self._read_script()
+        import re
+        match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("changes_by_library", func_body,
+            "Must organize changes by library")
+        self.assertIn("library_delta_details", func_body,
+            "Must read from library_delta_details")
+
+    def test_log_includes_broken_files(self):
+        """JSON log must include all broken file details."""
+        src = self._read_script()
+        import re
+        match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("all_broken_files", func_body,
+            "Must include comprehensive broken files list")
+        self.assertIn("_get_broken_reason", func_body,
+            "Must use _get_broken_reason to identify broken files")
+        self.assertIn("broken_files_from_metadata", func_body,
+            "Must include broken files from metadata collection")
+
+    def test_log_includes_undo_info_for_removed(self):
+        """Removed items must include file details for undo capability."""
+        src = self._read_script()
+        # Check that removal detail_info includes 'files' and 'duration' for undo
+        import re
+        # Find the removal details section
+        match = re.search(r"(# Build detailed info BEFORE removing.*?)(?=# Actually remove)", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must have removal details section")
+        removal_section = match.group(1)
+        self.assertIn("'duration'", removal_section,
+            "Removal details must capture duration for undo")
+        self.assertIn("'files'", removal_section,
+            "Removal details must capture files dict for undo")
+
+    def test_summary_always_printed(self):
+        """SUMMARY OF CHANGES must always print, not just when there are library changes."""
+        src = self._read_script()
+        # Find the SUMMARY OF CHANGES section — it should NOT be inside an if-block
+        idx = src.index("SUMMARY OF CHANGES")
+        # Get the 200 chars before it to check indentation context
+        context_before = src[max(0, idx-200):idx]
+        # The print statement should be at the same indentation as the main try block
+        self.assertNotIn("if total_added > 0 or total_removed > 0", context_before,
+            "SUMMARY OF CHANGES must not be inside 'if changes' block — should always print")
+
+    def test_details_file_path_printed(self):
+        """Must print path to CACHE_UPDATES_FILE at end of update."""
+        src = self._read_script()
+        self.assertIn("Details: {CACHE_UPDATES_FILE}", src,
+            "Must print the JSON log file path for the user")
+
+    def test_metadata_summary_in_summary_section(self):
+        """Metadata collection summary must appear in SUMMARY OF CHANGES, not in batch function."""
+        src = self._read_script()
+        # The "Metadata collected:" line should be AFTER "SUMMARY OF CHANGES"
+        summary_idx = src.index("SUMMARY OF CHANGES")
+        metadata_collected_idx = src.index("Metadata collected:", summary_idx)
+        self.assertGreater(metadata_collected_idx, summary_idx,
+            "Metadata summary must come after SUMMARY OF CHANGES header")
+
+    def test_broken_output_not_in_batch_function(self):
+        """Verbose BROKEN file output must NOT be printed during batch metadata collection."""
+        src = self._read_script()
+        import re
+        match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        # Should NOT contain the old verbose BROKEN print pattern
+        self.assertNotIn("✗ BROKEN [W", func_body,
+            "Batch function must not print verbose BROKEN output — details go to JSON log")
+
+    def test_detail_info_includes_type_and_year(self):
+        """Added/updated detail_info must include type and year for the JSON log."""
+        src = self._read_script()
+        # Find the detail_info preparation for added/updated items
+        import re
+        match = re.search(r"(# Prepare detailed info for verbose output.*?detail_info = \{.*?\})", src, re.DOTALL)
+        self.assertIsNotNone(match)
+        detail_section = match.group(1)
+        self.assertIn("'type':", detail_section,
+            "detail_info must include 'type' for JSON log")
+        self.assertIn("'year':", detail_section,
+            "detail_info must include 'year' for JSON log")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -3107,6 +3230,7 @@ _UNITTEST_CLASSES = [
     TestDeleteRequiresRemove,
     TestScan,
     TestBrokenCrossValidation,
+    TestCacheUpdateLog,
     TestEndToEnd,
 ]
 
