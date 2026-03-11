@@ -7250,6 +7250,7 @@ for line in sys.stdin:
     # Store for cache update summary
     PLEX_Media.last_metadata_batch_processed = processed
     PLEX_Media.last_metadata_batch_total = total
+    PLEX_Media.last_metadata_broken_count = error_count + not_found_count
 
     _metadata_batch_queue = []
 
@@ -10197,11 +10198,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Show detailed summary (only actual changes — metadata probing reported separately)
             metadata_probed = getattr(PLEX_Media, 'last_metadata_batch_processed', 0)
             metadata_total = getattr(PLEX_Media, 'last_metadata_batch_total', 0)
+            metadata_broken = getattr(PLEX_Media, 'last_metadata_broken_count', 0)
             metadata_interrupted = metadata_probed > 0 and metadata_probed < metadata_total
+
+            # Count ALL broken files in cache (not just from this run)
+            total_broken = 0
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                if obj.get('type') not in ('Movie', 'Episode'):
+                    continue
+                plex_duration = obj.get('duration') or 0
+                for fi in obj.get('files', {}).values():
+                    if _get_broken_reason(fi, plex_duration):
+                        total_broken += 1
 
             action = "Cache rebuild" if FROM_SCRATCH else "Cache update"
             status = "interrupted" if metadata_interrupted else "complete"
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
+            broken_str = f", {total_broken} broken files" if total_broken > 0 else ""
             if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
                 if total_added > 0:
@@ -10211,11 +10224,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if total_updated > 0:
                     parts.append(f"~{total_updated} updated")
                 meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
-                print(f"{action} {status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items", flush=True)
+                print(f"{action} {status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
             elif metadata_probed > 0:
-                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items", flush=True)
+                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
             else:
-                print(f"{action} {status}: no changes, {total_media_files} total PLEX items", flush=True)
+                print(f"{action} {status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
 
             # Print per-library summary of changes at the end (only if there ARE actual changes)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
