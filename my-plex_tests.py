@@ -3221,6 +3221,240 @@ class TestCacheUpdateLog(unittest.TestCase):
             "detail_info must include 'year' for JSON log")
 
 
+###########################################################################################
+#### EPISODE TSV / --missing / --sort-new TESTS
+###########################################################################################
+
+class TestEpisodesTSV(unittest.TestCase):
+    """Test episodes.tsv read/write and format detection."""
+
+    def test_write_and_read_roundtrip(self):
+        """Write a TSV and read it back, verify data integrity."""
+        import tempfile, os
+        metadata = {'source': 'fernsehserien.de', 'slug': 'test-show', 'show_id': '12345'}
+        episodes = [
+            {'season': 1, 'episode': 1, 'date': '2025-01-01', 'title': 'Pilot'},
+            {'season': 1, 'episode': 2, 'date': '2025-01-08', 'title': 'Second'},
+            {'season': 2, 'episode': 1, 'date': '2025-09-01', 'title': 'New Season'},
+        ]
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+            tsv_path = f.name
+
+        try:
+            write_episodes_tsv(tsv_path, metadata, episodes)
+            read_meta, read_eps = read_episodes_tsv(tsv_path)
+
+            self.assertEqual(read_meta['source'], 'fernsehserien.de')
+            self.assertEqual(read_meta['slug'], 'test-show')
+            self.assertEqual(read_meta['show_id'], '12345')
+            self.assertEqual(len(read_eps), 3)
+            self.assertEqual(read_eps[0]['season'], 1)
+            self.assertEqual(read_eps[0]['episode'], 1)
+            self.assertEqual(read_eps[0]['date'], '2025-01-01')
+            self.assertEqual(read_eps[0]['title'], 'Pilot')
+            self.assertEqual(read_eps[2]['season'], 2)
+        finally:
+            os.unlink(tsv_path)
+
+    def test_read_nonexistent(self):
+        """Reading a nonexistent file returns (None, None)."""
+        meta, eps = read_episodes_tsv('/nonexistent/path/episodes.tsv')
+        self.assertIsNone(meta)
+        self.assertIsNone(eps)
+
+    def test_metadata_comments_preserved(self):
+        """Verify header comments contain slug and source."""
+        import tempfile, os
+        metadata = {'source': 'fernsehserien.de', 'slug': 'my-show', 'specials_pattern': 'xxl|special'}
+        episodes = [{'season': 1, 'episode': 1, 'date': '2025-01-01', 'title': ''}]
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+            tsv_path = f.name
+
+        try:
+            write_episodes_tsv(tsv_path, metadata, episodes)
+            with open(tsv_path) as f:
+                content = f.read()
+            self.assertIn('# source: fernsehserien.de', content)
+            self.assertIn('# slug: my-show', content)
+            self.assertIn('# specials_pattern: xxl|special', content)
+            self.assertIn('# DO NOT edit or remove', content)
+        finally:
+            os.unlink(tsv_path)
+
+    def test_stale_detection(self):
+        """Test that freshly written TSV is not stale, old one is."""
+        import tempfile, os, time
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+            f.write("season\tepisode\tdate\ttitle\n")
+            tsv_path = f.name
+
+        try:
+            self.assertFalse(is_episodes_tsv_stale(tsv_path, max_age=86400))
+            self.assertTrue(is_episodes_tsv_stale(tsv_path, max_age=0))  # 0 seconds = always stale
+            self.assertTrue(is_episodes_tsv_stale('/nonexistent.tsv'))
+        finally:
+            os.unlink(tsv_path)
+
+
+class TestDateExtraction(unittest.TestCase):
+    """Test filename date extraction for various formats."""
+
+    def test_tvoon_standard(self):
+        """Standard TVOON filename: Show_Name_YY.MM.DD_HH-MM_channel_..."""
+        from datetime import date
+        d = extract_episode_date('Die_Millionenshow_26.01.19_20-15_orf2_55_TVOON_DE.mpg.HQ.avi')
+        self.assertEqual(d, date(2026, 1, 19))
+
+    def test_tvoon_2000s(self):
+        """TVOON with 2000s date."""
+        from datetime import date
+        d = extract_episode_date('Show_05.03.15_18-00_ard_50_TVOON_DE.mpg.HQ.avi')
+        self.assertEqual(d, date(2005, 3, 15))
+
+    def test_tvoon_1900s(self):
+        """TVOON with year >= 50 maps to 1900s."""
+        from datetime import date
+        d = extract_episode_date('Show_99.12.31_20-00_ard_50_TVOON_DE.mpg.avi')
+        self.assertEqual(d, date(1999, 12, 31))
+
+    def test_iso_date(self):
+        """ISO format: YYYY-MM-DD in filename."""
+        from datetime import date
+        d = extract_episode_date('show_2025-03-10_something.mkv')
+        self.assertEqual(d, date(2025, 3, 10))
+
+    def test_no_date(self):
+        """Filename without recognizable date pattern."""
+        d = extract_episode_date('random_show_episode.avi')
+        self.assertIsNone(d)
+
+    def test_auto_mode_tries_all(self):
+        """Auto mode should try TVOON first, then ISO."""
+        from datetime import date
+        # TVOON format
+        d = extract_episode_date('Show_26.03.09_20-15_orf2_55_TVOON_DE.mpg.HQ.avi', format_type='auto')
+        self.assertEqual(d, date(2026, 3, 9))
+        # ISO format
+        d = extract_episode_date('show_2025-03-10.mkv', format_type='auto')
+        self.assertEqual(d, date(2025, 3, 10))
+
+    def test_specific_format(self):
+        """Requesting a specific format only tries that format."""
+        # This TVOON filename should NOT match ISO format
+        d = extract_episode_date('Show_26.03.09_20-15_orf2_55_TVOON_DE.mpg.HQ.avi', format_type='ISO')
+        self.assertIsNone(d)
+
+
+class TestSpecialDetection(unittest.TestCase):
+    """Test special episode pattern matching."""
+
+    def test_xxl_special(self):
+        self.assertTrue(is_special_episode('Wer_weiss_denn_sowas_XXL_25.01.01_20-15_ard.avi'))
+
+    def test_promi_special(self):
+        self.assertTrue(is_special_episode('Die_Promi_Millionenshow_25.01.01_20-15_orf2.avi'))
+
+    def test_normal_episode(self):
+        self.assertFalse(is_special_episode('Wer_weiss_denn_sowas_25.01.01_18-00_ard_50_TVOON_DE.mpg.HQ.avi'))
+
+    def test_custom_pattern(self):
+        self.assertTrue(is_special_episode('Show_Custom_25.01.01.avi', specials_pattern='custom'))
+        self.assertFalse(is_special_episode('Show_Normal_25.01.01.avi', specials_pattern='custom'))
+
+
+class TestMissingEpisodes(unittest.TestCase):
+    """Test --missing command source inspection."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_missing_flag_in_media_argparser(self):
+        """--missing must be in PLEX_Media.argparser."""
+        src = self._read_script()
+        self.assertIn("'--missing'", src, "--missing not found in argparse arguments")
+
+    def test_missing_flag_in_global_parser(self):
+        """--missing must be in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--missing'", src,
+            "--missing not found in GLOBAL_CMD_PARSER")
+
+    def test_missing_help_case(self):
+        """Help system must have a 'missing' case."""
+        src = self._read_script()
+        self.assertIn("case 'missing'", src, "case 'missing' not found in help system")
+
+    def test_missing_dispatch_in_global(self):
+        """execute_global_commands must dispatch --missing."""
+        src = self._read_script()
+        self.assertIn('cmd_missing', src, "cmd_missing not found in source")
+
+
+class TestSortNew(unittest.TestCase):
+    """Test --sort-new command source inspection."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_sort_new_flag_in_global_parser(self):
+        """--sort-new must be in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("'--sort-new'", src, "--sort-new not found in GLOBAL_CMD_PARSER")
+
+    def test_sort_new_help_case(self):
+        """Help system must have a 'sort-new' case."""
+        src = self._read_script()
+        self.assertIn("case 'sort-new'", src, "case 'sort-new' not found in help system")
+
+    def test_sort_new_dispatch(self):
+        """execute_global_commands must dispatch --sort-new."""
+        src = self._read_script()
+        self.assertIn('cmd_sort_new', src, "cmd_sort_new not found in source")
+
+    def test_dry_run_flag(self):
+        """--dry-run must be in argument parsers."""
+        src = self._read_script()
+        self.assertIn("'--dry-run'", src, "--dry-run not found in argparse")
+
+
+class TestMissingE2E(unittest.TestCase):
+    """End-to-end tests for --missing."""
+
+    def test_missing_help(self):
+        """my-plex --help missing should exit 0."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'missing'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, f"--help missing failed: {result.stderr}")
+        self.assertIn('MISSING EPISODES', result.stdout)
+
+    def test_sort_new_help(self):
+        """my-plex --help sort-new should exit 0."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'sort-new'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, f"--help sort-new failed: {result.stderr}")
+        self.assertIn('SORT NEW', result.stdout)
+
+
+class TestCustomDateExtractors(unittest.TestCase):
+    """Test the custom date extractor loading interface."""
+
+    def test_builtin_extractors_registered(self):
+        """Built-in extractors (TVOON, ISO) must be in _BUILTIN_EXTRACTORS."""
+        self.assertIn('TVOON', _BUILTIN_EXTRACTORS)
+        self.assertIn('ISO', _BUILTIN_EXTRACTORS)
+        self.assertIsNotNone(_BUILTIN_EXTRACTORS['TVOON'])
+        self.assertIsNotNone(_BUILTIN_EXTRACTORS['ISO'])
+
+    def test_unknown_format_returns_none(self):
+        """Requesting an unknown format should return None."""
+        d = extract_episode_date('somefile.avi', format_type='UNKNOWN_FORMAT')
+        self.assertIsNone(d)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -3241,6 +3475,13 @@ _UNITTEST_CLASSES = [
     TestBrokenCrossValidation,
     TestCacheUpdateLog,
     TestEndToEnd,
+    TestEpisodesTSV,
+    TestDateExtraction,
+    TestSpecialDetection,
+    TestMissingEpisodes,
+    TestSortNew,
+    TestMissingE2E,
+    TestCustomDateExtractors,
 ]
 
 # ---------------------------------------------------------------------------
