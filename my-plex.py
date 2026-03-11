@@ -14520,30 +14520,10 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
 
     log['changes_by_library'] = changes_by_library
 
-    # Broken file details from metadata collection (ffprobe errors, file_not_found)
+    # Broken file details from metadata collection — stderr NOT fully in cache
+    # (cache stores 200 chars, log stores 500 for diagnostics)
     broken_details = getattr(PLEX_Media, 'last_metadata_broken_details', [])
     log['broken_files_from_metadata'] = broken_details
-
-    # All currently broken files in cache (with reasons)
-    all_broken = []
-    for key, obj in PLEX_Media.OBJ_BY_ID.items():
-        if obj.get('type') not in ('Movie', 'Episode'):
-            continue
-        plex_duration = obj.get('duration') or 0
-        for version, fi in obj.get('files', {}).items():
-            if not isinstance(fi, dict):
-                continue
-            reason = _get_broken_reason(fi, plex_duration)
-            if reason:
-                all_broken.append({
-                    'id': key,
-                    'title': obj.get('title', ''),
-                    'library': obj.get('library', ''),
-                    'version': version,
-                    'filepath': fi.get('filepath', ''),
-                    'reason': reason,
-                })
-    log['all_broken_files'] = all_broken
 
     try:
         import json
