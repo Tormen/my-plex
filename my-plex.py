@@ -105,6 +105,12 @@ CONFIG_DEFAULTS = {
     'PLEX_DB_PATH': '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db',
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
 
+    # Episode management (--missing, --sort-new)
+    # Custom filename date extractors: path to a Python module with extract_date(filename) functions
+    # The module should define EXTRACTORS = {'format_name': extract_function, ...}
+    # where each extract_function takes a filename string and returns datetime.date or None
+    'CUSTOM_DATE_EXTRACTORS': None,  # e.g. '/path/to/my_extractors.py'
+
     # Output Configuration
     'DUPLICATE_FILE': '/tmp/duplicates',
     'FORMAT': 'tsv_labeled',
@@ -226,6 +232,11 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # Alternative root paths for symlinks or different mount points
 # ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}
+
+# Custom filename date extractors for --sort-new (Python module path)
+# The module should define: EXTRACTORS = {{'format_name': extract_function, ...}}
+# Each extract_function takes a filename string and returns datetime.date or None
+# CUSTOM_DATE_EXTRACTORS = None
 
 ###############################################################################
 # Output Configuration
@@ -412,6 +423,7 @@ def generate_default_config():
 #
 # !!! All paths here need to be ABOLUTE PATHs !!!
 ALTERNATIVE_ROOTPATHS = CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']
+CUSTOM_DATE_EXTRACTORS = CONFIG_DEFAULTS['CUSTOM_DATE_EXTRACTORS']
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -1149,8 +1161,20 @@ _test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.p
 _test_mod = _mfs(_test_spec)
 _test_spec.loader.exec_module(_test_mod)
 _UNITTEST_CLASSES = _test_mod._UNITTEST_CLASSES
+# Provide lazy access to episode TSV functions for test module
+# (functions are defined later in this file, so we inject them just before tests run)
+_original_run_regression_tests = _test_mod.run_regression_tests
+# Names of episode TSV functions to inject into test module (defined later in this file)
+_EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_tsv_stale',
+                       'extract_episode_date', 'is_special_episode', '_BUILTIN_EXTRACTORS')
+def _inject_episode_funcs_into_test_mod():
+    """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
+    for _name in _EPISODE_FUNC_NAMES:
+        if _name in globals():
+            setattr(_test_mod, _name, globals()[_name])
 def run_regression_tests():
-    _test_mod.run_regression_tests(globals())
+    _inject_episode_funcs_into_test_mod()
+    _original_run_regression_tests(globals())
 
 
 ############################################################
@@ -10545,6 +10569,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-watched', nargs='?',                help="Set media as watched, optionally to provided watched-date. Example: --set-watched <watched-date in format YYYY-MM-DD HH:MM:SS>")
     argparser.add_argument('--set-view-offset',                       help="Set view offset for media. Example: --set-view-offset <offset_in_milliseconds>")
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
+    argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Requires episodes.tsv in the show directory (auto-scraped from fernsehserien.de). Use --help missing for details.")
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -10578,6 +10603,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if obj_args.set_watched:        PLEX_Media.set_watched(obj)
         if obj_args.set_view_offset:    PLEX_Media.set_view_offset(obj, int(obj_args.set_view_offset))
         if obj_args.set_user_rating:    PLEX_Media.set_user_rating(obj, float(obj_args.set_user_rating))
+        if safe_getattr(obj_args, 'missing', False):
+            # Resolve the media object to a show and run --missing
+            resolved = resolve_plex_media_obj(obj)
+            if resolved:
+                first_key = resolved[0] if isinstance(resolved, list) else resolved
+                obj_data = PLEX_Media.OBJ_BY_ID.get(first_key, {})
+                show_key = obj_data.get('show_key', first_key)
+                cmd_missing(show_key)
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -12826,6 +12859,75 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'missing':
+            print()
+            print("=" * 76)
+            print("MISSING EPISODES (--missing) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --missing <SHOW>")
+            print("       my-plex <SHOW> --missing")
+            print()
+            print("  Show missing episodes for a TV series by comparing an episodes.tsv")
+            print("  (scraped from fernsehserien.de) against what Plex has on disk.")
+            print()
+            print("  <SHOW> can be:")
+            print("    - Plex title:  my-plex --missing 'die millionenshow'")
+            print("    - Plex ID:     my-plex --missing ID:4215")
+            print("    - Filepath:    my-plex --missing /j2/watch.v/series.de/wer.weiss.denn.sowas_[quiz]")
+            print()
+            print("OUTPUT FORMAT:")
+            print("  S01E05    2025-03-10  Episode Title    (individual missing episode)")
+            print("  S03       2024-10-07  (entire season — 22 episodes)")
+            print()
+            print("  Future episodes (date > today) are not shown.")
+            print()
+            print("EPISODES.TSV:")
+            print("  The file episodes.tsv in the show directory is the source of truth.")
+            print("  It is auto-scraped from fernsehserien.de (if the show can be found there).")
+            print("  The TSV is auto-updated when older than 24 hours.")
+            print()
+            print("  Format:")
+            print("    # source: fernsehserien.de")
+            print("    # slug: die-millionenshow")
+            print("    # show_id: 22952")
+            print("    # DO NOT edit or remove the header comments above")
+            print("    season\tepisode\tdate\ttitle")
+            print()
+            print("  The slug and show_id are discovered automatically on first use.")
+            print("  To use a different scraper source, change the '# source:' comment.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'sort-new' | 'sort_new':
+            print()
+            print("=" * 76)
+            print("SORT NEW RECORDINGS (--sort-new) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --sort-new [--dry-run]")
+            print()
+            print("  Scans ALL show directories in series-type Plex libraries for unsorted")
+            print("  video files and sorts them into season subdirectories with S##E## naming.")
+            print()
+            print("  For each unsorted file:")
+            print("    1. Extract the air date from the filename (TVOON format: YY.MM.DD_HH-MM_)")
+            print("    2. Look up the date in episodes.tsv → get season + episode number")
+            print("    3. Also try previous day (for rebroadcasts that air after midnight)")
+            print("    4. Rename to 'S##E## - original_filename' and move to s##/ directory")
+            print()
+            print("  Special episodes (matching patterns like 'XXL', 'Promi', 'Spezial', etc.)")
+            print("  go to specials/ as S00E##. If sort_specials.sh exists in the show directory,")
+            print("  it is called instead for custom special handling.")
+            print()
+            print("  --dry-run / -n   Show what would be done without moving files")
+            print()
+            print("  episodes.tsv is auto-updated from fernsehserien.de if older than 24 hours.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'delete' | 'del':
             print()
             print("=" * 76)
@@ -12899,6 +13001,1002 @@ def main_print_help(args, remaining_args, main_parser):
     PLEXOBJ[PARSER][ args.help.lower() ].print_help()
     main_print_help_of_subparsers( PLEXOBJ[PARSER][ args.help.lower() ] )
     sys.exit(0)
+
+
+###########################################################################################
+#### EPISODE TSV INFRASTRUCTURE — for --missing and --sort-new
+###########################################################################################
+
+# Standardized episodes.tsv format:
+#   # source: fernsehserien.de
+#   # slug: die-millionenshow
+#   # show_id: 22952
+#   # updated: 2026-03-11
+#   # DO NOT edit or remove the header comments above
+#   season	episode	date	title
+#
+# The TSV is the source of truth for what episodes EXIST (aired).
+# Plex cache tells us what episodes we HAVE (on disk).
+# Diff = missing episodes.
+
+EPISODES_TSV_FILENAME = 'episodes.tsv'
+EPISODES_TSV_MAX_AGE = 86400  # 1 day in seconds
+
+# ---------------------------------------------------------------------------
+# Episode TSV read/write
+# ---------------------------------------------------------------------------
+
+def read_episodes_tsv(tsv_path):
+    """Read episodes.tsv from local or remote path.
+
+    Returns: (metadata_dict, episodes_list) where
+        metadata_dict: {'source': str, 'slug': str, 'show_id': str, 'updated': str,
+                        'specials_pattern': str}
+        episodes_list: [{'season': int, 'episode': int, 'date': str, 'title': str}, ...]
+    Returns (None, None) if file doesn't exist.
+    """
+    import os
+    if not os.path.isfile(tsv_path):
+        return None, None
+
+    metadata = {}
+    episodes = []
+    header_cols = None
+
+    with open(tsv_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line:
+                continue
+
+            # Parse header comments
+            if line.startswith('#'):
+                line = line.lstrip('#').strip()
+                if ':' in line:
+                    key, _, val = line.partition(':')
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key in ('source', 'slug', 'show_id', 'updated', 'specials_pattern'):
+                        metadata[key] = val
+                continue
+
+            # Parse column header
+            if header_cols is None:
+                header_cols = line.split('\t')
+                # Normalize column names
+                header_cols = [c.strip().lower().replace('-', '_').replace('release_date', 'date') for c in header_cols]
+                continue
+
+            # Parse data row
+            parts = line.split('\t')
+            if header_cols and len(parts) >= len(header_cols):
+                row = {}
+                for i, col in enumerate(header_cols):
+                    row[col] = parts[i].strip() if i < len(parts) else ''
+                # Normalize to standardized column names
+                ep = {}
+                ep['season'] = int(row.get('season', 0) or 0)
+                ep['episode'] = int(row.get('episode', 0) or 0)
+                ep['date'] = row.get('date', '')
+                ep['title'] = row.get('title', '')
+                episodes.append(ep)
+
+    return metadata, episodes
+
+
+def write_episodes_tsv(tsv_path, metadata, episodes):
+    """Write standardized episodes.tsv.
+
+    Args:
+        tsv_path: File path
+        metadata: dict with keys: source, slug, show_id, updated, specials_pattern (all optional)
+        episodes: list of dicts with keys: season, episode, date, title
+    """
+    from datetime import datetime
+
+    # Update timestamp
+    metadata['updated'] = datetime.now().strftime('%Y-%m-%d')
+
+    with open(tsv_path, 'w', encoding='utf-8') as f:
+        f.write(f"# source: {metadata.get('source', '')}\n")
+        f.write(f"# slug: {metadata.get('slug', '')}\n")
+        if metadata.get('show_id'):
+            f.write(f"# show_id: {metadata['show_id']}\n")
+        if metadata.get('specials_pattern'):
+            f.write(f"# specials_pattern: {metadata['specials_pattern']}\n")
+        f.write(f"# updated: {metadata['updated']}\n")
+        f.write(f"# DO NOT edit or remove the header comments above\n")
+        f.write("season\tepisode\tdate\ttitle\n")
+
+        # Sort by season, then episode
+        for ep in sorted(episodes, key=lambda e: (e.get('season', 0), e.get('episode', 0))):
+            s = ep.get('season', 0)
+            e = ep.get('episode', 0)
+            d = ep.get('date', '')
+            t = ep.get('title', '')
+            f.write(f"{s}\t{e}\t{d}\t{t}\n")
+
+
+def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
+    """Check if episodes.tsv is missing or older than max_age seconds."""
+    import os, time
+    if not os.path.isfile(tsv_path):
+        return True
+    age = time.time() - os.path.getmtime(tsv_path)
+    return age > max_age
+
+
+def get_episodes_tsv_path(show_dir):
+    """Return path to episodes.tsv for a given show directory (local path)."""
+    import os
+    return os.path.join(show_dir, EPISODES_TSV_FILENAME)
+
+
+def get_local_show_dir(show_dir_server):
+    """Translate a server path (e.g. /Volumes/2/watch.v/...) to local path using ALTERNATIVE_ROOTPATHS.
+    Returns the first alternative path that exists locally, or the original path if it exists."""
+    import os
+    if os.path.isdir(show_dir_server):
+        return show_dir_server
+    for alt in get_alternative_paths(show_dir_server):
+        if os.path.isdir(alt):
+            return alt
+    return show_dir_server  # fallback: return original (caller will handle missing)
+
+
+def get_server_show_dir(show_dir_local):
+    """Translate a local path (e.g. /j2/watch.v/...) to server path using ALTERNATIVE_ROOTPATHS.
+    Returns the first alternative path, or the original path."""
+    import os
+    for alt in get_alternative_paths(show_dir_local):
+        return alt  # first alternative = server path
+    return show_dir_local
+
+
+# ---------------------------------------------------------------------------
+# Filename date extraction interface
+# ---------------------------------------------------------------------------
+
+_custom_extractors_loaded = False
+_custom_extractors = {}  # {'format_name': extract_function}
+
+def _load_custom_date_extractors():
+    """Load custom date extractors from the module specified in CUSTOM_DATE_EXTRACTORS config."""
+    global _custom_extractors_loaded, _custom_extractors
+    if _custom_extractors_loaded:
+        return
+    _custom_extractors_loaded = True
+
+    if not CUSTOM_DATE_EXTRACTORS:
+        return
+
+    import importlib.util, os
+    module_path = CUSTOM_DATE_EXTRACTORS
+    if not os.path.isfile(module_path):
+        print(f"WARNING: CUSTOM_DATE_EXTRACTORS module not found: {module_path}")
+        return
+
+    try:
+        spec = importlib.util.spec_from_file_location("custom_date_extractors", module_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if hasattr(mod, 'EXTRACTORS') and isinstance(mod.EXTRACTORS, dict):
+            _custom_extractors.update(mod.EXTRACTORS)
+            if VRB:
+                print(f"  Loaded {len(mod.EXTRACTORS)} custom date extractor(s) from {module_path}")
+        else:
+            print(f"WARNING: CUSTOM_DATE_EXTRACTORS module has no EXTRACTORS dict: {module_path}")
+    except Exception as e:
+        print(f"WARNING: Failed to load CUSTOM_DATE_EXTRACTORS: {e}")
+
+
+# Built-in extractors registry
+_BUILTIN_EXTRACTORS = {
+    'TVOON': None,  # filled after function definitions below
+    'ISO': None,
+}
+
+def extract_episode_date(filename, format_type='auto'):
+    """Extract air date from a video filename.
+
+    Args:
+        filename: basename of the video file
+        format_type: 'auto' (try all), 'TVOON', 'ISO', or any custom format name
+
+    Returns: datetime.date or None
+
+    Custom extractors can be added via the CUSTOM_DATE_EXTRACTORS config variable,
+    pointing to a Python module with: EXTRACTORS = {'format_name': extract_function, ...}
+    Each extract_function takes a filename string and returns datetime.date or None.
+    """
+    _load_custom_date_extractors()
+
+    # Build combined extractors dict (builtins + custom, custom can override builtins)
+    all_extractors = dict(_BUILTIN_EXTRACTORS)
+    all_extractors.update(_custom_extractors)
+
+    if format_type == 'auto':
+        # Try all known formats: builtins first, then custom
+        for name, func in all_extractors.items():
+            if func:
+                result = func(filename)
+                if result:
+                    return result
+        return None
+
+    # Specific format requested
+    func = all_extractors.get(format_type)
+    if func:
+        return func(filename)
+
+    print(f"WARNING: Unknown date extractor format: '{format_type}'")
+    return None
+
+
+def _extract_date_TVOON(filename):
+    """Extract date from TVOON-style filename: Show_Name_YY.MM.DD_HH-MM_channel_..."""
+    import re
+    from datetime import date
+    m = re.search(r'(\d{2})\.(\d{2})\.(\d{2})_\d{2}-\d{2}_', filename)
+    if not m:
+        return None
+    yy, mm, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    year = 2000 + yy if yy < 50 else 1900 + yy
+    try:
+        return date(year, mm, dd)
+    except ValueError:
+        return None
+
+
+def _extract_date_ISO(filename):
+    """Extract date from YYYY-MM-DD pattern in filename."""
+    import re
+    from datetime import date
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', filename)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+# Register built-in extractors
+_BUILTIN_EXTRACTORS['TVOON'] = _extract_date_TVOON
+_BUILTIN_EXTRACTORS['ISO'] = _extract_date_ISO
+
+
+# ---------------------------------------------------------------------------
+# Special episode detection
+# ---------------------------------------------------------------------------
+
+import re as _re
+_DEFAULT_SPECIALS_PATTERN = _re.compile(
+    r'(promi|faschings|spezial|weihnachts|sportler|jubil|xxl|quizmarathon|marathon|special)',
+    _re.IGNORECASE
+)
+
+def is_special_episode(filename, specials_pattern=None):
+    """Check if filename matches special episode patterns.
+
+    Args:
+        filename: basename of the video file
+        specials_pattern: regex string from TSV metadata, or None for default
+
+    Returns: True if special
+    """
+    if specials_pattern:
+        return bool(_re.search(specials_pattern, filename, _re.IGNORECASE))
+    return bool(_DEFAULT_SPECIALS_PATTERN.search(filename))
+
+
+# ---------------------------------------------------------------------------
+# Episode scraper interface
+# ---------------------------------------------------------------------------
+
+def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False):
+    """Main scraper dispatcher. Updates episodes.tsv for a show.
+
+    1. Read existing episodes.tsv for metadata (slug, show_id, source)
+    2. If no slug: try to discover it
+    3. Dispatch to source-specific scraper
+    4. Write updated episodes.tsv
+
+    Args:
+        show_title: Plex show title
+        show_dir: local directory containing the show
+        source: scraper source name
+        force: force update even if TSV is fresh
+
+    Returns: (metadata, episodes) or (None, None) on failure
+    """
+    import os
+
+    tsv_path = get_episodes_tsv_path(show_dir)
+
+    # Read existing TSV
+    metadata, existing_episodes = read_episodes_tsv(tsv_path)
+    if metadata is None:
+        metadata = {}
+        existing_episodes = []
+
+    # Check if update needed
+    if not force and not is_episodes_tsv_stale(tsv_path):
+        return metadata, existing_episodes
+
+    # Determine source (from existing metadata or parameter)
+    source = metadata.get('source', source) or 'fernsehserien.de'
+
+    match source:
+        case 'fernsehserien.de':
+            result = _scrape_fernsehserien_de(show_title, metadata, existing_episodes)
+        case _:
+            print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
+            return metadata, existing_episodes
+
+    if result is None:
+        return metadata, existing_episodes
+
+    new_metadata, new_episodes = result
+
+    # Merge metadata
+    metadata.update(new_metadata)
+    metadata['source'] = source
+
+    # Write updated TSV
+    write_episodes_tsv(tsv_path, metadata, new_episodes)
+
+    return metadata, new_episodes
+
+
+def _discover_fernsehserien_slug(show_title):
+    """Search fernsehserien.de for the show's slug and ID.
+
+    Strategy:
+    1. Try direct URL from title-to-slug heuristic
+    2. Fall back to search page
+
+    Returns: (slug, show_id) or (None, None)
+    """
+    import urllib.request, urllib.parse, re
+
+    # Heuristic: title → slug  (e.g. "Wer weiß denn sowas?" → "wer-weiss-denn-sowas")
+    slug_guess = show_title.lower()
+    # German umlauts
+    for old, new in [('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('ß', 'ss'),
+                     ('é', 'e'), ('è', 'e'), ('ê', 'e'), ('à', 'a'), ('ô', 'o'),
+                     ('î', 'i'), ('ç', 'c'), ('ï', 'i'), ('â', 'a'), ('û', 'u')]:
+        slug_guess = slug_guess.replace(old, new)
+    # Remove punctuation, collapse whitespace to hyphens
+    slug_guess = re.sub(r'[^a-z0-9\s-]', '', slug_guess)
+    slug_guess = re.sub(r'[\s]+', '-', slug_guess).strip('-')
+
+    # Try direct URL
+    url = f"https://www.fernsehserien.de/{slug_guess}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        html = resp.read().decode("utf-8")
+        # Check if this is a valid show page (has episodenguide link)
+        if '/episodenguide' in html or '/sendetermine' in html:
+            # Try to extract show_id from episodenguide links
+            m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html)
+            show_id = m.group(1) if m else None
+            return slug_guess, show_id
+    except Exception:
+        pass
+
+    # Fall back to search
+    search_url = f"https://www.fernsehserien.de/suche?q={urllib.parse.quote(show_title)}"
+    req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+        # Look for first result link
+        matches = re.findall(r'<a href="/([^"/]+)"[^>]*class="[^"]*"[^>]*>.*?</a>', html, re.DOTALL)
+        if matches:
+            slug = matches[0]
+            # Verify it's a show page by checking for episodenguide
+            verify_url = f"https://www.fernsehserien.de/{slug}"
+            req2 = urllib.request.Request(verify_url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                html2 = urllib.request.urlopen(req2, timeout=10).read().decode("utf-8")
+                if '/episodenguide' in html2 or '/sendetermine' in html2:
+                    m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html2)
+                    show_id = m.group(1) if m else None
+                    return slug, show_id
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None, None
+
+
+def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
+    """Scrape fernsehserien.de for episode data.
+
+    Uses two strategies:
+    1. episodenguide/staffel-N pages (structured, per-season, needs show_id)
+    2. sendetermine pages (broadcast dates with episode links, works without show_id)
+
+    Returns: (metadata_updates, episodes_list) or None on failure
+    """
+    import urllib.request, re, time
+
+    slug = metadata.get('slug')
+    show_id = metadata.get('show_id')
+
+    # Discover slug if not known
+    if not slug:
+        print(f"  Discovering fernsehserien.de slug for '{show_title}'...")
+        slug, show_id = _discover_fernsehserien_slug(show_title)
+        if not slug:
+            print(f"  WARNING: Could not find '{show_title}' on fernsehserien.de")
+            return None
+
+    new_metadata = {'slug': slug}
+    if show_id:
+        new_metadata['show_id'] = show_id
+
+    # Build existing episodes lookup: (season, episode) -> {'date': ..., 'title': ...}
+    existing_by_key = {}
+    for ep in existing_episodes:
+        key = (ep['season'], ep['episode'])
+        existing_by_key[key] = ep
+
+    new_count = 0
+
+    if show_id:
+        # Strategy 1: episodenguide/staffel-N (structured data)
+        # Find latest season from existing data
+        max_season = max((ep['season'] for ep in existing_episodes), default=1)
+
+        for s in range(max(1, max_season - 1), max_season + 3):
+            url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            except Exception:
+                continue
+
+            # Extract episode number, date, and title
+            eps = re.findall(
+                r'itemprop="episodeNumber" content="(\d+)".*?'
+                r'itemprop="name"[^>]*>([^<]*)<.*?'
+                r'data-sort="\d+-(\d{4}-\d{2}-\d{2})"',
+                html, re.DOTALL
+            )
+
+            for ep_str, title, date in eps:
+                ep_num = int(ep_str)
+                key = (s, ep_num)
+                title = title.strip()
+                if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
+                    existing_by_key[key] = {'season': s, 'episode': ep_num, 'date': date, 'title': title}
+                    new_count += 1
+                elif not existing_by_key[key].get('title') and title:
+                    existing_by_key[key]['title'] = title
+
+            time.sleep(0.3)
+    else:
+        # Strategy 2: sendetermine pages (broadcast schedule)
+        for offset in [0, -1, -2, -3]:
+            url = f"https://www.fernsehserien.de/{slug}/sendetermine/{offset}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            except Exception as e:
+                print(f"  fetch offset {offset} failed: {e}")
+                break
+
+            pairs = re.findall(
+                r'role=rowgroup\s+href="/' + re.escape(slug) + r'/folgen/(\d+)-([^"]*)".*?datetime="(\d{4}-\d{2}-\d{2})T',
+                html, re.DOTALL
+            )
+
+            for ep_str, title_slug, date in pairs:
+                ep = int(ep_str)
+                title = title_slug.split('-')[:-1]  # remove trailing ID
+                title = ' '.join(title).strip()
+                # For sendetermine-based shows, episode is global; season needs derivation
+                # We'll store season=0 here and derive later
+                key = (0, ep)
+                if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
+                    existing_by_key[key] = {'season': 0, 'episode': ep, 'date': date, 'title': title}
+                    new_count += 1
+
+            time.sleep(0.3)
+
+        # Try to get season info from episodenguide main page
+        url = f"https://www.fernsehserien.de/{slug}/episodenguide"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            title_pairs = re.findall(
+                r'href="/' + re.escape(slug) + r'/folgen/(\d+)-[^"]*"\s*title="(\d+)\.(\d+)',
+                html
+            )
+            for global_ep, season, season_ep in title_pairs:
+                ep = int(global_ep)
+                key = (0, ep)
+                if key in existing_by_key:
+                    if existing_by_key[key]['season'] == 0:
+                        existing_by_key[key]['season'] = int(season)
+        except Exception:
+            pass
+
+        # Derive missing seasons from known season start dates
+        _derive_missing_seasons(existing_by_key)
+
+    episodes = list(existing_by_key.values())
+
+    if new_count:
+        print(f"  Scraped {new_count} new episodes for '{show_title}' (total: {len(episodes)})")
+    else:
+        print(f"  No new episodes for '{show_title}' ({len(episodes)} total)")
+
+    # Detect latest season
+    max_s = max((ep['season'] for ep in episodes if ep['season'] > 0), default=0)
+    if max_s:
+        new_metadata['latest_season'] = str(max_s)
+
+    return new_metadata, episodes
+
+
+def _derive_missing_seasons(episodes_by_key):
+    """For shows using sendetermine (global episode numbers), derive season from known season assignments.
+    Modifies episodes_by_key in place."""
+    # Collect known season start dates
+    season_starts = {}  # season_num -> earliest date
+    for key, ep in episodes_by_key.items():
+        s = ep['season']
+        if s > 0:
+            d = ep['date']
+            if s not in season_starts or d < season_starts[s]:
+                season_starts[s] = d
+
+    if not season_starts:
+        return
+
+    def get_season(date):
+        best = 0
+        for s in sorted(season_starts):
+            if date >= season_starts[s]:
+                best = s
+        return best
+
+    for key, ep in episodes_by_key.items():
+        if ep['season'] == 0 and ep['date']:
+            derived = get_season(ep['date'])
+            if derived > 0:
+                ep['season'] = derived
+
+
+# ---------------------------------------------------------------------------
+# Show resolution helpers
+# ---------------------------------------------------------------------------
+
+def resolve_show_for_episodes(show_ref):
+    """Resolve a show reference (name, Plex ID, filepath) to show data.
+
+    Args:
+        show_ref: Plex ID (e.g. "4215", "ID:4215", "Show:4215"),
+                  show title (e.g. "die millionenshow"),
+                  or filepath (e.g. "/j2/watch.v/series.de/die.millionenshow_[quiz]")
+
+    Returns: (show_key, show_dict) or err() if not found
+    """
+    import os
+
+    # Try as cache key directly
+    if show_ref in PLEX_Media.OBJ_BY_ID:
+        obj = PLEX_Media.OBJ_BY_ID[show_ref]
+        if obj.get('type_str') == 'Show':
+            return show_ref, obj
+
+    # Try as Show:NNN
+    if not show_ref.startswith('Show:'):
+        try_key = f"Show:{show_ref}"
+        if try_key in PLEX_Media.OBJ_BY_ID:
+            return try_key, PLEX_Media.OBJ_BY_ID[try_key]
+
+    # Try as ID:NNN or plain number
+    numeric_id = None
+    if show_ref.upper().startswith('ID:'):
+        try:
+            numeric_id = int(show_ref[3:])
+        except ValueError:
+            pass
+    else:
+        try:
+            numeric_id = int(show_ref)
+        except ValueError:
+            pass
+
+    if numeric_id is not None:
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            if obj.get('type_str') == 'Show' and int(obj.get('id', 0)) == numeric_id:
+                return key, obj
+
+    # Try as filepath (with path translation)
+    if os.sep in show_ref or show_ref.startswith('/'):
+        # Normalize and try alternatives
+        candidates = [show_ref] + get_alternative_paths(show_ref)
+        for path in candidates:
+            path = path.rstrip('/')
+            if path in PLEX_Media.OBJ_BY_FILEPATH:
+                for key in PLEX_Media.OBJ_BY_FILEPATH[path]:
+                    obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+                    if obj.get('type_str') == 'Show':
+                        return key, obj
+
+    # Try as title (case-insensitive substring match)
+    show_ref_lower = show_ref.lower()
+    matches = []
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        if obj.get('type_str') != 'Show':
+            continue
+        title = obj.get('title', '').lower()
+        orig_title = obj.get('originalTitle', '').lower()
+        if show_ref_lower == title or show_ref_lower == orig_title:
+            return key, obj  # exact match
+        if show_ref_lower in title or show_ref_lower in orig_title:
+            matches.append((key, obj))
+
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"  Ambiguous show reference '{show_ref}', matches:")
+        for key, obj in matches:
+            print(f"    {key}: {obj.get('title', '?')}")
+        err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
+
+    err(1087, f"Show not found: '{show_ref}'\n"
+        "  Possible reasons:\n"
+        "  - Show name doesn't match any show in the Plex cache\n"
+        "  - Cache may be outdated — run my-plex --update-cache\n"
+        "  - Try using the Plex ID: my-plex --info <show_name> to find it")
+
+
+def get_all_shows_in_series_libraries():
+    """Return list of (show_key, show_dict, library_name) for all shows in series-type libraries."""
+    shows = []
+    for lib_name, lib_type in PLEX_Library.OBJ_DICT_TYPE.items():
+        if lib_type != 'Show':
+            continue
+        lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
+        for show_key in lib_data.get('Show', []):
+            show_dict = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            if show_dict:
+                shows.append((show_key, show_dict, lib_name))
+    return shows
+
+
+# ---------------------------------------------------------------------------
+# --missing command
+# ---------------------------------------------------------------------------
+
+def cmd_missing(show_ref):
+    """Show missing episodes for a series.
+    Compares episodes.tsv (all aired episodes) against Plex cache (episodes on disk).
+    """
+    import os
+    from datetime import datetime
+
+    show_key, show_dict = resolve_show_for_episodes(show_ref)
+    show_title = show_dict.get('title', '?')
+    show_dir_server = show_dict.get('file', '')
+
+    if not show_dir_server:
+        err(1088, f"Show '{show_title}' ({show_key}) has no directory path in cache.\n"
+            "  Run my-plex --update-cache to refresh.")
+
+    show_dir = get_local_show_dir(show_dir_server)
+
+    print(f"\n{'=' * 76}")
+    print(f"MISSING EPISODES: {show_title}")
+    print(f"{'=' * 76}")
+    print(f"  Show:      {show_key} — {show_title}")
+    print(f"  Directory: {show_dir_server}")
+
+    # Load or update episodes.tsv
+    tsv_path = get_episodes_tsv_path(show_dir)
+
+    if os.path.isfile(tsv_path):
+        if is_episodes_tsv_stale(tsv_path):
+            print(f"  Updating episodes.tsv (stale)...")
+            metadata, all_episodes = scrape_episodes(show_title, show_dir)
+        else:
+            metadata, all_episodes = read_episodes_tsv(tsv_path)
+    else:
+        print(f"  No episodes.tsv found — scraping fernsehserien.de...")
+        metadata, all_episodes = scrape_episodes(show_title, show_dir, force=True)
+
+    if not all_episodes:
+        print(f"\n  No episode data available for '{show_title}'.")
+        print(f"  Create {tsv_path} or ensure the show exists on fernsehserien.de.")
+        print(f"{'=' * 76}")
+        return
+
+    print(f"  TSV:       {len(all_episodes)} episodes (source: {metadata.get('source', '?')})")
+
+    # Get cached episodes from OBJ_BY_SHOW_EPISODES
+    cached_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+
+    # Build set of (season, episode) tuples we HAVE
+    have_set = set()
+    for s_str, eps in cached_episodes.items():
+        # s_str is like "S01", "S00", etc.
+        try:
+            s_num = int(s_str[1:])
+        except (ValueError, IndexError):
+            continue
+        for e_str in eps:
+            try:
+                e_num = int(e_str[1:])
+            except (ValueError, IndexError):
+                continue
+            have_set.add((s_num, e_num))
+
+    print(f"  Cache:     {len(have_set)} episodes on disk")
+
+    # Build set of (season, episode) from TSV
+    tsv_set = {}  # (season, episode) -> {'date': ..., 'title': ...}
+    for ep in all_episodes:
+        key = (ep['season'], ep['episode'])
+        tsv_set[key] = ep
+
+    # Find missing: in TSV but not in cache
+    missing = []
+    for key, ep in sorted(tsv_set.items()):
+        if key not in have_set:
+            missing.append(ep)
+
+    # Also count episodes we have but aren't in TSV (extras)
+    extras = have_set - set(tsv_set.keys())
+
+    if not missing:
+        print(f"\n  No missing episodes! All {len(tsv_set)} TSV episodes are on disk.")
+        if extras:
+            print(f"  ({len(extras)} extra episodes on disk not in TSV)")
+        print(f"{'=' * 76}")
+        return
+
+    print(f"\n  Missing: {len(missing)} episodes")
+    if extras:
+        print(f"  Extra (on disk, not in TSV): {len(extras)}")
+    print()
+
+    # Group missing by season to detect fully missing seasons
+    from collections import defaultdict
+    missing_by_season = defaultdict(list)
+    tsv_by_season = defaultdict(int)
+    for ep in all_episodes:
+        tsv_by_season[ep['season']] += 1
+    for ep in missing:
+        missing_by_season[ep['season']].append(ep)
+
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    for season in sorted(missing_by_season):
+        season_missing = missing_by_season[season]
+        season_total = tsv_by_season[season]
+
+        if len(season_missing) == season_total:
+            # Entire season is missing
+            first_date = min(ep['date'] for ep in season_missing)
+            # Skip future episodes
+            if first_date > today:
+                continue
+            print(f"  S{season:02d}        {first_date}  (entire season — {season_total} episodes)")
+        else:
+            # Individual missing episodes
+            for ep in sorted(season_missing, key=lambda e: e['episode']):
+                # Skip future episodes
+                if ep['date'] > today:
+                    continue
+                title_str = f"  {ep['title']}" if ep.get('title') else ""
+                print(f"  S{season:02d}E{ep['episode']:02d}    {ep['date']}{title_str}")
+
+    print()
+    print(f"{'=' * 76}")
+
+
+# ---------------------------------------------------------------------------
+# --sort-new command
+# ---------------------------------------------------------------------------
+
+VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv', '.mov'}
+
+def cmd_sort_new(args, dry_run=False):
+    """Sort unsorted recordings into season directories for all series.
+
+    Scans all show directories in series-type libraries for unsorted video files
+    (files in the show root, not in season subdirs, without S##E## prefix).
+    Matches file dates to episodes.tsv, renames with S##E## prefix, moves to season dir.
+    """
+    import os, subprocess, shlex
+    from datetime import timedelta
+
+    shows = get_all_shows_in_series_libraries()
+    if not shows:
+        print("No shows found in series-type libraries.")
+        return
+
+    total_sorted = 0
+    total_failed = 0
+    total_shows_processed = 0
+
+    for show_key, show_dict, library_name in shows:
+        show_title = show_dict.get('title', '?')
+        show_dir_server = show_dict.get('file', '')
+        if not show_dir_server:
+            continue
+
+        show_dir = get_local_show_dir(show_dir_server)
+        if not os.path.isdir(show_dir):
+            continue
+
+        # Find unsorted video files in show root (not in subdirs)
+        unsorted = []
+        try:
+            for fn in os.listdir(show_dir):
+                fp = os.path.join(show_dir, fn)
+                if not os.path.isfile(fp):
+                    continue
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in VIDEO_EXTENSIONS:
+                    continue
+                # Skip already-sorted files (S##E## prefix)
+                if _re.match(r'^S\d+E\d+', fn):
+                    continue
+                # Skip scripts and metadata
+                if fn.endswith('.sh') or fn.endswith('.tsv'):
+                    continue
+                unsorted.append((fn, fp))
+        except OSError:
+            continue
+
+        if not unsorted:
+            continue
+
+        total_shows_processed += 1
+
+        # Load / update episodes.tsv
+        tsv_path = get_episodes_tsv_path(show_dir)
+        metadata, all_episodes = None, None
+
+        if os.path.isfile(tsv_path):
+            if is_episodes_tsv_stale(tsv_path):
+                metadata, all_episodes = scrape_episodes(show_title, show_dir)
+            else:
+                metadata, all_episodes = read_episodes_tsv(tsv_path)
+
+        if not all_episodes:
+            # Try scraping
+            print(f"\n  [{show_title}] No episodes.tsv — attempting to scrape...")
+            metadata, all_episodes = scrape_episodes(show_title, show_dir, force=True)
+
+        # Build date lookup: date_str -> (season, episode, title)
+        date_lookup = {}
+        if all_episodes:
+            for ep in all_episodes:
+                date_lookup[ep['date']] = (ep['season'], ep['episode'], ep.get('title', ''))
+
+        # Get specials pattern from metadata
+        specials_pattern = metadata.get('specials_pattern') if metadata else None
+
+        # Check for sort_specials.sh
+        specials_script = os.path.join(show_dir, 'sort_specials.sh')
+        has_specials_script = os.path.isfile(specials_script)
+
+        print(f"\n  [{show_title}] {len(unsorted)} unsorted file(s)")
+
+        # Sort files by name (chronological for TVOON dates)
+        unsorted.sort(key=lambda x: x[0])
+
+        sorted_count = 0
+        failed_count = 0
+
+        for fn, fp in unsorted:
+            # Parse date from filename
+            file_date = extract_episode_date(fn)
+            if file_date is None:
+                print(f"    WARNING: Cannot parse date from: {fn}")
+                failed_count += 1
+                continue
+
+            iso_date = file_date.strftime('%Y-%m-%d')
+
+            # Check for special episodes
+            if is_special_episode(fn, specials_pattern):
+                if has_specials_script:
+                    # Delegate to sort_specials.sh
+                    if dry_run:
+                        print(f"    [dry-run] {fn} -> sort_specials.sh")
+                    else:
+                        try:
+                            subprocess.run(['bash', specials_script, fp], check=True, cwd=show_dir)
+                            print(f"    {fn} -> sort_specials.sh")
+                        except subprocess.CalledProcessError as e:
+                            print(f"    ERROR: sort_specials.sh failed for {fn}: {e}")
+                            failed_count += 1
+                            continue
+                else:
+                    # Default: move to specials/ as S00Exx
+                    target_dir = os.path.join(show_dir, 'specials')
+                    ep_num = _next_episode_in_dir(target_dir, 0)
+                    new_name = f"S00E{ep_num:02d} - {fn}"
+                    target_path = os.path.join(target_dir, new_name)
+                    if dry_run:
+                        print(f"    [dry-run] {fn} -> specials/{new_name}")
+                    else:
+                        os.makedirs(target_dir, exist_ok=True)
+                        os.rename(fp, target_path)
+                        print(f"    {fn} -> specials/{new_name}")
+                sorted_count += 1
+                continue
+
+            # Look up date in TSV (also try previous day for rebroadcasts)
+            result = date_lookup.get(iso_date)
+            lookup_info = iso_date
+
+            if result is None:
+                prev_date = file_date - timedelta(days=1)
+                prev_iso = prev_date.strftime('%Y-%m-%d')
+                result = date_lookup.get(prev_iso)
+                if result:
+                    lookup_info = f"{prev_iso} (rebroadcast)"
+
+            if result:
+                season, ep_num, title = result
+                target_dir = os.path.join(show_dir, f"s{season:02d}")
+                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                target_path = os.path.join(target_dir, new_name)
+
+                if dry_run:
+                    print(f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}")
+                else:
+                    os.makedirs(target_dir, exist_ok=True)
+                    os.rename(fp, target_path)
+                    print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
+                sorted_count += 1
+            else:
+                # No TSV match — use fallback (latest season + sequential numbering)
+                if all_episodes:
+                    latest_season = max((ep['season'] for ep in all_episodes if ep['season'] > 0), default=1)
+                else:
+                    latest_season = 1
+                target_dir = os.path.join(show_dir, f"s{latest_season:02d}")
+                ep_num = _next_episode_in_dir(target_dir, latest_season)
+                new_name = f"S{latest_season:02d}E{ep_num:02d} - {fn}"
+
+                if dry_run:
+                    print(f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}")
+                else:
+                    os.makedirs(target_dir, exist_ok=True)
+                    os.rename(fp, os.path.join(target_dir, new_name))
+                    print(f"    [fallback] {iso_date} -> s{latest_season:02d}/{new_name}")
+                sorted_count += 1
+
+        total_sorted += sorted_count
+        total_failed += failed_count
+
+    print(f"\nDone: {total_sorted} sorted, {total_failed} failed across {total_shows_processed} show(s)")
+
+
+def _next_episode_in_dir(directory, season_num):
+    """Find the next available episode number in a season directory."""
+    import os
+    spad = f"S{season_num:02d}"
+    max_ep = 0
+    if os.path.isdir(directory):
+        for fn in os.listdir(directory):
+            m = _re.search(rf'{spad}E(\d+)', fn)
+            if m:
+                ep = int(m.group(1))
+                if ep > max_ep:
+                    max_ep = ep
+    return max_ep + 1
 
 
 ###########################################################################################
@@ -14738,6 +15836,17 @@ def execute_global_commands(args, cmd_args):
         run_regression_tests()
         # run_regression_tests() calls sys.exit(), so we never reach here
 
+    # Handle --missing command
+    if safe_getattr(cmd_args, 'missing', None):
+        cmd_missing(cmd_args.missing)
+        sys.exit(0)
+
+    # Handle --sort-new command
+    if safe_getattr(cmd_args, 'sort_new', False):
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        cmd_sort_new(args, dry_run=dry_run)
+        sys.exit(0)
+
     if cmd_args.list_libraries:
         print( "\nAvailable Libraries:" )
         PLEX_Library.print()
@@ -15136,6 +16245,9 @@ def main():
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
+    main_parser.add_argument('--missing', metavar='SHOW', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
     main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
@@ -15183,6 +16295,9 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
+    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', help="Show missing episodes for a series. Compares episodes.tsv (scraped from fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
+    GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
     GLOBAL_CMD_PARSER.add_argument('--test', action='store_true', help="Run regression tests to verify script functionality.")
 
@@ -15419,6 +16534,8 @@ def main():
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
+        # Inject episode TSV functions into test module (defined after test import)
+        _inject_episode_funcs_into_test_mod()
         # Load test classes into this module's namespace for unittest discovery
         for _cls in _UNITTEST_CLASSES:
             globals()[_cls.__name__] = _cls
