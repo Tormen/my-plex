@@ -10229,10 +10229,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
             metadata_success = getattr(PLEX_Media, 'last_metadata_batch_success', 0)
 
-            # --- SUMMARY OF CHANGES (always printed) ---
-            print(f"\n{'='*76}")
-            print(f"SUMMARY OF CHANGES")
-            print(f"{'='*76}")
+            has_changes = (total_added > 0 or total_removed > 0 or total_updated > 0
+                           or metadata_probed > 0)
+
+            # --- SUMMARY OF CHANGES (only when there are actual changes) ---
+            if has_changes:
+                print(f"\n{'='*76}")
+                print(f"SUMMARY OF CHANGES")
+                print(f"{'='*76}")
 
             # Library changes table (if any)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
@@ -10322,23 +10326,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
                     print(f"{lib_type:<12} | {lib_name:<20} | {lib_status:<{max_status_width}} | {ts_str}")
                 print()
-            else:
-                print("No library changes.")
+            if has_changes:
+                # Metadata collection summary
+                if metadata_probed > 0:
+                    if metadata_interrupted:
+                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted)")
+                    else:
+                        print(f"  ✓ Metadata collected: {metadata_success}/{metadata_total} files")
+                    if metadata_broken > 0:
+                        print(f"  ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
+                if total_broken > 0:
+                    print(f"  ⚠ {total_broken} broken files total (use --broken to list)")
 
-            # Metadata collection summary (moved here from batch collection)
-            if metadata_probed > 0:
-                if metadata_interrupted:
-                    print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted)")
-                else:
-                    print(f"  ✓ Metadata collected: {metadata_success}/{metadata_total} files")
-                if metadata_broken > 0:
-                    print(f"  ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
-
-            # Broken files total
-            if total_broken > 0:
-                print(f"  ⚠ {total_broken} broken files total (use --broken to list)")
-
-            # --- Build and write JSON update log ---
+            # --- Always write JSON update log ---
             _write_cache_update_log(
                 action=action,
                 completion_status=completion_status,
@@ -10362,11 +10362,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if total_updated > 0: parts.append(f"~{total_updated} updated")
                 meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
                 print(f"\n{action} {completion_status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
             elif metadata_probed > 0:
                 print(f"\n{action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
             else:
                 print(f"\n{action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
-            print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
