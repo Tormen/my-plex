@@ -3073,6 +3073,21 @@ class TestBrokenCrossValidation(unittest.TestCase):
         self.assertIn("'file_ends_cleanly'", src,
             "Result parsing must store file_ends_cleanly in file_metadata")
 
+    def test_cache_update_summary_includes_broken_count(self):
+        """Cache update summary line must include total broken files count."""
+        src = self._read_script()
+        self.assertIn("broken_str", src,
+            "Cache summary must include broken file count string")
+        self.assertIn("_get_broken_reason", src,
+            "Cache summary must use _get_broken_reason to count all broken files")
+        # Verify the broken count appears in all 3 summary print paths
+        # Find the summary section
+        summary_idx = src.index("Show detailed summary")
+        next_section = src.index("Print per-library summary", summary_idx)
+        summary_body = src[summary_idx:next_section]
+        self.assertEqual(summary_body.count("broken_str"), 4,
+            "broken_str must appear in all 3 summary print paths plus the definition")
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
