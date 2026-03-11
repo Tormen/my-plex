@@ -123,6 +123,7 @@ CONFIG_DEFAULTS = {
     # Cache Configuration
     'CACHE_FILE': '.plex_media_cache.pkl',
     'LOCK_FILE': '.plex_media_cache.lock',
+    'CACHE_UPDATES_FILE': '/tmp/my-plex.cache-updates.json',
     'CACHE_CHECKPOINT_INTERVAL': 100,
     'FORCE_CACHE_UPDATE': False,
     'FORCE_PLEXDATA': False,
@@ -461,6 +462,7 @@ OFFLINE = CONFIG_DEFAULTS['OFFLINE']
 # can be absolute path /or/ a relative path to the current users home directory
 CACHE_FILE = CONFIG_DEFAULTS['CACHE_FILE']
 LOCK_FILE = CONFIG_DEFAULTS['LOCK_FILE']
+CACHE_UPDATES_FILE = CONFIG_DEFAULTS['CACHE_UPDATES_FILE']
 FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
 FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
@@ -6872,11 +6874,14 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             type_key = type_map.get(obj_type)
 
             if type_key:
-                # Prepare detailed info for verbose output
+                # Prepare detailed info for verbose output and JSON update log
                 detail_info = {
                     'title': val.get('title', val.get('name', 'Unknown')),
                     'file': filepath,
-                    'id': key
+                    'id': key,
+                    'type': obj_type,
+                    'year': val.get('year'),
+                    'duration': val.get('duration'),
                 }
 
                 if is_new_object:
@@ -7143,6 +7148,7 @@ for line in sys.stdin:
     success_count = 0
     error_count = 0
     not_found_count = 0
+    metadata_broken_details = []  # Collected for JSON update log
 
     for worker_id in sorted(worker_results.keys()):
         stdout, returncode = worker_results[worker_id]
@@ -7165,9 +7171,15 @@ for line in sys.stdin:
 
                 if error_msg == 'file not found':
                     not_found_count += 1
-                    if VRB: print(f"  ⚠ File not found: {filepath}")
                     targets = filepath_lookup.get(filepath, [])
                     for obj_key, version, display_title in targets:
+                        metadata_broken_details.append({
+                            'filepath': filepath,
+                            'reason': 'file_not_found',
+                            'id': obj_key,
+                            'version': version,
+                            'library': display_title,
+                        })
                         if obj_key in PLEX_Media.OBJ_BY_ID:
                             obj = PLEX_Media.OBJ_BY_ID[obj_key]
                             files_dict = obj.get('files', {})
@@ -7182,18 +7194,21 @@ for line in sys.stdin:
                             PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
                     continue
 
-                # ffmpeg error — mark as broken
+                # ffmpeg error — mark as broken (details go to JSON update log, not stdout)
                 error_count += 1
                 file_n = entry.get('n', '?')
                 stderr_msg = entry.get('stderr', '')
-                print(f"\n  ✗ BROKEN [W{worker_id:02d} #{file_n}]: {os.path.basename(filepath)}")
-                print(f"      Path:  {filepath}")
-                if stderr_msg:
-                    for eline in stderr_msg.split('\n')[:3]:
-                        print(f"      {eline}")
 
                 targets = filepath_lookup.get(filepath, [])
                 for obj_key, version, display_title in targets:
+                    metadata_broken_details.append({
+                        'filepath': filepath,
+                        'reason': 'ffprobe_error',
+                        'stderr': stderr_msg[:500],
+                        'id': obj_key,
+                        'version': version,
+                        'library': display_title,
+                    })
                     if obj_key in PLEX_Media.OBJ_BY_ID:
                         obj = PLEX_Media.OBJ_BY_ID[obj_key]
                         files_dict = obj.get('files', {})
@@ -7238,19 +7253,14 @@ for line in sys.stdin:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
 
     processed = success_count + error_count + not_found_count
-    if processed < total:
-        print(f"\n  ✓ Metadata collected: {success_count} files ({processed}/{total} processed, interrupted)")
-    else:
-        print(f"\n  ✓ Metadata collected: {success_count}/{total} files")
-    if error_count > 0:
-        print(f"  ⚠ {error_count} files marked as BROKEN (ffmpeg failed — visible in --broken)")
-    if not_found_count > 0:
-        print(f"  ⚠ {not_found_count} files not found on server (Plex still lists them)")
+    print(f"\n  Metadata collection done ({processed}/{total} files processed)", flush=True)
 
-    # Store for cache update summary
+    # Store for cache update summary and JSON update log
     PLEX_Media.last_metadata_batch_processed = processed
     PLEX_Media.last_metadata_batch_total = total
+    PLEX_Media.last_metadata_batch_success = success_count
     PLEX_Media.last_metadata_broken_count = error_count + not_found_count
+    PLEX_Media.last_metadata_broken_details = metadata_broken_details
 
     _metadata_batch_queue = []
 
@@ -8520,13 +8530,16 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     for key in removed_keys:
                         if key in PLEX_Media.OBJ_BY_ID:
                             obj = PLEX_Media.OBJ_BY_ID[key]
-                            # Capture file path NOW before object is deleted
+                            # Capture full object NOW before deletion (for JSON update log / undo)
                             detail_info = {
                                 'title': obj.get('title', obj.get('name', 'Unknown')),
                                 'year': obj.get('year'),
                                 'file': obj.get('file'),
                                 'id': key,
-                                'type': obj.get('type')
+                                'type': obj.get('type'),
+                                'duration': obj.get('duration'),
+                                'files': {v: {'filepath': fi.get('filepath'), 'filesize': fi.get('filesize')}
+                                          for v, fi in obj.get('files', {}).items() if isinstance(fi, dict)},
                             }
                             removal_details.append(detail_info)
 
@@ -10212,35 +10225,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         total_broken += 1
 
             action = "Cache rebuild" if FROM_SCRATCH else "Cache update"
-            status = "interrupted" if metadata_interrupted else "complete"
+            completion_status = "interrupted" if metadata_interrupted else "complete"
             total_media_files = len(PLEX_Media.OBJ_BY_ID)
-            broken_str = f", {total_broken} broken files" if total_broken > 0 else ""
-            if total_added > 0 or total_removed > 0 or total_updated > 0:
-                parts = []
-                if total_added > 0:
-                    parts.append(f"+{total_added} added")
-                if total_removed > 0:
-                    parts.append(f"-{total_removed} removed")
-                if total_updated > 0:
-                    parts.append(f"~{total_updated} updated")
-                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
-                print(f"{action} {status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
-            elif metadata_probed > 0:
-                print(f"{action} {status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
-            else:
-                print(f"{action} {status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
+            metadata_success = getattr(PLEX_Media, 'last_metadata_batch_success', 0)
 
-            # Print per-library summary of changes at the end (only if there ARE actual changes)
-            if total_added > 0 or total_removed > 0 or total_updated > 0:
-                print(f"\n{'='*76}")
-                print(f"SUMMARY OF CHANGES")
-                print(f"{'='*76}")
+            # --- SUMMARY OF CHANGES (always printed) ---
+            print(f"\n{'='*76}")
+            print(f"SUMMARY OF CHANGES")
+            print(f"{'='*76}")
 
+            # Library changes table (if any)
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
                 # Collect library summaries (merge partitions into base libraries)
-                library_summaries = {}  # {base_lib_name: {added: {...}, removed: {...}, updated: {...}}}
+                library_summaries = {}
 
                 for lib_key, counters in PLEX_Media.library_delta_counters.items():
-                    # Extract base library name (remove partition suffix)
                     base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
 
                     if base_lib not in library_summaries:
@@ -10251,14 +10250,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             'metadata_probed': 0,
                         }
 
-                    # Aggregate counts
                     for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
                         library_summaries[base_lib]['added'][obj_type] += counters['added'][obj_type]
                         library_summaries[base_lib]['removed'][obj_type] += counters['removed'][obj_type]
                         library_summaries[base_lib]['updated'][obj_type] += counters['updated'][obj_type]
                     library_summaries[base_lib]['metadata_probed'] += counters.get('metadata_probed', 0)
 
-                # Group libraries by type for organized output
                 show_libs = []
                 movie_libs = []
                 other_libs = []
@@ -10267,36 +10264,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     summary = library_summaries[lib_name]
                     lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
 
-                    # Build change string for this library
                     change_parts = []
                     if lib_type == 'Show':
                         for obj_type in ['shows', 'seasons', 'episodes']:
                             added = summary['added'][obj_type]
                             removed = summary['removed'][obj_type]
                             updated = summary['updated'][obj_type]
-
                             if added > 0 or removed > 0 or updated > 0:
                                 parts = []
-                                if added > 0:
-                                    parts.append(f"+{added}")
-                                if removed > 0:
-                                    parts.append(f"-{removed}")
-                                if updated > 0:
-                                    parts.append(f"~{updated}")
+                                if added > 0: parts.append(f"+{added}")
+                                if removed > 0: parts.append(f"-{removed}")
+                                if updated > 0: parts.append(f"~{updated}")
                                 change_parts.append(f"{'/'.join(parts)} {obj_type}")
                     elif lib_type == 'Movie':
                         added = summary['added']['movies']
                         removed = summary['removed']['movies']
                         updated = summary['updated']['movies']
-
                         if added > 0 or removed > 0 or updated > 0:
                             parts = []
-                            if added > 0:
-                                parts.append(f"+{added}")
-                            if removed > 0:
-                                parts.append(f"-{removed}")
-                            if updated > 0:
-                                parts.append(f"~{updated}")
+                            if added > 0: parts.append(f"+{added}")
+                            if removed > 0: parts.append(f"-{removed}")
+                            if updated > 0: parts.append(f"~{updated}")
                             change_parts.append(f"{'/'.join(parts)} movies")
 
                     if lib_type == 'Show':
@@ -10306,155 +10294,140 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     else:
                         other_libs.append((lib_name, change_parts))
 
-                # Combine all libraries for table output (with timestamps)
-                # Get timestamps from PLEX_Library.current_library_stats (set by update_cache())
                 library_timestamps = {}
                 if hasattr(PLEX_Library, 'current_library_stats') and PLEX_Library.current_library_stats:
                     library_timestamps = PLEX_Library.current_library_stats.get('updatedAt', {})
 
                 all_libs = []
                 for lib_name, change_parts in show_libs:
-                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    lib_status = ', '.join(change_parts) if change_parts else 'no changes'
                     timestamp = library_timestamps.get(lib_name, 'N/A')
-                    all_libs.append(('Show', lib_name, status, timestamp))
+                    all_libs.append(('Show', lib_name, lib_status, timestamp))
                 for lib_name, change_parts in movie_libs:
-                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    lib_status = ', '.join(change_parts) if change_parts else 'no changes'
                     timestamp = library_timestamps.get(lib_name, 'N/A')
-                    all_libs.append(('Movie', lib_name, status, timestamp))
+                    all_libs.append(('Movie', lib_name, lib_status, timestamp))
                 for lib_name, change_parts in other_libs:
-                    status = ', '.join(change_parts) if change_parts else 'no changes'
+                    lib_status = ', '.join(change_parts) if change_parts else 'no changes'
                     timestamp = library_timestamps.get(lib_name, 'N/A')
-                    all_libs.append(('Other', lib_name, status, timestamp))
+                    all_libs.append(('Other', lib_name, lib_status, timestamp))
 
-                # Calculate dynamic width for Status column based on longest status text
-                max_status_width = max(len(status) for _, _, status, _ in all_libs) if all_libs else 11
-                # Ensure minimum width for the "Status" header
+                max_status_width = max(len(s) for _, _, s, _ in all_libs) if all_libs else 11
                 max_status_width = max(max_status_width, len('Status'))
 
-                # Print table header
                 print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<{max_status_width}} | {'Updated'}")
                 print(f"{'-'*12}-+-{'-'*20}-+-{'-'*max_status_width}-+-{'-'*19}")
 
-                # Print table rows
-                for lib_type, lib_name, status, timestamp in all_libs:
-                    # Format timestamp for display
+                for lib_type, lib_name, lib_status, timestamp in all_libs:
                     ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
-                    print(f"{lib_type:<12} | {lib_name:<20} | {status:<{max_status_width}} | {ts_str}")
+                    print(f"{lib_type:<12} | {lib_name:<20} | {lib_status:<{max_status_width}} | {ts_str}")
+                print()
+            else:
+                print("No library changes.")
 
-                # Keep these for backwards compatibility but make them empty
-                if False and show_libs:
-                    print(f"Series/Show Libraries:")
-                    for lib_name, change_parts in show_libs:
-                        if change_parts:
-                            print(f"  {lib_name}: {', '.join(change_parts)}")
-                        else:
-                            print(f"  {lib_name}: no changes")
+            # Metadata collection summary (moved here from batch collection)
+            if metadata_probed > 0:
+                if metadata_interrupted:
+                    print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted)")
+                else:
+                    print(f"  ✓ Metadata collected: {metadata_success}/{metadata_total} files")
+                if metadata_broken > 0:
+                    print(f"  ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
 
-                # Print Movie libraries
-                if False and movie_libs:
-                    print(f"Movie Libraries:")
-                    for lib_name, change_parts in movie_libs:
-                        if change_parts:
-                            print(f"  {lib_name}: {', '.join(change_parts)}")
-                        else:
-                            print(f"  {lib_name}: no changes")
+            # Broken files total
+            if total_broken > 0:
+                print(f"  ⚠ {total_broken} broken files total (use --broken to list)")
 
-                # Print Other libraries (if any)
-                if False and other_libs:
-                    print(f"Other Libraries:")
-                    for lib_name, change_parts in other_libs:
-                        if change_parts:
-                            print(f"  {lib_name}: {', '.join(change_parts)}")
-                        else:
-                            print(f"  {lib_name}: no changes")
+            # --- Build and write JSON update log ---
+            _write_cache_update_log(
+                action=action,
+                completion_status=completion_status,
+                total_added=total_added,
+                total_removed=total_removed,
+                total_updated=total_updated,
+                total_media_files=total_media_files,
+                total_broken=total_broken,
+                metadata_probed=metadata_probed,
+                metadata_total=metadata_total,
+                metadata_success=metadata_success,
+                metadata_broken=metadata_broken,
+            )
 
-                # Print detailed changes with -V or -VV
-                if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
-                    # Merge partitions into base libraries for detailed output
-                    library_details = {}  # {base_lib_name: {added: {...}, removed: {...}, updated: {...}}}
+            # Final one-liner
+            broken_str = f", {total_broken} broken files" if total_broken > 0 else ""
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
+                parts = []
+                if total_added > 0: parts.append(f"+{total_added} added")
+                if total_removed > 0: parts.append(f"-{total_removed} removed")
+                if total_updated > 0: parts.append(f"~{total_updated} updated")
+                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
+                print(f"\n{action} {completion_status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
+            elif metadata_probed > 0:
+                print(f"\n{action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
+            else:
+                print(f"\n{action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
+            print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
 
-                    for lib_key, details in PLEX_Media.library_delta_details.items():
-                        # Extract base library name (remove partition suffix)
-                        base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
+            # Print detailed changes with -V or -VV
+            if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
+                library_details = {}
 
-                        if base_lib not in library_details:
-                            library_details[base_lib] = {
-                                'added': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
-                                'updated': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
-                                'removed': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []}
-                            }
+                for lib_key, details in PLEX_Media.library_delta_details.items():
+                    base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
 
-                        # Aggregate details across partitions
-                        for action in ['added', 'removed', 'updated']:
-                            for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
-                                library_details[base_lib][action][obj_type].extend(details[action][obj_type])
+                    if base_lib not in library_details:
+                        library_details[base_lib] = {
+                            'added': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+                            'updated': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []},
+                            'removed': {'shows': [], 'seasons': [], 'episodes': [], 'movies': []}
+                        }
 
-                    # Check if there are ANY changes across ALL libraries
-                    has_any_changes = False
-                    for details in library_details.values():
-                        for action in ['added', 'removed', 'updated']:
-                            for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
-                                if len(details[action][obj_type]) > 0:
-                                    has_any_changes = True
-                                    break
-                            if has_any_changes:
-                                break
-                        if has_any_changes:
-                            break
+                    for act in ['added', 'removed', 'updated']:
+                        for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                            library_details[base_lib][act][obj_type].extend(details[act][obj_type])
 
-                    # Only print section if there are changes
-                    if has_any_changes:
-                        print(f"{'='*76}")
-                        print(f"DETAILED CHANGES")
-                        print(f"{'='*76}")
+                has_any_changes = any(
+                    len(det[act][ot]) > 0
+                    for det in library_details.values()
+                    for act in ['added', 'removed', 'updated']
+                    for ot in ['shows', 'seasons', 'episodes', 'movies']
+                )
 
-                        # Print detailed changes per library
-                        for lib_name in sorted(library_details.keys()):
-                            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
-                            details = library_details[lib_name]
+                if has_any_changes:
+                    print(f"{'='*76}")
+                    print(f"DETAILED CHANGES")
+                    print(f"{'='*76}")
 
-                            # Check if this library has any changes
-                            has_changes = False
-                            for action in ['added', 'removed', 'updated']:
-                                for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
-                                    if len(details[action][obj_type]) > 0:
-                                        has_changes = True
-                                        break
-                                if has_changes:
-                                    break
+                    for lib_name in sorted(library_details.keys()):
+                        lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+                        det = library_details[lib_name]
 
-                            if not has_changes:
-                                continue
+                        has_changes = any(
+                            len(det[act][ot]) > 0
+                            for act in ['added', 'removed', 'updated']
+                            for ot in ['shows', 'seasons', 'episodes', 'movies']
+                        )
+                        if not has_changes:
+                            continue
 
-                            print(f"\n{lib_name}:")
+                        print(f"\n{lib_name}:")
 
-                            # Print added items
-                            for action, symbol in [('added', '+'), ('removed', '-'), ('updated', '~')]:
-                                if lib_type == 'Show':
-                                    obj_types = ['shows', 'seasons', 'episodes']
-                                else:
-                                    obj_types = ['movies']
+                        for act, symbol in [('added', '+'), ('removed', '-'), ('updated', '~')]:
+                            obj_types = ['shows', 'seasons', 'episodes'] if lib_type == 'Show' else ['movies']
+                            for obj_type in obj_types:
+                                items = det[act][obj_type]
+                                if len(items) > 0:
+                                    for item in sorted(items, key=lambda x: x['title']):
+                                        title = item['title']
+                                        if item.get('type') == 'Movie' and item.get('year'):
+                                            title = f"{title} ({item['year']})"
+                                        file_str = f" [{item['file']}]" if item.get('file') else ""
+                                        if VERYVRB:
+                                            print(f"  [Local Cache] {symbol} {title}{file_str} (ID: {item['id']})")
+                                        else:
+                                            print(f"  [Local Cache] {symbol} {title}{file_str}")
 
-                                for obj_type in obj_types:
-                                    items = details[action][obj_type]
-                                    if len(items) > 0:
-                                        for item in sorted(items, key=lambda x: x['title']):
-                                            # Build display title with year for movies
-                                            title = item['title']
-                                            if item.get('type') == 'Movie' and item.get('year'):
-                                                title = f"{title} ({item['year']})"
-
-                                            # -V: Show title with year and file path
-                                            # -VV: Show full details (title, year, file path, ID)
-                                            if VERYVRB:
-                                                file_str = f" [{item['file']}]" if item['file'] else ""
-                                                print(f"  [Local Cache] {symbol} {title}{file_str} (ID: {item['id']})")
-                                            else:
-                                                # For -V mode, always show file path for context
-                                                file_str = f" [{item['file']}]" if item['file'] else ""
-                                                print(f"  [Local Cache] {symbol} {title}{file_str}")
-
-                        print(f"{'='*76}\n")
+                    print(f"{'='*76}\n")
 
             # Print detailed retry statistics if any retries occurred
             if PLEX_Media.retry_count > 0:
@@ -14477,6 +14450,108 @@ def verify_cache():
     _verify_data_integrity()
 
     print("\n" + "="*76)
+
+def _write_cache_update_log(action, completion_status, total_added, total_removed, total_updated,
+                            total_media_files, total_broken, metadata_probed, metadata_total,
+                            metadata_success, metadata_broken):
+    """Write a detailed JSON log of all changes made during --update-cache.
+
+    The log contains everything NOT already in the cache file: per-item change details,
+    broken file diagnostics (with stderr), metadata collection stats. Structured for both
+    human readability and machine parsing (e.g. to undo changes if needed).
+    """
+    from datetime import datetime
+
+    log = {
+        '_comment': 'Cache update log — all details not stored in the cache file. Machine-readable for undo.',
+        'timestamp': datetime.now().isoformat(),
+        'action': action,
+        'status': completion_status,
+        'totals': {
+            'plex_items': total_media_files,
+            'added': total_added,
+            'removed': total_removed,
+            'updated': total_updated,
+            'broken_files': total_broken,
+        },
+        'metadata': {
+            'files_probed': metadata_probed,
+            'files_total': metadata_total,
+            'files_success': metadata_success,
+            'files_broken': metadata_broken,
+        },
+    }
+
+    # Per-library change details (added/removed/updated items with full info)
+    changes_by_library = {}
+    if hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
+        for lib_key, details in PLEX_Media.library_delta_details.items():
+            base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
+            if base_lib not in changes_by_library:
+                changes_by_library[base_lib] = {'added': [], 'removed': [], 'updated': []}
+
+            for act in ['added', 'removed', 'updated']:
+                for obj_type in ['shows', 'seasons', 'episodes', 'movies']:
+                    for item in details[act][obj_type]:
+                        entry = {
+                            'id': item.get('id'),
+                            'type': item.get('type', obj_type.rstrip('s').capitalize()),
+                            'title': item.get('title'),
+                        }
+                        if item.get('year'):
+                            entry['year'] = item['year']
+                        if item.get('file'):
+                            entry['file'] = item['file']
+                        if item.get('duration'):
+                            entry['duration'] = item['duration']
+                        # For removed items: include files dict for undo capability
+                        if item.get('files'):
+                            entry['files'] = item['files']
+                        changes_by_library[base_lib][act].append(entry)
+
+    # Prune empty action lists for readability
+    for lib_name in list(changes_by_library.keys()):
+        lib_changes = changes_by_library[lib_name]
+        for act in list(lib_changes.keys()):
+            if not lib_changes[act]:
+                del lib_changes[act]
+        if not lib_changes:
+            del changes_by_library[lib_name]
+
+    log['changes_by_library'] = changes_by_library
+
+    # Broken file details from metadata collection (ffprobe errors, file_not_found)
+    broken_details = getattr(PLEX_Media, 'last_metadata_broken_details', [])
+    log['broken_files_from_metadata'] = broken_details
+
+    # All currently broken files in cache (with reasons)
+    all_broken = []
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        if obj.get('type') not in ('Movie', 'Episode'):
+            continue
+        plex_duration = obj.get('duration') or 0
+        for version, fi in obj.get('files', {}).items():
+            if not isinstance(fi, dict):
+                continue
+            reason = _get_broken_reason(fi, plex_duration)
+            if reason:
+                all_broken.append({
+                    'id': key,
+                    'title': obj.get('title', ''),
+                    'library': obj.get('library', ''),
+                    'version': version,
+                    'filepath': fi.get('filepath', ''),
+                    'reason': reason,
+                })
+    log['all_broken_files'] = all_broken
+
+    try:
+        import json
+        with open(CACHE_UPDATES_FILE, 'w') as f:
+            json.dump(log, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        print(f"  ⚠ Failed to write update log: {e}", flush=True)
+
 
 def _get_broken_reason(file_info, plex_duration=0):
     """Return a human-readable broken reason string, or None if file is not broken."""
