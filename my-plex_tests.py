@@ -3133,19 +3133,18 @@ class TestCacheUpdateLog(unittest.TestCase):
         self.assertIn("library_delta_details", func_body,
             "Must read from library_delta_details")
 
-    def test_log_includes_broken_files(self):
-        """JSON log must include all broken file details."""
+    def test_log_includes_broken_from_metadata(self):
+        """JSON log must include broken file details from metadata collection (not from cache)."""
         src = self._read_script()
         import re
         match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("all_broken_files", func_body,
-            "Must include comprehensive broken files list")
-        self.assertIn("_get_broken_reason", func_body,
-            "Must use _get_broken_reason to identify broken files")
         self.assertIn("broken_files_from_metadata", func_body,
-            "Must include broken files from metadata collection")
+            "Must include broken files from metadata collection (stderr not fully in cache)")
+        # Must NOT duplicate what's already in cache
+        self.assertNotIn("all_broken_files", func_body,
+            "Must NOT list all broken files — that info is already in the cache")
 
     def test_log_includes_undo_info_for_removed(self):
         """Removed items must include file details for undo capability."""
