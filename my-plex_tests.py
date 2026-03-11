@@ -3160,22 +3160,32 @@ class TestCacheUpdateLog(unittest.TestCase):
         self.assertIn("'files'", removal_section,
             "Removal details must capture files dict for undo")
 
-    def test_summary_always_printed(self):
-        """SUMMARY OF CHANGES must always print, not just when there are library changes."""
+    def test_summary_printed_when_changes(self):
+        """SUMMARY OF CHANGES must print when there are changes (library or metadata)."""
         src = self._read_script()
-        # Find the SUMMARY OF CHANGES section — it should NOT be inside an if-block
         idx = src.index("SUMMARY OF CHANGES")
-        # Get the 200 chars before it to check indentation context
+        # Get context before — must be guarded by has_changes (includes metadata_probed)
         context_before = src[max(0, idx-200):idx]
-        # The print statement should be at the same indentation as the main try block
-        self.assertNotIn("if total_added > 0 or total_removed > 0", context_before,
-            "SUMMARY OF CHANGES must not be inside 'if changes' block — should always print")
+        self.assertIn("has_changes", context_before,
+            "SUMMARY OF CHANGES must be inside 'has_changes' block")
+        # has_changes must include metadata_probed (not just library changes)
+        has_changes_idx = src.index("has_changes = ")
+        has_changes_line = src[has_changes_idx:src.index(')', has_changes_idx) + 1]
+        self.assertIn("metadata_probed", has_changes_line,
+            "has_changes must include metadata_probed, not just library changes")
 
-    def test_details_file_path_printed(self):
-        """Must print path to CACHE_UPDATES_FILE at end of update."""
+    def test_details_file_path_printed_on_changes(self):
+        """Must print path to CACHE_UPDATES_FILE when there are changes, not on no-op."""
         src = self._read_script()
         self.assertIn("Details: {CACHE_UPDATES_FILE}", src,
             "Must print the JSON log file path for the user")
+        # Should NOT appear in the "no changes" branch
+        no_changes_idx = src.index("no changes{broken_str}")
+        next_newline = src.index('\n', no_changes_idx)
+        # The next few lines after "no changes" should NOT have Details:
+        after_no_changes = src[next_newline:next_newline+200]
+        self.assertNotIn("Details:", after_no_changes,
+            "Must NOT print Details: line when there are no changes")
 
     def test_metadata_summary_in_summary_section(self):
         """Metadata collection summary must appear in SUMMARY OF CHANGES, not in batch function."""
