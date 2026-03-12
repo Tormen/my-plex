@@ -8242,6 +8242,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
     argparser.add_argument('--scan', action='store_true',   help="Trigger Plex filesystem scan for this library, wait for completion, then update cache. Use --help scan for details.")
+    argparser.add_argument('--missing', action='store_true', help="Show missing episodes for all series in this library. Compares episodes.tsv against Plex cache for each show. Use --help missing for details.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -9579,6 +9580,22 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                         media_type = safe_getattr(obj_args, 'type', None)
                                         resolve_mode = safe_getattr(obj_args, 'resolve', False)
                                         PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language)
+        # Handle --missing: show missing episodes for all shows in this library
+        if safe_getattr(obj_args, 'missing', False):
+            lib_name = obj  # obj is the library name string
+            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
+            if lib_type != 'Show':
+                err(1092, f"--missing is only supported for series libraries ('{lib_name}' is type '{lib_type}').\n"
+                    "  Use --missing with a series library or a specific show.")
+            lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
+            show_keys = lib_data.get('Show', [])
+            if not show_keys:
+                print(f"\nNo shows found in library '{lib_name}'.")
+            else:
+                print(f"\nChecking {len(show_keys)} show(s) in library '{lib_name}' for missing episodes...")
+                for show_key in show_keys:
+                    cmd_missing(show_key)
+
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -10604,13 +10621,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if obj_args.set_view_offset:    PLEX_Media.set_view_offset(obj, int(obj_args.set_view_offset))
         if obj_args.set_user_rating:    PLEX_Media.set_user_rating(obj, float(obj_args.set_user_rating))
         if safe_getattr(obj_args, 'missing', False):
-            # Resolve the media object to a show and run --missing
-            resolved = resolve_plex_media_obj(obj)
-            if resolved:
-                first_key = resolved[0] if isinstance(resolved, list) else resolved
-                obj_data = PLEX_Media.OBJ_BY_ID.get(first_key, {})
-                show_key = obj_data.get('show_key', first_key)
-                cmd_missing(show_key)
+            # Resolve media object to a show — use cache, not API
+            cmd_missing(obj)
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -12429,7 +12441,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'sort_new', False)
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -12867,6 +12879,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex --missing <SHOW>")
             print("       my-plex <SHOW> --missing")
+            print("       my-plex <LIBRARY> --missing   (all shows in a series library)")
             print()
             print("  Show missing episodes for a TV series by comparing an episodes.tsv")
             print("  (scraped from fernsehserien.de) against what Plex has on disk.")
@@ -13649,6 +13662,14 @@ def resolve_show_for_episodes(show_ref):
         for key, obj in matches:
             print(f"    {key}: {obj.get('title', '?')}")
         err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
+
+    # Try resolving through Episode/Season -> show_key
+    if show_ref in PLEX_Media.OBJ_BY_ID:
+        obj = PLEX_Media.OBJ_BY_ID[show_ref]
+        if obj.get('type_str') in ('Episode', 'Season'):
+            sk = obj.get('show_key', '')
+            if sk and sk in PLEX_Media.OBJ_BY_ID:
+                return sk, PLEX_Media.OBJ_BY_ID[sk]
 
     err(1087, f"Show not found: '{show_ref}'\n"
         "  Possible reasons:\n"
@@ -15838,6 +15859,12 @@ def execute_global_commands(args, cmd_args):
 
     # Handle --missing command
     if safe_getattr(cmd_args, 'missing', None):
+        if cmd_args.missing is True:  # --missing without show reference
+            err(1091, "--missing requires a show reference (title, Plex ID, or filepath)\n"
+                "  Usage: my-plex --missing <show>\n"
+                "         my-plex <library> --missing  (all shows in library)\n"
+                "         my-plex <show> --missing     (specific show)\n"
+                "  Use --help missing for details")
         cmd_missing(cmd_args.missing)
         sys.exit(0)
 
@@ -16245,7 +16272,7 @@ def main():
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
-    main_parser.add_argument('--missing', metavar='SHOW', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
@@ -16295,7 +16322,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
-    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', help="Show missing episodes for a series. Compares episodes.tsv (scraped from fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
+    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares episodes.tsv (scraped from fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
@@ -16307,7 +16334,10 @@ def main():
     add_PLEX_OBJ_TYPE( PLEX_Playlist )   # Playlist commands   (slow: server call)
 
     # Parse arguments
-    (args, remaining_args) = main_parser.parse_known_args()
+    try:
+        (args, remaining_args) = main_parser.parse_known_args()
+    except (argparse.ArgumentError, SystemExit) as e:
+        err(1090, f"{e}\nUse --help to see available options.")
     DBG = args.debug
     DEEPDBG = args.deep_debug
     VRB = args.verbose
@@ -16518,6 +16548,20 @@ def main():
         if DBG: print(f"{DBGPFX}--scan: SCAN_LIBRARIES={SCAN_LIBRARIES}")
 
     main_print_help(args, remaining_args, main_parser)
+
+    # Re-inject --missing into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    if safe_getattr(args, 'missing', None) is not None:
+        remaining_args.insert(0, '--missing')
+        if args.missing is not True:  # has a SHOW value (not bare --missing)
+            remaining_args.insert(1, args.missing)
+
+    # Re-inject --sort-new into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    if safe_getattr(args, 'sort_new', False):
+        remaining_args.insert(0, '--sort-new')
+
+    # Re-inject --dry-run into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    if safe_getattr(args, 'dry_run', False) and '--dry-run' not in remaining_args:
+        remaining_args.insert(0, '--dry-run')
 
     init_plex(args)
     #init_plex(args, all=False, server=True, library=True)

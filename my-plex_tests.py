@@ -3376,6 +3376,16 @@ class TestMissingEpisodes(unittest.TestCase):
         src = self._read_script()
         self.assertIn("'--missing'", src, "--missing not found in argparse arguments")
 
+    def test_missing_flag_in_library_argparser(self):
+        """--missing must be in PLEX_Library.argparser."""
+        src = self._read_script()
+        # Find the PLEX_Library class section (ends at next top-level class)
+        import re
+        lib_section = re.search(r'class PLEX_Library.*?(?=\nclass [A-Z])', src, re.DOTALL)
+        self.assertIsNotNone(lib_section)
+        self.assertIn("'--missing'", lib_section.group(),
+            "--missing not found in PLEX_Library argparser")
+
     def test_missing_flag_in_global_parser(self):
         """--missing must be in GLOBAL_CMD_PARSER."""
         src = self._read_script()
@@ -3431,12 +3441,35 @@ class TestMissingE2E(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--help missing failed: {result.stderr}")
         self.assertIn('MISSING EPISODES', result.stdout)
 
+    def test_missing_help_shows_library_usage(self):
+        """--help missing should document library usage."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'missing'],
+            capture_output=True, text=True, timeout=10)
+        self.assertIn('LIBRARY', result.stdout, "--help missing should document library usage")
+
     def test_sort_new_help(self):
         """my-plex --help sort-new should exit 0."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'sort-new'],
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, f"--help sort-new failed: {result.stderr}")
         self.assertIn('SORT NEW', result.stdout)
+
+    def test_missing_bare_gives_error(self):
+        """my-plex --missing (without show) should error gracefully, not stack trace."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--missing'],
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, "--missing without args should fail")
+        output = result.stdout + result.stderr
+        self.assertNotIn('Traceback', output, "--missing without args should not produce stack trace")
+        self.assertIn('ERROR', output, "--missing without args should show error message")
+
+    def test_unknown_flag_gives_error(self):
+        """my-plex --asdf should error gracefully, not stack trace."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--asdf'],
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, "--asdf should fail")
+        output = result.stdout + result.stderr
+        self.assertNotIn('Traceback', output, "--asdf should not produce stack trace")
 
 
 class TestCustomDateExtractors(unittest.TestCase):
