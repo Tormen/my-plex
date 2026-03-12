@@ -7714,6 +7714,15 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 episode_key = f"Episode:{episode_dict['id']}"
                 PLEX_Media.library_server_ids[library_name].add(episode_key)
 
+                # Track first episode filepath for directory derivation (BEFORE skip check,
+                # so show/season dirs are set even when all episodes are cached and skipped)
+                ep_filepath = episode_dict.get('file', '')
+                if ep_filepath:
+                    if first_season_ep_filepath is None:
+                        first_season_ep_filepath = ep_filepath
+                    if first_episode_filepath is None:
+                        first_episode_filepath = ep_filepath
+
                 # Skip if already cached (resume mode) — but update if file versions or paths changed
                 if FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
                     if episode_key in PLEX_Media.OBJ_BY_ID:
@@ -7732,14 +7741,6 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                         if VRB: print(f"{VRBPFX}Updating episode '{episode_dict['S0XE0X']}': file change detected")
 
                 processed_count += 1
-
-                # Track first episode filepath for directory derivation
-                ep_filepath = episode_dict.get('file', '')
-                if ep_filepath:
-                    if first_season_ep_filepath is None:
-                        first_season_ep_filepath = ep_filepath
-                    if first_episode_filepath is None:
-                        first_episode_filepath = ep_filepath
 
                 # Populate cache — Episode in OBJ_BY_ID
                 PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
