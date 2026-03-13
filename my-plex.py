@@ -16544,11 +16544,19 @@ def main():
 
     main_print_help(args, remaining_args, main_parser)
 
-    # Re-inject --missing into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    # Re-inject --missing into remaining_args
+    # Two cases:
+    #   1. --missing <SHOW> (no CMD_OR_PLEXOBJECT) → global command: insert at front
+    #   2. <PLEXOBJ> --missing (bare --missing with CMD_OR_PLEXOBJECT) → obj_arg: append at end
     if safe_getattr(args, 'missing', None) is not None:
-        remaining_args.insert(0, '--missing')
-        if args.missing is not True:  # has a SHOW value (not bare --missing)
+        if args.missing is not True:
+            # --missing <SHOW> — explicit show reference, goes through global command path
+            remaining_args.insert(0, '--missing')
             remaining_args.insert(1, args.missing)
+        else:
+            # bare --missing — append after PLEXOBJECT so it becomes an obj_arg,
+            # or insert at front if no PLEXOBJECT (global command will error with usage)
+            remaining_args.append('--missing')
 
     # Re-inject --sort-new into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
     if safe_getattr(args, 'sort_new', False):
