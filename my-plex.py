@@ -13692,18 +13692,28 @@ def cmd_missing(show_ref):
     cached_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
 
     # Build set of (season, episode) tuples we HAVE
+    # Plex stores episode.index as-is from the metadata agent / filename scanner (per plexapi
+    # source: Episode.index is the episode number within the season).  Some shows use "absolute"
+    # numbering in filenames (e.g. "Boston Legal 101" → Plex stores index=101 for S01E01).
+    # Detect per-season: if ALL episodes in a season have index // 100 == season_num, normalise.
     have_set = set()
     for s_str, eps in cached_episodes.items():
-        # s_str is like "S01", "S00", etc.
         try:
             s_num = int(s_str[1:])
         except (ValueError, IndexError):
             continue
+        e_nums = []
         for e_str in eps:
             try:
-                e_num = int(e_str[1:])
+                e_nums.append(int(e_str[1:]))
             except (ValueError, IndexError):
                 continue
+        # Detect absolute numbering: ALL episodes in this season have index // 100 == season_num
+        uses_absolute = (s_num > 0 and e_nums
+                         and all(e >= 100 and e // 100 == s_num for e in e_nums))
+        for e_num in e_nums:
+            if uses_absolute:
+                e_num = e_num % 100
             have_set.add((s_num, e_num))
 
     print(f"  Cache:     {len(have_set)} episodes on disk")
