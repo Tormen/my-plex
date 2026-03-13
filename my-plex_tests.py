@@ -995,12 +995,12 @@ Summary must report metadata probing separately from library changes (added/remo
         self.assertIn("json.dumps(", func_body,
             "Collector script must output JSON via json.dumps")
 
-    def test_add_media_obj_uses_determine_remote_host(self):
-        """add_media_obj must use determine_remote_host() not getattr(library, 'remote_host')."""
+    def test_add_media_obj_via_PLEX_API_uses_determine_remote_host(self):
+        """add_media_obj_via_PLEX_API must use determine_remote_host() not getattr(library, 'remote_host')."""
         content = self._read_script()
         import re
-        match = re.search(r'(def add_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
-        self.assertIsNotNone(match, "add_media_obj function must exist")
+        match = re.search(r'(def add_media_obj_via_PLEX_API\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match, "add_media_obj_via_PLEX_API function must exist")
         func_body = match.group(1)
         self.assertNotIn("getattr(library, 'remote_host'", func_body,
             "Must not use getattr(library, 'remote_host') — use determine_remote_host()")
@@ -3207,18 +3207,21 @@ class TestCacheUpdateLog(unittest.TestCase):
         self.assertNotIn("✗ BROKEN [W", func_body,
             "Batch function must not print verbose BROKEN output — details go to JSON log")
 
-    def test_detail_info_includes_type_and_year(self):
-        """Added/updated detail_info must include type and year for the JSON log."""
+    def test_track_delta_helper_exists(self):
+        """_track_delta() helper must exist for shared delta tracking."""
         src = self._read_script()
-        # Find the detail_info preparation for added/updated items
+        self.assertIn("def _track_delta(", src,
+            "_track_delta helper must exist for delta counter tracking")
+        # Must be used by both movie and show processing paths
         import re
-        match = re.search(r"(# Prepare detailed info for verbose output.*?detail_info = \{.*?\})", src, re.DOTALL)
-        self.assertIsNotNone(match)
-        detail_section = match.group(1)
-        self.assertIn("'type':", detail_section,
-            "detail_info must include 'type' for JSON log")
-        self.assertIn("'year':", detail_section,
-            "detail_info must include 'year' for JSON log")
+        movie_section = re.search(r'def _process_movies_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(movie_section)
+        self.assertIn("_track_delta(", movie_section.group(),
+            "_process_movies_from_database must call _track_delta")
+        show_section = re.search(r'def _process_shows_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
+        self.assertIsNotNone(show_section)
+        self.assertIn("_track_delta(", show_section.group(),
+            "_process_shows_from_database must call _track_delta")
 
 
 ###########################################################################################

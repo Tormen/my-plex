@@ -2506,7 +2506,7 @@ def fetch_movies_from_database(library_section_id):
 
     CACHE COMPATIBILITY:
     - Returns dicts with same structure as old API-based code
-    - Fields match what add_media_obj() previously created
+    - Fields match what add_media_obj_via_PLEX_API() previously created
     - Downstream code (display, search, resolve) works unchanged
 
     Args:
@@ -4744,7 +4744,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
     return all_success
 
 def undo_operation(operation_log, remote_host=None):
-    """API required: re-adds items to cache via add_media_obj() after trash restore — needs plexapi
+    """API required: re-adds items to cache via add_media_obj_via_PLEX_API() after trash restore — needs plexapi
     objects to extract media/part structure. Undo a resolution operation using the stored undo instructions
 
     Args:
@@ -4962,11 +4962,11 @@ def undo_operation(operation_log, remote_host=None):
                     print(f"✓")
                     print(f"  Adding to cache (new Plex ID: {item_found.ratingKey})...", end=' ', flush=True)
 
-                    # Add to cache using add_media_obj
+                    # Add to cache using add_media_obj_via_PLEX_API
                     if lib_type == 'movie':
                         for media_idx, media in enumerate(item_found.media):
                             for part_idx, part in enumerate(media.parts):
-                                add_media_obj(
+                                add_media_obj_via_PLEX_API(
                                     item_found, lib, item_found,
                                     media_idx, len(item_found.media), media,
                                     part_idx, len(media.parts), part
@@ -4976,7 +4976,7 @@ def undo_operation(operation_log, remote_host=None):
                         season = item_found.season()
                         for media_idx, media in enumerate(item_found.media):
                             for part_idx, part in enumerate(media.parts):
-                                add_media_obj(
+                                add_media_obj_via_PLEX_API(
                                     item_found, lib, show,
                                     media_idx, len(item_found.media), media,
                                     part_idx, len(media.parts), part,
@@ -6617,11 +6617,11 @@ def plex_rate_limit_delay():
         time.sleep(delay)
 
 
-def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
+def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
     """API required: expects plexapi objects (item, media, part). Used by undo_operation() (trash restore)
     to re-add items to cache. --update-cache uses DB path (_process_movies/shows_from_database) instead."""
     global FORCE_PLEXDATA
-    if DBG: print( f"{DBGPFX}add_media_obj(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath})" )
+    if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(obj:{obj}, library:{library}, item:{item}, media:{media}, part:{part}, season:{season}, episode:{episode}, filepath:{filepath})" )
 
     # PLEX RATE LIMITING: Add random delay during cache rebuilds to avoid throttling
     plex_rate_limit_delay()
@@ -6648,20 +6648,20 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
         # CASE 1: Same file + Same IDs → Same item, just check if needs updating
         if same_file and same_ids:
-            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} already in cache (same file + same IDs), checking if update needed" )
+            if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): item {key} already in cache (same file + same IDs), checking if update needed" )
             if not obj_needs_updating(obj, val):
-                if DBG: print( f"{DBGPFX}add_media_obj(): SKIPPING item {key} as updatedAt same (and NOT --update-cache parameter)" )
+                if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): SKIPPING item {key} as updatedAt same (and NOT --update-cache parameter)" )
                 return
             # Timestamp changed, fall through to update it
 
         # CASE 2: Same file + Different IDs → Plex rescanned and reassigned IDs, update the entry
         elif same_file and not same_ids:
-            if DBG: print( f"{DBGPFX}add_media_obj(): item {key} has same file but different IDs (Plex rescan), updating cache entry" )
+            if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): item {key} has same file but different IDs (Plex rescan), updating cache entry" )
             # Fall through to update it with new IDs
 
         # CASE 3: Different file + Same IDs → Same episode with different file (shouldn't happen, but handle it)
         elif not same_file and same_ids:
-            if DBG: print( f"{DBGPFX}add_media_obj(): WARNING - item {key} has same IDs but different file ('{cached_file}' → '{current_file}'), updating" )
+            if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): WARNING - item {key} has same IDs but different file ('{cached_file}' → '{current_file}'), updating" )
             # Fall through to update it
 
         # CASE 4: Different file + Different IDs → Could be multi-version OR genuine duplicate
@@ -6671,7 +6671,7 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             if same_item_id:
                 # Same item_id with different media/part IDs = multi-version episode
                 # Skip duplicate detection and let multi-version handling at line 6540 process it
-                if DBG: print( f"{DBGPFX}add_media_obj(): item {key} is multi-version (same item_id={item_ratingKey}, different media/part IDs), skipping duplicate check" )
+                if DBG: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): item {key} is multi-version (same item_id={item_ratingKey}, different media/part IDs), skipping duplicate check" )
                 # Fall through to multi-version handling
             else:
                 # Different item_id = GENUINE DUPLICATE (same ratingKey, different content)
@@ -6807,12 +6807,12 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
     match obj_type:
         case "Episode" | "Season" | "Show":   val = add_show_info( val, obj, obj_type, key, item, season, episode, version, lib_title)
         case "Movie":                         val = add_movie_info(val, obj, obj_type, key, version, filepath, lib_title)
-        case _: err( 1017, f"UNSUPPORTED obj.type '{obj_type}' for add_media_obj()" )
+        case _: err( 1017, f"UNSUPPORTED obj.type '{obj_type}' for add_media_obj_via_PLEX_API()" )
 
     if DBG:
         match media_type_str:
-            case "Movie*" | "Episode*": print( f"{DBGPFX}add_media_obj(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} [media:{media_idx}/0..{media_cnt}|part:{part_idx}/0..{part_cnt}] ---> val={val}" )
-            case _: print( f"{DBGPFX}add_media_obj(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} ---> val={val}" )
+            case "Movie*" | "Episode*": print( f"{DBGPFX}add_media_obj_via_PLEX_API(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} [media:{media_idx}/0..{media_cnt}|part:{part_idx}/0..{part_cnt}] ---> val={val}" )
+            case _: print( f"{DBGPFX}add_media_obj_via_PLEX_API(): adding {media_type.upper()} '{filepath}' {obj} id:{obj_ratingKey} | item_id:{item_ratingKey} > media_id:{media.id} > part_id:{part.id} ---> val={val}" )
 
     # If key already exists, check if we're resuming from checkpoint
     is_new_object = key not in PLEX_Media.OBJ_BY_ID
@@ -6825,15 +6825,15 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
             # With --force-plexdata, we need to recollect ALL Plex data including audio_languages
             if not FORCE_PLEXDATA:
                 # Already processed in previous run, skip
-                if DBG: print(f"{DBGPFX}add_media_obj(): SKIPPING already processed key '{key}' version '{version}'")
+                if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): SKIPPING already processed key '{key}' version '{version}'")
                 return
             else:
                 # Force reprocessing to update Plex metadata
-                if DBG: print(f"{DBGPFX}add_media_obj(): REPROCESSING key '{key}' version '{version}' (FORCE_PLEXDATA)")
+                if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): REPROCESSING key '{key}' version '{version}' (FORCE_PLEXDATA)")
         # New version of existing object - merge files dict
         existing_files[version] = {'filepath': filepath, 'filesize': part_size}
         val['files'] = existing_files
-        if DBG: print(f"{DBGPFX}add_media_obj(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
+        if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
 
     # Collect video file metadata during cache rebuild
     # This runs during --update-cache and collects container duration for broken file detection
@@ -6889,50 +6889,13 @@ def add_media_obj(obj, library, item, media_idx,media_cnt,media, part_idx,part_c
 
     # Track delta for library/partition completion summary (ADDED/UPDATED)
     if FORCE_CACHE_UPDATE:
-        # Use display_title (which includes partition suffix like '[0:314]') if available, otherwise library.title
-        # This ensures delta counters match the partition-specific counters initialized in process_single_library
         lib_key = display_title if display_title else library.title
-        if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
-            obj_type = val.get('type', '')
-            type_map = {'Show': 'shows', 'Season': 'seasons', 'Episode': 'episodes', 'Movie': 'movies'}
-            type_key = type_map.get(obj_type)
-
-            if type_key:
-                # Prepare detailed info for verbose output and JSON update log
-                detail_info = {
-                    'title': val.get('title', val.get('name', 'Unknown')),
-                    'file': filepath,
-                    'id': key,
-                    'type': obj_type,
-                    'year': val.get('year'),
-                    'duration': val.get('duration'),
-                }
-
-                if is_new_object:
-                    # New object added
-                    PLEX_Media.library_delta_counters[lib_key]['added'][type_key] += 1
-                    if hasattr(PLEX_Media, 'library_delta_details') and lib_key in PLEX_Media.library_delta_details:
-                        PLEX_Media.library_delta_details[lib_key]['added'][type_key].append(detail_info)
-
-                    # Print real-time verbose output with -VV
-                    global VERYVRB
-                    if VERYVRB:
-                        file_str = f" [{filepath}]" if filepath else ""
-                        print(f"  [Local Cache] + {detail_info['title']}{file_str} (ID: {key})", flush=True)
-                else:
-                    # Existing object updated (new version or modified)
-                    PLEX_Media.library_delta_counters[lib_key]['updated'][type_key] += 1
-                    if hasattr(PLEX_Media, 'library_delta_details') and lib_key in PLEX_Media.library_delta_details:
-                        PLEX_Media.library_delta_details[lib_key]['updated'][type_key].append(detail_info)
-
-                    # Print real-time verbose output with -VV
-                    if VERYVRB:
-                        file_str = f" [{filepath}]" if filepath else ""
-                        print(f"  [Local Cache] ~ {detail_info['title']}{file_str} (ID: {key})", flush=True)
+        obj_type = val.get('type', '')
+        _track_delta(lib_key, obj_type, is_new_object)
 
     # CHECKPOINT: Periodically save cache during rebuild to prevent total loss on failure
     # Only count actual NEW/UPDATED media files (Movies/Episodes), not container objects (Seasons/Shows)
-    # Items already in cache are skipped (never call add_media_obj), so items_processed only counts changes
+    # Items already in cache are skipped (never call add_media_obj_via_PLEX_API), so items_processed only counts changes
     if FORCE_CACHE_UPDATE and media_type in ('Movie', 'Episode'):
         PLEX_Media.items_processed += 1
         global CACHE_CHECKPOINT_INTERVAL
@@ -7289,6 +7252,30 @@ for line in sys.stdin:
     _metadata_batch_queue = []
 
 
+def _track_delta(display_title, obj_type, is_new):
+    """Increment library_delta_counters for a cache object being added or updated.
+
+    Args:
+        display_title: Library name (or partition key like 'series.en[0:50]')
+        obj_type: 'Show', 'Season', 'Episode', or 'Movie'
+        is_new: True if object is newly added, False if updated
+    """
+    if not FORCE_CACHE_UPDATE:
+        return
+    if not hasattr(PLEX_Media, 'library_delta_counters'):
+        return
+    if display_title not in PLEX_Media.library_delta_counters:
+        return
+    type_map = {'Show': 'shows', 'Season': 'seasons', 'Episode': 'episodes', 'Movie': 'movies'}
+    type_key = type_map.get(obj_type)
+    if not type_key:
+        return
+    if is_new:
+        PLEX_Media.library_delta_counters[display_title]['added'][type_key] += 1
+    else:
+        PLEX_Media.library_delta_counters[display_title]['updated'][type_key] += 1
+
+
 def _process_movies_from_database(all_movies, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """Process movies fetched from database and populate cache
 
@@ -7394,9 +7381,10 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
                 else:
                     PLEX_Media.cache_rebuild_lock.write_progress(f"Processing '{library_name}': {movie_idx}/{total_movies} movies ({100*movie_idx//total_movies}%)")
 
-        # Populate cache directly (bypassing add_media_obj for Plex metadata)
-        # add_media_obj() will still be called if FORCE_METADATA is set for file metadata collection
+        # Populate cache directly (bypassing add_media_obj_via_PLEX_API for Plex metadata)
+        is_new_movie = movie_key not in PLEX_Media.OBJ_BY_ID
         PLEX_Media.OBJ_BY_ID[movie_key] = movie_dict
+        _track_delta(display_title, 'Movie', is_new_movie)
 
         # Update other cache indices — register ALL filepaths for multi-version items
         for _version, file_info in movie_dict.get('files', {}).items():
@@ -7740,10 +7728,12 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                             continue
                         if VRB: print(f"{VRBPFX}Updating episode '{episode_dict['S0XE0X']}': file change detected")
 
+                is_new_episode = episode_key not in PLEX_Media.OBJ_BY_ID
                 processed_count += 1
 
                 # Populate cache — Episode in OBJ_BY_ID
                 PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
+                _track_delta(display_title, 'Episode', is_new_episode)
 
                 # OBJ_BY_FILEPATH — register ALL filepaths for multi-version episodes
                 for _version, file_info in episode_dict.get('files', {}).items():
@@ -7790,7 +7780,9 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 'S_str': s_str, 'S_idx': s_idx,
                 'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
             }
+            is_new_season = season_key not in PLEX_Media.OBJ_BY_ID
             PLEX_Media.OBJ_BY_ID[season_key] = season_dict
+            _track_delta(display_title, 'Season', is_new_season)
 
             # OBJ_BY_LIBRARY — Season
             if 'Season' not in lib_dict:
@@ -7830,7 +7822,9 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'season': None, 'S_str': None, 'S_idx': None,
             'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
         }
+        is_new_show = show_key not in PLEX_Media.OBJ_BY_ID
         PLEX_Media.OBJ_BY_ID[show_key] = show_dict
+        _track_delta(display_title, 'Show', is_new_show)
 
         # OBJ_BY_LIBRARY — Show
         if 'Show' not in lib_dict:
