@@ -1534,15 +1534,35 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         self.assertIn('f"ID:{plex_id}"', content,
             "--broken must format PLEX-ID column as ID:<num>")
 
-    def test_show_item_info_requires_id_prefix(self):
-        """show_item_info must REQUIRE 'ID:<num>' prefix — bare numbers must NOT match as Plex IDs."""
+    def test_resolve_cache_items_requires_id_prefix(self):
+        """resolve_cache_items must REQUIRE 'ID:<num>' prefix — bare numbers must NOT match as Plex IDs."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def resolve_cache_items\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match, "resolve_cache_items function must exist")
+        func_body = match.group(1)
+        self.assertIn("startswith('ID:')", func_body,
+            "resolve_cache_items must require 'ID:' prefix for Plex ID lookup")
+
+    def test_show_item_info_uses_resolve_cache_items(self):
+        """show_item_info must delegate to resolve_cache_items (centralised resolution)."""
         content = self._read_script()
         import re
         match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("startswith('ID:')", func_body,
-            "show_item_info must require 'ID:' prefix for Plex ID lookup")
+        self.assertIn("resolve_cache_items(", func_body,
+            "show_item_info must use resolve_cache_items() for centralised resolution")
+
+    def test_resolve_show_for_episodes_uses_resolve_cache_items(self):
+        """resolve_show_for_episodes must delegate to resolve_cache_items (centralised resolution)."""
+        content = self._read_script()
+        import re
+        match = re.search(r'(def resolve_show_for_episodes\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        func_body = match.group(1)
+        self.assertIn("resolve_cache_items(", func_body,
+            "resolve_show_for_episodes must use resolve_cache_items() for centralised resolution")
 
 
 class TestRefactoredMethodNames(unittest.TestCase):

@@ -13584,87 +13584,40 @@ def _derive_missing_seasons(episodes_by_key):
 # ---------------------------------------------------------------------------
 
 def resolve_show_for_episodes(show_ref):
-    """Resolve a show reference (name, Plex ID, filepath) to show data.
-
-    Args:
-        show_ref: Plex ID (e.g. "4215", "ID:4215", "Show:4215"),
-                  show title (e.g. "die millionenshow"),
-                  or filepath (e.g. "/j2/watch.v/series.de/die.millionenshow_[quiz]")
+    """Resolve a show reference to (show_key, show_dict) using the centralised resolve_cache_items().
+    Accepts any identifier that resolve_cache_items() supports (ID, key, title, filepath).
+    If the resolved item is an Episode or Season, follows show_key to the parent Show.
 
     Returns: (show_key, show_dict) or err() if not found
     """
-    import os
+    found_items = resolve_cache_items(show_ref)
 
-    # Try as cache key directly
-    if show_ref in PLEX_Media.OBJ_BY_ID:
-        obj = PLEX_Media.OBJ_BY_ID[show_ref]
+    # Filter to Show type, or resolve Episode/Season → parent Show
+    shows = []
+    for key, obj in found_items:
         if obj.get('type_str') == 'Show':
-            return show_ref, obj
-
-    # Try as Show:NNN
-    if not show_ref.startswith('Show:'):
-        try_key = f"Show:{show_ref}"
-        if try_key in PLEX_Media.OBJ_BY_ID:
-            return try_key, PLEX_Media.OBJ_BY_ID[try_key]
-
-    # Try as ID:NNN or plain number
-    numeric_id = None
-    if show_ref.upper().startswith('ID:'):
-        try:
-            numeric_id = int(show_ref[3:])
-        except ValueError:
-            pass
-    else:
-        try:
-            numeric_id = int(show_ref)
-        except ValueError:
-            pass
-
-    if numeric_id is not None:
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if obj.get('type_str') == 'Show' and int(obj.get('id', 0)) == numeric_id:
-                return key, obj
-
-    # Try as filepath (with path translation)
-    if os.sep in show_ref or show_ref.startswith('/'):
-        # Normalize and try alternatives
-        candidates = [show_ref] + get_alternative_paths(show_ref)
-        for path in candidates:
-            path = path.rstrip('/')
-            if path in PLEX_Media.OBJ_BY_FILEPATH:
-                for key in PLEX_Media.OBJ_BY_FILEPATH[path]:
-                    obj = PLEX_Media.OBJ_BY_ID.get(key, {})
-                    if obj.get('type_str') == 'Show':
-                        return key, obj
-
-    # Try as title (case-insensitive substring match)
-    show_ref_lower = show_ref.lower()
-    matches = []
-    for key, obj in PLEX_Media.OBJ_BY_ID.items():
-        if obj.get('type_str') != 'Show':
-            continue
-        title = obj.get('title', '').lower()
-        orig_title = obj.get('originalTitle', '').lower()
-        if show_ref_lower == title or show_ref_lower == orig_title:
-            return key, obj  # exact match
-        if show_ref_lower in title or show_ref_lower in orig_title:
-            matches.append((key, obj))
-
-    if len(matches) == 1:
-        return matches[0]
-    elif len(matches) > 1:
-        print(f"  Ambiguous show reference '{show_ref}', matches:")
-        for key, obj in matches:
-            print(f"    {key}: {obj.get('title', '?')}")
-        err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
-
-    # Try resolving through Episode/Season -> show_key
-    if show_ref in PLEX_Media.OBJ_BY_ID:
-        obj = PLEX_Media.OBJ_BY_ID[show_ref]
-        if obj.get('type_str') in ('Episode', 'Season'):
+            shows.append((key, obj))
+        elif obj.get('type_str') in ('Episode', 'Season'):
             sk = obj.get('show_key', '')
             if sk and sk in PLEX_Media.OBJ_BY_ID:
-                return sk, PLEX_Media.OBJ_BY_ID[sk]
+                show_obj = PLEX_Media.OBJ_BY_ID[sk]
+                if (sk, show_obj) not in shows:
+                    shows.append((sk, show_obj))
+
+    if len(shows) == 1:
+        return shows[0]
+    elif len(shows) > 1:
+        # Prefer exact title match
+        ref_lower = show_ref.lower()
+        for key, obj in shows:
+            title = obj.get('title', '').lower()
+            orig_title = obj.get('originalTitle', '').lower()
+            if ref_lower == title or ref_lower == orig_title:
+                return key, obj
+        print(f"  Ambiguous show reference '{show_ref}', matches:")
+        for key, obj in shows:
+            print(f"    {key}: {obj.get('title', '?')}")
+        err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
 
     err(1087, f"Show not found: '{show_ref}'\n"
         "  Possible reasons:\n"
@@ -15674,6 +15627,74 @@ def _get_broken_reason(file_info, plex_duration=0):
                 return f"suspiciously small ({avg_kbps:.1f} kbps)"
     return None
 
+def resolve_cache_items(identifier):
+    """Resolve a media identifier (ID, key, title, filepath) to a list of (key, obj) cache matches.
+    Used by show_item_info, resolve_show_for_episodes, and any other code that needs to find cache items.
+
+    Search strategy (in order):
+      1. Plex ID via "ID:NNN" prefix
+      2. Full cache key (e.g. "Show:4925", "Episode:2579")
+      3. Filepath lookup via OBJ_BY_FILEPATH (with path translation)
+      4. Partial key match or title/originalTitle search (case-insensitive)
+
+    Returns: list of (key, obj) tuples, sorted by type (Movie→Show→Season→Episode)
+    """
+    import os
+    found_items = []
+
+    # Strategy 1: Try as Plex ID — requires "ID:NNN" prefix (as printed by --broken)
+    if identifier.upper().startswith('ID:'):
+        try:
+            numeric_id = int(identifier[3:])
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if int(obj.get('id', 0)) == numeric_id:
+                    found_items.append((key, obj))
+                    break
+        except ValueError:
+            pass
+
+    # Strategy 2: Try as full cache key (e.g. "Show:4925", "Episode:2579")
+    if not found_items and identifier in PLEX_Media.OBJ_BY_ID:
+        found_items.append((identifier, PLEX_Media.OBJ_BY_ID[identifier]))
+
+    # Strategy 3: Try as Type:NNN variant (e.g. "4925" → try "Show:4925", "Movie:4925", etc.)
+    if not found_items:
+        try:
+            numeric_id = int(identifier)
+            for prefix in ('Show', 'Movie', 'Episode', 'Season', 'Collection'):
+                try_key = f"{prefix}:{numeric_id}"
+                if try_key in PLEX_Media.OBJ_BY_ID:
+                    found_items.append((try_key, PLEX_Media.OBJ_BY_ID[try_key]))
+        except ValueError:
+            pass
+
+    # Strategy 4: Try as filepath (with path translation)
+    if not found_items and (os.sep in identifier or identifier.startswith('/')):
+        candidates = [identifier] + get_alternative_paths(identifier)
+        for path in candidates:
+            path = path.rstrip('/')
+            if path in PLEX_Media.OBJ_BY_FILEPATH:
+                for key in PLEX_Media.OBJ_BY_FILEPATH[path]:
+                    obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+                    if obj:
+                        found_items.append((key, obj))
+
+    # Strategy 5: Partial key match or title/originalTitle search
+    if not found_items:
+        search_lower = identifier.lower()
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            title = obj.get('title', '').lower()
+            orig_title = obj.get('originalTitle', '').lower()
+            if search_lower in key.lower() or search_lower in title or search_lower in orig_title:
+                found_items.append((key, obj))
+
+    # Sort: Movies first, then Shows, then Seasons, then Episodes
+    type_order = {'Movie': 0, 'Show': 1, 'Season': 2, 'Episode': 3}
+    found_items.sort(key=lambda item: type_order.get(item[1].get('type_str', ''), 99))
+
+    return found_items
+
+
 def show_item_info(identifier, table_only=False):
     """Show detailed information about a Plex item by ID, key, or search term.
     If identifier is None or empty, shows general system information instead.
@@ -15685,34 +15706,7 @@ def show_item_info(identifier, table_only=False):
         show_system_info()
         return
 
-    # Try to find the item in cache
-    found_items = []
-
-    # Search strategy 1: Try as Plex ID — requires "ID:18349" prefix (as printed by --broken)
-    if identifier.upper().startswith('ID:'):
-        try:
-            numeric_id = int(identifier[3:])
-            for key, obj in PLEX_Media.OBJ_BY_ID.items():
-                if int(obj.get('id', 0)) == numeric_id:
-                    found_items.append((key, obj))
-                    break
-        except ValueError:
-            pass  # ID: prefix present but value not numeric
-
-    # Search strategy 2: Try as full key (e.g., "Episode_ID:2579")
-    if not found_items and identifier in PLEX_Media.OBJ_BY_ID:
-        key = identifier
-        found_items.append((key, PLEX_Media.OBJ_BY_ID[key]))
-
-    # Search strategy 3: Try partial key match or title search
-    if not found_items:
-        search_lower = identifier.lower()
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if search_lower in key.lower() or search_lower in obj.get('title', '').lower():
-                found_items.append((key, obj))
-        # Sort: Movies first, then Shows, then Seasons, then Episodes
-        type_order = {'Movie': 0, 'Show': 1, 'Season': 2, 'Episode': 3}
-        found_items.sort(key=lambda item: type_order.get(item[1].get('type', ''), 99))
+    found_items = resolve_cache_items(identifier)
 
     if not found_items:
         print(f"✗ No items found matching '{identifier}'")
