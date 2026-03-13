@@ -13040,7 +13040,9 @@ def read_episodes_tsv(tsv_path):
     Returns: (metadata_dict, episodes_list) where
         metadata_dict: {'source': str, 'slug': str, 'show_id': str, 'updated': str,
                         'specials_pattern': str}
-        episodes_list: [{'season': int, 'episode': int, 'date': str, 'title': str}, ...]
+        episodes_list: [{'season': int, 'episode': int, 'date': str, 'title': str,
+                         'original_title': str, 'date_local': str, 'sender_local': str,
+                         'date_original': str, 'sender_original': str}, ...]
     Returns (None, None) if file doesn't exist.
     """
     import os
@@ -13087,6 +13089,11 @@ def read_episodes_tsv(tsv_path):
                 ep['episode'] = int(row.get('episode', 0) or 0)
                 ep['date'] = row.get('date', '')
                 ep['title'] = row.get('title', '')
+                ep['original_title'] = row.get('original_title', '')
+                ep['date_local'] = row.get('date_local', '')
+                ep['sender_local'] = row.get('sender_local', '')
+                ep['date_original'] = row.get('date_original', '')
+                ep['sender_original'] = row.get('sender_original', '')
                 episodes.append(ep)
 
     return metadata, episodes
@@ -13098,7 +13105,8 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     Args:
         tsv_path: File path
         metadata: dict with keys: source, slug, show_id, updated, specials_pattern (all optional)
-        episodes: list of dicts with keys: season, episode, date, title
+        episodes: list of dicts with keys: season, episode, date, title,
+                  original_title, date_local, sender_local, date_original, sender_original
     """
     from datetime import datetime
 
@@ -13114,7 +13122,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
             f.write(f"# specials_pattern: {metadata['specials_pattern']}\n")
         f.write(f"# updated: {metadata['updated']}\n")
         f.write(f"# DO NOT edit or remove the header comments above\n")
-        f.write("season\tepisode\tdate\ttitle\n")
+        f.write("season\tepisode\tdate\ttitle\toriginal_title\tdate_local\tsender_local\tdate_original\tsender_original\n")
 
         # Sort by season, then episode
         for ep in sorted(episodes, key=lambda e: (e.get('season', 0), e.get('episode', 0))):
@@ -13122,7 +13130,12 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
             e = ep.get('episode', 0)
             d = ep.get('date', '')
             t = ep.get('title', '')
-            f.write(f"{s}\t{e}\t{d}\t{t}\n")
+            ot = ep.get('original_title', '')
+            dl = ep.get('date_local', '')
+            sl = ep.get('sender_local', '')
+            do = ep.get('date_original', '')
+            so = ep.get('sender_original', '')
+            f.write(f"{s}\t{e}\t{d}\t{t}\t{ot}\t{dl}\t{sl}\t{do}\t{so}\n")
 
 
 def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
@@ -13455,35 +13468,93 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
 
     if show_id:
         # Strategy 1: episodenguide/staffel-N (structured data)
-        # Find latest season from existing data
-        max_season = max((ep['season'] for ep in existing_episodes), default=1)
+        # Split HTML by itemprop="episode" sections — each section contains all data
+        # for one episode, avoiding cross-episode regex mismatches.
+        # Start from season 1 (or last known - 1 for updates) and keep going until
+        # two consecutive empty pages (some shows skip season numbers).
+        max_existing = max((ep['season'] for ep in existing_episodes), default=0)
+        start_season = max(1, max_existing - 1) if existing_episodes else 1
+        consecutive_empty = 0
 
-        for s in range(max(1, max_season - 1), max_season + 3):
+        s = start_season
+        while consecutive_empty < 2:
             url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             try:
                 html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
             except Exception:
+                consecutive_empty += 1
+                s += 1
+                time.sleep(0.3)
                 continue
 
-            # Extract episode number, date, and title
-            eps = re.findall(
-                r'itemprop="episodeNumber" content="(\d+)".*?'
-                r'itemprop="name"[^>]*>([^<]*)<.*?'
-                r'data-sort="\d+-(\d{4}-\d{2}-\d{2})"',
-                html, re.DOTALL
-            )
+            # Split by episode sections — first split chunk is before any episode
+            ep_sections = re.split(r'itemprop="episode"', html)[1:]
 
-            for ep_str, title, date in eps:
-                ep_num = int(ep_str)
+            for section in ep_sections:
+                m_num = re.search(r'itemprop="episodeNumber" content="(\d+)"', section)
+                if not m_num:
+                    continue
+                ep_num = int(m_num.group(1))
                 key = (s, ep_num)
-                title = title.strip()
-                if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
-                    existing_by_key[key] = {'season': s, 'episode': ep_num, 'date': date, 'title': title}
-                    new_count += 1
-                elif not existing_by_key[key].get('title') and title:
-                    existing_by_key[key]['title'] = title
 
+                # German title (itemprop="name")
+                m_title = re.search(r'itemprop="name">([^<]*)<', section)
+                title = m_title.group(1).strip() if m_title else ''
+
+                # Original title (in parentheses after originaltitel class)
+                m_orig = re.search(r'episode-output-originaltitel[^>]*>\(([^)]+)\)', section)
+                original_title = m_orig.group(1).strip() if m_orig else ''
+
+                # Air dates: <ea-angabe data-sort="0-YYYY-MM-DD">...<ea-angabe-sender>SENDER
+                # sort prefix 0 = local (German), 1 = original
+                dates = re.findall(
+                    r'<ea-angabe data-sort="(\d+)-(\d{4}-\d{2}-\d{2})">'
+                    r'<ea-angabe-titel>[^<]*</ea-angabe-titel>\s*'
+                    r'<ea-angabe-datum>[^<]*</ea-angabe-datum>\s*'
+                    r'<ea-angabe-sender>([^<]*)</ea-angabe-sender>',
+                    section
+                )
+                date_local = ''
+                date_original = ''
+                sender_local = ''
+                sender_original = ''
+                for sort_idx, date_val, sender in dates:
+                    if sort_idx == '0':     # local (German) premiere
+                        if not date_local or date_val < date_local:
+                            date_local = date_val
+                            sender_local = sender.strip()
+                    elif sort_idx == '1':   # original premiere
+                        if not date_original or date_val < date_original:
+                            date_original = date_val
+                            sender_original = sender.strip()
+
+                # Use earliest date available (prefer local, fall back to original)
+                date = date_local or date_original
+
+                ep_data = {
+                    'season': s, 'episode': ep_num, 'date': date, 'title': title,
+                    'original_title': original_title,
+                    'date_local': date_local, 'sender_local': sender_local,
+                    'date_original': date_original, 'sender_original': sender_original,
+                }
+                if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
+                    existing_by_key[key] = ep_data
+                    new_count += 1
+                else:
+                    # Update fields that may be missing in existing data
+                    existing = existing_by_key[key]
+                    for field in ('original_title', 'date_local', 'sender_local', 'date_original', 'sender_original'):
+                        if not existing.get(field) and ep_data.get(field):
+                            existing[field] = ep_data[field]
+                    if not existing.get('title') and title:
+                        existing['title'] = title
+
+            if ep_sections:
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+            s += 1
             time.sleep(0.3)
     else:
         # Strategy 2: sendetermine pages (broadcast schedule)
