@@ -861,7 +861,10 @@ class CacheLock:
 
             # Display initial progress immediately
             last_progress = CacheLock.read_progress(self.lock_file)
-            print(f"Progress: {last_progress} ", end='', flush=True)
+            last_line_len = 0
+            line = f"Progress: {last_progress}"
+            last_line_len = len(line)
+            print(f"{line} ", end='', flush=True)
 
             # Wait for lock with ability to quit and show progress
             while True:
@@ -884,7 +887,11 @@ class CacheLock:
                     # Read and display progress from lock file - only update if changed
                     current_progress = CacheLock.read_progress(self.lock_file)
                     if current_progress != last_progress:
-                        print(f"\rProgress: {current_progress} ", end='', flush=True)
+                        line = f"Progress: {current_progress}"
+                        # Pad with spaces to clear leftover chars from longer previous line
+                        padding = max(0, last_line_len - len(line))
+                        print(f"\r{line}{' ' * padding}", end='', flush=True)
+                        last_line_len = len(line)
                         last_progress = current_progress
                     # Continue waiting
 
@@ -983,8 +990,8 @@ def load_cache():
                         # Print cache stats
                         num_items = len(CACHE.get('obj_by_id', {}))
                         cache_size_mb = file_size / (1024 * 1024)
-                        if VRB:
-                            print(f"CACHE found: {num_items} items, {cache_size_mb:.2f} MB ({CACHE_FILE})")
+                        if DBG:
+                            print(f"{DBGPFX}CACHE found: {num_items} items, {cache_size_mb:.2f} MB ({CACHE_FILE})")
                 except Exception as e:
                     print(f"CACHE file '{CACHE_FILE}' is CORRUPTED - needs to be rebuilt.")
                     print(f"Error: {e}")
@@ -1371,7 +1378,7 @@ def connect_to_plex(plex_url, plex_token):
         # can block forever if the OS doesn't report the connection as dead
         import socket
         socket.setdefaulttimeout(PLEX_TIMEOUT)
-        if VRB: print(f"{VRBPFX}Global socket timeout set to {PLEX_TIMEOUT}s to prevent connection deadlocks")
+        if DBG: print(f"{DBGPFX}Global socket timeout set to {PLEX_TIMEOUT}s to prevent connection deadlocks")
 
         # Create a session with SSL verification disabled to avoid certificate hostname mismatch errors
         import requests
@@ -1395,7 +1402,7 @@ def connect_to_plex(plex_url, plex_token):
         timeout_adapter = TimeoutHTTPAdapter(timeout=PLEX_TIMEOUT)
         session.mount('http://', timeout_adapter)
         session.mount('https://', timeout_adapter)
-        if VRB: print(f"{VRBPFX}TimeoutHTTPAdapter mounted with {PLEX_TIMEOUT}s request timeout")
+        if DBG: print(f"{DBGPFX}TimeoutHTTPAdapter mounted with {PLEX_TIMEOUT}s request timeout")
 
         # Suppress only the InsecureRequestWarning from urllib3
         import urllib3
@@ -1406,7 +1413,7 @@ def connect_to_plex(plex_url, plex_token):
             lambda: PlexServer(plex_url, plex_token, session=session, timeout=PLEX_TIMEOUT),
             context="PlexServer connection"
         )
-        if VRB: print(f"{VRBPFX}Connected to Plex server: {PLEX_SERVER.friendlyName}")
+        if DBG: print(f"{DBGPFX}Connected to Plex server: {PLEX_SERVER.friendlyName}")
     except Exception as e:
         err(1016, f"Failed to connect to PLEX Server: {plex_url=} {plex_token=} {PLEX_TIMEOUT=}: {e}")
 
@@ -7911,6 +7918,9 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
         if VRB and total_shows > 50 and show_idx % max(1, total_shows // 10) == 0:
             print(f"{_get_worker_prefix()}library '{library_name}':<31s processed {show_idx}/{total_shows} shows ({100*show_idx//total_shows}%)")
 
+    # Ensure episodes.tsv exists for all shows and normalize episode indices from TSV
+    _ensure_tsv_and_normalize_episodes(shows_data, library_name)
+
     if VRB:
         print(f"{_get_worker_prefix()}library '{display_title}':<31s completed {processed_count} episodes")
     if DBG:
@@ -7920,6 +7930,193 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
         PLEX_Media.save_checkpoint(display_title)
 
     return True
+
+def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
+    """Ensure episodes.tsv exists for all shows and normalize episode indices from TSV.
+
+    For every show in the library:
+    1. Ensure episodes.tsv exists (scrape if missing)
+    2. Compare Plex episode indices against TSV — if they differ, use the TSV values
+       (TSV is source of truth for season/episode numbering)
+    3. Also fill in missing episode titles from TSV
+    """
+    import os
+
+    total_shows = len(shows_data)
+    scraped_count = 0
+    existing_count = 0
+    failed_shows = []  # (title, reason)
+    normalized_total = 0
+    titles_total = 0
+
+    print(f"  Ensuring episodes.tsv for {total_shows} shows in '{library_name}'...")
+
+    for show_idx, (sh_id, show_data) in enumerate(shows_data.items(), 1):
+        show_key = f"Show:{sh_id}"
+        show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
+        if not show_dict:
+            continue
+
+        show_title = show_dict.get('title', '?')
+        show_dir_server = show_dict.get('file', '')
+        if not show_dir_server:
+            failed_shows.append((show_title, 'no directory'))
+            continue
+
+        show_dir = get_local_show_dir(show_dir_server)
+        tsv_path = get_episodes_tsv_path(show_dir)
+
+        # Ensure TSV exists and is up-to-date
+        # Speed optimization: skip scraping if TSV exists AND is newer than show's updatedAt
+        # (if show hasn't changed in Plex, no new episodes to detect)
+        tsv_episodes = None
+        needs_scrape = True
+        if os.path.isfile(tsv_path):
+            _meta, tsv_episodes = read_episodes_tsv(tsv_path)
+            if tsv_episodes:
+                existing_count += 1
+                # Smart skip: compare TSV file mtime with show's updatedAt
+                tsv_mtime = os.path.getmtime(tsv_path)
+                show_updated = show_dict.get('updatedAt')
+                if show_updated:
+                    # updatedAt available — TSV newer than last Plex change means nothing changed
+                    if tsv_mtime > show_updated:
+                        needs_scrape = False  # TSV is newer than last Plex update — skip regardless of age
+                else:
+                    # No updatedAt — fall back to age-based staleness (24h)
+                    if not is_episodes_tsv_stale(tsv_path):
+                        needs_scrape = False  # TSV is fresh (< 24h) — skip
+        if not tsv_episodes or needs_scrape:
+            source = _determine_episode_source(show_dict)
+            external_ids = show_dict.get('external_ids', {})
+            if VRB:
+                reason = "missing" if not tsv_episodes else "stale"
+                print(f"{VRBPFX}Scraping episodes.tsv for '{show_title}' ({reason})...")
+            try:
+                _meta, new_episodes = scrape_episodes(show_title, show_dir, source=source,
+                                                       force=True, external_ids=external_ids)
+                if new_episodes:
+                    tsv_episodes = new_episodes
+                    scraped_count += 1
+                elif not tsv_episodes:
+                    # Only count as failed if we had no existing TSV data either
+                    failed_shows.append((show_title, f'{source}: no data'))
+            except Exception as e:
+                if not tsv_episodes:
+                    failed_shows.append((show_title, str(e)[:60]))
+                if VRB:
+                    print(f"{VRBPFX}  WARNING: Failed to scrape episodes.tsv for '{show_title}': {e}")
+
+        # Print progress every 10% (or every 10 shows for small libraries)
+        step = max(1, total_shows // 10)
+        if show_idx % step == 0 or show_idx == total_shows:
+            print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped, {len(failed_shows)} failed)", end='', flush=True)
+
+        if not tsv_episodes:
+            continue
+
+        # Build TSV lookup: {season_num: [episodes sorted by episode_num]}
+        # Each entry: {'episode': int, 'title': str}
+        tsv_by_season = {}
+        for ep in tsv_episodes:
+            s = ep.get('season', 0)
+            e = ep.get('episode', 0)
+            if s > 0 and e > 0:
+                if s not in tsv_by_season:
+                    tsv_by_season[s] = {}
+                tsv_by_season[s][e] = ep.get('title', '')
+
+        if not tsv_by_season:
+            continue
+
+        # Compare and normalize each season's episodes
+        normalized_count = 0
+        title_count = 0
+        for s_key, season_data in show_data['seasons'].items():
+            if s_key <= 0:
+                continue
+            tsv_season = tsv_by_season.get(s_key, {})
+            if not tsv_season:
+                continue
+
+            s_str = f"S{s_key:02d}"
+
+            # Sort Plex episodes by their current E_idx to establish position order
+            plex_eps = sorted(season_data['episodes'], key=lambda e: e.get('E_idx', 0))
+            # Sort TSV episode numbers
+            tsv_ep_nums = sorted(tsv_season.keys())
+
+            # Match by position: plex_eps[i] ↔ tsv_ep_nums[i]
+            for i, ep_dict in enumerate(plex_eps):
+                if i >= len(tsv_ep_nums):
+                    break  # more Plex episodes than TSV — skip extras
+
+                old_idx = ep_dict.get('E_idx', 0)
+                tsv_ep_num = tsv_ep_nums[i]
+                tsv_title = tsv_season[tsv_ep_num]
+
+                if old_idx == tsv_ep_num:
+                    # Episode number matches — just check title
+                    ep_key = f"Episode:{ep_dict['id']}"
+                    cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                    if cached_ep and not cached_ep.get('title') and tsv_title:
+                        cached_ep['title'] = tsv_title
+                        title_count += 1
+                    continue
+
+                # Episode number differs — normalize to TSV value
+                old_e_str = ep_dict['E_str']
+                new_e_str = f"E{tsv_ep_num:02d}"
+                new_s0xe0x = f"S{s_key:02d}E{tsv_ep_num:02d}"
+
+                ep_key = f"Episode:{ep_dict['id']}"
+                cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                if cached_ep:
+                    cached_ep['E_idx'] = tsv_ep_num
+                    cached_ep['episode'] = tsv_ep_num
+                    cached_ep['E_str'] = new_e_str
+                    cached_ep['S0XE0X'] = new_s0xe0x
+                    if not cached_ep.get('title') and tsv_title:
+                        cached_ep['title'] = tsv_title
+                        title_count += 1
+
+                # Re-key in OBJ_BY_SHOW_EPISODES: old E_str → new E_str
+                show_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                if old_e_str in show_eps and old_e_str != new_e_str:
+                    if new_e_str not in show_eps:
+                        show_eps[new_e_str] = show_eps.pop(old_e_str)
+                    else:
+                        for ver, keys in show_eps.pop(old_e_str).items():
+                            if ver not in show_eps[new_e_str]:
+                                show_eps[new_e_str][ver] = []
+                            show_eps[new_e_str][ver].extend(keys)
+
+                normalized_count += 1
+
+        normalized_total += normalized_count
+        titles_total += title_count
+        if VRB and (normalized_count > 0 or title_count > 0):
+            parts = []
+            if normalized_count > 0:
+                parts.append(f"{normalized_count} episode indices normalized")
+            if title_count > 0:
+                parts.append(f"{title_count} titles filled from TSV")
+            print(f"{VRBPFX}'{show_title}': {', '.join(parts)}")
+
+    # Summary
+    print()  # newline after progress \r
+    parts = [f"{existing_count} cached", f"{scraped_count} scraped"]
+    if failed_shows:
+        parts.append(f"{len(failed_shows)} failed")
+    if normalized_total > 0:
+        parts.append(f"{normalized_total} indices normalized")
+    if titles_total > 0:
+        parts.append(f"{titles_total} titles filled")
+    print(f"  episodes.tsv: {', '.join(parts)}")
+    if failed_shows and VRB:
+        for title, reason in failed_shows:
+            print(f"    FAILED: {title} — {reason}")
+
 
 def _store_collections_from_database(library_section_id, library_name):
     """Fetch collections for a library section and store them in OBJ_BY_COLLECTION, OBJ_BY_ID and OBJ_BY_LIBRARY."""
@@ -8744,8 +8941,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # PERFORMANCE OPTIMIZATION: Save cache only ONCE at the end instead of after each library
         # NOTE: We always save cache (not just when cache_needs_save) to ensure library_stats
         # and itemsCount_by_item_id are persisted even when no libraries were updated
-        if VRB and cache_needs_save: print(f"{VRBPFX}Saving updated cache to disk (libraries changed)...")
-        elif VRB: print(f"{VRBPFX}Saving cache to disk (updating library_stats)...")
+        if DBG and cache_needs_save: print(f"{DBGPFX}Saving updated cache to disk (libraries changed)...")
+        elif DBG: print(f"{DBGPFX}Saving cache to disk (updating library_stats)...")
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
@@ -8778,9 +8975,18 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving updated cache...")
 
+        # Safety: refuse to save an empty cache if the existing one has data
+        existing_count = len(CACHE.get('obj_by_id', {}))
+        new_count = len(PLEX_Media.OBJ_BY_ID)
+        if new_count == 0 and existing_count > 0:
+            print(f"WARNING: Refusing to save empty cache (existing cache has {existing_count} items).")
+            print("  This likely means --update-cache was interrupted before any data was collected.")
+            print("  Your existing cache is preserved. Run --update-cache again.")
+            return
+
         # Save cache to disk
         if DBG:
-            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {len(PLEX_Media.OBJ_BY_ID)} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
+            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {new_count} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
         update_and_save_cache(build_media_cache_dict(
             library_stats=current_library_stats,
             library_object_counts=updated_library_object_counts
@@ -8811,13 +9017,13 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                        len(format_count(season_count)),
                        len(format_count(episode_count)))
 
-        if VRB:
-            print(f"{PRINTPFX}      {format_count(movie_count):>{max_width}} Plex movie objects")
-            print(f"{PRINTPFX}      {format_count(show_count):>{max_width}} Plex show/series objects")
-            print(f"{PRINTPFX}      {format_count(season_count):>{max_width}} Plex season objects")
-            print(f"{PRINTPFX}      {format_count(episode_count):>{max_width}} Plex episode objects")
-            print(f"{PRINTPFX}{'-' * 60}")
-            print(f"{PRINTPFX}TOTAL {format_count(total_count):>{max_width}} Plex media objects")
+        if DBG:
+            print(f"{DBGPFX}      {format_count(movie_count):>{max_width}} Plex movie objects")
+            print(f"{DBGPFX}      {format_count(show_count):>{max_width}} Plex show/series objects")
+            print(f"{DBGPFX}      {format_count(season_count):>{max_width}} Plex season objects")
+            print(f"{DBGPFX}      {format_count(episode_count):>{max_width}} Plex episode objects")
+            print(f"{DBGPFX}{'-' * 60}")
+            print(f"{DBGPFX}TOTAL {format_count(total_count):>{max_width}} Plex media objects")
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_MOVIE, var_name="PLEX_Media.OBJ_BY_MOVIE", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW, var_name="PLEX_Media.OBJ_BY_SHOW", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_SHOW_EPISODES, var_name="PLEX_Media.OBJ_BY_SHOW_EPISODES", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
@@ -9601,7 +9807,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Show summary if no libraries were updated
             if not FORCE_CACHE_UPDATE and not cache_needs_save:
-                if VRB: print("Cache still up-to-date")
+                if DBG: print(f"{DBGPFX}Cache still up-to-date")
 
         PLEX_Library._finalize_and_save_cache(cache_needs_save, current_library_stats,
                                                 old_read_only=locals().get('old_read_only'))
@@ -10676,7 +10882,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
     argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Compares scraped episode data against Plex cache. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
-    argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Episode only. Use --help rename for details.")
+    argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
 
     @staticmethod
@@ -10739,10 +10945,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"ERROR: No items found matching '{media_identifier}'")
                 return
             if len(found_items) > 1:
-                # Multiple matches — filter to Show/Episode only
-                show_items = [(k, o) for k, o in found_items if o.get('type') in ('Show', 'Episode')]
+                # Multiple matches — filter to Show/Season/Episode only
+                show_items = [(k, o) for k, o in found_items if o.get('type') in ('Show', 'Season', 'Episode')]
                 if not show_items:
-                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show or Episode type")
+                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type")
                     return
                 if len(show_items) > 1:
                     # Multiple shows/episodes — check if there's exactly one Show
@@ -10760,8 +10966,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             else:
                 key, obj = found_items[0]
 
-        if obj['type'] in ('Movie', 'Collection', 'Season'):
-            print(f"ERROR: --rename is only available for Show and Episode objects, not {obj['type']}")
+        # Check that the object belongs to a Show-type library
+        obj_library = obj.get('library', '')
+        lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj_library, '')
+        if lib_type != 'Show':
+            print(f"ERROR: --rename is only available for objects in Show libraries, not {lib_type} library '{obj_library}'")
             return
 
         pattern = EPISODE_NAME_PATTERN
@@ -10770,8 +10979,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             show_key = key
             episode_keys = PLEX_Media._collect_episode_keys_for_show(show_key)
             print(f"\n{obj['title']} ({len(episode_keys)} episodes)")
-        else:  # Episode
+        elif obj['type'] == 'Season':
+            # Find the show this season belongs to, then collect episodes for this season only
+            show_key = obj.get('show_key', '')
+            S_str = obj.get('S_str', '')
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            show_title = show_obj.get('title', '?')
+            episode_keys = []
+            season_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(S_str, {})
+            for e_str, versions in season_episodes.items():
+                for version_str, ep_keys in versions.items():
+                    episode_keys.extend(ep_keys)
+            print(f"\n{show_title} {S_str} ({len(episode_keys)} episodes)")
+        elif obj['type'] == 'Episode':
             episode_keys = [key]
+        else:
+            print(f"ERROR: --rename cannot operate on {obj['type']} objects (no episode files)")
+            return
 
         renamed_count = 0
         skipped_count = 0
@@ -13281,10 +13505,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex <LIBRARY> --rename [--dry-run]")
             print("       my-plex <SHOW> --rename [--dry-run]")
+            print("       my-plex <SEASON> --rename [--dry-run]")
             print("       my-plex <EPISODE> --rename [--dry-run]")
             print()
             print("  Rename episode files according to EPISODE_NAME_PATTERN (config).")
-            print("  Only works for Show/Episode objects — Movie libraries print an error.")
+            print("  Only works for Show, Season, and Episode objects — Movie libraries print an error.")
             print()
             print("  --dry-run / -n   Show what would be renamed without changing files")
             print()
@@ -13751,7 +13976,7 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
         case 'tmdb':
             result = _scrape_tmdb(show_title, metadata, existing_episodes, external_ids)
         case _:
-            print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
+            if VRB: print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
             return metadata, existing_episodes
 
     if result is None:
@@ -13795,12 +14020,17 @@ def _tvdb_login(api_key):
             if token:
                 _tvdb_login._cached_token = token
                 return token
-            print(f"  WARNING: TVDB login succeeded but no token in response")
+            err(1100, "TVDB login succeeded but no token in response.\n"
+                "  Possible reasons:\n"
+                "  - TVDB API changed their response format\n"
+                "  - Temporary server issue — try again later")
     except Exception as e:
-        print(f"  WARNING: TVDB login failed: {e}")
-        print(f"  Your TVDB_API_KEY may be invalid or expired.")
-        print(f"  Check/renew at: https://thetvdb.com/dashboard → API Keys")
-        print(f"  Then update TVDB_API_KEY in ~/.my-plex.conf")
+        err(1101, f"TVDB login failed: {e}\n"
+            "  Possible reasons:\n"
+            "  - TVDB_API_KEY is invalid or expired\n"
+            "  - Network issue connecting to thetvdb.com\n"
+            "  Fix: Check/renew at https://thetvdb.com/dashboard → API Keys\n"
+            "  Then update TVDB_API_KEY in ~/.my-plex.conf")
 
     return None
 
@@ -13853,8 +14083,9 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
         tvdb_id = metadata['tvdb_id']
 
     if not tvdb_id:
-        print(f"  WARNING: No TVDB ID found for '{show_title}' — cannot scrape TVDB")
-        print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+        if VRB:
+            print(f"  WARNING: No TVDB ID found for '{show_title}' — cannot scrape TVDB")
+            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
         return None
 
     # Authenticate
@@ -13873,7 +14104,7 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
         except Exception as e:
-            print(f"  WARNING: TVDB API request failed (page {page}): {e}")
+            if VRB: print(f"  WARNING: TVDB API request failed (page {page}): {e}")
             if page == 0:
                 return None  # First page failed — fatal
             break  # Subsequent pages — use what we have
@@ -13907,7 +14138,7 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
         page += 1
 
     if not all_episodes:
-        print(f"  WARNING: TVDB returned 0 episodes for '{show_title}' (tvdb:{tvdb_id})")
+        if VRB: print(f"  WARNING: TVDB returned 0 episodes for '{show_title}' (tvdb:{tvdb_id})")
         return None
 
     new_metadata = {'tvdb_id': str(tvdb_id)}
@@ -13971,8 +14202,9 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
         tmdb_id = metadata['tmdb_id']
 
     if not tmdb_id:
-        print(f"  WARNING: No TMDB ID found for '{show_title}' — cannot scrape TMDB")
-        print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+        if VRB:
+            print(f"  WARNING: No TMDB ID found for '{show_title}' — cannot scrape TMDB")
+            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
         return None
 
     headers = {
@@ -13989,13 +14221,16 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
             series_data = json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            print(f"  ERROR: TMDB authentication failed — check TMDB_API_KEY in ~/.my-plex.conf")
-            print(f"  NOTE: TMDB_API_KEY should be the 'API Read Access Token' (long string), not the short 'API Key'")
-        else:
+            err(1102, f"TMDB authentication failed for '{show_title}' (tmdb:{tmdb_id}).\n"
+                "  Possible reasons:\n"
+                "  - TMDB_API_KEY is invalid or expired\n"
+                "  - TMDB_API_KEY should be the 'API Read Access Token' (long string), not the short 'API Key'\n"
+                "  Fix: Update TMDB_API_KEY in ~/.my-plex.conf")
+        elif VRB:
             print(f"  WARNING: TMDB series request failed for '{show_title}' (tmdb:{tmdb_id}): {e}")
         return None
     except Exception as e:
-        print(f"  WARNING: TMDB series request failed for '{show_title}' (tmdb:{tmdb_id}): {e}")
+        if VRB: print(f"  WARNING: TMDB series request failed for '{show_title}' (tmdb:{tmdb_id}): {e}")
         return None
 
     num_seasons = series_data.get('number_of_seasons', 0)
@@ -14005,7 +14240,7 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
         num_seasons = max((s.get('season_number', 0) for s in seasons_list), default=0)
 
     if not num_seasons:
-        print(f"  WARNING: TMDB reports 0 seasons for '{show_title}' (tmdb:{tmdb_id})")
+        if VRB: print(f"  WARNING: TMDB reports 0 seasons for '{show_title}' (tmdb:{tmdb_id})")
         return None
 
     # Step 2: Fetch episodes for each season
@@ -14018,7 +14253,7 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 season_data = json.loads(resp.read().decode('utf-8'))
         except Exception as e:
-            print(f"  WARNING: TMDB season {season_num} request failed: {e}")
+            if VRB: print(f"  WARNING: TMDB season {season_num} request failed: {e}")
             continue
 
         for ep in season_data.get('episodes', []):
@@ -14038,7 +14273,7 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
             })
 
     if not all_episodes:
-        print(f"  WARNING: TMDB returned 0 episodes for '{show_title}' (tmdb:{tmdb_id})")
+        if VRB: print(f"  WARNING: TMDB returned 0 episodes for '{show_title}' (tmdb:{tmdb_id})")
         return None
 
     new_metadata = {'tmdb_id': str(tmdb_id)}
@@ -14130,10 +14365,10 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
 
     # Discover slug if not known
     if not slug:
-        print(f"  Discovering fernsehserien.de slug for '{show_title}'...")
+        if VRB: print(f"  Discovering fernsehserien.de slug for '{show_title}'...")
         slug, show_id = _discover_fernsehserien_slug(show_title)
         if not slug:
-            print(f"  WARNING: Could not find '{show_title}' on fernsehserien.de")
+            if VRB: print(f"  WARNING: Could not find '{show_title}' on fernsehserien.de")
             return None
 
     new_metadata = {'slug': slug}
@@ -14306,10 +14541,11 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
 
     episodes = list(existing_by_key.values())
 
-    if new_count:
-        print(f"  Scraped {new_count} new episodes for '{show_title}' (total: {len(episodes)})")
-    else:
-        print(f"  No new episodes for '{show_title}' ({len(episodes)} total)")
+    if VRB:
+        if new_count:
+            print(f"  Scraped {new_count} new episodes for '{show_title}' (total: {len(episodes)})")
+        else:
+            print(f"  No new episodes for '{show_title}' ({len(episodes)} total)")
 
     # Detect latest season
     max_s = max((ep['season'] for ep in episodes if ep['season'] > 0), default=0)
@@ -16699,6 +16935,29 @@ def show_item_info(identifier, table_only=False):
                     for version_str, ep_keys in versions.items():
                         ep_count += len(ep_keys)
                 print(f"  {S_str:<8} {season_key:<16} {ep_count:>8}")
+        # Episode table (verbose mode)
+        if VRB and show_episodes:
+            # Collect all episodes with their info
+            all_eps = []
+            for S_str in sorted(show_episodes.keys()):
+                for E_str in sorted(show_episodes[S_str].keys()):
+                    for version_str, ep_keys in show_episodes[S_str][E_str].items():
+                        for ep_key in ep_keys:
+                            ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                            s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
+                            title = ep.get('title', '')
+                            ep_file = ep.get('file', '')
+                            all_eps.append((s0xe0x, ep_key, title, ep_file))
+            if all_eps:
+                col_ep = max(len(e[0]) for e in all_eps)
+                col_key = max(len(e[1]) for e in all_eps)
+                col_title = max((len(e[2]) for e in all_eps), default=5)
+                col_ep = max(col_ep, 7)
+                col_key = max(col_key, 3)
+                col_title = max(col_title, 5)
+                print(f"\n  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
+                for s0xe0x, ep_key, title, ep_file in all_eps:
+                    print(f"  {s0xe0x:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
 
@@ -16752,7 +17011,9 @@ def show_item_info(identifier, table_only=False):
                 print(f"  [{i}] {ver}{size_str}{broken_str}")
                 print(f"      {info.get('filepath', 'N/A')}")
     elif obj.get('file'):
-        print(f"File:\t{obj['file']}")
+        # For Shows with -V, episode table already shows files — skip redundant directory line
+        if not (obj_type == 'Show' and VRB):
+            print(f"File:\t{obj['file']}")
         fs = obj.get('filesize')
         if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
 
@@ -17589,9 +17850,10 @@ def main():
 
     # --rename requires a library or media object target
     if safe_getattr(args, 'rename', None) is not None and not any(a for a in remaining_args if not a.startswith('-')):
-        print("ERROR: --rename requires a library or show/episode target.")
+        print("ERROR: --rename requires a library or show/season/episode target.")
         print("  Usage: my-plex <LIBRARY> --rename          (rename all episodes in library)")
         print("         my-plex <SHOW> --rename              (rename all episodes of a show)")
+        print("         my-plex <SEASON> --rename            (rename all episodes of a season)")
         print("         my-plex <EPISODE> --rename           (rename a single episode)")
         print("  Use --help rename for details.")
         sys.exit(1)

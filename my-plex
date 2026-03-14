@@ -22,15 +22,17 @@ my_echo() { [ -n "$LOG" ] && echo "$1" >> "$LOG" || echo "$1"; }
 
 ENVDIR=~/".python.venv/my-plex"
 
-# Detect verbose mode from args
+# Detect verbose and debug mode from args
 VRB=0
+DBG=0
 for _arg in "$@"; do
-  case "$_arg" in -V|--verbose|-VV|--very-verbose) VRB=1; break;; esac
+  case "$_arg" in -V|--verbose|-VV|--very-verbose) VRB=1;; esac
+  case "$_arg" in -D|--debug|-DD|--deep-debug) DBG=1;; esac
 done
 
 [ -n "$LOG" ] && echo "Output of $0 goes to '$LOG'.${NL}Output of my-plex.py goes to stdout AND to '$LOG'."
 
-[ $VRB -eq 1 ] && my_echo "ENVDIR='$ENVDIR'"
+[ $DBG -eq 1 ] && my_echo "ENVDIR='$ENVDIR'"
 
 [ -d "$ENVDIR" -a -x "$ENVDIR"/bin/python3 -a -n "$( ls -d "$ENVDIR"/lib/*/site-packages/plexapi 2>/dev/null )" ] || {
 
@@ -196,14 +198,14 @@ fi
 if [ -n "$1" -a -s "$1" ]; then
    #echo "/usr/bin/env -v \"$ENVDIR\"/bin/python3 ""$@""|tee -a \"$LOG\"" >>"$LOG"
    #/usr/bin/env -v "$ENVDIR"/bin/python3 "$@"|tee -a "$LOG"
-   [ $VRB -eq 1 ] && my_echo "\"$ENVDIR\"/bin/python3 ""$@""|tee -a \"$LOG\""
+   [ $DBG -eq 1 ] && my_echo "\"$ENVDIR\"/bin/python3 ""$@""|tee -a \"$LOG\""
    if [ -n "$LOG" ]; then "$ENVDIR"/bin/python3 "$@"|tee -a "$LOG"; RC=$?;
                      else "$ENVDIR"/bin/python3 "$@"; RC=$?; fi
 else
    WHAT="/LINKS/src/,py/prj/my-plex/my-plex.py"
    #echo "/usr/bin/env -v \"$ENVDIR\"/bin/python3 \"$WHAT\" ""$@""|tee -a \"$LOG\"" >>"$LOG"
    #/usr/bin/env -v "$ENVDIR"/bin/python3 "$WHAT" "$@"|tee -a "$LOG"
-   [ $VRB -eq 1 ] && my_echo "\"$ENVDIR\"/bin/python3 \"$WHAT\" ""$@""|tee -a \"$LOG\""
+   [ $DBG -eq 1 ] && my_echo "\"$ENVDIR\"/bin/python3 \"$WHAT\" ""$@""|tee -a \"$LOG\""
    if [ -n "$LOG" ]; then "$ENVDIR"/bin/python3 "$WHAT" "$@"|tee -a "$LOG"; RC=$?;
                      else "$ENVDIR"/bin/python3 "$WHAT" "$@"; RC=$?; fi;
 fi
