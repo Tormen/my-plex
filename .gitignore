@@ -36,3 +36,8 @@ Thumbs.db
 
 # Temporary files
 /tmp/
+
+# Project-internal (not for publishing)
+.archive/
+test-playground/
+.claude/
