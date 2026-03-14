@@ -105,6 +105,16 @@ CONFIG_DEFAULTS = {
     'PLEX_DB_PATH': '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db',
     'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
 
+    # Episode renaming pattern for --rename
+    # Available elements: {S0XE0X} {TITLE} {ORIGINALTITLE} {SERIES} {LANG} {YEAR}
+    #   {WATCHED} (vu/nv) {WATCHEDDATE} (YYYY-MM-DD or '') {VIEWCOUNT}
+    #   {RESOLUTION} {VIDEO_CODEC} {AUDIO_CODEC} {DURATION}
+    # File extension is preserved automatically and NOT part of the pattern.
+    # Example: '{S0XE0X} - {TITLE}'              → 'S05E12 - Made in China.avi'
+    # Example: '{SERIES} {S0XE0X} {TITLE}'       → 'Boston Legal S05E12 Made in China.avi'
+    # Example: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]' → 'S05E12 Made in China [vu@2026-02-14].avi'
+    'EPISODE_NAME_PATTERN': '{SERIES} {S0XE0X} {TITLE}',
+
     # Episode management (--missing, --sort-new)
     # Custom filename date extractors: path to a Python module with extract_date(filename) functions
     # The module should define EXTRACTORS = {'format_name': extract_function, ...}
@@ -461,6 +471,7 @@ CUSTOM_DATE_EXTRACTORS = CONFIG_DEFAULTS['CUSTOM_DATE_EXTRACTORS']
 TVDB_API_KEY = CONFIG_DEFAULTS['TVDB_API_KEY']
 TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
+EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -8297,6 +8308,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--scan', action='store_true',   help="Trigger Plex filesystem scan for this library, wait for completion, then update cache. Use --help scan for details.")
     argparser.add_argument('--missing', action='store_true', help="Show missing episodes for all series in this library. Compares scraped episode data against Plex cache for each show. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
+    argparser.add_argument('--rename', action='store_true', help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show libraries only. Use --help rename for details.")
+    argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -9652,6 +9665,25 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 for show_key in show_keys:
                     cmd_missing(show_key, source_override=safe_getattr(obj_args, 'source', None))
 
+        # Handle --rename: rename episode files for all shows in this library
+        if safe_getattr(obj_args, 'rename', False):
+            lib_name = obj  # obj is the library name string
+            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
+            if lib_type != 'Show':
+                print(f"ERROR: --rename is only available for Show libraries, not {lib_type} (library '{lib_name}')")
+            else:
+                lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
+                show_keys = lib_data.get('Show', [])
+                if not show_keys:
+                    print(f"\nNo shows found in library '{lib_name}'.")
+                else:
+                    dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+                    print(f"\nRenaming episodes in {len(show_keys)} show(s) in library '{lib_name}'...")
+                    for show_key in show_keys:
+                        show = PLEX_Media.OBJ_BY_ID.get(show_key)
+                        if show:
+                            PLEX_Media.rename_episodes(show, dry_run=dry_run)
+
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -10644,6 +10676,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
     argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Compares scraped episode data against Plex cache. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
+    argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Episode only. Use --help rename for details.")
+    argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -10657,6 +10691,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return False
             except (ValueError, TypeError):
                 pass
+        # Fast path: check if obj is a full cache key (e.g. "Show:4925", "Episode:2579")
+        if obj in PLEX_Media.OBJ_BY_ID:
+            return True
         return (len(resolve_plex_media_obj(obj)) > 0)
 
     @staticmethod
@@ -10680,6 +10717,212 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if safe_getattr(obj_args, 'missing', False):
             # Resolve media object to a show — use cache, not API
             cmd_missing(obj, source_override=safe_getattr(obj_args, 'source', None))
+        if safe_getattr(obj_args, 'rename', False):
+            dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            PLEX_Media.rename_episodes(obj, dry_run=dry_run)
+
+    ############################################################
+    ###### RENAME:
+
+    @staticmethod
+    def rename_episodes(media_identifier, dry_run=False):
+        """Rename episode files according to EPISODE_NAME_PATTERN config.
+        media_identifier can be a string (title, ID:xxx, cache key) or a dict.
+        Only works for Show and Episode objects."""
+        # Resolve identifier to cache object(s) — same as --info
+        if isinstance(media_identifier, dict):
+            obj = media_identifier
+            key = f"{obj['type']}:{obj['id']}"
+        else:
+            found_items = resolve_cache_items(media_identifier)
+            if not found_items:
+                print(f"ERROR: No items found matching '{media_identifier}'")
+                return
+            if len(found_items) > 1:
+                # Multiple matches — filter to Show/Episode only
+                show_items = [(k, o) for k, o in found_items if o.get('type') in ('Show', 'Episode')]
+                if not show_items:
+                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show or Episode type")
+                    return
+                if len(show_items) > 1:
+                    # Multiple shows/episodes — check if there's exactly one Show
+                    shows = [(k, o) for k, o in show_items if o.get('type') == 'Show']
+                    if len(shows) == 1:
+                        key, obj = shows[0]
+                    else:
+                        print(f"Multiple items found matching '{media_identifier}':")
+                        for k, o in show_items:
+                            print(f"  {k}  {o.get('title', '')}")
+                        print("Please specify a more precise identifier.")
+                        return
+                else:
+                    key, obj = show_items[0]
+            else:
+                key, obj = found_items[0]
+
+        if obj['type'] in ('Movie', 'Collection', 'Season'):
+            print(f"ERROR: --rename is only available for Show and Episode objects, not {obj['type']}")
+            return
+
+        pattern = EPISODE_NAME_PATTERN
+
+        if obj['type'] == 'Show':
+            show_key = key
+            episode_keys = PLEX_Media._collect_episode_keys_for_show(show_key)
+            print(f"\n{obj['title']} ({len(episode_keys)} episodes)")
+        else:  # Episode
+            episode_keys = [key]
+
+        renamed_count = 0
+        skipped_count = 0
+        error_count = 0
+        for ep_key in sorted(episode_keys, key=lambda k: (PLEX_Media.OBJ_BY_ID.get(k, {}).get('S_idx', 0), PLEX_Media.OBJ_BY_ID.get(k, {}).get('E_idx', 0))):
+            ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+            if not ep:
+                continue
+            result = PLEX_Media._rename_single_episode(ep, ep_key, pattern, dry_run)
+            if result == 'renamed':
+                renamed_count += 1
+            elif result == 'skipped':
+                skipped_count += 1
+            elif result == 'error':
+                error_count += 1
+
+        if not dry_run and renamed_count > 0:
+            save_cache(CACHE, CACHE_FILE, LOCK_FILE)
+
+        pfx = "[DRY-RUN] " if dry_run else ""
+        print(f"\n{pfx}{renamed_count} renamed, {skipped_count} already correct" + (f", {error_count} errors" if error_count else ""))
+
+    @staticmethod
+    def _collect_episode_keys_for_show(show_key):
+        """Collect all episode cache keys for a show from OBJ_BY_SHOW_EPISODES."""
+        keys = []
+        show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+        for s_str, episodes_by_e in show_episodes.items():
+            for e_str, versions in episodes_by_e.items():
+                for version_str, ep_keys in versions.items():
+                    keys.extend(ep_keys)
+        return keys
+
+    @staticmethod
+    def _rename_single_episode(ep, ep_key, pattern, dry_run):
+        """Rename a single episode file according to pattern.
+        Returns 'renamed', 'skipped', or 'error'."""
+        from datetime import datetime
+
+        # Build variable dict for pattern substitution
+        var = {}
+        var['S0XE0X'] = ep.get('S0XE0X', '')
+        var['TITLE'] = ep.get('title', '') or ''
+        var['ORIGINALTITLE'] = ep.get('originalTitle', '') or ''
+        var['SERIES'] = ep.get('series', '') or ''
+        var['YEAR'] = str(ep.get('year', '')) if ep.get('year') else ''
+
+        # Library language from cache
+        lib_name = ep.get('library', '')
+        lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
+        if lang == 'xn':
+            lang = 'none'
+        var['LANG'] = lang
+
+        # Watched status
+        view_count = ep.get('viewCount', 0) or 0
+        var['WATCHED'] = 'vu' if view_count > 0 else 'nv'
+        var['VIEWCOUNT'] = str(view_count)
+
+        last_viewed = ep.get('lastViewedAt')
+        if last_viewed:
+            try:
+                var['WATCHEDDATE'] = datetime.fromtimestamp(last_viewed).strftime('%Y-%m-%d')
+            except (OSError, ValueError):
+                var['WATCHEDDATE'] = ''
+        else:
+            var['WATCHEDDATE'] = ''
+
+        # Technical info
+        var['RESOLUTION'] = ep.get('resolution', '') or ''
+        var['VIDEO_CODEC'] = ep.get('video_codec', '') or ''
+        var['AUDIO_CODEC'] = ep.get('audio_codec', '') or ''
+        duration = ep.get('duration')
+        var['DURATION'] = format_duration(duration, 'm') if duration else ''
+
+        # Process each file version
+        files = ep.get('files', {})
+        if not files:
+            # Single file
+            filepath = ep.get('file', '')
+            if not filepath:
+                return 'skipped'
+            files = {'_single_': {'filepath': filepath}}
+
+        result = 'skipped'
+        for version_str, file_info in files.items():
+            filepath = file_info.get('filepath', '') if isinstance(file_info, dict) else file_info
+            if not filepath:
+                continue
+
+            # Get extension from current file
+            _, ext = os.path.splitext(filepath)
+            ext = ext.lstrip('.')
+
+            # Format the pattern
+            try:
+                new_basename = pattern.format(**var)
+            except KeyError as e:
+                print(f"  ERROR: Unknown pattern variable {e} in EPISODE_NAME_PATTERN")
+                return 'error'
+
+            # Strip trailing whitespace (e.g. if {TITLE} is empty: "Series S01E02 " → "Series S01E02")
+            new_basename = new_basename.strip()
+
+            # Sanitize filename: replace unsafe characters
+            for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+                new_basename = new_basename.replace(ch, '_')
+
+            # Add extension
+            new_filename = f"{new_basename}.{ext}" if ext else new_basename
+
+            # Compare with current filename
+            current_filename = os.path.basename(filepath)
+            if current_filename == new_filename:
+                continue  # Already correct
+
+            current_dir = os.path.dirname(filepath)
+            new_filepath = os.path.join(current_dir, new_filename)
+
+            pfx = "[DRY-RUN] " if dry_run else ""
+            print(f"  {pfx}{new_filename}  \u2190  {current_filename}")
+
+            if not dry_run:
+                success, actual_new_path = rename_file(filepath, new_filename, remote_host=PLEX_DB_REMOTE_HOST)
+                if success:
+                    # Update cache
+                    old_filepath = filepath
+                    new_actual = actual_new_path if actual_new_path else new_filepath
+
+                    # Update OBJ_BY_FILEPATH
+                    if old_filepath in PLEX_Media.OBJ_BY_FILEPATH:
+                        del PLEX_Media.OBJ_BY_FILEPATH[old_filepath]
+                    PLEX_Media.OBJ_BY_FILEPATH[new_actual] = ep_key
+
+                    # Update files dict
+                    if version_str != '_single_':
+                        if isinstance(ep['files'][version_str], dict):
+                            ep['files'][version_str]['filepath'] = new_actual
+                    ep['file'] = new_actual
+
+                    # Update OBJ_BY_MOVIE / OBJ_BY_SHOW_EPISODES filepath references
+                    # (OBJ_BY_MOVIE stores {version: filepath} for movies, not episodes)
+
+                    result = 'renamed'
+                else:
+                    print(f"    ERROR: rename failed for {current_filename}")
+                    result = 'error'
+            else:
+                result = 'renamed'
+
+        return result
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -11929,8 +12172,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 year_str = f"\t({obj['year']})" if obj['year']>0 else ""
                 season_plural = "s" if obj['S_count']>1 else ""
                 print(f"> SERIES\t{obj['title']}{year_str}\t: {obj['S_count']} season{season_plural}")
+                # Season table
+                print(f"\n  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}")
+                for S_str in obj['members']:
+                    season_obj_id = PLEX_Media.OBJ_BY_SHOW[ key ][ S_str ]
+                    # Count episodes in this season
+                    ep_count = 0
+                    season_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(key, {}).get(S_str, {})
+                    for e_str, versions in season_episodes.items():
+                        for version_str, ep_keys in versions.items():
+                            ep_count += len(ep_keys)
+                    print(f"  {S_str:<8} {season_obj_id:<16} {ep_count:>8}")
                 if VRB:
-                    print( f"{obj['file']}" )
+                    print(f"\n{obj['file']}")
                     for S_str in obj['members']:
                         season_obj_id = PLEX_Media.OBJ_BY_SHOW[ key ][ S_str ]
                         season = PLEX_Media.OBJ_BY_ID[ season_obj_id ]
@@ -12498,7 +12752,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'sort_new', False)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -13015,6 +13269,62 @@ def main_print_help(args, remaining_args, main_parser):
             print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours.")
             print("  If the source changes (e.g. due to config update), the TSV is re-scraped")
             print("  automatically.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'rename':
+            print()
+            print("=" * 76)
+            print("RENAME EPISODES (--rename) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <LIBRARY> --rename [--dry-run]")
+            print("       my-plex <SHOW> --rename [--dry-run]")
+            print("       my-plex <EPISODE> --rename [--dry-run]")
+            print()
+            print("  Rename episode files according to EPISODE_NAME_PATTERN (config).")
+            print("  Only works for Show/Episode objects — Movie libraries print an error.")
+            print()
+            print("  --dry-run / -n   Show what would be renamed without changing files")
+            print()
+            print(f"  Current pattern: '{EPISODE_NAME_PATTERN}'")
+            print()
+            print("AVAILABLE PATTERN ELEMENTS:")
+            print("  {S0XE0X}        Season+episode   S05E12")
+            print("  {TITLE}         Episode title     Made in China")
+            print("  {ORIGINALTITLE} Original title    (if different)")
+            print("  {SERIES}        Show title        Boston Legal")
+            print("  {YEAR}          Year              2008")
+            print("  {LANG}          Library language   en")
+            print("  {WATCHED}       Watch status       vu (watched) / nv (not viewed)")
+            print("  {WATCHEDDATE}   Last viewed date   2026-02-14")
+            print("  {VIEWCOUNT}     Times watched      1")
+            print("  {RESOLUTION}    Video resolution   1080p")
+            print("  {VIDEO_CODEC}   Video codec        h264")
+            print("  {AUDIO_CODEC}   Audio codec        aac")
+            print("  {DURATION}      Duration           45m")
+            print()
+            print("  The file extension is preserved automatically (not part of the pattern).")
+            print("  If {TITLE} is empty, trailing whitespace is stripped automatically.")
+            print()
+            print("CONFIGURATION:")
+            print("  Set in ~/.my-plex.conf:")
+            print("    EPISODE_NAME_PATTERN = '{SERIES} {S0XE0X} {TITLE}'")
+            print()
+            print("EXAMPLES:")
+            print("  Pattern: '{S0XE0X} - {TITLE}'")
+            print("    → S05E12 - Made in China.avi")
+            print()
+            print("  Pattern: '{SERIES} {S0XE0X} {TITLE}'")
+            print("    → Boston Legal S05E12 Made in China.avi")
+            print()
+            print("  Pattern: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]'")
+            print("    → S05E12 Made in China [vu@2026-02-14].avi")
+            print()
+            print("  my-plex 'boston legal' --rename --dry-run    # Preview renames")
+            print("  my-plex series.en --rename                   # Rename all in library")
+            print("  my-plex ID:12345 --rename                    # Rename single episode")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -16373,6 +16683,22 @@ def show_item_info(identifier, table_only=False):
     elif obj_type == 'Season':
         print(f"Series:\t{obj.get('series', 'N/A')}")
         print(f"Season:\t{obj.get('S_str', 'N/A')}")
+    elif obj_type == 'Show':
+        year = obj.get('year', 0)
+        if year and year > 0:
+            print(f"Year:\t{year}")
+        # Season table
+        show_seasons = PLEX_Media.OBJ_BY_SHOW.get(key, {})
+        show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(key, {})
+        if show_seasons:
+            print(f"\n  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}")
+            for S_str in sorted(show_seasons.keys()):
+                season_key = show_seasons[S_str]
+                ep_count = 0
+                for e_str, versions in show_episodes.get(S_str, {}).items():
+                    for version_str, ep_keys in versions.items():
+                        ep_count += len(ep_keys)
+                print(f"  {S_str:<8} {season_key:<16} {ep_count:>8}")
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
 
@@ -16781,7 +17107,7 @@ def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
-    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
+    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, EPISODE_NAME_PATTERN
 
     # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
     # This allows us to use DBG/DEEPDBG during config file loading
@@ -16931,7 +17257,8 @@ def main():
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new
+    main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
+    main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
     main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
@@ -16982,7 +17309,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
-    GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
+    GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
+    GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
     GLOBAL_CMD_PARSER.add_argument('--test', action='store_true', help="Run regression tests to verify script functionality.")
 
@@ -17230,9 +17558,25 @@ def main():
     if safe_getattr(args, 'sort_new', False):
         remaining_args.insert(0, '--sort-new')
 
-    # Re-inject --dry-run into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    # Re-inject --rename into remaining_args
+    # Two cases (mimics --info/--missing pattern):
+    #   1. --rename <TARGET> (no CMD_OR_PLEXOBJECT) → TARGET becomes the object, --rename is obj_arg
+    #   2. <PLEXOBJ> --rename (bare --rename with CMD_OR_PLEXOBJECT) → append as obj_arg
+    if safe_getattr(args, 'rename', None) is not None:
+        if args.rename is not True and args.rename:
+            # --rename <TARGET> — target is the PLEX object, --rename is a flag
+            remaining_args.insert(0, args.rename)
+            remaining_args.append('--rename')
+        elif args.rename is True:
+            # bare --rename — append after PLEXOBJECT
+            remaining_args.append('--rename')
+
+    # Re-inject --dry-run into remaining_args
     if safe_getattr(args, 'dry_run', False) and '--dry-run' not in remaining_args:
-        remaining_args.insert(0, '--dry-run')
+        if safe_getattr(args, 'rename', None) is not None:
+            remaining_args.append('--dry-run')  # append after PLEXOBJECT (like --rename)
+        else:
+            remaining_args.insert(0, '--dry-run')  # global command (--sort-new)
 
     init_plex(args)
     #init_plex(args, all=False, server=True, library=True)
@@ -17242,6 +17586,15 @@ def main():
     if args.verify_cache:
         verify_cache()
         sys.exit(0)
+
+    # --rename requires a library or media object target
+    if safe_getattr(args, 'rename', None) is not None and not any(a for a in remaining_args if not a.startswith('-')):
+        print("ERROR: --rename requires a library or show/episode target.")
+        print("  Usage: my-plex <LIBRARY> --rename          (rename all episodes in library)")
+        print("         my-plex <SHOW> --rename              (rename all episodes of a show)")
+        print("         my-plex <EPISODE> --rename           (rename a single episode)")
+        print("  Use --help rename for details.")
+        sys.exit(1)
 
     parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args)
 
