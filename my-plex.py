@@ -13478,8 +13478,9 @@ def _tvdb_login(api_key):
             print(f"  WARNING: TVDB login succeeded but no token in response")
     except Exception as e:
         print(f"  WARNING: TVDB login failed: {e}")
-        print(f"  Check your TVDB_API_KEY in config file (~/.my-plex.conf)")
-        print(f"  Register for free at https://thetvdb.com/dashboard (Project → API Keys)")
+        print(f"  Your TVDB_API_KEY may be invalid or expired.")
+        print(f"  Check/renew at: https://thetvdb.com/dashboard → API Keys")
+        print(f"  Then update TVDB_API_KEY in ~/.my-plex.conf")
 
     return None
 
@@ -13503,8 +13504,25 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
     global TVDB_API_KEY
 
     if not TVDB_API_KEY:
-        print(f"  ERROR: TVDB_API_KEY not configured. Set it in ~/.my-plex.conf")
-        print(f"  Register for free at https://thetvdb.com/dashboard (Project → API Keys)")
+        print()
+        print("  ╔══════════════════════════════════════════════════════════════════╗")
+        print("  ║  TVDB API key required (free, one-time setup, takes 2 minutes)  ║")
+        print("  ╚══════════════════════════════════════════════════════════════════╝")
+        print()
+        print("  Step 1: Go to https://thetvdb.com/dashboard")
+        print("          (Create a free account if you don't have one)")
+        print()
+        print("  Step 2: In your dashboard, go to 'API Keys' tab under your project")
+        print("          (or create a project first: any name will do)")
+        print()
+        print("  Step 3: Copy the API key and add it to your config file:")
+        print()
+        print("          echo \"TVDB_API_KEY = 'paste-your-key-here'\" >> ~/.my-plex.conf")
+        print()
+        print("  Step 4: Re-run this command. Done!")
+        print()
+        print("  Alternative: use --source tmdb or --source fernsehserien.de instead.")
+        print()
         return None
 
     # Get TVDB series ID from external_ids or metadata
@@ -13602,8 +13620,27 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
     global TMDB_API_KEY
 
     if not TMDB_API_KEY:
-        print(f"  ERROR: TMDB_API_KEY not configured. Set it in ~/.my-plex.conf")
-        print(f"  Register for free at https://www.themoviedb.org/settings/api")
+        print()
+        print("  ╔══════════════════════════════════════════════════════════════════╗")
+        print("  ║  TMDB API key required (free, one-time setup, takes 2 minutes)  ║")
+        print("  ╚══════════════════════════════════════════════════════════════════╝")
+        print()
+        print("  Step 1: Go to https://www.themoviedb.org/signup")
+        print("          (Create a free account if you don't have one)")
+        print()
+        print("  Step 2: Go to https://www.themoviedb.org/settings/api")
+        print("          Click 'Request an API Key' → choose 'Developer'")
+        print("          Fill in any name/URL (personal use is fine)")
+        print()
+        print("  Step 3: Copy the 'API Read Access Token' (the long string,")
+        print("          NOT the short 'API Key') and add to your config file:")
+        print()
+        print("          echo \"TMDB_API_KEY = 'paste-your-token-here'\" >> ~/.my-plex.conf")
+        print()
+        print("  Step 4: Re-run this command. Done!")
+        print()
+        print("  Alternative: use --source tvdb or --source fernsehserien.de instead.")
+        print()
         return None
 
     # Get TMDB series ID from external_ids or metadata
@@ -14094,13 +14131,8 @@ def _determine_episode_source(show_dict, source_override=None):
     if TMDB_API_KEY:
         return 'tmdb'
 
-    # No API keys configured — give helpful error
-    print(f"  WARNING: No API key configured for episode source.")
-    print(f"  For '{library_name}' (language: {lib_language}), configure one of:")
-    print(f"    TVDB_API_KEY  — register free at https://thetvdb.com/dashboard")
-    print(f"    TMDB_API_KEY  — register free at https://www.themoviedb.org/settings/api")
-    print(f"  Add to ~/.my-plex.conf, then re-run.")
-    return 'tvdb'  # Will fail with helpful message in _scrape_tvdb
+    # No API keys configured — fall through to tvdb which will show setup instructions
+    return 'tvdb'
 
 
 def cmd_missing(show_ref, source_override=None):
