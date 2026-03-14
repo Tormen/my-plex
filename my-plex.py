@@ -14103,7 +14103,8 @@ def _determine_episode_source(show_dict, source_override=None):
 
     Auto-detection logic:
     - German libraries (language starts with 'de') → fernsehserien.de
-    - All other libraries → tvdb (with tmdb fallback if no TVDB key)
+    - Otherwise: match the Plex agent (TMDB-based agent → tmdb, TVDB agent → tvdb)
+    - Fallback: whichever API key is configured
 
     Returns: source name string ('tvdb', 'tmdb', 'fernsehserien.de')
     """
@@ -14125,14 +14126,26 @@ def _determine_episode_source(show_dict, source_override=None):
     if lib_language.startswith('de'):
         return 'fernsehserien.de'
 
-    # Non-German: prefer TVDB (most complete for TV), fallback to TMDB
+    # 4. Match the Plex-configured agent
+    lib_agent = CACHE.get('library_stats', {}).get('agent', {}).get(library_name, '')
+    if lib_agent:
+        # TMDB-based agents: tv.plex.agents.series, tv.plex.agents.movie, com.plexapp.agents.themoviedb
+        if lib_agent in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
+            if TMDB_API_KEY:
+                return 'tmdb'
+        # TVDB-based agent
+        elif lib_agent == 'com.plexapp.agents.thetvdb':
+            if TVDB_API_KEY:
+                return 'tvdb'
+
+    # 5. Fallback: whichever API key is configured
     if TVDB_API_KEY:
         return 'tvdb'
     if TMDB_API_KEY:
         return 'tmdb'
 
-    # No API keys configured — fall through to tvdb which will show setup instructions
-    return 'tvdb'
+    # No API keys configured — fall through to tmdb which will show setup instructions
+    return 'tmdb'
 
 
 def cmd_missing(show_ref, source_override=None):
@@ -16476,12 +16489,26 @@ def execute_global_commands(args, cmd_args):
                     missing_src = f'{MISSING_EPISODES_SOURCE[lib_name]} (config)'
                 elif lib_lang.startswith('de'):
                     missing_src = f'fernsehserien.de (lang={lib_lang})'
+                elif agent_id in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
+                    if TMDB_API_KEY:
+                        missing_src = 'tmdb (matches plex agent)'
+                    elif TVDB_API_KEY:
+                        missing_src = 'tvdb (fallback, no TMDB key)'
+                    else:
+                        missing_src = 'tmdb (no API key!)'
+                elif agent_id == 'com.plexapp.agents.thetvdb':
+                    if TVDB_API_KEY:
+                        missing_src = 'tvdb (matches plex agent)'
+                    elif TMDB_API_KEY:
+                        missing_src = 'tmdb (fallback, no TVDB key)'
+                    else:
+                        missing_src = 'tvdb (no API key!)'
                 elif TVDB_API_KEY:
-                    missing_src = 'tvdb (API key configured)'
+                    missing_src = 'tvdb (fallback)'
                 elif TMDB_API_KEY:
-                    missing_src = 'tmdb (API key configured)'
+                    missing_src = 'tmdb (fallback)'
                 else:
-                    missing_src = 'tvdb (no API key!)'
+                    missing_src = 'tmdb (no API key!)'
             else:
                 missing_src = '-'
             print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}")
