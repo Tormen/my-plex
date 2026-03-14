@@ -47,7 +47,7 @@ A comprehensive Plex media management tool with direct database access, intellig
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/my-plex.git
+git clone https://github.com/Tormen/my-plex.git
 cd my-plex
 
 # Dependencies
