@@ -16445,8 +16445,12 @@ def execute_global_commands(args, cmd_args):
         sys.exit(0)
 
     if cmd_args.list_libraries:
-        print( "\nAvailable Libraries:" )
-        PLEX_Library.print()
+        agents = CACHE.get('library_stats', {}).get('agent', {})
+        for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
+            l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
+            supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
+            agent = agents.get(lib_name, '')
+            print(f"{lib_name}\t{supported}\t{agent}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
