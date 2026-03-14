@@ -3774,6 +3774,16 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertIn('S01', result.stdout, "Should show S01")
         self.assertIn('Season:', result.stdout, "Should show Season: keys")
 
+    def test_show_info_verbose_has_episode_table(self):
+        """my-plex 'boston legal' --info -V should show an episode table."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info', '-V'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('EPISODE', result.stdout, "Should have EPISODE header")
+        self.assertIn('TITLE', result.stdout, "Should have TITLE header")
+        # Boston Legal uses absolute numbering (S01E101, S01E102, ...)
+        self.assertRegex(result.stdout, r'S01E\d+', "Should show S01 episodes")
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
