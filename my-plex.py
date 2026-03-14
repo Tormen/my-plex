@@ -111,6 +111,17 @@ CONFIG_DEFAULTS = {
     # where each extract_function takes a filename string and returns datetime.date or None
     'CUSTOM_DATE_EXTRACTORS': None,  # e.g. '/path/to/my_extractors.py'
 
+    # API keys for external episode sources (used by --missing)
+    # TVDB v4 API: Register for free at https://thetvdb.com/dashboard (Project → API Keys)
+    # TMDB API v3: Register for free at https://www.themoviedb.org/settings/api
+    'TVDB_API_KEY': None,   # TVDB v4 API key (subscriber PIN not needed for read-only)
+    'TMDB_API_KEY': None,   # TMDB API v3 key (also called "API Read Access Token")
+
+    # Per-library episode source for --missing
+    # Dict of library_name → source ('tvdb', 'tmdb', 'fernsehserien.de')
+    # If not configured, auto-detects from library's Plex agent + language
+    'MISSING_EPISODES_SOURCE': {},
+
     # Output Configuration
     'DUPLICATE_FILE': '/tmp/duplicates',
     'FORMAT': 'tsv_labeled',
@@ -237,6 +248,29 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # The module should define: EXTRACTORS = {{'format_name': extract_function, ...}}
 # Each extract_function takes a filename string and returns datetime.date or None
 # CUSTOM_DATE_EXTRACTORS = None
+
+###############################################################################
+# Episode Source Configuration (--missing)
+###############################################################################
+
+# API keys for external episode databases.
+# Required for --missing to know which episodes SHOULD exist.
+# Plex only stores episodes that have files on disk — external sources provide the full list.
+#
+# TVDB v4 API key — register for free at https://thetvdb.com/dashboard
+# (Dashboard → Project → API Keys)
+# TVDB_API_KEY = None
+#
+# TMDB API v3 key — register for free at https://www.themoviedb.org/settings/api
+# (Settings → API → Request an API Key → Developer)
+# TMDB_API_KEY = None
+
+# Per-library episode source override for --missing.
+# By default, the source is auto-detected from the library's Plex agent + language:
+#   - German libraries (de-DE) → fernsehserien.de (web scraping, no API key needed)
+#   - Other libraries → tvdb (requires TVDB_API_KEY), fallback to tmdb
+# Override per library:
+# MISSING_EPISODES_SOURCE = {{'series.de': 'fernsehserien.de', 'series.en': 'tvdb', 'series.fr': 'tmdb'}}
 
 ###############################################################################
 # Output Configuration
@@ -424,6 +458,9 @@ def generate_default_config():
 # !!! All paths here need to be ABOLUTE PATHs !!!
 ALTERNATIVE_ROOTPATHS = CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']
 CUSTOM_DATE_EXTRACTORS = CONFIG_DEFAULTS['CUSTOM_DATE_EXTRACTORS']
+TVDB_API_KEY = CONFIG_DEFAULTS['TVDB_API_KEY']
+TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
+MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -529,7 +566,7 @@ US=os.path.basename(__file__); # "my-plex-api.py"
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{} }
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{} }
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
@@ -1166,7 +1203,9 @@ _UNITTEST_CLASSES = _test_mod._UNITTEST_CLASSES
 _original_run_regression_tests = _test_mod.run_regression_tests
 # Names of episode TSV functions to inject into test module (defined later in this file)
 _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_tsv_stale',
-                       'extract_episode_date', 'is_special_episode', '_BUILTIN_EXTRACTORS')
+                       'extract_episode_date', 'is_special_episode', '_BUILTIN_EXTRACTORS',
+                       'scrape_episodes', 'cmd_missing', '_determine_episode_source',
+                       'EMPTY_LIBRARY_STATS', 'CONFIG_DEFAULTS', 'CACHE')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
     for _name in _EPISODE_FUNC_NAMES:
@@ -1483,6 +1522,8 @@ def get_library_stats(supported=True):
         # Store ACTUAL Plex timestamp without any modification
         library_stats['updatedAt'][title] = library.updatedAt
         library_stats['plexUpdatedAt'][title] = library.updatedAt
+        library_stats['agent'][title] = getattr(library, 'agent', '')
+        library_stats['language'][title] = getattr(library, 'language', '')
 
         # Get item count from database
         item_count = 0
@@ -2451,7 +2492,7 @@ def get_library_sections_from_database():
         Returns None on database error
     """
     query = """
-    SELECT id, name, section_type, updated_at
+    SELECT id, name, section_type, updated_at, agent, language
     FROM library_sections
     ORDER BY id
     """
@@ -2462,14 +2503,16 @@ def get_library_sections_from_database():
 
     libraries = []
     for row in rows:
-        lib_id, lib_name, section_type, updated_at = row
+        lib_id, lib_name, section_type, updated_at, agent, language = row
         libraries.append({
             'id': int(lib_id),
             'name': lib_name,
             'section_type': int(section_type),
             # Map section_type to type string for compatibility
             'type': 'movie' if section_type == '1' else 'show' if section_type == '2' else 'artist' if section_type == '8' else 'unknown',
-            'updated_at': int(updated_at) if updated_at else 0
+            'updated_at': int(updated_at) if updated_at else 0,
+            'agent': agent or '',
+            'language': language or '',
         })
 
     if VRB:
@@ -2620,7 +2663,7 @@ def fetch_movies_from_database(library_section_id):
     WHERE mi.metadata_type = 1
       AND mi.library_section_id = {library_section_id}
       AND mi.deleted_at IS NULL
-      AND t.tag_type IN (1, 4, 5, 6, 8, 9)
+      AND t.tag_type IN (1, 4, 5, 6, 8, 9, 314)
     ORDER BY mi.id, t.tag_type, tg."index"
     """
 
@@ -2634,17 +2677,24 @@ def fetch_movies_from_database(library_section_id):
             if metadata_id not in tags_by_metadata:
                 tags_by_metadata[metadata_id] = {
                     'genres': [], 'actors': [], 'directors': [],
-                    'writers': [], 'countries': [], 'collections': []
+                    'writers': [], 'countries': [], 'collections': [],
+                    'external_ids': {}
                 }
 
-            # tag_type: 1=genre, 4=director, 5=writer, 6=actor, 8=country, 9=collection
-            tag_map = {
-                '1': 'genres', '4': 'directors', '5': 'writers',
-                '6': 'actors', '8': 'countries', '9': 'collections'
-            }
-            list_name = tag_map.get(tag_type)
-            if list_name and tag and tag not in tags_by_metadata[metadata_id][list_name]:
-                tags_by_metadata[metadata_id][list_name].append(tag)
+            # tag_type: 1=genre, 4=director, 5=writer, 6=actor, 8=country, 9=collection, 314=external_id
+            if tag_type == '314' and tag:
+                # External IDs: tvdb://79168, tmdb://1668, imdb://tt0108778
+                prefix, _, ext_id = tag.partition('://')
+                if prefix and ext_id:
+                    tags_by_metadata[metadata_id]['external_ids'][prefix] = ext_id
+            else:
+                tag_map = {
+                    '1': 'genres', '4': 'directors', '5': 'writers',
+                    '6': 'actors', '8': 'countries', '9': 'collections'
+                }
+                list_name = tag_map.get(tag_type)
+                if list_name and tag and tag not in tags_by_metadata[metadata_id][list_name]:
+                    tags_by_metadata[metadata_id][list_name].append(tag)
 
     # Convert rows to movie dicts, grouping multiple media items per metadata_id
     # Plex can have multiple media_items per movie (multi-version: different quality releases)
@@ -2663,7 +2713,8 @@ def fetch_movies_from_database(library_section_id):
         # Get tags for this metadata item
         tags = tags_by_metadata.get(metadata_id, {
             'genres': [], 'actors': [], 'directors': [],
-            'writers': [], 'countries': [], 'collections': []
+            'writers': [], 'countries': [], 'collections': [],
+            'external_ids': {}
         })
 
         # Build version string (matching existing cache format)
@@ -2741,6 +2792,7 @@ def fetch_movies_from_database(library_section_id):
                 'writers': tags.get('writers', []),
                 'genres': tags.get('genres', []),
                 'contentRating': content_rating or None,
+                'external_ids': tags.get('external_ids', {}),
                 # Movie-specific (no season/episode)
                 'season': None,
                 'S_str': None,
@@ -7513,7 +7565,7 @@ def fetch_shows_from_database(library_section_id):
     JOIN taggings tg ON mi.id = tg.metadata_item_id
     JOIN tags t ON tg.tag_id = t.id
     WHERE mi.library_section_id = {library_section_id} AND mi.metadata_type IN (2,4)
-      AND mi.deleted_at IS NULL AND t.tag_type IN (1,4,5,6,8,9)
+      AND mi.deleted_at IS NULL AND t.tag_type IN (1,4,5,6,8,9,314)
     """
 
     tag_rows = query_plex_database(tags_query, mode='rows')
@@ -7521,9 +7573,14 @@ def fetch_shows_from_database(library_section_id):
     if tag_rows:
         for mid, ttype, tag in tag_rows:
             if mid not in tags_by_id:
-                tags_by_id[mid] = {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]}
+                tags_by_id[mid] = {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[],'external_ids':{}}
             tmap = {'1':'genres','4':'directors','5':'writers','6':'actors','8':'countries','9':'collections'}
-            if ttype in tmap and tag and tag not in tags_by_id[mid][tmap[ttype]]:
+            if ttype == '314' and tag:
+                # External IDs: tvdb://79168, tmdb://1668, imdb://tt0108778
+                prefix, _, ext_id = tag.partition('://')
+                if prefix and ext_id:
+                    tags_by_id[mid]['external_ids'][prefix] = ext_id
+            elif ttype in tmap and tag and tag not in tags_by_id[mid][tmap[ttype]]:
                 tags_by_id[mid][tmap[ttype]].append(tag)
 
     # Build structure, merging multiple media items per episode into files dict
@@ -7542,7 +7599,7 @@ def fetch_shows_from_database(library_section_id):
             raise
 
         if sh_id not in shows:
-            sh_tags = tags_by_id.get(sh_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+            sh_tags = tags_by_id.get(sh_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[],'external_ids':{}})
             shows[sh_id] = {
                 'show_info': {'id':sh_id,'title':sh_title,'originalTitle':sh_orig or '','year':int(sh_year) if sh_year else 0,
                              'rating':float(sh_rating) if sh_rating else None,'audienceRating':float(sh_aud) if sh_aud else None,
@@ -7555,7 +7612,7 @@ def fetch_shows_from_database(library_section_id):
             shows[sh_id]['seasons'][s_key] = {'season_info':{'id':s_id,'index':s_key,'title':s_title or f"Season {s_key}"},'episodes':[]}
 
         streams = streams_by_part.get(mp_id, {'audio_languages':[],'subtitle_languages':[]})
-        ep_tags = tags_by_id.get(ep_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[]})
+        ep_tags = tags_by_id.get(ep_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[],'external_ids':{}})
 
         dur_min = round(int(md_dur or 0)/60000,2) if md_dur else 0
         res_full = f"{width or 0}x{height or 0}"
@@ -7818,6 +7875,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'directors': show_info.get('directors', []), 'writers': show_info.get('writers', []),
             'countries': show_info.get('countries', []),
             'contentRating': show_info.get('contentRating', ''), 'studio': '',
+            'external_ids': show_info.get('external_ids', {}),
             'series': show_info['title'], 'show_key': show_key,
             'season': None, 'S_str': None, 'S_idx': None,
             'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
@@ -8237,7 +8295,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--create-library', action='store_true',  help="Create the library as new library.")
     argparser.add_argument('--delete', action='store_true',help="Delete the library.")
     argparser.add_argument('--scan', action='store_true',   help="Trigger Plex filesystem scan for this library, wait for completion, then update cache. Use --help scan for details.")
-    argparser.add_argument('--missing', action='store_true', help="Show missing episodes for all series in this library. Compares episodes.tsv against Plex cache for each show. Use --help missing for details.")
+    argparser.add_argument('--missing', action='store_true', help="Show missing episodes for all series in this library. Compares scraped episode data against Plex cache for each show. Use --help missing for details.")
+    argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -8789,6 +8848,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         'type': lib_info['type'],
                         'key': lib_info['id'],  # Use numeric ID directly
                         'updatedAt': lib_info['updated_at'],
+                        'agent': lib_info.get('agent', ''),
+                        'language': lib_info.get('language', ''),
                         'locations': [],  # Will be populated if needed
                         'totalSize': 0  # Will be populated during cache build
                     })()
@@ -9589,7 +9650,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             else:
                 print(f"\nChecking {len(show_keys)} show(s) in library '{lib_name}' for missing episodes...")
                 for show_key in show_keys:
-                    cmd_missing(show_key)
+                    cmd_missing(show_key, source_override=safe_getattr(obj_args, 'source', None))
 
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
@@ -10581,7 +10642,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-watched', nargs='?',                help="Set media as watched, optionally to provided watched-date. Example: --set-watched <watched-date in format YYYY-MM-DD HH:MM:SS>")
     argparser.add_argument('--set-view-offset',                       help="Set view offset for media. Example: --set-view-offset <offset_in_milliseconds>")
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
-    argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Requires episodes.tsv in the show directory (auto-scraped from fernsehserien.de). Use --help missing for details.")
+    argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Compares scraped episode data against Plex cache. Use --help missing for details.")
+    argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -10617,7 +10679,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if obj_args.set_user_rating:    PLEX_Media.set_user_rating(obj, float(obj_args.set_user_rating))
         if safe_getattr(obj_args, 'missing', False):
             # Resolve media object to a show — use cache, not API
-            cmd_missing(obj)
+            cmd_missing(obj, source_override=safe_getattr(obj_args, 'source', None))
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -12875,14 +12937,32 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex --missing <SHOW>")
             print("       my-plex <SHOW> --missing")
             print("       my-plex <LIBRARY> --missing   (all shows in a series library)")
+            print("       my-plex <SHOW> --missing --source tvdb")
             print()
-            print("  Show missing episodes for a TV series by comparing an episodes.tsv")
-            print("  (scraped from fernsehserien.de) against what Plex has on disk.")
+            print("  Show missing episodes for a TV series by comparing episode data")
+            print("  (from TVDB, TMDB, or fernsehserien.de) against what Plex has on disk.")
             print()
             print("  <SHOW> can be:")
-            print("    - Plex title:  my-plex --missing 'die millionenshow'")
+            print("    - Plex title:  my-plex --missing 'boston legal'")
             print("    - Plex ID:     my-plex --missing ID:4215")
             print("    - Filepath:    my-plex --missing /j2/watch.v/series.de/wer.weiss.denn.sowas_[quiz]")
+            print()
+            print("EPISODE SOURCES:")
+            print("  --source tvdb             TVDB v4 API (requires TVDB_API_KEY in config)")
+            print("  --source tmdb             TMDB API v3 (requires TMDB_API_KEY in config)")
+            print("  --source fernsehserien.de Web scraping (no API key needed, German TV)")
+            print()
+            print("  Without --source, auto-detects from library agent + language:")
+            print("    - German libraries (de-DE)  → fernsehserien.de")
+            print("    - Other libraries            → tvdb (fallback: tmdb)")
+            print()
+            print("  Per-library defaults configurable in ~/.my-plex.conf:")
+            print("    MISSING_EPISODES_SOURCE = {'series.de': 'fernsehserien.de', 'series.en': 'tvdb'}")
+            print()
+            print("API KEYS:")
+            print("  TVDB:  Register free at https://thetvdb.com/dashboard (Project → API Keys)")
+            print("  TMDB:  Register free at https://www.themoviedb.org/settings/api")
+            print("  Add to ~/.my-plex.conf:  TVDB_API_KEY = 'your-key-here'")
             print()
             print("OUTPUT FORMAT:")
             print("  S01E05    2025-03-10  Episode Title    (individual missing episode)")
@@ -12891,19 +12971,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Future episodes (date > today) are not shown.")
             print()
             print("EPISODES.TSV:")
-            print("  The file episodes.tsv in the show directory is the source of truth.")
-            print("  It is auto-scraped from fernsehserien.de (if the show can be found there).")
-            print("  The TSV is auto-updated when older than 24 hours.")
+            print("  The file episodes.tsv in the show directory caches scraped data.")
+            print("  Auto-updated when older than 24 hours.")
             print()
             print("  Format:")
-            print("    # source: fernsehserien.de")
-            print("    # slug: die-millionenshow")
-            print("    # show_id: 22952")
+            print("    # source: tvdb")
+            print("    # tvdb_id: 74608")
             print("    # DO NOT edit or remove the header comments above")
-            print("    season\tepisode\tdate\ttitle")
-            print()
-            print("  The slug and show_id are discovered automatically on first use.")
-            print("  To use a different scraper source, change the '# source:' comment.")
+            print("    season\tepisode\tdate\ttitle\toriginal_title\t...")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -13314,7 +13389,7 @@ def is_special_episode(filename, specials_pattern=None):
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
-def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False):
+def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False, external_ids=None):
     """Main scraper dispatcher. Updates episodes.tsv for a show.
 
     1. Read existing episodes.tsv for metadata (slug, show_id, source)
@@ -13325,8 +13400,9 @@ def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False
     Args:
         show_title: Plex show title
         show_dir: local directory containing the show
-        source: scraper source name
+        source: scraper source name ('tvdb', 'tmdb', 'fernsehserien.de')
         force: force update even if TSV is fresh
+        external_ids: dict with external IDs from cache, e.g. {'tvdb': '79168', 'tmdb': '1668', 'imdb': 'tt0108778'}
 
     Returns: (metadata, episodes) or (None, None) on failure
     """
@@ -13350,6 +13426,10 @@ def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False
     match source:
         case 'fernsehserien.de':
             result = _scrape_fernsehserien_de(show_title, metadata, existing_episodes)
+        case 'tvdb':
+            result = _scrape_tvdb(show_title, metadata, existing_episodes, external_ids)
+        case 'tmdb':
+            result = _scrape_tmdb(show_title, metadata, existing_episodes, external_ids)
         case _:
             print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
             return metadata, existing_episodes
@@ -13367,6 +13447,251 @@ def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False
     write_episodes_tsv(tsv_path, metadata, new_episodes)
 
     return metadata, new_episodes
+
+
+def _tvdb_login(api_key):
+    """Authenticate with TVDB v4 API and return bearer token.
+
+    Token is cached for reuse (valid ~1 month).
+    Returns: token string, or None on failure.
+    """
+    import urllib.request, json
+
+    if not api_key:
+        return None
+
+    # Cache token on module level
+    if hasattr(_tvdb_login, '_cached_token') and _tvdb_login._cached_token:
+        return _tvdb_login._cached_token
+
+    url = 'https://api4.thetvdb.com/v4/login'
+    payload = json.dumps({'apikey': api_key}).encode('utf-8')
+    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            token = data.get('data', {}).get('token')
+            if token:
+                _tvdb_login._cached_token = token
+                return token
+            print(f"  WARNING: TVDB login succeeded but no token in response")
+    except Exception as e:
+        print(f"  WARNING: TVDB login failed: {e}")
+        print(f"  Check your TVDB_API_KEY in config file (~/.my-plex.conf)")
+        print(f"  Register for free at https://thetvdb.com/dashboard (Project → API Keys)")
+
+    return None
+
+
+def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
+    """Scrape TVDB v4 API for episode data.
+
+    Uses the TVDB v4 API (https://api4.thetvdb.com/v4) with bearer token auth.
+    Endpoint: /series/{id}/episodes/default?page=0
+
+    Args:
+        show_title: Plex show title
+        metadata: existing TSV metadata dict
+        existing_episodes: existing episode list from TSV
+        external_ids: dict with 'tvdb' key for TVDB series ID
+
+    Returns: (metadata_updates, episodes_list) or None on failure
+    """
+    import urllib.request, json
+
+    global TVDB_API_KEY
+
+    if not TVDB_API_KEY:
+        print(f"  ERROR: TVDB_API_KEY not configured. Set it in ~/.my-plex.conf")
+        print(f"  Register for free at https://thetvdb.com/dashboard (Project → API Keys)")
+        return None
+
+    # Get TVDB series ID from external_ids or metadata
+    tvdb_id = None
+    if external_ids and 'tvdb' in external_ids:
+        tvdb_id = external_ids['tvdb']
+    elif metadata.get('tvdb_id'):
+        tvdb_id = metadata['tvdb_id']
+
+    if not tvdb_id:
+        print(f"  WARNING: No TVDB ID found for '{show_title}' — cannot scrape TVDB")
+        print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+        return None
+
+    # Authenticate
+    token = _tvdb_login(TVDB_API_KEY)
+    if not token:
+        return None
+
+    # Fetch all episodes (paginated)
+    all_episodes = []
+    page = 0
+    while True:
+        url = f'https://api4.thetvdb.com/v4/series/{tvdb_id}/episodes/default?page={page}'
+        req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            print(f"  WARNING: TVDB API request failed (page {page}): {e}")
+            if page == 0:
+                return None  # First page failed — fatal
+            break  # Subsequent pages — use what we have
+
+        episodes_data = data.get('data', {}).get('episodes', [])
+        if not episodes_data:
+            break
+
+        for ep in episodes_data:
+            season_num = ep.get('seasonNumber')
+            ep_num = ep.get('number')
+            if season_num is None or ep_num is None:
+                continue
+            # Skip specials (season 0) by default — they have irregular numbering
+            if season_num == 0:
+                continue
+            all_episodes.append({
+                'season': int(season_num),
+                'episode': int(ep_num),
+                'date': ep.get('aired', '') or '',
+                'title': ep.get('name', '') or '',
+                'original_title': '',
+                'date_local': '',
+                'sender_local': '',
+                'date_original': ep.get('aired', '') or '',
+                'sender_original': '',
+            })
+
+        # Check if more pages
+        # TVDB v4 returns empty episodes array when past last page
+        page += 1
+
+    if not all_episodes:
+        print(f"  WARNING: TVDB returned 0 episodes for '{show_title}' (tvdb:{tvdb_id})")
+        return None
+
+    new_metadata = {'tvdb_id': str(tvdb_id)}
+    max_s = max(ep['season'] for ep in all_episodes)
+    if max_s:
+        new_metadata['latest_season'] = str(max_s)
+
+    print(f"  TVDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+
+    return new_metadata, all_episodes
+
+
+def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
+    """Scrape TMDB API v3 for episode data.
+
+    Uses TMDB API v3:
+    1. GET /tv/{series_id} → get number_of_seasons
+    2. GET /tv/{series_id}/season/{n} → get episodes per season
+
+    Args:
+        show_title: Plex show title
+        metadata: existing TSV metadata dict
+        existing_episodes: existing episode list from TSV
+        external_ids: dict with 'tmdb' key for TMDB series ID
+
+    Returns: (metadata_updates, episodes_list) or None on failure
+    """
+    import urllib.request, json
+
+    global TMDB_API_KEY
+
+    if not TMDB_API_KEY:
+        print(f"  ERROR: TMDB_API_KEY not configured. Set it in ~/.my-plex.conf")
+        print(f"  Register for free at https://www.themoviedb.org/settings/api")
+        return None
+
+    # Get TMDB series ID from external_ids or metadata
+    tmdb_id = None
+    if external_ids and 'tmdb' in external_ids:
+        tmdb_id = external_ids['tmdb']
+    elif metadata.get('tmdb_id'):
+        tmdb_id = metadata['tmdb_id']
+
+    if not tmdb_id:
+        print(f"  WARNING: No TMDB ID found for '{show_title}' — cannot scrape TMDB")
+        print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+        return None
+
+    headers = {
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json'
+    }
+
+    # Step 1: Get series details to find number of seasons
+    url = f'https://api.themoviedb.org/3/tv/{tmdb_id}'
+    req = urllib.request.Request(url, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            series_data = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print(f"  ERROR: TMDB authentication failed — check TMDB_API_KEY in ~/.my-plex.conf")
+            print(f"  NOTE: TMDB_API_KEY should be the 'API Read Access Token' (long string), not the short 'API Key'")
+        else:
+            print(f"  WARNING: TMDB series request failed for '{show_title}' (tmdb:{tmdb_id}): {e}")
+        return None
+    except Exception as e:
+        print(f"  WARNING: TMDB series request failed for '{show_title}' (tmdb:{tmdb_id}): {e}")
+        return None
+
+    num_seasons = series_data.get('number_of_seasons', 0)
+    if not num_seasons:
+        # Try counting from seasons array
+        seasons_list = series_data.get('seasons', [])
+        num_seasons = max((s.get('season_number', 0) for s in seasons_list), default=0)
+
+    if not num_seasons:
+        print(f"  WARNING: TMDB reports 0 seasons for '{show_title}' (tmdb:{tmdb_id})")
+        return None
+
+    # Step 2: Fetch episodes for each season
+    all_episodes = []
+    for season_num in range(1, num_seasons + 1):
+        url = f'https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_num}'
+        req = urllib.request.Request(url, headers=headers)
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                season_data = json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            print(f"  WARNING: TMDB season {season_num} request failed: {e}")
+            continue
+
+        for ep in season_data.get('episodes', []):
+            ep_num = ep.get('episode_number')
+            if ep_num is None:
+                continue
+            all_episodes.append({
+                'season': int(season_num),
+                'episode': int(ep_num),
+                'date': ep.get('air_date', '') or '',
+                'title': ep.get('name', '') or '',
+                'original_title': '',
+                'date_local': '',
+                'sender_local': '',
+                'date_original': ep.get('air_date', '') or '',
+                'sender_original': '',
+            })
+
+    if not all_episodes:
+        print(f"  WARNING: TMDB returned 0 episodes for '{show_title}' (tmdb:{tmdb_id})")
+        return None
+
+    new_metadata = {'tmdb_id': str(tmdb_id)}
+    max_s = max(ep['season'] for ep in all_episodes)
+    if max_s:
+        new_metadata['latest_season'] = str(max_s)
+
+    print(f"  TMDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+
+    return new_metadata, all_episodes
 
 
 def _discover_fernsehserien_slug(show_title):
@@ -13731,7 +14056,54 @@ def get_all_shows_in_series_libraries():
 # --missing command
 # ---------------------------------------------------------------------------
 
-def cmd_missing(show_ref):
+def _determine_episode_source(show_dict, source_override=None):
+    """Determine the episode data source for a show.
+
+    Priority:
+    1. CLI override (--source tvdb|tmdb|fernsehserien.de)
+    2. Config file: MISSING_EPISODES_SOURCE per library
+    3. Auto-detect from library agent + language in cache
+
+    Auto-detection logic:
+    - German libraries (language starts with 'de') → fernsehserien.de
+    - All other libraries → tvdb (with tmdb fallback if no TVDB key)
+
+    Returns: source name string ('tvdb', 'tmdb', 'fernsehserien.de')
+    """
+    global MISSING_EPISODES_SOURCE, TVDB_API_KEY, TMDB_API_KEY
+
+    # 1. CLI override
+    if source_override:
+        return source_override
+
+    library_name = show_dict.get('library', '')
+
+    # 2. Config file per-library override
+    if MISSING_EPISODES_SOURCE and library_name in MISSING_EPISODES_SOURCE:
+        return MISSING_EPISODES_SOURCE[library_name]
+
+    # 3. Auto-detect from cached library stats
+    lib_language = CACHE.get('library_stats', {}).get('language', {}).get(library_name, '')
+
+    if lib_language.startswith('de'):
+        return 'fernsehserien.de'
+
+    # Non-German: prefer TVDB (most complete for TV), fallback to TMDB
+    if TVDB_API_KEY:
+        return 'tvdb'
+    if TMDB_API_KEY:
+        return 'tmdb'
+
+    # No API keys configured — give helpful error
+    print(f"  WARNING: No API key configured for episode source.")
+    print(f"  For '{library_name}' (language: {lib_language}), configure one of:")
+    print(f"    TVDB_API_KEY  — register free at https://thetvdb.com/dashboard")
+    print(f"    TMDB_API_KEY  — register free at https://www.themoviedb.org/settings/api")
+    print(f"  Add to ~/.my-plex.conf, then re-run.")
+    return 'tvdb'  # Will fail with helpful message in _scrape_tvdb
+
+
+def cmd_missing(show_ref, source_override=None):
     """Show missing episodes for a series.
     Compares episodes.tsv (all aired episodes) against Plex cache (episodes on disk).
     """
@@ -13748,11 +14120,16 @@ def cmd_missing(show_ref):
 
     show_dir = get_local_show_dir(show_dir_server)
 
+    # Determine episode source for this show
+    source = _determine_episode_source(show_dict, source_override)
+    external_ids = show_dict.get('external_ids', {})
+
     print(f"\n{'=' * 76}")
     print(f"MISSING EPISODES: {show_title}")
     print(f"{'=' * 76}")
     print(f"  Show:      {show_key} — {show_title}")
     print(f"  Directory: {show_dir_server}")
+    print(f"  Source:    {source}" + (f" (tvdb:{external_ids.get('tvdb', '?')}, tmdb:{external_ids.get('tmdb', '?')})" if source in ('tvdb', 'tmdb') else ''))
 
     # Load or update episodes.tsv
     tsv_path = get_episodes_tsv_path(show_dir)
@@ -13760,16 +14137,21 @@ def cmd_missing(show_ref):
     if os.path.isfile(tsv_path):
         if is_episodes_tsv_stale(tsv_path):
             print(f"  Updating episodes.tsv (stale)...")
-            metadata, all_episodes = scrape_episodes(show_title, show_dir)
+            metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
         else:
             metadata, all_episodes = read_episodes_tsv(tsv_path)
     else:
-        print(f"  No episodes.tsv found — scraping fernsehserien.de...")
-        metadata, all_episodes = scrape_episodes(show_title, show_dir, force=True)
+        print(f"  No episodes.tsv found — scraping {source}...")
+        metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
 
     if not all_episodes:
         print(f"\n  No episode data available for '{show_title}'.")
-        print(f"  Create {tsv_path} or ensure the show exists on fernsehserien.de.")
+        if source == 'tvdb':
+            print(f"  Check TVDB_API_KEY in ~/.my-plex.conf and TVDB ID: {external_ids.get('tvdb', 'not found')}")
+        elif source == 'tmdb':
+            print(f"  Check TMDB_API_KEY in ~/.my-plex.conf and TMDB ID: {external_ids.get('tmdb', 'not found')}")
+        else:
+            print(f"  Create {tsv_path} or ensure the show exists on {source}.")
         print(f"{'=' * 76}")
         return
 
@@ -15951,7 +16333,7 @@ def execute_global_commands(args, cmd_args):
                 "         my-plex <library> --missing  (all shows in library)\n"
                 "         my-plex <show> --missing     (specific show)\n"
                 "  Use --help missing for details")
-        cmd_missing(cmd_args.missing)
+        cmd_missing(cmd_args.missing, source_override=safe_getattr(cmd_args, 'source', None))
         sys.exit(0)
 
     # Handle --sort-new command
@@ -16359,6 +16741,7 @@ def main():
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
@@ -16408,7 +16791,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
-    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares episodes.tsv (scraped from fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
+    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
+    GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
@@ -16648,6 +17032,11 @@ def main():
             # bare --missing — append after PLEXOBJECT so it becomes an obj_arg,
             # or insert at front if no PLEXOBJECT (global command will error with usage)
             remaining_args.append('--missing')
+
+    # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
+    if safe_getattr(args, 'source', None):
+        remaining_args.append('--source')
+        remaining_args.append(args.source)
 
     # Re-inject --sort-new into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
     if safe_getattr(args, 'sort_new', False):

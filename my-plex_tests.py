@@ -3511,6 +3511,184 @@ class TestCustomDateExtractors(unittest.TestCase):
         self.assertIsNone(d)
 
 
+class TestEpisodeSourceSelection(unittest.TestCase):
+    """Test multi-source episode scraping architecture."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_source_flag_in_media_argparser(self):
+        """--source must be in PLEX_Media.argparser."""
+        src = self._read_script()
+        self.assertIn("'--source'", src, "--source not found in argparse arguments")
+
+    def test_source_flag_in_library_argparser(self):
+        """--source must be in PLEX_Library.argparser."""
+        import re
+        src = self._read_script()
+        lib_section = re.search(r'class PLEX_Library.*?(?=\nclass [A-Z])', src, re.DOTALL)
+        self.assertIsNotNone(lib_section)
+        self.assertIn("'--source'", lib_section.group(),
+            "--source not found in PLEX_Library argparser")
+
+    def test_source_flag_in_global_parser(self):
+        """--source must be in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--source'", src,
+            "--source not found in GLOBAL_CMD_PARSER")
+
+    def test_source_in_main_parser(self):
+        """--source must be in main_parser (suppressed) to prevent value consumption."""
+        src = self._read_script()
+        self.assertIn("main_parser.add_argument('--source'", src,
+            "--source not found in main_parser")
+
+    def test_scrape_episodes_accepts_source(self):
+        """scrape_episodes() must accept source and external_ids params."""
+        import inspect
+        sig = inspect.signature(scrape_episodes)
+        self.assertIn('source', sig.parameters, "scrape_episodes missing 'source' param")
+        self.assertIn('external_ids', sig.parameters, "scrape_episodes missing 'external_ids' param")
+
+    def test_scrape_dispatch_tvdb(self):
+        """scrape_episodes dispatch must include 'tvdb' case."""
+        src = self._read_script()
+        self.assertIn("case 'tvdb':", src, "tvdb case not found in scrape_episodes dispatch")
+
+    def test_scrape_dispatch_tmdb(self):
+        """scrape_episodes dispatch must include 'tmdb' case."""
+        src = self._read_script()
+        self.assertIn("case 'tmdb':", src, "tmdb case not found in scrape_episodes dispatch")
+
+    def test_determine_episode_source_exists(self):
+        """_determine_episode_source function must exist."""
+        src = self._read_script()
+        self.assertIn("def _determine_episode_source(", src,
+            "_determine_episode_source not found")
+
+    def test_cmd_missing_passes_source_override(self):
+        """cmd_missing must accept and pass source_override."""
+        import inspect
+        sig = inspect.signature(cmd_missing)
+        self.assertIn('source_override', sig.parameters,
+            "cmd_missing missing 'source_override' param")
+
+    def test_tvdb_scraper_exists(self):
+        """_scrape_tvdb function must exist."""
+        src = self._read_script()
+        self.assertIn("def _scrape_tvdb(", src, "_scrape_tvdb not found")
+
+    def test_tmdb_scraper_exists(self):
+        """_scrape_tmdb function must exist."""
+        src = self._read_script()
+        self.assertIn("def _scrape_tmdb(", src, "_scrape_tmdb not found")
+
+    def test_tvdb_login_exists(self):
+        """_tvdb_login function must exist."""
+        src = self._read_script()
+        self.assertIn("def _tvdb_login(", src, "_tvdb_login not found")
+
+
+class TestExternalIdsInCache(unittest.TestCase):
+    """Test external IDs (tvdb/tmdb/imdb) storage in cache."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_external_ids_in_show_dict(self):
+        """Show dicts in OBJ_BY_ID must include external_ids field."""
+        src = self._read_script()
+        # The show dict creation in _process_shows_from_database
+        self.assertIn("'external_ids': show_info.get('external_ids'", src,
+            "external_ids not found in show dict creation")
+
+    def test_external_ids_in_movie_dict(self):
+        """Movie dicts must include external_ids field."""
+        src = self._read_script()
+        self.assertIn("'external_ids': tags.get('external_ids'", src,
+            "external_ids not found in movie dict creation")
+
+    def test_tag_type_314_in_show_query(self):
+        """fetch_shows_from_database tags query must include tag_type 314."""
+        src = self._read_script()
+        # Both movie and show queries should include 314
+        self.assertIn('314', src, "tag_type 314 not found in source")
+
+    def test_library_agent_in_query(self):
+        """get_library_sections_from_database must select agent column."""
+        src = self._read_script()
+        self.assertIn("agent, language", src,
+            "agent and language not selected in library sections query")
+
+    def test_library_agent_in_stats(self):
+        """EMPTY_LIBRARY_STATS must include agent and language."""
+        self.assertIn('agent', EMPTY_LIBRARY_STATS,
+            "agent not in EMPTY_LIBRARY_STATS")
+        self.assertIn('language', EMPTY_LIBRARY_STATS,
+            "language not in EMPTY_LIBRARY_STATS")
+
+
+class TestEpisodeSourceConfig(unittest.TestCase):
+    """Test API key and episode source configuration."""
+
+    def test_tvdb_api_key_in_defaults(self):
+        """TVDB_API_KEY must be in CONFIG_DEFAULTS."""
+        self.assertIn('TVDB_API_KEY', CONFIG_DEFAULTS,
+            "TVDB_API_KEY not in CONFIG_DEFAULTS")
+
+    def test_tmdb_api_key_in_defaults(self):
+        """TMDB_API_KEY must be in CONFIG_DEFAULTS."""
+        self.assertIn('TMDB_API_KEY', CONFIG_DEFAULTS,
+            "TMDB_API_KEY not in CONFIG_DEFAULTS")
+
+    def test_missing_episodes_source_in_defaults(self):
+        """MISSING_EPISODES_SOURCE must be in CONFIG_DEFAULTS."""
+        self.assertIn('MISSING_EPISODES_SOURCE', CONFIG_DEFAULTS,
+            "MISSING_EPISODES_SOURCE not in CONFIG_DEFAULTS")
+
+    def test_missing_episodes_source_is_dict(self):
+        """MISSING_EPISODES_SOURCE default must be a dict."""
+        self.assertIsInstance(CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE'], dict,
+            "MISSING_EPISODES_SOURCE default should be empty dict")
+
+    def test_api_keys_default_none(self):
+        """API keys should default to None."""
+        self.assertIsNone(CONFIG_DEFAULTS['TVDB_API_KEY'])
+        self.assertIsNone(CONFIG_DEFAULTS['TMDB_API_KEY'])
+
+
+class TestSourceE2E(unittest.TestCase):
+    """End-to-end tests for --source flag."""
+
+    def test_help_missing_shows_source(self):
+        """--help missing should document --source."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'missing'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('--source', result.stdout, "--help missing should mention --source")
+        self.assertIn('tvdb', result.stdout, "--help missing should mention tvdb")
+        self.assertIn('tmdb', result.stdout, "--help missing should mention tmdb")
+        self.assertIn('fernsehserien.de', result.stdout, "--help missing should mention fernsehserien.de")
+
+    def test_source_with_invalid_choice(self):
+        """my-plex --missing X --source invalid should error."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--missing', 'test', '--source', 'invalid'],
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, "--source invalid should fail")
+        output = result.stdout + result.stderr
+        self.assertNotIn('Traceback', output, "should not produce stack trace")
+
+    def test_help_missing_shows_api_key_info(self):
+        """--help missing should document API key registration."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'missing'],
+            capture_output=True, text=True, timeout=10)
+        self.assertIn('API KEY', result.stdout.upper(), "--help missing should mention API keys")
+        self.assertIn('thetvdb.com', result.stdout, "--help missing should mention thetvdb.com")
+        self.assertIn('themoviedb.org', result.stdout, "--help missing should mention themoviedb.org")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -3538,6 +3716,10 @@ _UNITTEST_CLASSES = [
     TestSortNew,
     TestMissingE2E,
     TestCustomDateExtractors,
+    TestEpisodeSourceSelection,
+    TestExternalIdsInCache,
+    TestEpisodeSourceConfig,
+    TestSourceE2E,
 ]
 
 # ---------------------------------------------------------------------------
