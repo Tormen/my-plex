@@ -8053,11 +8053,14 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                     print(f"{VRBPFX}  WARNING: Failed to scrape episodes.tsv for '{show_title}': {e}")
 
         # Print progress every 10% (or every 10 shows for small libraries)
+        # Skip \r-based progress in worker threads — concurrent output would stomp on it
         step = max(1, total_shows // 10)
         if show_idx % step == 0 or show_idx == total_shows:
             fb_part = f", {fallback_count} fallback" if fallback_count else ""
             fail_part = f", {len(failed_shows)} failed" if failed_shows else ""
-            print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped{fb_part}{fail_part})", end='', flush=True)
+            if not _get_worker_prefix():
+                # Main thread: use \r for clean overwriting progress
+                print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped{fb_part}{fail_part})", end='', flush=True)
 
         if not tsv_episodes:
             continue
@@ -8151,7 +8154,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             print(f"{VRBPFX}'{show_title}': {', '.join(parts)}")
 
     # Summary
-    print()  # newline after progress \r
+    if not _get_worker_prefix():
+        print()  # newline after progress \r (main thread only)
     parts = [f"{existing_count} cached", f"{scraped_count} scraped"]
     if fallback_count:
         parts.append(f"{fallback_count} fallback")
@@ -8824,7 +8828,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Print progress to terminal
         # In incremental mode (not FORCE_CACHE_UPDATE): always show
         # In FORCE mode: show basic progress unless VERYVRB (which has detailed per-show output)
-        if not FORCE_CACHE_UPDATE or not VERYVRB:
+        if VRB and (not FORCE_CACHE_UPDATE or not VERYVRB):
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y-%m-%d_%H%M.%S')
             worker_prefix = _get_worker_prefix()
