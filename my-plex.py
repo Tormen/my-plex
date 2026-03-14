@@ -16458,13 +16458,20 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.localmedia':    'Local Media',
         }
         agents = CACHE.get('library_stats', {}).get('agent', {})
-        print(f"library-name\tmy-plex\tplex-agent")
+        languages = CACHE.get('library_stats', {}).get('language', {})
+        print(f"library-name\tmy-plex\tplex-agent\t--missing source")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
-            print(f"{lib_name}\t{supported}\t{agent}")
+            # Determine --missing episode source for Show libraries
+            if l_type == 'Show':
+                dummy = {'library': lib_name}
+                missing_src = _determine_episode_source(dummy)
+            else:
+                missing_src = '-'
+            print(f"{lib_name}\t{supported}\t{agent}\t{missing_src}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
