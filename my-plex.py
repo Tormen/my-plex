@@ -16485,7 +16485,7 @@ def execute_global_commands(args, cmd_args):
         agents = lib_stats.get('agent', {})
         languages = lib_stats.get('language', {})
         items_count = lib_stats.get('itemsCount', {})
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t--MISSING SOURCE")
+        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODE-DATA-SOURCE")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
