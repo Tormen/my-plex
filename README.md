@@ -46,22 +46,23 @@ A comprehensive Plex media management tool with direct database access, intellig
 ## Installation
 
 ```bash
-# Clone
+# Clone and add to PATH
 git clone https://github.com/Tormen/my-plex.git
-cd my-plex
+ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex   # or anywhere in your PATH
 
-# Dependencies
-pip install plexapi
-
-# Configuration
-cp ~/.my-plex.conf.example ~/.my-plex.conf  # or:
-python3 my-plex.py --config-file ~/.my-plex.conf --create
+# Configure
+my-plex --config-file ~/.my-plex.conf --create
 # Edit ~/.my-plex.conf with your Plex DB path and SSH host
 ```
 
+That's it. On first run, the `my-plex` shell wrapper automatically:
+- Creates a Python virtualenv (`~/.python.venv/my-plex/`)
+- Installs all dependencies (`plexapi`, `readchar`)
+- Sets up zsh tab-completion
+
 ### Requirements
 - Python 3.10+ (uses `match/case`)
-- `plexapi` Python package (for write operations)
+- `virtualenv` (for automatic venv setup)
 - SSH access to the Plex server (for database and file operations)
 - SQLite3 on the Plex server
 
