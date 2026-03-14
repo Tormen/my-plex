@@ -16457,14 +16457,20 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.none':          'Personal Media',
             'com.plexapp.agents.localmedia':    'Local Media',
         }
-        agents = CACHE.get('library_stats', {}).get('agent', {})
-        languages = CACHE.get('library_stats', {}).get('language', {})
-        print(f"library-name\tmy-plex\tplex-media-info-source\t--missing source\tsource-reason")
+        lib_stats = CACHE.get('library_stats', {})
+        agents = lib_stats.get('agent', {})
+        languages = lib_stats.get('language', {})
+        items_count = lib_stats.get('itemsCount', {})
+        episodes_count = lib_stats.get('episodesCount', {})
+        print(f"library-name\tlanguage\ttype\tmy-plex\tplex-media-info-source\titems\tepisodes\t--missing source\tsource-reason")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
+            lang = languages.get(lib_name, '-')
+            items = items_count.get(lib_name, '-')
+            episodes = episodes_count.get(lib_name, '-')
             # Determine --missing episode source + reason for Show libraries
             if l_type == 'Show':
                 lib_lang = languages.get(lib_name, '')
@@ -16486,7 +16492,7 @@ def execute_global_commands(args, cmd_args):
             else:
                 missing_src = '-'
                 src_reason = '-'
-            print(f"{lib_name}\t{supported}\t{agent}\t{missing_src}\t{src_reason}")
+            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{episodes}\t{missing_src}\t{src_reason}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
