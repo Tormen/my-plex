@@ -16458,9 +16458,10 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.localmedia':    'Local Media',
         }
         agents = CACHE.get('library_stats', {}).get('agent', {})
+        print(f"library\tmy-plex\tplex-agent")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
-            supported = 'supported (by my-plex)' if l_type in PLEX_Library.SUPPORTED_TYPES else 'unsupported'
+            supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
             print(f"{lib_name}\t{supported}\t{agent}")
