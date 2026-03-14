@@ -112,6 +112,7 @@ _my-plex() {
         '--excess-versions[List entries with too many file versions]:limit:'
         '--problems[Run all problem detection checks]'
         '--scan[Trigger Plex library scan + metadata refresh + cache update]'
+        '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
         '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
         '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
         '--list-labels[List all labels and item counts]'
