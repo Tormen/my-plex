@@ -13420,8 +13420,10 @@ def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False
     if not force and not is_episodes_tsv_stale(tsv_path):
         return metadata, existing_episodes
 
-    # Determine source (from existing metadata or parameter)
-    source = metadata.get('source', source) or 'fernsehserien.de'
+    # The passed-in source parameter takes priority (it's the current auto-detected or CLI choice).
+    # Only fall back to TSV metadata source if no source was passed in.
+    if not source:
+        source = metadata.get('source', 'fernsehserien.de')
 
     match source:
         case 'fernsehserien.de':
@@ -14180,7 +14182,12 @@ def cmd_missing(show_ref, source_override=None):
     tsv_path = get_episodes_tsv_path(show_dir)
 
     if os.path.isfile(tsv_path):
-        if is_episodes_tsv_stale(tsv_path):
+        existing_meta, _ = read_episodes_tsv(tsv_path)
+        old_source = existing_meta.get('source', '') if existing_meta else ''
+        if old_source and old_source != source:
+            print(f"  Re-scraping: source changed ({old_source} → {source})...")
+            metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
+        elif is_episodes_tsv_stale(tsv_path):
             print(f"  Updating episodes.tsv (stale)...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
         else:
