@@ -13478,79 +13478,95 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
 
         s = start_season
         while consecutive_empty < 2:
-            url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            try:
-                html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
-            except Exception:
-                consecutive_empty += 1
-                s += 1
-                time.sleep(0.3)
-                continue
-
-            # Split by episode sections — first split chunk is before any episode
-            ep_sections = re.split(r'itemprop="episode"', html)[1:]
-
-            for section in ep_sections:
-                m_num = re.search(r'itemprop="episodeNumber" content="(\d+)"', section)
-                if not m_num:
-                    continue
-                ep_num = int(m_num.group(1))
-                key = (s, ep_num)
-
-                # German title (itemprop="name")
-                m_title = re.search(r'itemprop="name">([^<]*)<', section)
-                title = m_title.group(1).strip() if m_title else ''
-
-                # Original title (in parentheses after originaltitel class)
-                m_orig = re.search(r'episode-output-originaltitel[^>]*>\(([^)]+)\)', section)
-                original_title = m_orig.group(1).strip() if m_orig else ''
-
-                # Air dates: <ea-angabe data-sort="0-YYYY-MM-DD">...<ea-angabe-sender>SENDER
-                # sort prefix 0 = local (German), 1 = original
-                dates = re.findall(
-                    r'<ea-angabe data-sort="(\d+)-(\d{4}-\d{2}-\d{2})">'
-                    r'<ea-angabe-titel>[^<]*</ea-angabe-titel>\s*'
-                    r'<ea-angabe-datum>[^<]*</ea-angabe-datum>\s*'
-                    r'<ea-angabe-sender>([^<]*)</ea-angabe-sender>',
-                    section
-                )
-                date_local = ''
-                date_original = ''
-                sender_local = ''
-                sender_original = ''
-                for sort_idx, date_val, sender in dates:
-                    if sort_idx == '0':     # local (German) premiere
-                        if not date_local or date_val < date_local:
-                            date_local = date_val
-                            sender_local = sender.strip()
-                    elif sort_idx == '1':   # original premiere
-                        if not date_original or date_val < date_original:
-                            date_original = date_val
-                            sender_original = sender.strip()
-
-                # Use earliest date available (prefer local, fall back to original)
-                date = date_local or date_original
-
-                ep_data = {
-                    'season': s, 'episode': ep_num, 'date': date, 'title': title,
-                    'original_title': original_title,
-                    'date_local': date_local, 'sender_local': sender_local,
-                    'date_original': date_original, 'sender_original': sender_original,
-                }
-                if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
-                    existing_by_key[key] = ep_data
-                    new_count += 1
+            # Paginate within each season: page 1 = no suffix, page 2+ = /2, /3, ...
+            season_had_episodes = False
+            page = 1
+            while True:
+                if page == 1:
+                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}"
                 else:
-                    # Update fields that may be missing in existing data
-                    existing = existing_by_key[key]
-                    for field in ('original_title', 'date_local', 'sender_local', 'date_original', 'sender_original'):
-                        if not existing.get(field) and ep_data.get(field):
-                            existing[field] = ep_data[field]
-                    if not existing.get('title') and title:
-                        existing['title'] = title
+                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}/{page}"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                try:
+                    html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+                except Exception:
+                    break  # no more pages for this season
 
-            if ep_sections:
+                # Split by episode sections — first split chunk is before any episode
+                ep_sections = re.split(r'itemprop="episode"', html)[1:]
+                if not ep_sections:
+                    break  # empty page, no more episodes for this season
+
+                season_had_episodes = True
+
+                for section in ep_sections:
+                    m_num = re.search(r'itemprop="episodeNumber" content="(\d+)"', section)
+                    if not m_num:
+                        continue
+                    ep_num = int(m_num.group(1))
+                    key = (s, ep_num)
+
+                    # German title (itemprop="name")
+                    m_title = re.search(r'itemprop="name">([^<]*)<', section)
+                    title = m_title.group(1).strip() if m_title else ''
+
+                    # Original title (in parentheses after originaltitel class)
+                    m_orig = re.search(r'episode-output-originaltitel[^>]*>\(([^)]+)\)', section)
+                    original_title = m_orig.group(1).strip() if m_orig else ''
+
+                    # Air dates: <ea-angabe data-sort="0-YYYY-MM-DD">...<ea-angabe-sender>SENDER
+                    # sort prefix 0 = local (German), 1 = original
+                    dates = re.findall(
+                        r'<ea-angabe data-sort="(\d+)-(\d{4}-\d{2}-\d{2})">'
+                        r'<ea-angabe-titel>[^<]*</ea-angabe-titel>\s*'
+                        r'<ea-angabe-datum>[^<]*</ea-angabe-datum>\s*'
+                        r'<ea-angabe-sender>([^<]*)</ea-angabe-sender>',
+                        section
+                    )
+                    date_local = ''
+                    date_original = ''
+                    sender_local = ''
+                    sender_original = ''
+                    for sort_idx, date_val, sender in dates:
+                        if sort_idx == '0':     # local (German) premiere
+                            if not date_local or date_val < date_local:
+                                date_local = date_val
+                                sender_local = sender.strip()
+                        elif sort_idx == '1':   # original premiere
+                            if not date_original or date_val < date_original:
+                                date_original = date_val
+                                sender_original = sender.strip()
+
+                    # Use earliest date available (prefer local, fall back to original)
+                    date = date_local or date_original
+
+                    ep_data = {
+                        'season': s, 'episode': ep_num, 'date': date, 'title': title,
+                        'original_title': original_title,
+                        'date_local': date_local, 'sender_local': sender_local,
+                        'date_original': date_original, 'sender_original': sender_original,
+                    }
+                    if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
+                        existing_by_key[key] = ep_data
+                        new_count += 1
+                    else:
+                        # Update fields that may be missing in existing data
+                        existing = existing_by_key[key]
+                        for field in ('original_title', 'date_local', 'sender_local', 'date_original', 'sender_original'):
+                            if not existing.get(field) and ep_data.get(field):
+                                existing[field] = ep_data[field]
+                        if not existing.get('title') and title:
+                            existing['title'] = title
+
+                # Check for next page link
+                next_page_url = f"/{slug}/episodenguide/staffel-{s}/{show_id}/{page + 1}"
+                if next_page_url in html:
+                    page += 1
+                    time.sleep(0.3)
+                else:
+                    break  # no next page
+
+            if season_had_episodes:
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
