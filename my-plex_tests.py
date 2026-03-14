@@ -3689,6 +3689,92 @@ class TestSourceE2E(unittest.TestCase):
         self.assertIn('themoviedb.org', result.stdout, "--help missing should mention themoviedb.org")
 
 
+class TestRename(unittest.TestCase):
+    """Tests for --rename command and EPISODE_NAME_PATTERN config."""
+
+    def test_help_rename(self):
+        """--help rename should show rename documentation."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'rename'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('RENAME EPISODES', result.stdout)
+        self.assertIn('EPISODE_NAME_PATTERN', result.stdout)
+        self.assertIn('{S0XE0X}', result.stdout)
+        self.assertIn('{TITLE}', result.stdout)
+        self.assertIn('{SERIES}', result.stdout)
+        self.assertIn('{WATCHED}', result.stdout)
+        self.assertIn('{WATCHEDDATE}', result.stdout)
+        self.assertIn('--dry-run', result.stdout)
+
+    def test_rename_without_target_errors(self):
+        """--rename without a library or media target should error."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename'],
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, "--rename without target should fail")
+        output = result.stdout + result.stderr
+        self.assertIn('ERROR', output)
+        self.assertIn('--rename requires', output)
+
+    def test_rename_dry_run_no_file_changes(self):
+        """--rename --dry-run should preview without changing files."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename', 'boston legal', '--dry-run'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--rename --dry-run should succeed, stderr: {result.stderr}")
+        self.assertIn('[DRY-RUN]', result.stdout, "Dry run should show [DRY-RUN] prefix")
+        self.assertNotIn('ERROR', result.stdout, "Dry run should not have errors")
+        self.assertNotIn('Traceback', result.stderr, "Should not produce stack trace")
+
+    def test_rename_obj_form_dry_run(self):
+        """my-plex 'boston legal' --rename --dry-run should work."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--rename', '--dry-run'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"obj form should succeed, stderr: {result.stderr}")
+        self.assertIn('[DRY-RUN]', result.stdout)
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_rename_config_default_exists(self):
+        """EPISODE_NAME_PATTERN should exist in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'EPISODE_NAME_PATTERN'", src, "CONFIG_DEFAULTS should include EPISODE_NAME_PATTERN")
+
+    def test_rename_in_media_argparser(self):
+        """--rename should be in PLEX_Media argparser."""
+        src = self._read_script()
+        self.assertIn("'--rename'", src, "PLEX_Media argparser should have --rename")
+
+    def test_rename_help_shows_current_pattern(self):
+        """--help rename should show the current pattern value."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'rename'],
+            capture_output=True, text=True, timeout=10)
+        self.assertIn('Current pattern:', result.stdout, "--help rename should show current pattern")
+
+    def test_rename_movie_error(self):
+        """--rename on a movie should print an error."""
+        # Use a known movie from cache — search for one
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename', 'movies.en', '--dry-run'],
+            capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        self.assertIn('Movie', output, "--rename on movie library should mention Movie type")
+
+
+class TestShowInfoSeasonTable(unittest.TestCase):
+    """Tests for --info on Show objects showing season table."""
+
+    def test_show_info_has_season_table(self):
+        """my-plex 'boston legal' --info should show a season table."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('SEASON', result.stdout, "Should have SEASON header")
+        self.assertIn('KEY', result.stdout, "Should have KEY header")
+        self.assertIn('EPISODES', result.stdout, "Should have EPISODES header")
+        self.assertIn('S01', result.stdout, "Should show S01")
+        self.assertIn('Season:', result.stdout, "Should show Season: keys")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -3720,6 +3806,8 @@ _UNITTEST_CLASSES = [
     TestExternalIdsInCache,
     TestEpisodeSourceConfig,
     TestSourceE2E,
+    TestRename,
+    TestShowInfoSeasonTable,
 ]
 
 # ---------------------------------------------------------------------------
