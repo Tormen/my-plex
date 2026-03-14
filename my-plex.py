@@ -1223,7 +1223,9 @@ _original_run_regression_tests = _test_mod.run_regression_tests
 _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_tsv_stale',
                        'extract_episode_date', 'is_special_episode', '_BUILTIN_EXTRACTORS',
                        'scrape_episodes', 'cmd_missing', '_determine_episode_source',
-                       'EMPTY_LIBRARY_STATS', 'CONFIG_DEFAULTS', 'CACHE')
+                       'EMPTY_LIBRARY_STATS', 'CONFIG_DEFAULTS', 'CACHE',
+                       'write_episodes_err', 'read_episodes_err', 'clear_episodes_err',
+                       'get_episodes_err_path', 'EPISODES_ERR_FILENAME')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
     for _name in _EPISODE_FUNC_NAMES:
@@ -7931,6 +7933,42 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
 
     return True
 
+# Accumulates TSV errors across all libraries during --update-cache for cache-updates.json
+_TSV_FAILED_SHOWS = []
+
+def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_dict):
+    """Classify a TSV scraping failure into an error_type and message.
+    Returns: (error_type, message)"""
+    import os
+    # No external IDs at all
+    if not external_ids:
+        return ('no_external_ids', 'No external IDs — use Plex > Fix Match to re-identify this show')
+
+    # Suspicious title: very short title but long directory name
+    dir_basename = os.path.basename(show_dir_name.rstrip('/'))
+    if len(show_title) <= 5 and len(dir_basename) > len(show_title) * 2:
+        return ('suspicious_title', f"Title '{show_title}' may be truncated (dir: {dir_basename})")
+
+    # Misidentified show: check if show has only 1 season with 1 episode
+    seasons = show_dict.get('seasons', {}) if show_dict else {}
+    total_episodes = 0
+    for s_key, s_data in seasons.items():
+        if s_key > 0:  # skip specials (season 0)
+            total_episodes += len(s_data.get('episodes', []))
+    real_seasons = sum(1 for s in seasons if s > 0)
+    if real_seasons <= 1 and total_episodes <= 1:
+        return ('misidentified_show', 'Likely a misidentified file — Fix Match in Plex')
+
+    # Source ID missing for the chosen source
+    source_id_map = {'tmdb': 'tmdb', 'tvdb': 'tvdb', 'fernsehserien.de': None}
+    needed_id = source_id_map.get(source)
+    if needed_id and not external_ids.get(needed_id):
+        return ('no_id_for_source', f'No {needed_id.upper()} ID found')
+
+    # Generic: source returned no data
+    return ('source_not_found', f'{source}: no data returned')
+
+
 def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     """Ensure episodes.tsv exists for all shows and normalize episode indices from TSV.
 
@@ -7944,8 +7982,9 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
 
     total_shows = len(shows_data)
     scraped_count = 0
+    fallback_count = 0
     existing_count = 0
-    failed_shows = []  # (title, reason)
+    failed_shows = []  # (title, error_type, reason, library_name)
     normalized_total = 0
     titles_total = 0
 
@@ -7966,31 +8005,26 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         show_dir = get_local_show_dir(show_dir_server)
         tsv_path = get_episodes_tsv_path(show_dir)
 
-        # Ensure TSV exists and is up-to-date
-        # Speed optimization: skip scraping if TSV exists AND is newer than show's updatedAt
-        # (if show hasn't changed in Plex, no new episodes to detect)
+        # Ensure TSV exists — during --update-cache we only scrape MISSING TSVs.
+        # Freshness of existing TSVs is handled by --missing (which checks staleness).
+        # Use --update-cache --force/--from-scratch to re-scrape all TSVs.
         tsv_episodes = None
-        needs_scrape = True
+        needs_scrape = False
         if os.path.isfile(tsv_path):
             _meta, tsv_episodes = read_episodes_tsv(tsv_path)
             if tsv_episodes:
                 existing_count += 1
-                # Smart skip: compare TSV file mtime with show's updatedAt
-                tsv_mtime = os.path.getmtime(tsv_path)
-                show_updated = show_dict.get('updatedAt')
-                if show_updated:
-                    # updatedAt available — TSV newer than last Plex change means nothing changed
-                    if tsv_mtime > show_updated:
-                        needs_scrape = False  # TSV is newer than last Plex update — skip regardless of age
-                else:
-                    # No updatedAt — fall back to age-based staleness (24h)
-                    if not is_episodes_tsv_stale(tsv_path):
-                        needs_scrape = False  # TSV is fresh (< 24h) — skip
-        if not tsv_episodes or needs_scrape:
+                if FROM_SCRATCH:
+                    needs_scrape = True  # --force/--from-scratch: re-scrape everything
+            else:
+                needs_scrape = True  # TSV exists but is empty/corrupt — re-scrape
+        else:
+            needs_scrape = True  # No TSV at all — must scrape
+        if needs_scrape:
             source = _determine_episode_source(show_dict)
             external_ids = show_dict.get('external_ids', {})
             if VRB:
-                reason = "missing" if not tsv_episodes else "stale"
+                reason = "missing" if not tsv_episodes else ("forced" if FROM_SCRATCH else "empty/corrupt")
                 print(f"{VRBPFX}Scraping episodes.tsv for '{show_title}' ({reason})...")
             try:
                 _meta, new_episodes = scrape_episodes(show_title, show_dir, source=source,
@@ -7998,19 +8032,32 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                 if new_episodes:
                     tsv_episodes = new_episodes
                     scraped_count += 1
+                    # Track fallback usage
+                    if _meta and _meta.get('_fallback_from'):
+                        fallback_count += 1
+                        if VRB:
+                            print(f"    Fallback: {show_title} ({_meta['_fallback_from']} → {_meta.get('source', '?')})")
+                    # Success — clear any previous error
+                    clear_episodes_err(show_dir)
                 elif not tsv_episodes:
-                    # Only count as failed if we had no existing TSV data either
-                    failed_shows.append((show_title, f'{source}: no data'))
+                    # Classify the failure
+                    error_type, message = _classify_tsv_error(
+                        show_title, show_dir_server, source, external_ids, show_dict)
+                    failed_shows.append((show_title, error_type, message, library_name))
+                    write_episodes_err(show_dir, error_type, source, message)
             except Exception as e:
                 if not tsv_episodes:
-                    failed_shows.append((show_title, str(e)[:60]))
+                    failed_shows.append((show_title, 'scrape_failed', str(e)[:60], library_name))
+                    write_episodes_err(show_dir, 'scrape_failed', source, str(e)[:80])
                 if VRB:
                     print(f"{VRBPFX}  WARNING: Failed to scrape episodes.tsv for '{show_title}': {e}")
 
         # Print progress every 10% (or every 10 shows for small libraries)
         step = max(1, total_shows // 10)
         if show_idx % step == 0 or show_idx == total_shows:
-            print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped, {len(failed_shows)} failed)", end='', flush=True)
+            fb_part = f", {fallback_count} fallback" if fallback_count else ""
+            fail_part = f", {len(failed_shows)} failed" if failed_shows else ""
+            print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped{fb_part}{fail_part})", end='', flush=True)
 
         if not tsv_episodes:
             continue
@@ -8106,6 +8153,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     # Summary
     print()  # newline after progress \r
     parts = [f"{existing_count} cached", f"{scraped_count} scraped"]
+    if fallback_count:
+        parts.append(f"{fallback_count} fallback")
     if failed_shows:
         parts.append(f"{len(failed_shows)} failed")
     if normalized_total > 0:
@@ -8113,9 +8162,82 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     if titles_total > 0:
         parts.append(f"{titles_total} titles filled")
     print(f"  episodes.tsv: {', '.join(parts)}")
-    if failed_shows and VRB:
-        for title, reason in failed_shows:
-            print(f"    FAILED: {title} — {reason}")
+
+    # Always print failure details (actionable for the user)
+    if failed_shows:
+        # Group by error_type for compact display
+        from collections import defaultdict
+        by_type = defaultdict(list)
+        for title, error_type, message, lib in failed_shows:
+            by_type[error_type].append((title, lib))
+        _ERROR_TYPE_LABELS = {
+            'no_external_ids':  'No external IDs (fix in Plex)',
+            'suspicious_title': 'Suspicious title (may be truncated)',
+            'misidentified_show': 'Misidentified show',
+            'no_id_for_source': 'No ID for source',
+            'source_not_found': 'Source not found',
+            'scrape_failed':    'Scrape failed',
+        }
+        for etype, shows in by_type.items():
+            label = _ERROR_TYPE_LABELS.get(etype, etype)
+            for title, lib in shows:
+                print(f"    {label + ':':40s} {title} ({lib})")
+
+    # Accumulate for cache-updates.json
+    _TSV_FAILED_SHOWS.extend(failed_shows)
+
+
+def _list_tsv_problems():
+    """Scan all show directories for episodes.err files and print grouped results.
+    Returns: number of issues found."""
+    import os
+    from collections import defaultdict
+
+    _ERROR_TYPE_LABELS = {
+        'no_external_ids':    'No external IDs (fix in Plex > Fix Match)',
+        'suspicious_title':   'Suspicious title (may be truncated)',
+        'misidentified_show': 'Misidentified show (1 episode, fix in Plex)',
+        'no_id_for_source':   'No ID for source',
+        'source_not_found':   'Source not found',
+        'scrape_failed':      'Scrape failed',
+    }
+
+    by_type = defaultdict(list)
+    total = 0
+
+    for show_key, show_seasons in PLEX_Media.OBJ_BY_SHOW.items():
+        show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
+        if not show_dict:
+            continue
+        show_dir_server = show_dict.get('file', '')
+        if not show_dir_server:
+            continue
+        show_dir = get_local_show_dir(show_dir_server)
+        err_data = read_episodes_err(show_dir)
+        if err_data:
+            error_type = err_data.get('error_type', 'unknown')
+            message = err_data.get('message', '')
+            title = show_dict.get('title', '?')
+            # Find which library this show belongs to
+            lib = '?'
+            for lib_name, lib_data in PLEX_Media.OBJ_BY_LIBRARY.items():
+                if show_key in lib_data.get('Show', []):
+                    lib = lib_name
+                    break
+            by_type[error_type].append((title, lib))
+            total += 1
+
+    if total == 0:
+        print("  No episode data issues found.")
+        return 0
+
+    for etype, shows in by_type.items():
+        label = _ERROR_TYPE_LABELS.get(etype, etype)
+        print(f"  {label}:")
+        for title, lib in sorted(shows):
+            print(f"    {title:40s} {lib}")
+    print(f"\n  {total} issue(s) found.")
+    return total
 
 
 def _store_collections_from_database(library_section_id, library_name):
@@ -13385,6 +13507,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  2. --excess-versions 3  Detect entries with 3+ file versions")
             print("                          (likely accidental duplicates merged under one entry)")
             print()
+            print("  3. Episode data issues  Scan for episodes.err files written by --update-cache")
+            print("                          (no external IDs, misidentified shows, truncated titles,")
+            print("                          scraper failures)")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -13771,6 +13897,61 @@ def get_episodes_tsv_path(show_dir):
     return os.path.join(show_dir, EPISODES_TSV_FILENAME)
 
 
+EPISODES_ERR_FILENAME = 'episodes.err'
+
+def get_episodes_err_path(show_dir):
+    """Return path to episodes.err for a given show directory (local path)."""
+    import os
+    return os.path.join(show_dir, EPISODES_ERR_FILENAME)
+
+
+def write_episodes_err(show_dir, error_type, source, message):
+    """Write an episodes.err file recording an episode data problem.
+    Args:
+        show_dir: local show directory path
+        error_type: machine-readable type (no_external_ids, source_not_found, etc.)
+        source: data source that failed (tmdb, tvdb, fernsehserien.de, etc.)
+        message: human-readable description
+    """
+    import os
+    from datetime import date
+    err_path = get_episodes_err_path(show_dir)
+    os.makedirs(show_dir, exist_ok=True)
+    with open(err_path, 'w', encoding='utf-8') as f:
+        f.write('# my-plex episode data error\n')
+        f.write(f'# updated: {date.today().isoformat()}\n')
+        f.write(f'error_type: {error_type}\n')
+        f.write(f'source: {source}\n')
+        f.write(f'message: {message}\n')
+
+
+def read_episodes_err(show_dir):
+    """Read an episodes.err file and return a dict with keys error_type, source, message.
+    Returns None if the file does not exist."""
+    import os
+    err_path = get_episodes_err_path(show_dir)
+    if not os.path.isfile(err_path):
+        return None
+    result = {}
+    with open(err_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if ':' in line:
+                key, _, value = line.partition(':')
+                result[key.strip()] = value.strip()
+    return result if result else None
+
+
+def clear_episodes_err(show_dir):
+    """Delete episodes.err if it exists (problem resolved)."""
+    import os
+    err_path = get_episodes_err_path(show_dir)
+    if os.path.isfile(err_path):
+        os.remove(err_path)
+
+
 def get_local_show_dir(show_dir_server):
     """Translate a server path (e.g. /Volumes/2/watch.v/...) to local path using ALTERNATIVE_ROOTPATHS.
     Returns the first alternative path that exists locally, or the original path if it exists."""
@@ -13978,6 +14159,28 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
         case _:
             if VRB: print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
             return metadata, existing_episodes
+
+    # Fallback chain: if primary source failed, try alternatives based on external_ids
+    original_source = source
+    if result is None and external_ids:
+        fallback_sources = []
+        if source != 'tmdb' and external_ids.get('tmdb'):
+            fallback_sources.append('tmdb')
+        if source != 'tvdb' and external_ids.get('tvdb'):
+            fallback_sources.append('tvdb')
+        # fernsehserien.de has no ID-based lookup, so not a useful fallback
+
+        for fb_source in fallback_sources:
+            if VRB: print(f"    Fallback: trying {fb_source} for '{show_title}'...")
+            match fb_source:
+                case 'tvdb':
+                    result = _scrape_tvdb(show_title, metadata, existing_episodes, external_ids)
+                case 'tmdb':
+                    result = _scrape_tmdb(show_title, metadata, existing_episodes, external_ids)
+            if result is not None:
+                source = fb_source
+                metadata['_fallback_from'] = original_source  # record original source that failed
+                break
 
     if result is None:
         return metadata, existing_episodes
@@ -16752,6 +16955,13 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
     broken_details = getattr(PLEX_Media, 'last_metadata_broken_details', [])
     log['broken_files_from_metadata'] = broken_details
 
+    # TSV scraping errors
+    if _TSV_FAILED_SHOWS:
+        log['tsv_errors'] = [
+            {'show': title, 'library': lib, 'error_type': etype, 'message': msg}
+            for title, etype, msg, lib in _TSV_FAILED_SHOWS
+        ]
+
     try:
         import json
         with open(CACHE_UPDATES_FILE, 'w') as f:
@@ -17180,13 +17390,18 @@ def execute_global_commands(args, cmd_args):
         result = PLEX_Media._list_excess_versions(obj_keys, None, 3)
         excess_file_count, excess_entry_count = result if result else (0, 0)
 
+        # 3. Episode data issues
+        print("\n--- Episode Data (TSV) Issues ---")
+        tsv_problem_count = _list_tsv_problems()
+
         # Summary
         print("\n" + "=" * 76)
         print("SUMMARY")
         print("=" * 76)
         print(f"  Broken/truncated files:   {broken_count}")
         print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
-        total_problems = broken_count + excess_entry_count
+        print(f"  Episode data issues:      {tsv_problem_count}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
