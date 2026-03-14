@@ -14983,6 +14983,76 @@ def show_system_info():
     else:
         print(f"  {'Status':<12} Not connected")
 
+    # API & connectivity status
+    print("\nAPI STATUS:")
+    import subprocess, urllib.request, json
+
+    # 1. Plex API
+    if plex:
+        print(f"  {'Plex API':<16} ✓ connected ({PLEX_URL})")
+    elif OFFLINE:
+        print(f"  {'Plex API':<16} - skipped (offline mode)")
+    elif PLEX_URL and PLEX_TOKEN:
+        print(f"  {'Plex API':<16} ✗ configured but not connected")
+    else:
+        print(f"  {'Plex API':<16} ✗ not configured (set PLEX_URL + PLEX_TOKEN)")
+
+    # 2. Plex DB via SSH
+    if OFFLINE:
+        print(f"  {'Plex DB (SSH)':<16} - skipped (offline mode)")
+    elif PLEX_DB_REMOTE_HOST:
+        try:
+            result = subprocess.run(
+                ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', PLEX_DB_REMOTE_HOST, 'echo ok'],
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
+            else:
+                print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
+        except Exception:
+            print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
+    else:
+        print(f"  {'Plex DB (SSH)':<16} ✗ not configured (set PLEX_DB_REMOTE_HOST)")
+
+    # 3. TVDB API
+    if TVDB_API_KEY:
+        try:
+            # Try a fresh login to actually test connectivity
+            url = 'https://api4.thetvdb.com/v4/login'
+            payload = json.dumps({'apikey': TVDB_API_KEY}).encode('utf-8')
+            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data.get('data', {}).get('token'):
+                    print(f"  {'TVDB API':<16} ✓ authenticated (key: ...{TVDB_API_KEY[-6:]})")
+                else:
+                    print(f"  {'TVDB API':<16} ✗ login returned no token")
+        except Exception as e:
+            print(f"  {'TVDB API':<16} ✗ login failed: {e}")
+    else:
+        print(f"  {'TVDB API':<16} - not configured (optional, for --missing)")
+
+    # 4. TMDB API
+    if TMDB_API_KEY:
+        try:
+            req = urllib.request.Request(
+                'https://api.themoviedb.org/3/configuration',
+                headers={'Authorization': f'Bearer {TMDB_API_KEY}', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    print(f"  {'TMDB API':<16} ✓ authenticated (token: ...{TMDB_API_KEY[-6:]})")
+                else:
+                    print(f"  {'TMDB API':<16} ✗ unexpected status {resp.status}")
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print(f"  {'TMDB API':<16} ✗ authentication failed (invalid token)")
+            else:
+                print(f"  {'TMDB API':<16} ✗ request failed: {e}")
+        except Exception as e:
+            print(f"  {'TMDB API':<16} ✗ request failed: {e}")
+    else:
+        print(f"  {'TMDB API':<16} - not configured (optional, for --missing)")
+
     # Cache information
     print("\nCACHE:")
     cache_path = Path(CACHE_FILE).expanduser()
