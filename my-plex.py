@@ -16459,7 +16459,7 @@ def execute_global_commands(args, cmd_args):
         }
         agents = CACHE.get('library_stats', {}).get('agent', {})
         languages = CACHE.get('library_stats', {}).get('language', {})
-        print(f"library-name\tmy-plex\tplex-agent\t--missing source")
+        print(f"library-name\tmy-plex\tplex-media-info-source\t--missing source")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
