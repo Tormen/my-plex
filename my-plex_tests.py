@@ -3785,6 +3785,154 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertRegex(result.stdout, r'S01E\d+', "Should show S01 episodes")
 
 
+class TestEpisodesErr(unittest.TestCase):
+    """Test episodes.err read/write/clear functions and --problems TSV integration."""
+
+    def test_write_read_roundtrip(self):
+        """Write episodes.err and read it back, verify data integrity."""
+        import tempfile, os
+        show_dir = tempfile.mkdtemp()
+        try:
+            write_episodes_err(show_dir, 'no_external_ids', 'tmdb',
+                               'No TMDB ID — use Plex > Fix Match')
+            result = read_episodes_err(show_dir)
+            self.assertIsNotNone(result)
+            self.assertEqual(result['error_type'], 'no_external_ids')
+            self.assertEqual(result['source'], 'tmdb')
+            self.assertIn('Fix Match', result['message'])
+        finally:
+            import shutil
+            shutil.rmtree(show_dir)
+
+    def test_read_nonexistent(self):
+        """Reading from directory without episodes.err returns None."""
+        import tempfile
+        show_dir = tempfile.mkdtemp()
+        try:
+            result = read_episodes_err(show_dir)
+            self.assertIsNone(result)
+        finally:
+            import shutil, os
+            shutil.rmtree(show_dir)
+
+    def test_clear_removes_file(self):
+        """clear_episodes_err removes the file."""
+        import tempfile, os
+        show_dir = tempfile.mkdtemp()
+        try:
+            write_episodes_err(show_dir, 'scrape_failed', 'tvdb', 'timeout')
+            err_path = get_episodes_err_path(show_dir)
+            self.assertTrue(os.path.isfile(err_path))
+            clear_episodes_err(show_dir)
+            self.assertFalse(os.path.isfile(err_path))
+        finally:
+            import shutil
+            shutil.rmtree(show_dir)
+
+    def test_clear_nonexistent_is_noop(self):
+        """clear_episodes_err on missing file does not raise."""
+        import tempfile
+        show_dir = tempfile.mkdtemp()
+        try:
+            clear_episodes_err(show_dir)  # should not raise
+        finally:
+            import shutil
+            shutil.rmtree(show_dir)
+
+    def test_err_file_format(self):
+        """Verify episodes.err has expected format with comments and key-value lines."""
+        import tempfile, os
+        show_dir = tempfile.mkdtemp()
+        try:
+            write_episodes_err(show_dir, 'suspicious_title', 'fernsehserien.de',
+                               "Title 'The G' may be truncated")
+            err_path = get_episodes_err_path(show_dir)
+            with open(err_path, 'r') as f:
+                content = f.read()
+            self.assertIn('# my-plex episode data error', content)
+            self.assertIn('# updated:', content)
+            self.assertIn('error_type: suspicious_title', content)
+            self.assertIn('source: fernsehserien.de', content)
+        finally:
+            import shutil
+            shutil.rmtree(show_dir)
+
+    def test_episodes_err_functions_exist(self):
+        """Source must define episodes.err functions."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        for func_name in ('write_episodes_err', 'read_episodes_err',
+                          'clear_episodes_err', 'get_episodes_err_path'):
+            self.assertIn(f'def {func_name}(', content,
+                          f"Must define {func_name}")
+
+    def test_scrape_episodes_has_fallback(self):
+        """scrape_episodes must contain fallback chain logic."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        import re
+        match = re.search(r'def scrape_episodes\(.*?\ndef ', content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find scrape_episodes function")
+        body = match.group(0)
+        self.assertIn('fallback_sources', body, "Must have fallback_sources list")
+        self.assertIn('_fallback_from', body, "Must record fallback origin")
+
+    def test_problems_includes_tsv_section(self):
+        """--problems handler must call _list_tsv_problems."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must find --problems handler block")
+        body = match.group(1)
+        self.assertIn('_list_tsv_problems()', body, "Must call _list_tsv_problems")
+        self.assertIn('Episode Data', body, "Must have Episode Data section header")
+
+    def test_problems_summary_includes_tsv_count(self):
+        """--problems summary must include tsv_problem_count."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('tsv_problem_count', body)
+        self.assertIn('Episode data issues', body)
+
+    def test_problems_e2e(self):
+        """--problems runs without error (E2E)."""
+        import subprocess, sys
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--problems'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
+        self.assertIn('PROBLEM DETECTION', result.stdout)
+        self.assertIn('Episode Data', result.stdout)
+        self.assertIn('SUMMARY', result.stdout)
+
+
+class TestEpisodesErrClassification(unittest.TestCase):
+    """Test _classify_tsv_error error classification."""
+
+    def test_classify_no_external_ids(self):
+        """Empty external_ids should classify as no_external_ids."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        self.assertIn('def _classify_tsv_error(', content)
+
+    def test_classify_function_checks_title_length(self):
+        """_classify_tsv_error must check for suspicious (short) titles."""
+        with open(MAIN_SCRIPT, 'r') as f:
+            content = f.read()
+        import re
+        match = re.search(r'def _classify_tsv_error\(.*?\n(?=def )', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('suspicious_title', body)
+        self.assertIn('misidentified_show', body)
+        self.assertIn('no_id_for_source', body)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -3818,6 +3966,8 @@ _UNITTEST_CLASSES = [
     TestSourceE2E,
     TestRename,
     TestShowInfoSeasonTable,
+    TestEpisodesErr,
+    TestEpisodesErrClassification,
 ]
 
 # ---------------------------------------------------------------------------
