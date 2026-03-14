@@ -1,6 +1,6 @@
 # my-plex
 
-A comprehensive Plex media management tool with direct database access, intelligent caching, and multi-source episode tracking.
+The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
 **17,000+ lines of Python** | **370 tests** | **Offline-capable** | **60x faster than Plex API**
 
