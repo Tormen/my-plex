@@ -16461,8 +16461,7 @@ def execute_global_commands(args, cmd_args):
         agents = lib_stats.get('agent', {})
         languages = lib_stats.get('language', {})
         items_count = lib_stats.get('itemsCount', {})
-        episodes_count = lib_stats.get('episodesCount', {})
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODES\t--MISSING SOURCE\tSOURCE-REASON")
+        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t--MISSING SOURCE")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
@@ -16470,29 +16469,22 @@ def execute_global_commands(args, cmd_args):
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
             lang = languages.get(lib_name, '-')
             items = items_count.get(lib_name, '-')
-            episodes = episodes_count.get(lib_name, '-')
-            # Determine --missing episode source + reason for Show libraries
+            # Determine --missing episode source for Show libraries
             if l_type == 'Show':
                 lib_lang = languages.get(lib_name, '')
                 if MISSING_EPISODES_SOURCE and lib_name in MISSING_EPISODES_SOURCE:
-                    missing_src = MISSING_EPISODES_SOURCE[lib_name]
-                    src_reason = 'config: MISSING_EPISODES_SOURCE'
+                    missing_src = f'{MISSING_EPISODES_SOURCE[lib_name]} (config)'
                 elif lib_lang.startswith('de'):
-                    missing_src = 'fernsehserien.de'
-                    src_reason = f'auto: language={lib_lang}'
+                    missing_src = f'fernsehserien.de (lang={lib_lang})'
                 elif TVDB_API_KEY:
-                    missing_src = 'tvdb'
-                    src_reason = 'auto: TVDB_API_KEY configured'
+                    missing_src = 'tvdb (API key configured)'
                 elif TMDB_API_KEY:
-                    missing_src = 'tmdb'
-                    src_reason = 'auto: TMDB_API_KEY configured'
+                    missing_src = 'tmdb (API key configured)'
                 else:
-                    missing_src = 'tvdb'
-                    src_reason = 'auto: default (no API key configured)'
+                    missing_src = 'tvdb (no API key!)'
             else:
                 missing_src = '-'
-                src_reason = '-'
-            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{episodes}\t{missing_src}\t{src_reason}")
+            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
