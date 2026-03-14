@@ -16481,6 +16481,8 @@ def execute_global_commands(args, cmd_args):
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
             lang = languages.get(lib_name, '-')
+            if lang == 'xn':
+                lang = 'none'
             items = items_count.get(lib_name, '-')
             # Determine --missing episode source for Show libraries
             if l_type == 'Show':
