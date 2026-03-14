@@ -16459,19 +16459,34 @@ def execute_global_commands(args, cmd_args):
         }
         agents = CACHE.get('library_stats', {}).get('agent', {})
         languages = CACHE.get('library_stats', {}).get('language', {})
-        print(f"library-name\tmy-plex\tplex-media-info-source\t--missing source")
+        print(f"library-name\tmy-plex\tplex-media-info-source\t--missing source\tsource-reason")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
-            # Determine --missing episode source for Show libraries
+            # Determine --missing episode source + reason for Show libraries
             if l_type == 'Show':
-                dummy = {'library': lib_name}
-                missing_src = _determine_episode_source(dummy)
+                lib_lang = languages.get(lib_name, '')
+                if MISSING_EPISODES_SOURCE and lib_name in MISSING_EPISODES_SOURCE:
+                    missing_src = MISSING_EPISODES_SOURCE[lib_name]
+                    src_reason = 'config: MISSING_EPISODES_SOURCE'
+                elif lib_lang.startswith('de'):
+                    missing_src = 'fernsehserien.de'
+                    src_reason = f'auto: language={lib_lang}'
+                elif TVDB_API_KEY:
+                    missing_src = 'tvdb'
+                    src_reason = 'auto: TVDB_API_KEY configured'
+                elif TMDB_API_KEY:
+                    missing_src = 'tmdb'
+                    src_reason = 'auto: TMDB_API_KEY configured'
+                else:
+                    missing_src = 'tvdb'
+                    src_reason = 'auto: default (no API key configured)'
             else:
                 missing_src = '-'
-            print(f"{lib_name}\t{supported}\t{agent}\t{missing_src}")
+                src_reason = '-'
+            print(f"{lib_name}\t{supported}\t{agent}\t{missing_src}\t{src_reason}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
