@@ -13389,7 +13389,7 @@ def is_special_episode(filename, specials_pattern=None):
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
-def scrape_episodes(show_title, show_dir, source='fernsehserien.de', force=False, external_ids=None):
+def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids=None):
     """Main scraper dispatcher. Updates episodes.tsv for a show.
 
     1. Read existing episodes.tsv for metadata (slug, show_id, source)
@@ -14361,20 +14361,24 @@ def cmd_sort_new(args, dry_run=False):
 
         total_shows_processed += 1
 
+        # Determine episode source for this show
+        source = _determine_episode_source(show_dict)
+        external_ids = show_dict.get('external_ids', {})
+
         # Load / update episodes.tsv
         tsv_path = get_episodes_tsv_path(show_dir)
         metadata, all_episodes = None, None
 
         if os.path.isfile(tsv_path):
             if is_episodes_tsv_stale(tsv_path):
-                metadata, all_episodes = scrape_episodes(show_title, show_dir)
+                metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
             else:
                 metadata, all_episodes = read_episodes_tsv(tsv_path)
 
         if not all_episodes:
             # Try scraping
             print(f"\n  [{show_title}] No episodes.tsv — attempting to scrape...")
-            metadata, all_episodes = scrape_episodes(show_title, show_dir, force=True)
+            metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
 
         # Build date lookup: date_str -> (season, episode, title)
         date_lookup = {}
