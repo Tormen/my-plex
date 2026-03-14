@@ -16491,14 +16491,14 @@ def execute_global_commands(args, cmd_args):
                     missing_src = f'fernsehserien.de (lang={lib_lang})'
                 elif agent_id in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
                     if TMDB_API_KEY:
-                        missing_src = 'tmdb (matches plex agent)'
+                        missing_src = 'tmdb (matches plex agent, API key configured)'
                     elif TVDB_API_KEY:
                         missing_src = 'tvdb (fallback, no TMDB key)'
                     else:
                         missing_src = 'tmdb (no API key!)'
                 elif agent_id == 'com.plexapp.agents.thetvdb':
                     if TVDB_API_KEY:
-                        missing_src = 'tvdb (matches plex agent)'
+                        missing_src = 'tvdb (matches plex agent, API key configured)'
                     elif TMDB_API_KEY:
                         missing_src = 'tmdb (fallback, no TVDB key)'
                     else:
