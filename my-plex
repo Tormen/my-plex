@@ -77,16 +77,14 @@ _my-plex() {
             has_list=1
         elif [[ "$word" == "--duplicates" ]]; then
             has_duplicates=1
-            has_list=1
+            has_list=1  # --duplicates auto-enables --list, so --type should be available
         elif [[ "$word" == "--broken" ]]; then
             has_broken=1
-            has_list=1
+            has_list=1  # --broken auto-enables --list, so --type should be available
         elif [[ "$word" == "--resolve" ]]; then
             has_resolve=1
-            has_duplicates=1
-            has_list=1
-        elif [[ "$word" == "--problems" ]]; then
-            has_problems=1
+            has_duplicates=1  # --resolve auto-enables --duplicates
+            has_list=1  # --resolve auto-enables --list, so --type should be available
         elif [[ "$word" == "--list" ]]; then
             has_list=1
         elif [[ "$word" == "--update-cache" ]] || [[ "$word" == "--rebuild-cache" ]] || [[ "$word" == "-U" ]]; then
@@ -139,9 +137,6 @@ _my-plex() {
     # Only add --force/--from-scratch/--force-plexdata/--force-metadata if --update-cache is present
     if [[ $has_update_cache -eq 1 ]]; then
         args_spec+=('--force[Force complete cache rebuild from scratch]')
-        args_spec+=('--from-scratch[Rebuild cache from scratch]')
-        args_spec+=('--force-plexdata[Force re-fetch of Plex data]')
-        args_spec+=('--force-metadata[Force re-fetch of metadata]')
     fi
 
     # Only add --duplicates if --list is present (but not if --list-duplicates or --resolve is already there)
