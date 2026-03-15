@@ -8871,6 +8871,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--rename', action='store_true', help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show libraries only. Use --help rename for details.")
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
+    argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). Use --help unsorted for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
@@ -10268,6 +10269,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"\n--- Unmatched Items in '{lib_name}' (not identified by any Plex metadata agent) ---")
             PLEX_Media._list_unmatched(obj_keys, lib_name)
 
+        # Handle --unsorted: list shows with episodes directly in show dir (no season subdirs)
+        if safe_getattr(obj_args, 'unsorted', False):
+            lib_name = obj
+            print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
+            PLEX_Media._list_unsorted(library_name=lib_name)
+
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -11295,6 +11302,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
     argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Compares scraped episode data against Plex cache. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
+    argparser.add_argument('--unsorted', action='store_true',        help="Check if this show has episodes without season subdirs. Use --help unsorted for details.")
     argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
 
@@ -11336,6 +11344,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if safe_getattr(obj_args, 'missing', False):
             # Resolve media object to a show — use cache, not API
             cmd_missing(obj, source_override=safe_getattr(obj_args, 'source', None))
+        if safe_getattr(obj_args, 'unsorted', False):
+            # Resolve media object to find the show key
+            found_items = resolve_cache_items(obj) if isinstance(obj, str) else [obj]
+            for item in found_items:
+                if isinstance(item, tuple):
+                    item_key, item = item
+                else:
+                    item_key = f"{item['type']}:{item['id']}"
+                if item.get('type') == 'Show':
+                    print(f"\n--- Unsorted Check for '{item.get('title', '?')}' ---")
+                    PLEX_Media._list_unsorted(show_key_filter=item_key)
         if safe_getattr(obj_args, 'rename', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
@@ -11807,6 +11826,62 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  {obj_type:<7} ID:{plex_id:<7} {title[:45]:<45} {library:<20} {filepath}")
         print(f"\n  {len(unmatched)} unmatched item(s) found.")
         return len(unmatched)
+
+    @staticmethod
+    def _list_unsorted(library_name=None, show_key_filter=None):
+        """List shows with episodes directly in the show directory (no season subdirs).
+        Plex needs season directories (e.g. 'Season 01/') for proper organization.
+        Returns count of unsorted shows."""
+        unsorted = []
+        for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+            show = PLEX_Media.OBJ_BY_ID.get(show_key)
+            if not show:
+                continue
+            if show.get('type') != 'Show':
+                continue
+            if library_name and show.get('library') != library_name:
+                continue
+            if show_key_filter and show_key != show_key_filter:
+                continue
+            show_dir = show.get('file', '')
+            if not show_dir:
+                continue
+            title = show.get('title', '?')
+            library = show.get('library', '?')
+            # Check all episode filepaths: if dirname(filepath) == show_dir, it's unsorted
+            unsorted_files = []
+            for s_str, episodes in seasons.items():
+                for e_str, versions in episodes.items():
+                    for version, ep_keys in versions.items():
+                        for ep_key in ep_keys:
+                            ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                            if not ep:
+                                continue
+                            filepath = ep.get('file', '')
+                            if not filepath:
+                                continue
+                            ep_dir = os.path.dirname(filepath)
+                            if ep_dir == show_dir:
+                                unsorted_files.append((s_str, e_str, filepath))
+            if unsorted_files:
+                unsorted.append((show_key, title, library, show_dir, unsorted_files))
+
+        if not unsorted:
+            scope = f" in '{library_name}'" if library_name else ""
+            if not show_key_filter:
+                print(f"  All shows{scope} have proper season directories.")
+            return 0
+
+        unsorted.sort(key=lambda x: (x[2].lower(), x[1].lower()))  # library, title
+
+        for show_key, title, library, show_dir, files in unsorted:
+            print(f"\n  {title:<45} {library:<20} {show_dir}")
+            for s_str, e_str, filepath in sorted(files):
+                print(f"    {s_str} {e_str}: {filepath}")
+
+        total_files = sum(len(f) for _, _, _, _, f in unsorted)
+        print(f"\n  {len(unsorted)} show(s) with {total_files} unsorted episode(s) found.")
+        return len(unsorted)
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -13441,7 +13516,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -13863,6 +13938,12 @@ def main_print_help(args, remaining_args, main_parser):
             print("                          (no external IDs, misidentified shows, truncated titles,")
             print("                          scraper failures)")
             print()
+            print("  4. --unmatched          Detect items not matched by Plex metadata agent")
+            print("                          (local:// guid — Fix Match needed)")
+            print()
+            print("  5. --unsorted           Detect shows with episodes directly in show dir")
+            print("                          (missing season subdirectories)")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -13881,6 +13962,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
             print("  my-plex --broken                # Show broken/truncated files only")
             print("  my-plex --unmatched             # Show unmatched items only")
+            print("  my-plex --unsorted              # Show unsorted shows only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -13919,6 +14001,43 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --unmatched                # All unmatched across all libraries")
             print("  my-plex ,unsorted --unmatched      # Unmatched in ,unsorted only")
             print("  my-plex --problems                 # Includes unmatched in full report")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'unsorted':
+            print()
+            print("=" * 76)
+            print("UNSORTED SHOWS HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --unsorted")
+            print("       my-plex <library> --unsorted")
+            print("       my-plex <show> --unsorted")
+            print()
+            print("Lists shows where episode files are directly in the show directory")
+            print("instead of being organized into season subdirectories.")
+            print()
+            print("Plex expects series to be organized as:")
+            print("  /library/Show Name/Season 01/S01E01 - Title.mkv")
+            print("  /library/Show Name/Season 02/S02E01 - Title.mkv")
+            print()
+            print("Unsorted episodes are found directly under the show directory:")
+            print("  /library/Show Name/S01E01 - Title.mkv    ← no season dir!")
+            print()
+            print("WHY THIS MATTERS:")
+            print("  Plex needs season directories for proper metadata matching.")
+            print("  Without them, episodes may be misidentified or missing metadata.")
+            print()
+            print("TO FIX: Move episodes into 'Season XX' subdirectories, then")
+            print("        run: my-plex <library> --scan")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --unsorted                 # All unsorted across all libraries")
+            print("  my-plex series.en --unsorted       # Unsorted in series.en only")
+            print("  my-plex 'Breaking Bad' --unsorted  # Check a specific show")
+            print("  my-plex --problems                 # Includes unsorted in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -17824,6 +17943,10 @@ def execute_global_commands(args, cmd_args):
         print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
         unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
 
+        # 5. Unsorted shows
+        print("\n--- Unsorted Shows (episodes without season directories) ---")
+        unsorted_count = PLEX_Media._list_unsorted()
+
         # Summary
         print("\n" + "=" * 76)
         print("SUMMARY")
@@ -17832,7 +17955,8 @@ def execute_global_commands(args, cmd_args):
         print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
         print(f"  Episode data issues:      {tsv_problem_count}")
         print(f"  Unmatched items:          {unmatched_count}")
-        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count
+        print(f"  Unsorted shows:           {unsorted_count}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
@@ -17850,6 +17974,15 @@ def execute_global_commands(args, cmd_args):
         scope = f" in '{library_name}'" if library_name else ""
         print(f"\n--- Unmatched Items{scope} (not identified by any Plex metadata agent) ---")
         PLEX_Media._list_unmatched(obj_keys, library_name)
+        return
+
+    # Handle --unsorted [LIBRARY]: list shows with episodes in show dir without season subdirs
+    unsorted_val = safe_getattr(cmd_args, 'unsorted', None)
+    if unsorted_val is not None:
+        library_name = None if unsorted_val is True else unsorted_val
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Unsorted Shows{scope} (episodes without season directories) ---")
+        PLEX_Media._list_unsorted(library_name=library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -18200,6 +18333,7 @@ def main():
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
@@ -18237,8 +18371,9 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted). Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -18518,6 +18653,21 @@ def main():
                 remaining_args.append('--unmatched')
             else:
                 remaining_args.insert(0, '--unmatched')
+
+    # Re-inject --unsorted into remaining_args
+    # Same pattern as --unmatched: supports --unsorted [LIBRARY], <PLEXOBJ> --unsorted, bare --unsorted
+    if safe_getattr(args, 'unsorted', None) is not None:
+        if args.unsorted is not True:
+            # --unsorted <LIBRARY> — explicit library name, goes through global command path
+            remaining_args.insert(0, '--unsorted')
+            remaining_args.insert(1, args.unsorted)
+        else:
+            # bare --unsorted — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
+            # otherwise it's a global command (list all unsorted)
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--unsorted')
+            else:
+                remaining_args.insert(0, '--unsorted')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
