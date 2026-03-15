@@ -10558,8 +10558,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE:
             PLEX_Media.OBJ_BY_FILEPATH = {}
             for key, obj in PLEX_Media.OBJ_BY_ID.items():
-                if obj.get('type') in ('Show', 'Season', 'Collection'):
+                obj_type = obj.get('type')
+                if obj_type == 'Collection':
                     continue
+                # Show/Season: store directory path (no 'files' dict, just 'file')
+                if obj_type in ('Show', 'Season'):
+                    dirpath = obj.get('file', '')
+                    if dirpath:
+                        if dirpath not in PLEX_Media.OBJ_BY_FILEPATH:
+                            PLEX_Media.OBJ_BY_FILEPATH[dirpath] = []
+                        if key not in PLEX_Media.OBJ_BY_FILEPATH[dirpath]:
+                            PLEX_Media.OBJ_BY_FILEPATH[dirpath].append(key)
+                    continue
+                # Movie/Episode: store each file path
                 for _ver, fi in obj.get('files', {}).items():
                     fp = fi.get('filepath') if isinstance(fi, dict) else None
                     if fp:
@@ -17712,6 +17723,31 @@ def main():
             print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+
+    # =====================================================================
+    # CLI DESIGN AXIOMS
+    # =====================================================================
+    # 1. SYMMETRY:  my-plex --cmd <object>  AND  my-plex <object> --cmd
+    #    must both work. The user should never have to remember which order.
+    #
+    # 2. GLOBAL FALLBACK:  When a command makes sense without an object,
+    #    allow global usage.  E.g. my-plex --info (system overview),
+    #    my-plex --list (all media), my-plex --problems (all checks).
+    #
+    # 3. FLEXIBLE <object>:  An object can be identified by any of:
+    #    - Title (partial, case-insensitive):  my-plex 'boston legal' --info
+    #    - Plex ID:                            my-plex ID:4925 --info
+    #    - Cache key:                          my-plex Show:4925 --info
+    #    - Filepath (server or local, with path translation):
+    #                                          my-plex /path/to/show --info
+    #    Object type is auto-detected (library, media, playlist, collection).
+    #
+    # 4. HELP STRUCTURE:
+    #    - my-plex               → global options overview
+    #    - my-plex --help        → same as above
+    #    - my-plex --help <topic>→ detailed help for <topic>
+    #    - my-plex --help all    → complete structured help (global + all objects)
+    # =====================================================================
 
     main_parser = argparse.ArgumentParser( description="Plex Database Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
     main_parser.add_argument('-O', '--offline', action='store_true', help=f"Work entirely from local cache without connecting to Plex server or SSH. Defaults to '{OFFLINE}'", default=OFFLINE)
