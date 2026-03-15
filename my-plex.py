@@ -1050,6 +1050,15 @@ def load_media_cache(source):
             err(1080, f"Cache format is outdated (OBJ_BY_LIBRARY has old structure).\n"
                       f"Please rebuild: my-plex --update-cache --from-scratch")
 
+    # Detect missing guid field (added for --unmatched support)
+    # Only warn — don't fatal, since most commands don't need guid.
+    # --unmatched and --problems will check and error at point of use.
+    for obj in PLEX_Media.OBJ_BY_ID.values():
+        if obj.get('type') in ('Movie', 'Show'):
+            if 'guid' not in obj:
+                PLEX_Media._cache_missing_guid = True
+            break  # only need to check one
+
 def update_and_save_cache(obj_dict):
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
 
@@ -2595,6 +2604,7 @@ def fetch_movies_from_database(library_section_id):
         mi.duration as metadata_duration,
         mi.added_at,
         mi.updated_at,
+        mi.guid,
         ls.name as library_name,
         -- Media info
         md.id as media_id,
@@ -2722,7 +2732,8 @@ def fetch_movies_from_database(library_section_id):
     movies_by_id = {}  # metadata_id -> movie_dict (with merged files)
     for row in rows:
         (metadata_id, title, original_title, year, critics_rating, audience_rating,
-         content_rating, summary, _metadata_duration, added_at, updated_at, library_name,
+         content_rating, summary, _metadata_duration, added_at, updated_at, guid,
+         library_name,
          media_id, width, height, media_duration, video_codec, audio_codec,
          _container, _bitrate, part_id, filepath, filesize,
          user_rating, view_count, last_viewed_at) = row
@@ -2813,6 +2824,7 @@ def fetch_movies_from_database(library_section_id):
                 'genres': tags.get('genres', []),
                 'contentRating': content_rating or None,
                 'external_ids': tags.get('external_ids', {}),
+                'guid': guid or '',
                 # Movie-specific (no season/episode)
                 'season': None,
                 'S_str': None,
@@ -7519,6 +7531,7 @@ def fetch_shows_from_database(library_section_id):
         sh.id as sh_id, sh.title as sh_title, sh.original_title as sh_orig,
         sh.year as sh_year, sh.rating as sh_rating, sh.audience_rating as sh_aud_rating,
         sh.content_rating as sh_content_rating, sh.summary as sh_summary,
+        sh.guid as sh_guid,
         md.id as md_id, md.width, md.height, md.duration as md_dur,
         md.video_codec, md.audio_codec,
         mp.id as mp_id, mp.file, mp.size,
@@ -7551,8 +7564,8 @@ def fetch_shows_from_database(library_section_id):
     # DEBUG: Check row structure
     if rows and DBG:
         print(f"{DBGPFX}fetch_shows_from_database: Got {len(rows)} rows")
-        print(f"{DBGPFX}First row has {len(rows[0])} fields (expected 36)")
-        if len(rows[0]) != 36:
+        print(f"{DBGPFX}First row has {len(rows[0])} fields (expected 37)")
+        if len(rows[0]) != 37:
             print(f"{DBGPFX}ERROR: Row field count mismatch!")
             print(f"{DBGPFX}First row: {rows[0]}")
 
@@ -7609,7 +7622,7 @@ def fetch_shows_from_database(library_section_id):
     for row_idx, row in enumerate(rows):
         try:
             (ep_id,ep_title,ep_orig,ep_num,ep_year,ep_rating,ep_aud,ep_cr,ep_sum,_ep_dur,ep_add,ep_upd,
-             s_id,s_num,s_title,sh_id,sh_title,sh_orig,sh_year,sh_rating,sh_aud,sh_cr,sh_sum,
+             s_id,s_num,s_title,sh_id,sh_title,sh_orig,sh_year,sh_rating,sh_aud,sh_cr,sh_sum,sh_guid,
              md_id,width,height,md_dur,v_codec,a_codec,mp_id,filepath,filesize,lib_name,
              u_rating,v_count,last_view) = row
         except ValueError as e:
@@ -7623,7 +7636,8 @@ def fetch_shows_from_database(library_section_id):
             shows[sh_id] = {
                 'show_info': {'id':sh_id,'title':sh_title,'originalTitle':sh_orig or '','year':int(sh_year) if sh_year else 0,
                              'rating':float(sh_rating) if sh_rating else None,'audienceRating':float(sh_aud) if sh_aud else None,
-                             'contentRating':sh_cr,'summary':sh_sum or '','library':lib_name,**sh_tags},
+                             'contentRating':sh_cr,'summary':sh_sum or '','library':lib_name,
+                             'guid':sh_guid or '',**sh_tags},
                 'seasons': {}
             }
 
@@ -7896,6 +7910,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'countries': show_info.get('countries', []),
             'contentRating': show_info.get('contentRating', ''), 'studio': '',
             'external_ids': show_info.get('external_ids', {}),
+            'guid': show_info.get('guid', ''),
             'series': show_info['title'], 'show_key': show_key,
             'season': None, 'S_str': None, 'S_idx': None,
             'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
@@ -8632,6 +8647,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--missing', action='store_true', help="Show missing episodes for all series in this library. Compares scraped episode data against Plex cache for each show. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--rename', action='store_true', help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show libraries only. Use --help rename for details.")
+    argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
@@ -10015,6 +10031,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         show = PLEX_Media.OBJ_BY_ID.get(show_key)
                         if show:
                             PLEX_Media.rename_episodes(show, dry_run=dry_run)
+
+        # Handle --unmatched: list unmatched items in this library
+        if safe_getattr(obj_args, 'unmatched', False):
+            lib_name = obj
+            media_type = safe_getattr(obj_args, 'type', None)
+            obj_keys = collect_library_keys(library_name=lib_name, media_type=media_type)
+            print(f"\n--- Unmatched Items in '{lib_name}' ---")
+            PLEX_Media._list_unmatched(obj_keys, lib_name)
 
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
@@ -11479,6 +11503,49 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         entry_count = len(set((plex_id, title) for plex_id, title, _, _, _, _ in excess_files))
         print(f"\nTotal: {len(excess_files)} files across {entry_count} entries with {version_limit}+ versions")
         return len(excess_files), entry_count
+
+    @staticmethod
+    def _list_unmatched(obj_keys, library_name):
+        """List items with local:// guid (unmatched by Plex metadata agent).
+        Returns count of unmatched items."""
+        if getattr(PLEX_Media, '_cache_missing_guid', False):
+            print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --from-scratch")
+            return 0
+        unmatched = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type')
+            if obj_type not in ('Movie', 'Show'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            guid = obj.get('guid', '')
+            if guid.startswith('local://'):
+                title = obj.get('title', '?')
+                plex_id = obj.get('id', '?')
+                library = obj.get('library', '?')
+                filepath = obj.get('file', '')
+                unmatched.append((obj_type, plex_id, title, library, filepath))
+
+        if not unmatched:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No unmatched items{scope} found.")
+            return 0
+
+        unmatched.sort(key=lambda x: (x[3].lower(), x[0], x[2].lower()))  # library, type, title
+
+        print(f"\n  {'TYPE':<7} {'PLEX-ID':<10} {'TITLE':<45} {'LIBRARY':<20} FILEPATH")
+        print("  " + "-" * 140)
+        for obj_type, plex_id, title, library, filepath in unmatched:
+            print(f"  {obj_type:<7} ID:{plex_id:<7} {title[:45]:<45} {library:<20} {filepath}")
+        print(f"\n  {len(unmatched)} unmatched item(s) found.")
+        return len(unmatched)
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -13543,6 +13610,45 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --excess-versions 2     # Show entries with 2+ versions")
             print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
             print("  my-plex --broken                # Show broken/truncated files only")
+            print("  my-plex --unmatched             # Show unmatched items only")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'unmatched':
+            print()
+            print("=" * 76)
+            print("UNMATCHED ITEMS HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --unmatched")
+            print("       my-plex <library> --unmatched")
+            print()
+            print("Lists items that Plex could not match to any metadata agent.")
+            print("These items have a 'local://' guid instead of a proper")
+            print("'plex://movie/...' or 'plex://show/...' identifier.")
+            print()
+            print("Unmatched items typically have:")
+            print("  - Mangled or unusual filenames (Plex couldn't guess the title)")
+            print("  - No poster, summary, or other metadata")
+            print("  - A title derived from the filename instead of a proper match")
+            print()
+            print("TO FIX: In Plex Web UI, click the item → '...' → 'Fix Match'")
+            print("        and search for the correct title manually.")
+            print()
+            print("DETECTION:")
+            print("  Checks the 'guid' field in the Plex database.")
+            print("  Unmatched: guid starts with 'local://' (no agent matched)")
+            print("  Matched:   guid starts with 'plex://' (successfully identified)")
+            print()
+            print("NOTE: Requires --update-cache --from-scratch to populate the 'guid'")
+            print("      field in the cache (added in this version).")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --unmatched                # All unmatched across all libraries")
+            print("  my-plex ,unsorted --unmatched      # Unmatched in ,unsorted only")
+            print("  my-plex --problems                 # Includes unmatched in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -17409,6 +17515,10 @@ def execute_global_commands(args, cmd_args):
         print("\n--- Episode Data (TSV) Issues ---")
         tsv_problem_count = _list_tsv_problems()
 
+        # 4. Unmatched items
+        print("\n--- Unmatched Items (local:// guid) ---")
+        unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
+
         # Summary
         print("\n" + "=" * 76)
         print("SUMMARY")
@@ -17416,12 +17526,21 @@ def execute_global_commands(args, cmd_args):
         print(f"  Broken/truncated files:   {broken_count}")
         print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
         print(f"  Episode data issues:      {tsv_problem_count}")
-        total_problems = broken_count + excess_entry_count + tsv_problem_count
+        print(f"  Unmatched items:          {unmatched_count}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
             print(f"\n  Total: {total_problems} problem(s) found.")
         print("=" * 76)
+        return
+
+    # Handle --unmatched: list items not matched by Plex metadata agent
+    if safe_getattr(cmd_args, 'unmatched', False):
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+        print("\n--- Unmatched Items ---")
+        PLEX_Media._list_unmatched(obj_keys, None)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -17807,7 +17926,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unmatched', action='store_true', help="List items not matched by Plex (local:// guid). These need 'Fix Match' in Plex. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -17908,6 +18028,8 @@ def main():
             help_redirect = 'broken'
         elif '--list' in remaining_args:
             help_redirect = 'list'
+        elif '--unmatched' in remaining_args:
+            help_redirect = 'unmatched'
 
         if help_redirect:
             args.help = help_redirect

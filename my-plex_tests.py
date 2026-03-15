@@ -3933,6 +3933,101 @@ class TestEpisodesErrClassification(unittest.TestCase):
         self.assertIn('no_id_for_source', body)
 
 
+class TestUnmatched(unittest.TestCase):
+    """Test --unmatched flag and guid-based detection."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_unmatched_arg_defined_global(self):
+        """--unmatched must be defined in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        self.assertIn("'--unmatched'", content)
+
+    def test_unmatched_arg_defined_library(self):
+        """--unmatched must be in library argparser."""
+        content = self._read_script()
+        # Library argparser section
+        import re
+        match = re.search(r"class PLEX_Library.*?argparser\.add_argument\('--unmatched'", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --unmatched in library argparser")
+
+    def test_guid_in_movie_query(self):
+        """Movie DB query must SELECT mi.guid."""
+        content = self._read_script()
+        # The SQL query string in fetch_movies_from_database must contain mi.guid
+        self.assertIn('mi.guid', content, "Movie query must SELECT mi.guid")
+
+    def test_guid_in_show_query(self):
+        """Show DB query must SELECT sh.guid."""
+        content = self._read_script()
+        self.assertIn('sh.guid as sh_guid', content, "Show query must SELECT sh.guid")
+
+    def test_guid_stored_in_movie_dict(self):
+        """Movie dict must include guid field."""
+        content = self._read_script()
+        self.assertIn("'guid': guid", content, "Movie dict must store 'guid' field")
+
+    def test_guid_stored_in_show_dict(self):
+        """Show dict (OBJ_BY_ID) must include guid field."""
+        content = self._read_script()
+        self.assertIn("'guid': show_info.get('guid'", content,
+                       "Show OBJ_BY_ID dict must store 'guid' from show_info")
+
+    def test_list_unmatched_function_exists(self):
+        """_list_unmatched must be defined."""
+        content = self._read_script()
+        self.assertIn('def _list_unmatched(', content)
+
+    def test_list_unmatched_checks_local_guid(self):
+        """_list_unmatched must check for local:// guid."""
+        content = self._read_script()
+        import re
+        match = re.search(r'def _list_unmatched\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("local://", body, "Must check for local:// guid prefix")
+
+    def test_problems_includes_unmatched(self):
+        """--problems handler must call _list_unmatched."""
+        content = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('_list_unmatched(', body, "Must call _list_unmatched in --problems")
+        self.assertIn('Unmatched', body, "Must have Unmatched section header")
+
+    def test_help_unmatched_exists(self):
+        """--help unmatched must have a case block."""
+        content = self._read_script()
+        self.assertIn("case 'unmatched':", content)
+        import re
+        match = re.search(r"case 'unmatched':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('UNMATCHED', body)
+        self.assertIn('local://', body)
+        self.assertIn('Fix Match', body)
+
+    def test_cache_format_check_for_guid(self):
+        """Cache must detect missing guid field and warn at point of use."""
+        content = self._read_script()
+        self.assertIn("_cache_missing_guid", content, "Must flag missing guid in cache")
+        self.assertIn("update-cache --from-scratch", content, "Must tell user how to fix")
+
+    def test_unmatched_e2e_help(self):
+        """--help unmatched must run without error."""
+        import subprocess, sys
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'unmatched'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help unmatched failed: {result.stderr}")
+        self.assertIn('UNMATCHED', result.stdout)
+        self.assertIn('Fix Match', result.stdout)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -3968,6 +4063,7 @@ _UNITTEST_CLASSES = [
     TestShowInfoSeasonTable,
     TestEpisodesErr,
     TestEpisodesErrClassification,
+    TestUnmatched,
 ]
 
 # ---------------------------------------------------------------------------
