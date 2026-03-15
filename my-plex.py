@@ -527,6 +527,7 @@ CACHE_UPDATES_FILE = CONFIG_DEFAULTS['CACHE_UPDATES_FILE']
 FORCE_CACHE_UPDATE = CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']
 FORCE_PLEXDATA = CONFIG_DEFAULTS.get('FORCE_PLEXDATA', False)
 FROM_SCRATCH = CONFIG_DEFAULTS['FROM_SCRATCH']  # When True with --update-cache, deletes existing cache files before rebuilding
+KEEP_TSV = False  # When True with --from-scratch, skip re-scraping episode TSV files
 FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
 RESCAN_BROKEN = False   # When True with --update-cache, re-queues broken files (ffprobe_error) for metadata collection
 SCAN_LIBRARIES = None   # When set (list of library names), --scan restricts Plex scan + cache update to these libraries only
@@ -8209,8 +8210,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             _meta, tsv_episodes = read_episodes_tsv(tsv_path)
             if tsv_episodes:
                 existing_count += 1
-                if FROM_SCRATCH:
-                    needs_scrape = True  # --force/--from-scratch: re-scrape everything
+                if FROM_SCRATCH and not KEEP_TSV:
+                    needs_scrape = True  # --from-scratch: re-scrape everything (unless --keep-tsv)
             else:
                 needs_scrape = True  # TSV exists but is empty/corrupt — re-scrape
         else:
@@ -8223,7 +8224,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                 print(f"{VRBPFX}Scraping episodes.tsv for '{show_title}' ({reason})...")
             try:
                 _meta, new_episodes = scrape_episodes(show_title, show_dir, source=source,
-                                                       force=True, external_ids=external_ids)
+                                                       force=True, external_ids=external_ids,
+                                                       library_name=library_name)
                 if new_episodes:
                     tsv_episodes = new_episodes
                     scraped_count += 1
@@ -10516,7 +10518,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Acquire and hold the lock for the entire rebuild process
             PLEX_Media.cache_rebuild_lock = CacheLock(LOCK_FILE)
             PLEX_Media.cache_rebuild_lock.__enter__()
-            mode_str = "From-scratch rebuild" if FROM_SCRATCH else "Incremental update"
+            mode_str = "From-scratch rebuild" + (" (keeping episode TSVs)" if KEEP_TSV else "") if FROM_SCRATCH else "Incremental update"
             PLEX_Media.cache_rebuild_lock.write_progress(f"Cache {mode_str.lower()} started - initializing...")
         else:
             # Load the previous cache
@@ -13538,6 +13540,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("        • Useful after fixing ffmpeg issues or updating ffmpeg")
             print("      Example: my-plex --update-cache --broken")
             print()
+            print("  --keep-tsv")
+            print("      With --from-scratch: rebuild cache but keep existing episode TSV files.")
+            print("        • Skips re-scraping episodes from TMDB/TVDB/fernsehserien.de")
+            print("        • Only re-scrapes TSVs that are missing or empty/corrupt")
+            print("        • Useful when you want a fresh cache but don't need to re-fetch episode data")
+            print("      Example: my-plex --update-cache --from-scratch --keep-tsv")
+            print()
             print("COMBINATIONS:")
             print()
             print("  # Incremental update (only add missing items)")
@@ -13557,6 +13566,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  # Complete rebuild (Plex data + file metadata)")
             print("  my-plex --update-cache --force")
+            print()
+            print("  # Fresh start but keep episode TSV files (don't re-scrape)")
+            print("  my-plex --update-cache --from-scratch --keep-tsv")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -14469,7 +14481,7 @@ def is_special_episode(filename, specials_pattern=None):
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
-def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids=None):
+def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids=None, library_name=None):
     """Main scraper dispatcher. Updates episodes.tsv for a show.
 
     1. Read existing episodes.tsv for metadata (slug, show_id, source)
@@ -14483,6 +14495,7 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
         source: scraper source name ('tvdb', 'tmdb', 'fernsehserien.de')
         force: force update even if TSV is fresh
         external_ids: dict with external IDs from cache, e.g. {'tvdb': '79168', 'tmdb': '1668', 'imdb': 'tt0108778'}
+        library_name: Plex library name (for log prefix)
 
     Returns: (metadata, episodes) or (None, None) on failure
     """
@@ -14705,7 +14718,8 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
     if max_s:
         new_metadata['latest_season'] = str(max_s)
 
-    print(f"  TVDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+    w_prefix = _get_worker_prefix()
+    print(f"  {w_prefix}TVDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, all_episodes
 
@@ -14840,7 +14854,8 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
     if max_s:
         new_metadata['latest_season'] = str(max_s)
 
-    print(f"  TMDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+    w_prefix = _get_worker_prefix()
+    print(f"  {w_prefix}TMDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, all_episodes
 
@@ -15100,16 +15115,13 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
 
     episodes = list(existing_by_key.values())
 
-    if VRB:
-        if new_count:
-            print(f"  Scraped {new_count} new episodes for '{show_title}' (total: {len(episodes)})")
-        else:
-            print(f"  No new episodes for '{show_title}' ({len(episodes)} total)")
-
     # Detect latest season
     max_s = max((ep['season'] for ep in episodes if ep['season'] > 0), default=0)
     if max_s:
         new_metadata['latest_season'] = str(max_s)
+
+    w_prefix = _get_worker_prefix()
+    print(f"  {w_prefix}fernsehserien.de: {len(episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, episodes
 
@@ -17953,7 +17965,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 #############################################################################
 
 def main():
-    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
+    global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, KEEP_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
     global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, EPISODE_NAME_PATTERN
@@ -18136,9 +18148,10 @@ def main():
     main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
-    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --broken (rescan broken files), --keep-tsv (with --from-scratch: don't re-scrape episode TSVs) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--keep-tsv', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - with --from-scratch: don't re-scrape episode TSVs
     main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-plexdata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-metadata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
@@ -18226,7 +18239,10 @@ def main():
         print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
         print("="*76)
         print("This will delete the existing cache and rebuild from scratch.")
-        print("Plex data will be re-read from DB, episode data (TSV) re-scraped from APIs.")
+        if KEEP_TSV:
+            print("Plex data will be re-read from DB. Episode TSV files will be KEPT (not re-scraped).")
+        else:
+            print("Plex data will be re-read from DB, episode data (TSV) re-scraped from APIs.")
         print("File metadata (ffmpeg scans) will be preserved from old cache if available.")
         if args.force:
             print("Additionally, --force will refresh ALL Plex metadata (slower but verifies files).")
@@ -18291,6 +18307,7 @@ def main():
     RESCAN_BROKEN = args.update_cache and has_broken  # --update-cache --broken: rescan broken files
 
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
+    KEEP_TSV = args.keep_tsv  # With --from-scratch: don't re-scrape episode TSV files
     AUTO_YES = args.yes
     AUTO_NO = args.no
     FORMAT = args.format
