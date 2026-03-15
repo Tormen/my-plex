@@ -4069,6 +4069,115 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn('Fix Match', result.stdout)
 
 
+class TestUnsorted(unittest.TestCase):
+    """Test --unsorted flag and season directory detection."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_unsorted_arg_defined_global(self):
+        """--unsorted must be defined in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        self.assertIn("'--unsorted'", content)
+
+    def test_unsorted_arg_defined_library(self):
+        """--unsorted must be in library argparser."""
+        import re
+        content = self._read_script()
+        match = re.search(r"class PLEX_Library.*?argparser\.add_argument\('--unsorted'", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --unsorted in library argparser")
+
+    def test_unsorted_arg_defined_media(self):
+        """--unsorted must be in media argparser."""
+        import re
+        content = self._read_script()
+        # Media argparser section (after TYPE_STR = 'media')
+        match = re.search(r"TYPE_STR = 'media'.*?argparser\.add_argument\('--unsorted'", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --unsorted in media argparser")
+
+    def test_list_unsorted_function_exists(self):
+        """_list_unsorted must be defined."""
+        content = self._read_script()
+        self.assertIn('def _list_unsorted(', content)
+
+    def test_list_unsorted_checks_show_dir(self):
+        """_list_unsorted must check if episode dir equals show dir."""
+        import re
+        content = self._read_script()
+        match = re.search(r'def _list_unsorted\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("show_dir", body, "Must reference show_dir")
+        self.assertIn("dirname", body, "Must use os.path.dirname to check episode paths")
+
+    def test_problems_includes_unsorted(self):
+        """--problems handler must call _list_unsorted."""
+        import re
+        content = self._read_script()
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --unmatched)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('_list_unsorted(', body, "Must call _list_unsorted in --problems")
+        self.assertIn('Unsorted', body, "Must have Unsorted section header")
+
+    def test_problems_summary_includes_unsorted(self):
+        """--problems summary must show unsorted count."""
+        import re
+        content = self._read_script()
+        self.assertIn('Unsorted shows:', content, "Summary must show 'Unsorted shows:' line")
+
+    def test_help_unsorted_exists(self):
+        """--help unsorted must have a case block."""
+        content = self._read_script()
+        self.assertIn("case 'unsorted':", content)
+        import re
+        match = re.search(r"case 'unsorted':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('UNSORTED', body)
+        self.assertIn('Season', body)
+
+    def test_unsorted_e2e_help(self):
+        """--help unsorted must run without error."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'unsorted'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help unsorted failed: {result.stderr}")
+        self.assertIn('UNSORTED', result.stdout)
+        self.assertIn('Season', result.stdout)
+
+    def test_unsorted_in_main_help(self):
+        """--unsorted must appear in main --help output."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('unsorted', result.stdout)
+
+    def test_unsorted_in_problems_help(self):
+        """--problems help must mention --unsorted."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'problems'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help problems failed: {result.stderr}")
+        self.assertIn('unsorted', result.stdout.lower())
+
+    def test_has_standalone_cmd_includes_unsorted(self):
+        """has_standalone_cmd must check for --unsorted."""
+        content = self._read_script()
+        self.assertIn("'unsorted'", content)
+        import re
+        match = re.search(r'has_standalone_cmd\s*=.*', content)
+        self.assertIsNotNone(match)
+        self.assertIn('unsorted', match.group(0), "has_standalone_cmd must include 'unsorted'")
+
+    def test_reinjection_exists(self):
+        """--unsorted must be re-injected into remaining_args."""
+        content = self._read_script()
+        self.assertIn("Re-inject --unsorted", content)
+
+
 class TestForceTsv(unittest.TestCase):
     """Tests for --force-tsv flag."""
 
@@ -4315,6 +4424,7 @@ _UNITTEST_CLASSES = [
     TestEpisodesErr,
     TestEpisodesErrClassification,
     TestUnmatched,
+    TestUnsorted,
     TestForceTsv,
     TestTsvScrapersE2E,
 ]
