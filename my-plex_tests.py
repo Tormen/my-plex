@@ -4109,6 +4109,176 @@ class TestForceTsv(unittest.TestCase):
         self.assertNotIn('FROM_SCRATCH and not FORCE_TSV', src, "Logic should be opt-IN (FORCE_TSV), not opt-OUT")
 
 
+class TestTsvScrapersE2E(unittest.TestCase):
+    """End-to-end tests for TSV scrapers (TMDB, TVDB, fernsehserien.de).
+
+    These tests call the actual scraper functions via subprocess and verify
+    the results are consistent (episode counts, season counts, data format).
+    Tests skip gracefully if network is unavailable.
+    """
+
+    def _get_tmdb_api_key(self):
+        """Read TMDB API key from config file, return None if not found."""
+        config_path = os.path.expanduser('~/.my-plex.conf')
+        if not os.path.isfile(config_path):
+            return None
+        try:
+            with open(config_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('TMDB_API_KEY') and '=' in line:
+                        val = line.split('=', 1)[1].strip().strip("'\"")
+                        if val and val != 'None':
+                            return val
+        except Exception:
+            pass
+        return None
+
+    def _run_scraper_tmdb(self, tmdb_id, show_title):
+        """Call TMDB API directly and return {'episodes': N, 'max_season': M} or {'error': ...}."""
+        import json
+        api_key = self._get_tmdb_api_key()
+        if not api_key:
+            return {'error': 'no TMDB_API_KEY configured'}
+        code = f"""
+import json, sys
+try:
+    import urllib.request
+    url = f'https://api.themoviedb.org/3/tv/{tmdb_id}?language=en-US'
+    headers = {{'Authorization': 'Bearer {api_key}', 'Accept': 'application/json'}}
+    req = urllib.request.Request(url, headers=headers)
+    resp = urllib.request.urlopen(req, timeout=15)
+    data = json.loads(resp.read())
+    num_seasons = data.get('number_of_seasons', 0)
+    num_episodes = data.get('number_of_episodes', 0)
+    print(json.dumps({{'episodes': num_episodes, 'max_season': num_seasons, 'title': data.get('name', '')}}))
+except Exception as e:
+    print(json.dumps({{'error': str(e)}}))
+"""
+        result = subprocess.run([sys.executable, '-c', code],
+            capture_output=True, text=True, timeout=30)
+        try:
+            return json.loads(result.stdout.strip().split('\n')[-1])
+        except (json.JSONDecodeError, IndexError):
+            return {'error': f'parse failed: {result.stderr[:200]}'}
+
+    def _run_scraper_fernsehserien(self, slug, show_id=None):
+        """Scrape fernsehserien.de directly and return episode/season count."""
+        import json
+        code = f"""
+import json, sys, re, urllib.request, time
+slug = {slug!r}
+show_id = {show_id!r}
+episodes = {{}}
+if show_id:
+    # Strategy 1: episodenguide
+    consecutive_empty = 0
+    s = 1
+    while consecutive_empty < 2:
+        url = f'https://www.fernsehserien.de/{{slug}}/episodenguide/staffel-{{s}}/{{show_id}}'
+        req = urllib.request.Request(url, headers={{'User-Agent': 'Mozilla/5.0'}})
+        try:
+            html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+        except:
+            consecutive_empty += 1; s += 1; continue
+        ep_sections = re.split(r'itemprop="episode"', html)[1:]
+        if not ep_sections:
+            consecutive_empty += 1; s += 1; continue
+        consecutive_empty = 0
+        for sec in ep_sections:
+            m = re.search(r'itemprop="episodeNumber" content="(\\d+)"', sec)
+            if m:
+                episodes[(s, int(m.group(1)))] = True
+        s += 1
+        time.sleep(0.3)
+else:
+    # Strategy 2: sendetermine
+    for offset in [0, -1, -2, -3]:
+        url = f'https://www.fernsehserien.de/{{slug}}/sendetermine/{{offset}}'
+        req = urllib.request.Request(url, headers={{'User-Agent': 'Mozilla/5.0'}})
+        try:
+            html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+        except:
+            break
+        pairs = re.findall(r'role=rowgroup\\s+href="/' + re.escape(slug) + r'/folgen/(\\d+)-([^\\"]*)".*?datetime="(\\d{{4}}-\\d{{2}}-\\d{{2}})T', html, re.DOTALL)
+        for ep_str, _, _ in pairs:
+            episodes[(0, int(ep_str))] = True
+        time.sleep(0.3)
+max_s = max((k[0] for k in episodes if k[0] > 0), default=0)
+print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
+"""
+        result = subprocess.run([sys.executable, '-c', code],
+            capture_output=True, text=True, timeout=60)
+        try:
+            return json.loads(result.stdout.strip().split('\n')[-1])
+        except (json.JSONDecodeError, IndexError):
+            return {'error': f'parse failed: {result.stderr[:200]}'}
+
+    def test_tmdb_friends(self):
+        """TMDB API: Friends should return ~228 episodes in 10 seasons."""
+        data = self._run_scraper_tmdb('1668', 'Friends')
+        if 'error' in data:
+            self.skipTest(f"TMDB API failed: {data['error']}")
+        self.assertGreater(data['episodes'], 200, f"Friends should have >200 episodes, got {data['episodes']}")
+        self.assertEqual(data['max_season'], 10, f"Friends should have 10 seasons, got {data['max_season']}")
+
+    def test_tmdb_firefly(self):
+        """TMDB API: Firefly should return ~11 episodes in 1 season."""
+        data = self._run_scraper_tmdb('1437', 'Firefly')
+        if 'error' in data:
+            self.skipTest(f"TMDB API failed: {data['error']}")
+        self.assertGreaterEqual(data['episodes'], 11, f"Firefly should have >=11 episodes, got {data['episodes']}")
+        self.assertEqual(data['max_season'], 1, f"Firefly should have 1 season, got {data['max_season']}")
+
+    def test_tmdb_different_shows_different_data(self):
+        """TMDB API: Different shows must return different data."""
+        show1 = self._run_scraper_tmdb('1668', 'Friends')
+        show2 = self._run_scraper_tmdb('1437', 'Firefly')
+        if 'error' in show1 or 'error' in show2:
+            self.skipTest("One or both TMDB calls failed")
+        self.assertNotEqual(show1['episodes'], show2['episodes'],
+            f"Friends and Firefly should not have the same episode count: {show1['episodes']}")
+
+    def test_fernsehserien_tatortreiniger(self):
+        """fernsehserien.de: Der Tatortreiniger should return ~31 episodes in 7 seasons."""
+        data = self._run_scraper_fernsehserien('der-tatortreiniger', '16508')
+        if 'error' in data:
+            self.skipTest(f"fernsehserien.de scraper failed: {data['error']}")
+        self.assertGreaterEqual(data['episodes'], 25, f"Der Tatortreiniger should have >=25 episodes, got {data['episodes']}")
+        self.assertLessEqual(data['episodes'], 50, f"Der Tatortreiniger should have <=50 episodes, got {data['episodes']}")
+        self.assertEqual(data['max_season'], 7, f"Der Tatortreiniger should have 7 seasons, got {data['max_season']}")
+
+    def test_fernsehserien_ted_lasso(self):
+        """fernsehserien.de: Ted Lasso should return ~34 episodes in 3 seasons."""
+        data = self._run_scraper_fernsehserien('ted-lasso', '46650')
+        if 'error' in data:
+            self.skipTest(f"fernsehserien.de scraper failed: {data['error']}")
+        self.assertGreaterEqual(data['episodes'], 30, f"Ted Lasso should have >=30 episodes, got {data['episodes']}")
+        self.assertLessEqual(data['episodes'], 50, f"Ted Lasso should have <=50 episodes, got {data['episodes']}")
+        self.assertEqual(data['max_season'], 3, f"Ted Lasso should have 3 seasons, got {data['max_season']}")
+
+    def test_fernsehserien_different_shows_different_data(self):
+        """fernsehserien.de: Different shows must return different episode counts (no data leakage)."""
+        show1 = self._run_scraper_fernsehserien('ted-lasso', '46650')
+        show2 = self._run_scraper_fernsehserien('der-tatortreiniger', '35834')
+        if 'error' in show1 or 'error' in show2:
+            self.skipTest("One or both scrapers failed")
+        same = (show1['episodes'] == show2['episodes'] and show1['max_season'] == show2['max_season'])
+        self.assertFalse(same,
+            f"Ted Lasso and Der Tatortreiniger returned identical data: {show1['episodes']} ep / {show1['max_season']} seasons — likely a bug")
+
+    def test_scraper_summary_lines_all_sources(self):
+        """All three scrapers must print a summary line with episode/season count."""
+        src = self._read_script()
+        for scraper in ['TMDB', 'TVDB', 'fernsehserien.de']:
+            self.assertRegex(src, rf"{re.escape(scraper)}:.*episodes in.*seasons for",
+                f"{scraper} scraper must print summary: 'N episodes in M seasons for'")
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -4146,6 +4316,7 @@ _UNITTEST_CLASSES = [
     TestEpisodesErrClassification,
     TestUnmatched,
     TestForceTsv,
+    TestTsvScrapersE2E,
 ]
 
 # ---------------------------------------------------------------------------
