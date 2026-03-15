@@ -8068,7 +8068,29 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                     PLEX_Media.OBJ_BY_FILEPATH[season_dir].append(season_key)
 
         # Create Show object in OBJ_BY_ID (matching old API structure)
-        show_dir = os.path.dirname(os.path.dirname(first_episode_filepath)) if first_episode_filepath else ''
+        # Derive show directory: the show is always the FIRST subdirectory under the library root.
+        # Find the library root from PLEX_Library.PATHS_DICT, then take the next path component.
+        # - Standard:  /library/show/Season 01/ep.mkv → show_dir = /library/show  ✓
+        # - Flat:      /library/show/ep.mkv           → show_dir = /library/show  ✓
+        show_dir = ''
+        if first_episode_filepath:
+            # Find which library root this filepath belongs to
+            lib_root = ''
+            for path in PLEX_Library.PATHS_DICT:
+                if first_episode_filepath.startswith(path + '/') or first_episode_filepath.startswith(path + os.sep):
+                    if len(path) > len(lib_root):  # longest match wins
+                        lib_root = path
+            if lib_root:
+                # Extract the show directory: first path component after lib_root
+                remainder = first_episode_filepath[len(lib_root):].lstrip('/')
+                show_subdir = remainder.split('/')[0] if '/' in remainder else ''
+                if show_subdir:
+                    show_dir = os.path.join(lib_root, show_subdir)
+                else:
+                    show_dir = lib_root  # shouldn't happen, but fallback
+            else:
+                # Fallback: original heuristic (go up 2 levels)
+                show_dir = os.path.dirname(os.path.dirname(first_episode_filepath))
         show_dict = {
             'file': show_dir, 'files': {}, 'type': 'Show', 'type_str': 'Show',
             'id': show_id, 'title': show_info['title'],
