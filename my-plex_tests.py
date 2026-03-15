@@ -3266,6 +3266,10 @@ class TestCacheUpdateLog(unittest.TestCase):
 class TestEpisodesTSV(unittest.TestCase):
     """Test episodes.tsv read/write and format detection."""
 
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
     def test_write_and_read_roundtrip(self):
         """Write a TSV and read it back, verify data integrity."""
         import tempfile, os
@@ -3334,6 +3338,12 @@ class TestEpisodesTSV(unittest.TestCase):
             self.assertTrue(is_episodes_tsv_stale('/nonexistent.tsv'))
         finally:
             os.unlink(tsv_path)
+
+    def test_fernsehserien_summary_line(self):
+        """_scrape_fernsehserien_de must print a summary line like TMDB/TVDB do."""
+        src = self._read_script()
+        self.assertIn("fernsehserien.de:", src, "fernsehserien.de scraper must print summary with episode/season count")
+        self.assertRegex(src, r"fernsehserien\.de:.*episodes in.*seasons for", "Summary must follow 'N episodes in M seasons for' pattern")
 
 
 class TestDateExtraction(unittest.TestCase):
@@ -4059,6 +4069,40 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn('Fix Match', result.stdout)
 
 
+class TestKeepTsv(unittest.TestCase):
+    """Tests for --keep-tsv flag."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_keep_tsv_arg_defined(self):
+        """--keep-tsv must be defined in main_parser."""
+        src = self._read_script()
+        self.assertIn('--keep-tsv', src)
+
+    def test_keep_tsv_skips_rescrape(self):
+        """FROM_SCRATCH + KEEP_TSV must not force needs_scrape."""
+        src = self._read_script()
+        self.assertIn('FROM_SCRATCH and not KEEP_TSV', src)
+
+    def test_keep_tsv_in_help(self):
+        """--keep-tsv must be documented in update-cache help."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'update-cache'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help update-cache failed: {result.stderr}")
+        self.assertIn('--keep-tsv', result.stdout)
+
+    def test_keep_tsv_e2e_help(self):
+        """--keep-tsv must appear in main --help output."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('keep-tsv', result.stdout)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -4095,6 +4139,7 @@ _UNITTEST_CLASSES = [
     TestEpisodesErr,
     TestEpisodesErrClassification,
     TestUnmatched,
+    TestKeepTsv,
 ]
 
 # ---------------------------------------------------------------------------
