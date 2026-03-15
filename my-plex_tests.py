@@ -4069,38 +4069,44 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn('Fix Match', result.stdout)
 
 
-class TestKeepTsv(unittest.TestCase):
-    """Tests for --keep-tsv flag."""
+class TestForceTsv(unittest.TestCase):
+    """Tests for --force-tsv flag."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_keep_tsv_arg_defined(self):
-        """--keep-tsv must be defined in main_parser."""
+    def test_force_tsv_arg_defined(self):
+        """--force-tsv must be defined in main_parser."""
         src = self._read_script()
-        self.assertIn('--keep-tsv', src)
+        self.assertIn('--force-tsv', src)
 
-    def test_keep_tsv_skips_rescrape(self):
-        """FROM_SCRATCH + KEEP_TSV must not force needs_scrape."""
+    def test_force_tsv_triggers_rescrape(self):
+        """FROM_SCRATCH + FORCE_TSV must force needs_scrape."""
         src = self._read_script()
-        self.assertIn('FROM_SCRATCH and not KEEP_TSV', src)
+        self.assertIn('FROM_SCRATCH and FORCE_TSV', src)
 
-    def test_keep_tsv_in_help(self):
-        """--keep-tsv must be documented in update-cache help."""
+    def test_force_tsv_in_help(self):
+        """--force-tsv must be documented in update-cache help."""
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--help', 'update-cache'],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, f"--help update-cache failed: {result.stderr}")
-        self.assertIn('--keep-tsv', result.stdout)
+        self.assertIn('--force-tsv', result.stdout)
 
-    def test_keep_tsv_e2e_help(self):
-        """--keep-tsv must appear in main --help output."""
+    def test_force_tsv_e2e_help(self):
+        """--force-tsv must appear in main --help output."""
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--help'],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0)
-        self.assertIn('keep-tsv', result.stdout)
+        self.assertIn('force-tsv', result.stdout)
+
+    def test_default_preserves_tsv(self):
+        """--from-scratch without --force-tsv must NOT force re-scrape (default = preserve)."""
+        src = self._read_script()
+        # The condition must require FORCE_TSV to be True for re-scraping
+        self.assertNotIn('FROM_SCRATCH and not FORCE_TSV', src, "Logic should be opt-IN (FORCE_TSV), not opt-OUT")
 
 
 # List of all unittest classes for run_regression_tests()
@@ -4139,7 +4145,7 @@ _UNITTEST_CLASSES = [
     TestEpisodesErr,
     TestEpisodesErrClassification,
     TestUnmatched,
-    TestKeepTsv,
+    TestForceTsv,
 ]
 
 # ---------------------------------------------------------------------------
