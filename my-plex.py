@@ -79,7 +79,7 @@ import requests.exceptions
 # - Output configuration (FORMAT, LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX)
 # - Debug/verbose flags (DBG, VRB, VERYVRB, DEEPDBG, OFFLINE)
 # - Cache configuration (FORCE_CACHE_UPDATE, FORCE_PLEXDATA, READ_ONLY_MODE, CACHE_CHECKPOINT_INTERVAL)
-# - Performance tuning (MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS)
+# - Performance tuning (MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS)
 #
 ###########################################################################################
 
@@ -162,6 +162,7 @@ CONFIG_DEFAULTS = {
     'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
     'LIBRARY_START_DELAY': 1.0,
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
+    'SSH_RETRY_DELAYS': [0.5, 2, 10],
 
     # Broken File Detection Configuration
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
@@ -562,6 +563,7 @@ LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']  # 500ms stagger be
 # Example: [5, 30, 60] = 4 total attempts with 5s, 30s, 60s waits
 # Current: [5, 30, 60, 120, 240, 480] = 7 attempts, max ~15min total wait
 PLEX_RETRY_DELAYS = CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']  # Exponential: 5s, 30s, 1m, 2m, 4m, 8m
+SSH_RETRY_DELAYS = CONFIG_DEFAULTS['SSH_RETRY_DELAYS']    # Retry lost files after SSH connection drops: 0.5s, 2s, 10s
 
 # Checkpoint configuration for cache rebuilds
 # Saves cache periodically during rebuild to prevent total loss on failure
@@ -7152,7 +7154,7 @@ for line in sys.stdin:
     import time as _time
 
     def run_worker(worker_id, partition):
-        """Run collector script for a file partition, return (stdout, returncode)."""
+        """Run collector script for a file partition, return (stdout, returncode, stderr_lines)."""
         w_prefix = f"W{worker_id:02d}"
         partition_size = len(partition)
         print(f"{w_prefix}| processing {partition_size} files...", flush=True)
@@ -7169,10 +7171,13 @@ for line in sys.stdin:
         try:
             proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
 
-            # Stream stderr (progress) in a background thread
+            # Stream stderr (progress) in a background thread, but also capture it
+            stderr_lines = []
             def relay_stderr():
                 for line in proc.stderr:
-                    print(line.rstrip('\n'), flush=True)
+                    stripped = line.rstrip('\n')
+                    stderr_lines.append(stripped)
+                    print(stripped, flush=True)
             import threading
             t = threading.Thread(target=relay_stderr, daemon=True)
             t.start()
@@ -7188,17 +7193,22 @@ for line in sys.stdin:
         except sp.TimeoutExpired:
             proc.kill()
             print(f"{w_prefix}| ✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
-            return '', 1
+            return '', 1, ['TIMEOUT']
 
         elapsed = _time.time() - t0
         # Count actual results (lines in stdout), not partition_size
         actual_count = sum(1 for line in stdout_data.strip().split('\n') if line.strip()) if stdout_data.strip() else 0
         rate = actual_count / elapsed if elapsed > 0 else 0
         if actual_count < partition_size:
-            print(f"{w_prefix}| processed {actual_count}/{partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
+            missing = partition_size - actual_count
+            # Find the actual error from stderr (SSH disconnect, broken pipe, etc.)
+            error_lines = [l for l in stderr_lines if any(kw in l.lower() for kw in
+                ['connection reset', 'broken pipe', 'disconnect', 'timeout', 'refused', 'error', 'fatal'])]
+            error_reason = error_lines[-1] if error_lines else f"exit code {returncode}"
+            print(f"{w_prefix}| processed {actual_count}/{partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s) — {missing} file(s) lost: {error_reason}", flush=True)
         else:
             print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
-        return stdout_data, returncode
+        return stdout_data, returncode, stderr_lines
 
     # Launch workers in parallel
     from concurrent.futures import ThreadPoolExecutor
@@ -7208,24 +7218,47 @@ for line in sys.stdin:
         for future in futures:
             worker_id = futures[future]
             try:
-                stdout, returncode = future.result()
-                worker_results[worker_id] = (stdout, returncode)
+                stdout, returncode, stderr_lines = future.result()
+                worker_results[worker_id] = (stdout, returncode, stderr_lines)
             except Exception as e:
                 print(f"W{worker_id:02d}| ✗ Worker failed: {e}", flush=True)
-                worker_results[worker_id] = ('', 1)
+                worker_results[worker_id] = ('', 1, [str(e)])
 
     # Parse JSON-lines output from all workers and integrate results
     from datetime import datetime
     success_count = 0
     error_count = 0
     not_found_count = 0
+    no_response_count = 0
     metadata_broken_details = []  # Collected for JSON update log
 
     for worker_id in sorted(worker_results.keys()):
-        stdout, returncode = worker_results[worker_id]
+        stdout, returncode, stderr_lines = worker_results[worker_id]
+        partition_files = set(partitions[worker_id]) if worker_id < len(partitions) else set()
+        responded_files = set()
+
+        # Extract actual error from stderr
+        error_lines = [l for l in stderr_lines if any(kw in l.lower() for kw in
+            ['connection reset', 'broken pipe', 'disconnect', 'timeout', 'refused', 'error', 'fatal'])]
+        worker_error = error_lines[-1] if error_lines else f"exit code {returncode}"
+
         if not stdout.strip():
             if returncode != 0:
-                print(f"W{worker_id:02d}| ✗ Worker failed (exit code {returncode})")
+                print(f"W{worker_id:02d}| ✗ Worker failed: {worker_error}")
+            # ALL files in this partition lost
+            for filepath in sorted(partition_files):
+                no_response_count += 1
+                targets = filepath_lookup.get(filepath, [])
+                for obj_key, version, display_title in targets:
+                    metadata_broken_details.append({
+                        'filepath': filepath,
+                        'reason': 'connection_lost',
+                        'error': worker_error,
+                        'id': obj_key,
+                        'version': version,
+                        'library': display_title,
+                    })
+            print(f"  ⚠ {len(partition_files)} files lost (W{worker_id:02d}): {worker_error}", flush=True)
             continue
 
         for line in stdout.strip().split('\n'):
@@ -7237,6 +7270,7 @@ for line in sys.stdin:
                 continue
 
             filepath = entry.get('path', '')
+            responded_files.add(filepath)
             if 'error' in entry:
                 error_msg = entry.get('error', 'unknown')
 
@@ -7323,14 +7357,158 @@ for line in sys.stdin:
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                     PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
 
-    processed = success_count + error_count + not_found_count
-    print(f"\n  Metadata collection done ({processed}/{total} files processed)", flush=True)
+        # Detect files that were sent to this worker but got no result back
+        missing_files = partition_files - responded_files
+        if missing_files:
+            print(f"  ⚠ {len(missing_files)} file(s) lost from W{worker_id:02d} (SSH connection dropped: {worker_error})", flush=True)
+            for filepath in sorted(missing_files):
+                no_response_count += 1
+                targets = filepath_lookup.get(filepath, [])
+                for obj_key, version, display_title in targets:
+                    metadata_broken_details.append({
+                        'filepath': filepath,
+                        'reason': 'connection_lost',
+                        'error': worker_error,
+                        'id': obj_key,
+                        'version': version,
+                        'library': display_title,
+                    })
+
+    # Retry files lost to SSH connection drops
+    global SSH_RETRY_DELAYS
+    all_lost_files = []
+    for worker_id in sorted(worker_results.keys()):
+        partition_files = set(partitions[worker_id]) if worker_id < len(partitions) else set()
+        stdout, _, _ = worker_results[worker_id]
+        responded = set()
+        if stdout.strip():
+            for line in stdout.strip().split('\n'):
+                if line.strip():
+                    try:
+                        entry = json.loads(line)
+                        responded.add(entry.get('path', ''))
+                    except json.JSONDecodeError:
+                        pass
+        all_lost_files.extend(sorted(partition_files - responded))
+
+    for retry_num, delay in enumerate(SSH_RETRY_DELAYS):
+        if not all_lost_files or _shutdown_requested:
+            break
+        print(f"\n  Retrying {len(all_lost_files)} lost file(s) (attempt {retry_num + 1}/{len(SSH_RETRY_DELAYS)}, waiting {delay}s)...", flush=True)
+        _time.sleep(delay)
+
+        # Run a single retry worker with all lost files
+        retry_stdout, retry_rc, retry_stderr = run_worker(98 + retry_num, all_lost_files)
+
+        # Parse retry results
+        retry_responded = set()
+        if retry_stdout.strip():
+            for line in retry_stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                filepath = entry.get('path', '')
+                retry_responded.add(filepath)
+
+                if 'error' in entry:
+                    error_msg = entry.get('error', 'unknown')
+                    if error_msg == 'file not found':
+                        not_found_count += 1
+                        targets = filepath_lookup.get(filepath, [])
+                        for obj_key, version, display_title in targets:
+                            metadata_broken_details.append({
+                                'filepath': filepath, 'reason': 'file_not_found',
+                                'id': obj_key, 'version': version, 'library': display_title,
+                            })
+                            if obj_key in PLEX_Media.OBJ_BY_ID:
+                                obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                                files_dict = obj.get('files', {})
+                                if version in files_dict:
+                                    files_dict[version]['file_metadata'] = {
+                                        'broken': True, 'reason': 'file_not_found',
+                                        'filesize': files_dict[version].get('filesize'),
+                                        'marked_at': datetime.now().isoformat()
+                                    }
+                    else:
+                        error_count += 1
+                        targets = filepath_lookup.get(filepath, [])
+                        for obj_key, version, display_title in targets:
+                            metadata_broken_details.append({
+                                'filepath': filepath, 'reason': 'ffprobe_error',
+                                'stderr': entry.get('stderr', '')[:500],
+                                'id': obj_key, 'version': version, 'library': display_title,
+                            })
+                            if obj_key in PLEX_Media.OBJ_BY_ID:
+                                obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                                files_dict = obj.get('files', {})
+                                if version in files_dict:
+                                    files_dict[version]['file_metadata'] = {
+                                        'broken': True, 'reason': 'ffprobe_error',
+                                        'stderr': entry.get('stderr', '')[:200],
+                                        'filesize': files_dict[version].get('filesize'),
+                                        'marked_at': datetime.now().isoformat()
+                                    }
+                else:
+                    success_count += 1
+                    targets = filepath_lookup.get(filepath, [])
+                    for obj_key, version, display_title in targets:
+                        if obj_key in PLEX_Media.OBJ_BY_ID:
+                            obj = PLEX_Media.OBJ_BY_ID[obj_key]
+                            files_dict = obj.get('files', {})
+                            if version in files_dict:
+                                file_info = files_dict[version]
+                                metadata = {
+                                    'container_duration': entry['container_duration'],
+                                    'filesize': entry.get('filesize'),
+                                    'scanned_at': entry.get('scanned_at', datetime.now().isoformat()),
+                                    'file_type': entry.get('file_type', '')
+                                }
+                                if 'video_duration' in entry:
+                                    metadata['video_duration'] = entry['video_duration']
+                                if 'file_ends_cleanly' in entry:
+                                    metadata['file_ends_cleanly'] = entry['file_ends_cleanly']
+                                file_info['file_metadata'] = metadata
+                        if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
+                            PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
+
+            # Recovered files are no longer lost
+            no_response_count -= len(retry_responded)
+
+        # Update lost files for next retry
+        all_lost_files = [f for f in all_lost_files if f not in retry_responded]
+        if not all_lost_files:
+            print(f"  ✓ All lost files recovered on retry {retry_num + 1}", flush=True)
+
+    # Record remaining lost files in broken details
+    if all_lost_files:
+        # Remove the optimistic broken_details added earlier and re-add with final status
+        metadata_broken_details = [d for d in metadata_broken_details if d.get('reason') != 'connection_lost']
+        for filepath in all_lost_files:
+            targets = filepath_lookup.get(filepath, [])
+            for obj_key, version, display_title in targets:
+                metadata_broken_details.append({
+                    'filepath': filepath,
+                    'reason': 'connection_lost',
+                    'error': f'SSH connection lost, failed after {len(SSH_RETRY_DELAYS)} retries',
+                    'id': obj_key,
+                    'version': version,
+                    'library': display_title,
+                })
+
+    processed = success_count + error_count + not_found_count + no_response_count
+    if no_response_count > 0:
+        print(f"\n  Metadata collection done ({processed}/{total} files processed, {no_response_count} lost to SSH connection drops)", flush=True)
+    else:
+        print(f"\n  Metadata collection done ({processed}/{total} files processed)", flush=True)
 
     # Store for cache update summary and JSON update log
     PLEX_Media.last_metadata_batch_processed = processed
     PLEX_Media.last_metadata_batch_total = total
     PLEX_Media.last_metadata_batch_success = success_count
-    PLEX_Media.last_metadata_broken_count = error_count + not_found_count
+    PLEX_Media.last_metadata_broken_count = error_count + not_found_count + no_response_count
     PLEX_Media.last_metadata_broken_details = metadata_broken_details
 
     _metadata_batch_queue = []
@@ -7950,6 +8128,8 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
 
 # Accumulates TSV errors across all libraries during --update-cache for cache-updates.json
 _TSV_FAILED_SHOWS = []
+# Accumulates TSV stats across all libraries during --update-cache for summary
+_TSV_STATS = {'cached': 0, 'scraped': 0, 'fallback': 0, 'failed': 0, 'normalized': 0, 'titles_filled': 0}
 
 def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_dict):
     """Classify a TSV scraping failure into an error_type and message.
@@ -8075,7 +8255,9 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             fail_part = f", {len(failed_shows)} failed" if failed_shows else ""
             if not _get_worker_prefix():
                 # Main thread: use \r for clean overwriting progress
-                print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({existing_count} cached, {scraped_count} scraped{fb_part}{fail_part})", end='', flush=True)
+                progress_cached = existing_count - scraped_count if existing_count > scraped_count else 0
+                cached_part = f"{progress_cached} cached, " if progress_cached > 0 else ""
+                print(f"\r  episodes.tsv: {show_idx}/{total_shows} shows ({cached_part}{scraped_count} scraped{fb_part}{fail_part})", end='', flush=True)
 
         if not tsv_episodes:
             continue
@@ -8171,7 +8353,14 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     # Summary
     if not _get_worker_prefix():
         print()  # newline after progress \r (main thread only)
-    parts = [f"{existing_count} cached", f"{scraped_count} scraped"]
+    # "cached" = used existing TSV without re-scraping; "scraped" = fetched from API
+    # A show that had a TSV but was re-scraped (--from-scratch) counts only as "scraped"
+    actual_cached = existing_count - scraped_count  # shows where existing TSV was reused
+    if actual_cached < 0: actual_cached = 0
+    parts = []
+    if actual_cached > 0:
+        parts.append(f"{actual_cached} cached")
+    parts.append(f"{scraped_count} scraped from API")
     if fallback_count:
         parts.append(f"{fallback_count} fallback")
     if failed_shows:
@@ -8180,7 +8369,11 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         parts.append(f"{normalized_total} indices normalized")
     if titles_total > 0:
         parts.append(f"{titles_total} titles filled")
-    print(f"  episodes.tsv: {', '.join(parts)}")
+    w_prefix = _get_worker_prefix()
+    if w_prefix:
+        print(f"{w_prefix} episodes.tsv: {', '.join(parts)}")
+    else:
+        print(f"  episodes.tsv ({library_name}): {', '.join(parts)}")
 
     # Always print failure details (actionable for the user)
     if failed_shows:
@@ -8202,8 +8395,14 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             for title, lib in shows:
                 print(f"    {label + ':':40s} {title} ({lib})")
 
-    # Accumulate for cache-updates.json
+    # Accumulate for cache-updates.json and summary
     _TSV_FAILED_SHOWS.extend(failed_shows)
+    _TSV_STATS['cached'] += actual_cached
+    _TSV_STATS['scraped'] += scraped_count
+    _TSV_STATS['fallback'] += fallback_count
+    _TSV_STATS['failed'] += len(failed_shows)
+    _TSV_STATS['normalized'] += normalized_total
+    _TSV_STATS['titles_filled'] += titles_total
 
 
 def _list_tsv_problems():
@@ -9454,6 +9653,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         global MAX_PARALLEL_WORKERS
         max_workers = min(MAX_PARALLEL_WORKERS, total_libraries) if total_libraries > 1 else 1
 
+        # Make library_stats available in CACHE BEFORE workers start,
+        # so _determine_episode_source() can read agent/language for TSV source selection
+        if FORCE_CACHE_UPDATE:
+            CACHE['library_stats'] = current_library_stats
+
         if FORCE_CACHE_UPDATE and max_workers > 1:
             print(f"Processing {total_libraries} libraries in parallel with {max_workers} workers...")
             print(f"{'='*76}")
@@ -10037,7 +10241,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj
             media_type = safe_getattr(obj_args, 'type', None)
             obj_keys = collect_library_keys(library_name=lib_name, media_type=media_type)
-            print(f"\n--- Unmatched Items in '{lib_name}' ---")
+            print(f"\n--- Unmatched Items in '{lib_name}' (not identified by any Plex metadata agent) ---")
             PLEX_Media._list_unmatched(obj_keys, lib_name)
 
         if obj_args.create_library:     PLEX_Library.create(obj)
@@ -10268,7 +10472,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     except Exception as e:
                         print(f"  Warning: Could not read file metadata from backup: {e}")
                 if PLEX_Media._preserved_file_metadata:
-                    print(f"  Preserving file metadata for {len(PLEX_Media._preserved_file_metadata)} files")
+                    print(f"\nPreserving ffmpeg file metadata from old cache for {len(PLEX_Media._preserved_file_metadata)} files (from-scratch rebuilds Plex data, not file scans — use --force-metadata to also re-scan files)")
 
                 PLEX_Media.OBJ_BY_ID = {}
                 PLEX_Media.OBJ_BY_MOVIE = {}
@@ -10708,7 +10912,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             metadata_probed = getattr(PLEX_Media, 'last_metadata_batch_processed', 0)
             metadata_total = getattr(PLEX_Media, 'last_metadata_batch_total', 0)
             metadata_broken = getattr(PLEX_Media, 'last_metadata_broken_count', 0)
-            metadata_interrupted = metadata_probed > 0 and metadata_probed < metadata_total
+            metadata_interrupted = _shutdown_requested
 
             # Count ALL broken files in cache (not just from this run)
             total_broken = 0
@@ -10825,14 +11029,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if has_changes:
                 # Metadata collection summary
                 if metadata_probed > 0:
+                    metadata_missing = metadata_total - metadata_probed
                     if metadata_interrupted:
-                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted)")
+                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted by user)")
+                    elif metadata_missing > 0:
+                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, {metadata_missing} got no response from ffmpeg)")
                     else:
                         print(f"  ✓ Metadata collected: {metadata_success}/{metadata_total} files")
                     if metadata_broken > 0:
                         print(f"  ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
                 if total_broken > 0:
                     print(f"  ⚠ {total_broken} broken files total (use --broken to list)")
+
+                # TSV summary (episode data scraping across all show libraries)
+                if _TSV_STATS['cached'] > 0 or _TSV_STATS['scraped'] > 0:
+                    total_shows = _TSV_STATS['cached'] + _TSV_STATS['scraped']
+                    if _TSV_STATS['cached'] > 0:
+                        tsv_parts = [f"{total_shows} shows ({_TSV_STATS['cached']} used cached TSV, {_TSV_STATS['scraped']} scraped from API)"]
+                    else:
+                        tsv_parts = [f"{total_shows} shows (all scraped from API)"]
+                    if _TSV_STATS['fallback']:
+                        tsv_parts.append(f"{_TSV_STATS['fallback']} used fallback source (primary failed)")
+                    if _TSV_STATS['failed']:
+                        tsv_parts.append(f"{_TSV_STATS['failed']} failed")
+                    if _TSV_STATS['normalized']:
+                        tsv_parts.append(f"{_TSV_STATS['normalized']} episode numbers corrected (Plex → TSV numbering)")
+                    if _TSV_STATS['titles_filled']:
+                        tsv_parts.append(f"{_TSV_STATS['titles_filled']} missing episode titles filled from TSV")
+                    print(f"  ✓ Episode data: {tsv_parts[0]}")
+                    for part in tsv_parts[1:]:
+                        print(f"    {part}")
 
             # --- Always write JSON update log ---
             _write_cache_update_log(
@@ -11512,6 +11738,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --from-scratch")
             return 0
         unmatched = []
+        missing_guid_count = 0
         seen_keys = set()
         for key in obj_keys:
             if key in seen_keys:
@@ -11526,16 +11753,24 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if library_name and obj.get('library') != library_name:
                 continue
             guid = obj.get('guid', '')
-            if guid.startswith('local://'):
+            if not guid:
+                missing_guid_count += 1
+            elif guid.startswith('local://'):
                 title = obj.get('title', '?')
                 plex_id = obj.get('id', '?')
                 library = obj.get('library', '?')
                 filepath = obj.get('file', '')
                 unmatched.append((obj_type, plex_id, title, library, filepath))
 
+        if missing_guid_count > 0:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  WARNING: {missing_guid_count} item(s){scope} have no guid in cache — results incomplete.")
+            print(f"  Run: my-plex --update-cache --from-scratch")
+
         if not unmatched:
             scope = f" in '{library_name}'" if library_name else ""
-            print(f"  No unmatched items{scope} found.")
+            if missing_guid_count == 0:
+                print(f"  All items{scope} are matched — every item was identified by a Plex metadata agent.")
             return 0
 
         unmatched.sort(key=lambda x: (x[3].lower(), x[0], x[2].lower()))  # library, type, title
@@ -13180,7 +13415,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -17516,7 +17751,7 @@ def execute_global_commands(args, cmd_args):
         tsv_problem_count = _list_tsv_problems()
 
         # 4. Unmatched items
-        print("\n--- Unmatched Items (local:// guid) ---")
+        print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
         unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
 
         # Summary
@@ -17535,12 +17770,16 @@ def execute_global_commands(args, cmd_args):
         print("=" * 76)
         return
 
-    # Handle --unmatched: list items not matched by Plex metadata agent
-    if safe_getattr(cmd_args, 'unmatched', False):
+    # Handle --unmatched [LIBRARY]: list items not matched by Plex metadata agent
+    unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
+    if unmatched_val is not None:
+        # unmatched_val is True (no arg) or a string (library name)
+        library_name = None if unmatched_val is True else unmatched_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=None, media_type=media_type)
-        print("\n--- Unmatched Items ---")
-        PLEX_Media._list_unmatched(obj_keys, None)
+        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Unmatched Items{scope} (not identified by any Plex metadata agent) ---")
+        PLEX_Media._list_unmatched(obj_keys, library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -17715,7 +17954,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 
 def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
-    global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
+    global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
     global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, EPISODE_NAME_PATTERN
 
@@ -17890,6 +18129,7 @@ def main():
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
@@ -17927,7 +18167,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched). Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--unmatched', action='store_true', help="List items not matched by Plex (local:// guid). These need 'Fix Match' in Plex. Use --help unmatched for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -17986,7 +18226,8 @@ def main():
         print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
         print("="*76)
         print("This will delete the existing cache and rebuild from scratch.")
-        print("This operation may take several hours depending on your Plex library sizes!")
+        print("Plex data will be re-read from DB, episode data (TSV) re-scraped from APIs.")
+        print("File metadata (ffmpeg scans) will be preserved from old cache if available.")
         if args.force:
             print("Additionally, --force will refresh ALL Plex metadata (slower but verifies files).")
         print()
@@ -18186,6 +18427,24 @@ def main():
             # bare --missing — append after PLEXOBJECT so it becomes an obj_arg,
             # or insert at front if no PLEXOBJECT (global command will error with usage)
             remaining_args.append('--missing')
+
+    # Re-inject --unmatched into remaining_args
+    # Two cases:
+    #   1. --unmatched <LIBRARY> (no CMD_OR_PLEXOBJECT) → global command: insert at front
+    #   2. <PLEXOBJ> --unmatched (bare --unmatched with CMD_OR_PLEXOBJECT) → obj_arg: append at end
+    #   3. bare --unmatched (no arg, no CMD_OR_PLEXOBJECT) → global command: insert at front
+    if safe_getattr(args, 'unmatched', None) is not None:
+        if args.unmatched is not True:
+            # --unmatched <LIBRARY> — explicit library name, goes through global command path
+            remaining_args.insert(0, '--unmatched')
+            remaining_args.insert(1, args.unmatched)
+        else:
+            # bare --unmatched — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
+            # otherwise it's a global command (list all unmatched)
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--unmatched')
+            else:
+                remaining_args.insert(0, '--unmatched')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
