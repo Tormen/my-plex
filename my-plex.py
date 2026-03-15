@@ -17280,7 +17280,29 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
         },
     }
 
-    # Per-library change details (added/removed/updated items with full info)
+    # Per-library summary counts (always populated)
+    libraries = {}
+    if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
+        for lib_key, counters in PLEX_Media.library_delta_counters.items():
+            base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
+            if base_lib not in libraries:
+                libraries[base_lib] = {'added': {}, 'removed': {}, 'updated': {}}
+            for act in ['added', 'removed', 'updated']:
+                for obj_type, count in counters[act].items():
+                    if count > 0:
+                        libraries[base_lib][act][obj_type] = libraries[base_lib][act].get(obj_type, 0) + count
+
+    # Prune empty actions
+    for lib_name in list(libraries.keys()):
+        for act in list(libraries[lib_name].keys()):
+            if not libraries[lib_name][act]:
+                del libraries[lib_name][act]
+        if not libraries[lib_name]:
+            del libraries[lib_name]
+
+    log['libraries'] = libraries
+
+    # Per-library change details (individual items — only populated for incremental updates)
     changes_by_library = {}
     if hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
         for lib_key, details in PLEX_Media.library_delta_details.items():
@@ -17316,12 +17338,25 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
         if not lib_changes:
             del changes_by_library[lib_name]
 
-    log['changes_by_library'] = changes_by_library
+    if changes_by_library:
+        log['changes_by_library'] = changes_by_library
 
     # Broken file details from metadata collection — stderr NOT fully in cache
     # (cache stores 200 chars, log stores 500 for diagnostics)
     broken_details = getattr(PLEX_Media, 'last_metadata_broken_details', [])
     log['broken_files_from_metadata'] = broken_details
+
+    # Episode data (TSV) stats
+    if _TSV_STATS['cached'] > 0 or _TSV_STATS['scraped'] > 0:
+        log['episode_data'] = {
+            'total_shows': _TSV_STATS['cached'] + _TSV_STATS['scraped'],
+            'cached': _TSV_STATS['cached'],
+            'scraped': _TSV_STATS['scraped'],
+            'fallback': _TSV_STATS['fallback'],
+            'failed': _TSV_STATS['failed'],
+            'indices_normalized': _TSV_STATS['normalized'],
+            'titles_filled': _TSV_STATS['titles_filled'],
+        }
 
     # TSV scraping errors
     if _TSV_FAILED_SHOWS:
