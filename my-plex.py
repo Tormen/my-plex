@@ -8180,7 +8180,7 @@ _TSV_FAILED_SHOWS = []
 # Accumulates TSV stats across all libraries during --update-cache for summary
 _TSV_STATS = {'cached': 0, 'scraped': 0, 'fallback': 0, 'failed': 0, 'numbering_issues': 0, 'titles_filled': 0}
 
-def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_dict):
+def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_key):
     """Classify a TSV scraping failure into an error_type and message.
     Returns: (error_type, message)"""
     import os
@@ -8193,15 +8193,26 @@ def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_di
     if len(show_title) <= 5 and len(dir_basename) > len(show_title) * 2:
         return ('suspicious_title', f"Title '{show_title}' may be truncated (dir: {dir_basename})")
 
-    # Misidentified show: check if show has only 1 season with 1 episode
-    seasons = show_dict.get('seasons', {}) if show_dict else {}
+    # Misidentified show: check if show has only 1 season with 1 episode in Plex
+    show_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
     total_episodes = 0
-    for s_key, s_data in seasons.items():
-        if s_key > 0:  # skip specials (season 0)
-            total_episodes += len(s_data.get('episodes', []))
-    real_seasons = sum(1 for s in seasons if s > 0)
+    real_seasons = 0
+    ep_file = ''
+    for s_str, episodes in show_eps.items():
+        if s_str == 'S-1':
+            continue  # skip specials
+        real_seasons += 1
+        for e_str, versions in episodes.items():
+            for ver, ep_keys in versions.items():
+                total_episodes += len(ep_keys)
+                if not ep_file and ep_keys:
+                    ep = PLEX_Media.OBJ_BY_ID.get(ep_keys[0], {})
+                    ep_file = ep.get('file', '')
     if real_seasons <= 1 and total_episodes <= 1:
-        return ('misidentified_show', 'Likely a misidentified file — Fix Match in Plex')
+        msg = f'Single episode in series — please verify'
+        if ep_file:
+            msg += f'\n  file: {ep_file}'
+        return ('misidentified_show', msg)
 
     # Source ID missing for the chosen source
     source_id_map = {'tmdb': 'tmdb', 'tvdb': 'tvdb', 'fernsehserien.de': None}
@@ -8292,7 +8303,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                 elif not tsv_episodes:
                     # Classify the failure
                     error_type, message = _classify_tsv_error(
-                        show_title, show_dir_server, source, external_ids, show_dict)
+                        show_title, show_dir_server, source, external_ids, show_key)
                     failed_shows.append((show_title, error_type, message, library_name))
                     write_episodes_err(show_dir, error_type, source, message)
             except Exception as e:
@@ -8505,7 +8516,7 @@ def _list_tsv_problems():
     _ERROR_TYPE_LABELS = {
         'no_external_ids':    'No external IDs (fix in Plex)',
         'suspicious_title':   'Suspicious title (may be truncated)',
-        'misidentified_show': 'Misidentified show (1 episode, fix in Plex)',
+        'misidentified_show': 'Single episode in series — please verify',
         'no_id_for_source':   'No ID for source',
         'source_not_found':   'Source not found',
         'scrape_failed':      'Scrape failed',
@@ -8529,6 +8540,18 @@ def _list_tsv_problems():
         err_data = read_episodes_err(show_dir)
         if err_data:
             error_type = err_data.get('error_type', 'unknown')
+            # Re-validate misidentified_show against actual episode count
+            # (old .err files may have wrong classification due to bug)
+            if error_type == 'misidentified_show':
+                show_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+                ep_count = 0
+                for s_str, episodes in show_eps.items():
+                    if s_str != 'S-1':
+                        for e_str, versions in episodes.items():
+                            for ver, ep_keys in versions.items():
+                                ep_count += len(ep_keys)
+                if ep_count > 1:
+                    error_type = 'source_not_found'  # reclassify: scraper failed, not misidentified
             title = show_dict.get('title', '?')
             # Find which library this show belongs to
             lib = '?'
@@ -11198,7 +11221,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         _ERROR_TYPE_LABELS = {
                             'no_external_ids':    'No external IDs (fix in Plex)',
                             'suspicious_title':   'Suspicious title',
-                            'misidentified_show': 'Misidentified show',
+                            'misidentified_show': 'Single episode in series',
                             'no_id_for_source':   'No ID for source',
                             'source_not_found':   'Source not found',
                             'scrape_failed':      'Scrape failed',
