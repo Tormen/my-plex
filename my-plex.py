@@ -16200,7 +16200,25 @@ def cmd_sort_new(args, dry_run=False):
         failed_count = 0
 
         for fn, fp in unsorted:
-            # Parse date from filename
+            # 1. Check if filename already contains S##E## — use directly, no date needed
+            sxex_match = _re.search(r'S(\d+)E(\d+)', fn, _re.IGNORECASE)
+            if sxex_match:
+                season = int(sxex_match.group(1))
+                ep_num = int(sxex_match.group(2))
+                target_dir = os.path.join(show_dir, f"s{season:02d}")
+                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                target_path = os.path.join(target_dir, new_name)
+
+                if dry_run:
+                    print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
+                else:
+                    os.makedirs(target_dir, exist_ok=True)
+                    os.rename(fp, target_path)
+                    print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
+                sorted_count += 1
+                continue
+
+            # 2. Parse date from filename
             file_date = extract_episode_date(fn)
             if file_date is None:
                 print(f"    WARNING: Cannot parse date from: {fn}")
@@ -16238,7 +16256,7 @@ def cmd_sort_new(args, dry_run=False):
                 sorted_count += 1
                 continue
 
-            # Look up date in TSV (also try previous day for rebroadcasts)
+            # 3. Look up date in TSV (also try previous day for rebroadcasts)
             result = date_lookup.get(iso_date)
             lookup_info = iso_date
 
