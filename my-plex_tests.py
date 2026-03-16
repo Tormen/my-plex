@@ -4460,6 +4460,72 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
             return f.read()
 
 
+class TestPotentialMismatch(unittest.TestCase):
+    """Test --potential-mismatch command integration."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_function_exists(self):
+        """_list_potential_mismatches must exist."""
+        content = self._read_script()
+        self.assertIn('def _list_potential_mismatches(', content)
+
+    def test_normalize_exists(self):
+        """_normalize_for_comparison must exist."""
+        content = self._read_script()
+        self.assertIn('def _normalize_for_comparison(', content)
+
+    def test_title_similarity_exists(self):
+        """_title_similarity must exist."""
+        content = self._read_script()
+        self.assertIn('def _title_similarity(', content)
+
+    def test_library_argparser(self):
+        """--potential-mismatch must be in library argparser."""
+        content = self._read_script()
+        self.assertIn("'--potential-mismatch'", content)
+
+    def test_global_cmd_parser(self):
+        """--potential-mismatch must be in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        idx = content.index('GLOBAL_CMD_PARSER.add_argument')
+        self.assertIn('--potential-mismatch', content[idx:])
+
+    def test_problems_integration(self):
+        """--problems must include potential mismatches section."""
+        content = self._read_script()
+        self.assertIn('Potential Mismatches', content)
+        self.assertIn('mismatch_count', content)
+
+    def test_help_exists(self):
+        """--help potential-mismatch must work."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'potential-mismatch'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help potential-mismatch failed: {result.stderr}")
+        self.assertIn('POTENTIAL MISMATCH', result.stdout)
+
+    def test_e2e_runs(self):
+        """--potential-mismatch must run without error."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--potential-mismatch'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, f"--potential-mismatch failed: {result.stderr}")
+
+    def test_re_injection(self):
+        """--potential-mismatch must be re-injected into remaining_args."""
+        content = self._read_script()
+        self.assertIn("'potential_mismatch'", content)
+        self.assertIn("'--potential-mismatch'", content)
+
+    def test_has_standalone_cmd(self):
+        """--potential-mismatch must be in has_standalone_cmd check."""
+        content = self._read_script()
+        self.assertIn("'potential_mismatch'", content)
+
+
 class TestShowDirDerivation(unittest.TestCase):
     """Test show_dir derivation uses PATHS_DICT (library root from section_locations)."""
 
@@ -4545,6 +4611,7 @@ _UNITTEST_CLASSES = [
     TestVersionStringCollision,
     TestForceTsv,
     TestTsvScrapersE2E,
+    TestPotentialMismatch,
     TestShowDirDerivation,
 ]
 
