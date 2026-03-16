@@ -8896,6 +8896,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--rename', action='store_true', help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show libraries only. Use --help rename for details.")
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
     argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). Use --help unsorted for details.")
+    argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
@@ -10301,6 +10302,13 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj
             print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
             PLEX_Media._list_unsorted(library_name=lib_name)
+
+        if safe_getattr(obj_args, 'potential_mismatch', False):
+            lib_name = obj
+            media_type = safe_getattr(obj_args, 'type', None)
+            obj_keys = collect_library_keys(library_name=lib_name, media_type=media_type)
+            print(f"\n--- Potential Mismatches in '{lib_name}' (Plex title vs directory name) ---")
+            PLEX_Media._list_potential_mismatches(obj_keys, lib_name)
 
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
@@ -11848,10 +11856,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         unmatched.sort(key=lambda x: (x[3].lower(), x[0], x[2].lower()))  # library, type, title
 
-        print(f"\n  {'TYPE':<7} {'PLEX-ID':<10} {'TITLE':<45} {'LIBRARY':<20} FILEPATH")
+        print(f"\n  {'KEY':<17} {'TITLE':<45} {'LIBRARY':<20} FILEPATH")
         print("  " + "-" * 140)
         for obj_type, plex_id, title, library, filepath in unmatched:
-            print(f"  {obj_type:<7} ID:{plex_id:<7} {title[:45]:<45} {library:<20} {filepath}")
+            cache_key = f"{obj_type}:{plex_id}"
+            print(f"  {cache_key:<17} {title[:45]:<45} {library:<20} {filepath}")
         print(f"\n  {len(unmatched)} unmatched item(s) found.")
         return len(unmatched)
 
@@ -11910,6 +11919,117 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         total_files = sum(len(f) for _, _, _, _, f in unsorted)
         print(f"\n  {len(unsorted)} show(s) with {total_files} unsorted episode(s) found.")
         return len(unsorted)
+
+    @staticmethod
+    def _normalize_for_comparison(name):
+        """Normalize a name for fuzzy comparison: lowercase, strip punctuation, collapse whitespace."""
+        import re
+        name = name.lower()
+        # Remove year in parens like "(2016)"
+        name = re.sub(r'\(\d{4}\)', '', name)
+        # Replace dots, underscores, hyphens with spaces
+        name = re.sub(r'[._\-]', ' ', name)
+        # Strip common brackets and their content: [vu], [quiz], [from_...], etc.
+        name = re.sub(r'\[.*?\]', '', name)
+        # Remove punctuation
+        name = re.sub(r"[^a-z0-9\s]", '', name)
+        # Collapse whitespace
+        name = re.sub(r'\s+', ' ', name).strip()
+        return name
+
+    @staticmethod
+    def _title_similarity(dir_name, title, original_title=''):
+        """Compute best similarity ratio between a directory name and a Plex title/originalTitle.
+        Returns (best_ratio, matched_against) where matched_against is 'title' or 'originalTitle'.
+        Uses difflib.SequenceMatcher for token-level similarity."""
+        from difflib import SequenceMatcher
+        norm_dir = PLEX_Media._normalize_for_comparison(dir_name)
+        if not norm_dir:
+            return 0.0, 'title'
+
+        best_ratio = 0.0
+        matched = 'title'
+        for label, raw in [('title', title), ('originalTitle', original_title)]:
+            if not raw:
+                continue
+            norm = PLEX_Media._normalize_for_comparison(raw)
+            if not norm:
+                continue
+            # Check containment first (one is substring of the other)
+            if norm_dir in norm or norm in norm_dir:
+                ratio = 0.9  # high but not perfect (substring match)
+            else:
+                ratio = SequenceMatcher(None, norm_dir, norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                matched = label
+        return best_ratio, matched
+
+    @staticmethod
+    def _list_potential_mismatches(obj_keys, library_name):
+        """List items where the Plex title doesn't match the filesystem directory name.
+        This detects potential Plex misidentifications (Fix Match needed).
+        Returns count of potential mismatches."""
+        MISMATCH_THRESHOLD = 0.35  # below this = likely mismatch
+
+        mismatches = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type')
+            if obj_type not in ('Movie', 'Show'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+
+            title = obj.get('title', '')
+            original_title = obj.get('originalTitle', '')
+            filepath = obj.get('file', '')
+            if not filepath or not title:
+                continue
+
+            # Get the directory name to compare against
+            if obj_type == 'Show':
+                dir_name = os.path.basename(filepath)  # show_dir basename
+            else:  # Movie
+                dir_name = os.path.basename(os.path.dirname(filepath))  # movie folder
+
+            if not dir_name:
+                continue
+
+            ratio, matched_against = PLEX_Media._title_similarity(dir_name, title, original_title)
+
+            if ratio < MISMATCH_THRESHOLD:
+                plex_id = obj.get('id', '?')
+                library = obj.get('library', '?')
+                mismatches.append((obj_type, plex_id, title, original_title, dir_name,
+                                   library, filepath, ratio))
+
+        if not mismatches:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No potential mismatches found{scope} — all titles match their directory names.")
+            return 0
+
+        mismatches.sort(key=lambda x: (x[0], x[7], x[5].lower(), x[2].lower()))  # type, ratio, library, title
+
+        print(f"\n  {'TYPE':<7} {'PLEX-ID':<10} {'PLEX TITLE':<40} {'DIRECTORY NAME':<40} {'SIM':>4} {'LIBRARY':<15}")
+        print("  " + "-" * 130)
+        for obj_type, plex_id, title, orig_title, dir_name, library, filepath, ratio in mismatches:
+            pct = f"{ratio:.0%}"
+            title_display = title[:40]
+            dir_display = dir_name[:40]
+            print(f"  {obj_type:<7} ID:{plex_id:<7} {title_display:<40} {dir_display:<40} {pct:>4} {library:<15}")
+            if orig_title and orig_title != title:
+                print(f"  {'':7} {'':10} originalTitle: {orig_title[:60]}")
+
+        print(f"\n  {len(mismatches)} potential mismatch(es) found (similarity < {MISMATCH_THRESHOLD:.0%}).")
+        print(f"  These items may need Fix Match in Plex.")
+        return len(mismatches)
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -13544,7 +13664,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -13976,6 +14096,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("  5. --unsorted           Detect shows with episodes directly in show dir")
             print("                          (missing season subdirectories)")
             print()
+            print("  6. --potential-mismatch Detect items where Plex title doesn't match directory")
+            print("                          (wrong metadata match — Fix Match needed)")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -13995,6 +14118,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --broken                # Show broken/truncated files only")
             print("  my-plex --unmatched             # Show unmatched items only")
             print("  my-plex --unsorted              # Show unsorted shows only")
+            print("  my-plex --potential-mismatch    # Show potential mismatches only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -14070,6 +14194,40 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex series.en --unsorted       # Unsorted in series.en only")
             print("  my-plex 'Breaking Bad' --unsorted  # Check a specific show")
             print("  my-plex --problems                 # Includes unsorted in full report")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'potential-mismatch' | 'potential_mismatch' | 'mismatch':
+            print()
+            print("=" * 76)
+            print("POTENTIAL MISMATCH HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --potential-mismatch")
+            print("       my-plex --potential-mismatch <LIBRARY>")
+            print("       my-plex <library> --potential-mismatch")
+            print()
+            print("Detects items where the Plex title doesn't match the filesystem")
+            print("directory name. This usually indicates Plex matched the wrong show")
+            print("or movie (needs Fix Match in Plex).")
+            print()
+            print("HOW IT WORKS:")
+            print("  Compares the Plex title (and originalTitle) against the directory")
+            print("  name using string similarity. Items below 35% similarity are flagged.")
+            print()
+            print("EXAMPLES OF MISMATCHES:")
+            print("  Dir: picket.fences/       Plex: 'Armored Troopers J-Phoenix PF LIPS'")
+            print("  Dir: greys.anatomy/       Plex: 'The G'")
+            print()
+            print("TO FIX: Use Plex > Fix Match to re-identify the item correctly.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --potential-mismatch              # All libraries")
+            print("  my-plex --potential-mismatch series.en    # One library")
+            print("  my-plex series.en --potential-mismatch    # Same")
+            print("  my-plex --problems                        # Includes this in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -18035,6 +18193,10 @@ def execute_global_commands(args, cmd_args):
         print("\n--- Unsorted Shows (episodes without season directories) ---")
         unsorted_count = PLEX_Media._list_unsorted()
 
+        # 6. Potential mismatches
+        print("\n--- Potential Mismatches (Plex title vs directory name) ---")
+        mismatch_count = PLEX_Media._list_potential_mismatches(obj_keys, None)
+
         # Summary
         print("\n" + "=" * 76)
         print("SUMMARY")
@@ -18044,7 +18206,8 @@ def execute_global_commands(args, cmd_args):
         print(f"  Episode data issues:      {tsv_problem_count}")
         print(f"  Unmatched items:          {unmatched_count}")
         print(f"  Unsorted shows:           {unsorted_count}")
-        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count
+        print(f"  Potential mismatches:     {mismatch_count}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
@@ -18071,6 +18234,17 @@ def execute_global_commands(args, cmd_args):
         scope = f" in '{library_name}'" if library_name else ""
         print(f"\n--- Unsorted Shows{scope} (episodes without season directories) ---")
         PLEX_Media._list_unsorted(library_name=library_name)
+        return
+
+    # Handle --potential-mismatch [LIBRARY]: list items where Plex title doesn't match directory name
+    mismatch_val = safe_getattr(cmd_args, 'potential_mismatch', None)
+    if mismatch_val is not None:
+        library_name = None if mismatch_val is True else mismatch_val
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Potential Mismatches{scope} (Plex title vs directory name) ---")
+        PLEX_Media._list_potential_mismatches(obj_keys, library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -18422,6 +18596,7 @@ def main():
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
@@ -18459,9 +18634,10 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch). Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
+    GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -18566,6 +18742,8 @@ def main():
             help_redirect = 'list'
         elif '--unmatched' in remaining_args:
             help_redirect = 'unmatched'
+        elif '--potential-mismatch' in remaining_args:
+            help_redirect = 'potential-mismatch'
 
         if help_redirect:
             args.help = help_redirect
@@ -18756,6 +18934,18 @@ def main():
                 remaining_args.append('--unsorted')
             else:
                 remaining_args.insert(0, '--unsorted')
+
+    # Re-inject --potential-mismatch into remaining_args
+    # Same pattern as --unmatched: supports --potential-mismatch [LIBRARY], <PLEXOBJ> --potential-mismatch, bare
+    if safe_getattr(args, 'potential_mismatch', None) is not None:
+        if args.potential_mismatch is not True:
+            remaining_args.insert(0, '--potential-mismatch')
+            remaining_args.insert(1, args.potential_mismatch)
+        else:
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--potential-mismatch')
+            else:
+                remaining_args.insert(0, '--potential-mismatch')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
