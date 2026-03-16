@@ -11135,6 +11135,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
             else:
                 print(f"\n{action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
