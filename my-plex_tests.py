@@ -3209,18 +3209,17 @@ class TestCacheUpdateLog(unittest.TestCase):
         self.assertIn("metadata_probed", has_changes_line,
             "has_changes must include metadata_probed, not just library changes")
 
-    def test_details_file_path_printed_on_changes(self):
-        """Must print path to CACHE_UPDATES_FILE when there are changes, not on no-op."""
+    def test_details_file_path_always_printed(self):
+        """Must always print path to CACHE_UPDATES_FILE, including on no-change runs."""
         src = self._read_script()
         self.assertIn("Details: {CACHE_UPDATES_FILE}", src,
             "Must print the JSON log file path for the user")
-        # Should NOT appear in the "no changes" branch
+        # Should also appear after the "no changes" branch
         no_changes_idx = src.index("no changes{broken_str}")
         next_newline = src.index('\n', no_changes_idx)
-        # The next few lines after "no changes" should NOT have Details:
         after_no_changes = src[next_newline:next_newline+200]
-        self.assertNotIn("Details:", after_no_changes,
-            "Must NOT print Details: line when there are no changes")
+        self.assertIn("Details:", after_no_changes,
+            "Must print Details: line even when there are no changes")
 
     def test_metadata_summary_in_summary_section(self):
         """Metadata collection summary must appear in SUMMARY OF CHANGES, not in batch function."""
