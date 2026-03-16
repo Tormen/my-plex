@@ -4264,9 +4264,9 @@ class TestForceTsv(unittest.TestCase):
         self.assertIn('--force-tsv', src)
 
     def test_force_tsv_triggers_rescrape(self):
-        """FROM_SCRATCH + FORCE_TSV must force needs_scrape."""
+        """FORCE_TSV must force needs_scrape."""
         src = self._read_script()
-        self.assertIn('FROM_SCRATCH and FORCE_TSV', src)
+        self.assertIn('if FORCE_TSV:', src)
 
     def test_force_tsv_in_help(self):
         """--force-tsv must be documented in update-cache help."""
