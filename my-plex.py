@@ -7887,6 +7887,15 @@ def fetch_shows_from_database(library_section_id):
         print(f"{VRBPFX}Fetched {len(shows)} shows with {total_eps} episodes from database")
     return shows
 
+_SEASON_DIR_RE = re.compile(
+    r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+    re.IGNORECASE
+)
+
+def _is_season_dir(dirname):
+    """Return True if dirname looks like a season directory (e.g. 'Season 01', 'Staffel 2', 's01', 'Specials')."""
+    return bool(_SEASON_DIR_RE.match(dirname))
+
 def _process_shows_from_database(shows_data, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """Process shows/episodes fetched from database and populate cache
 
@@ -8101,8 +8110,15 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 else:
                     show_dir = lib_root  # shouldn't happen, but fallback
             else:
-                # Fallback: original heuristic (go up 2 levels)
-                show_dir = os.path.dirname(os.path.dirname(first_episode_filepath))
+                # Fallback: derive show dir from episode filepath structure.
+                # Standard layout: show/Season 01/ep.mkv → go up 2 levels
+                # Flat layout:     show/ep.mkv           → go up 1 level
+                parent = os.path.dirname(first_episode_filepath)
+                parent_name = os.path.basename(parent)
+                if _is_season_dir(parent_name):
+                    show_dir = os.path.dirname(parent)
+                else:
+                    show_dir = parent
         show_dict = {
             'file': show_dir, 'files': {}, 'type': 'Show', 'type_str': 'Show',
             'id': show_id, 'title': show_info['title'],
