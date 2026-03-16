@@ -8503,12 +8503,16 @@ def _list_tsv_problems():
     from collections import defaultdict
 
     _ERROR_TYPE_LABELS = {
-        'no_external_ids':    'No external IDs (fix in Plex > Fix Match)',
+        'no_external_ids':    'No external IDs (fix in Plex)',
         'suspicious_title':   'Suspicious title (may be truncated)',
         'misidentified_show': 'Misidentified show (1 episode, fix in Plex)',
         'no_id_for_source':   'No ID for source',
         'source_not_found':   'Source not found',
         'scrape_failed':      'Scrape failed',
+    }
+    # Types whose details are shown via a dedicated command (count + hint only here)
+    _ERROR_TYPE_HINT = {
+        'no_external_ids':    '--unmatched',
     }
 
     by_type = defaultdict(list)
@@ -8525,7 +8529,6 @@ def _list_tsv_problems():
         err_data = read_episodes_err(show_dir)
         if err_data:
             error_type = err_data.get('error_type', 'unknown')
-            message = err_data.get('message', '')
             title = show_dict.get('title', '?')
             # Find which library this show belongs to
             lib = '?'
@@ -8542,9 +8545,15 @@ def _list_tsv_problems():
 
     for etype, shows in by_type.items():
         label = _ERROR_TYPE_LABELS.get(etype, etype)
-        print(f"  {label}:")
-        for title, lib in sorted(shows):
-            print(f"    {title:40s} {lib}")
+        hint = _ERROR_TYPE_HINT.get(etype)
+        if hint:
+            # Has dedicated command → show count + hint
+            print(f"  {label}: {len(shows)}  (use {hint} for details)")
+        else:
+            # No dedicated command → show inline details
+            print(f"  {label}:")
+            for title, lib in sorted(shows):
+                print(f"    {title:40s} {lib}")
     print(f"\n  {total} issue(s) found.")
     return total
 
@@ -11906,12 +11915,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def _list_unmatched(obj_keys, library_name):
-        """List items with local:// guid (unmatched by Plex metadata agent).
+        """List items needing rematch in Plex: local:// guid (never matched) or
+        matched but missing external IDs (no TMDB/TVDB → can't scrape episodes).
         Returns count of unmatched items."""
         if getattr(PLEX_Media, '_cache_missing_guid', False):
             print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --from-scratch")
             return 0
-        unmatched = []
+        unmatched = []       # (obj_type, plex_id, title, library, filepath, reason)
         missing_guid_count = 0
         seen_keys = set()
         for key in obj_keys:
@@ -11927,14 +11937,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if library_name and obj.get('library') != library_name:
                 continue
             guid = obj.get('guid', '')
+            title = obj.get('title', '?')
+            plex_id = obj.get('id', '?')
+            library = obj.get('library', '?')
+            filepath = obj.get('file', '')
             if not guid:
                 missing_guid_count += 1
             elif guid.startswith('local://'):
-                title = obj.get('title', '?')
-                plex_id = obj.get('id', '?')
-                library = obj.get('library', '?')
-                filepath = obj.get('file', '')
-                unmatched.append((obj_type, plex_id, title, library, filepath))
+                unmatched.append((obj_type, plex_id, title, library, filepath, 'not matched'))
+            elif obj_type == 'Show':
+                # Matched but no external IDs → can't scrape episode data
+                ext_ids = obj.get('external_ids', {})
+                if not ext_ids:
+                    unmatched.append((obj_type, plex_id, title, library, filepath, 'no external IDs'))
 
         if missing_guid_count > 0:
             scope = f" in '{library_name}'" if library_name else ""
@@ -11949,11 +11964,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         unmatched.sort(key=lambda x: (x[3].lower(), x[0], x[2].lower()))  # library, type, title
 
-        print(f"\n  {'KEY':<17} {'TITLE':<45} {'LIBRARY':<20} FILEPATH")
-        print("  " + "-" * 140)
-        for obj_type, plex_id, title, library, filepath in unmatched:
+        print(f"\n  {'KEY':<17} {'TITLE':<45} {'LIBRARY':<20} {'REASON':<20} FILEPATH")
+        print("  " + "-" * 160)
+        for obj_type, plex_id, title, library, filepath, reason in unmatched:
             cache_key = f"{obj_type}:{plex_id}"
-            print(f"  {cache_key:<17} {title[:45]:<45} {library:<20} {filepath}")
+            print(f"  {cache_key:<17} {title[:45]:<45} {library:<20} {reason:<20} {filepath}")
         print(f"\n  {len(unmatched)} unmatched item(s) found.")
         return len(unmatched)
 
