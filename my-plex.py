@@ -8486,27 +8486,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     else:
         print(f"  episodes.tsv ({library_name}): {', '.join(parts)}")
 
-    # Always print failure details (actionable for the user)
-    if failed_shows:
-        # Group by error_type for compact display
-        from collections import defaultdict
-        by_type = defaultdict(list)
-        for title, error_type, message, lib in failed_shows:
-            by_type[error_type].append((title, lib))
-        _ERROR_TYPE_LABELS = {
-            'no_external_ids':  'No external IDs (fix in Plex)',
-            'suspicious_title': 'Suspicious title (may be truncated)',
-            'misidentified_show': 'Misidentified show',
-            'no_id_for_source': 'No ID for source',
-            'source_not_found': 'Source not found',
-            'scrape_failed':    'Scrape failed',
-        }
-        for etype, shows in by_type.items():
-            label = _ERROR_TYPE_LABELS.get(etype, etype)
-            for title, lib in shows:
-                print(f"    {label + ':':40s} {title} ({lib})")
-
-    # Accumulate for cache-updates.json and summary
+    # Accumulate for cache-updates.json and summary (details printed in final summary)
     _TSV_FAILED_SHOWS.extend(failed_shows)
     _TSV_STATS['cached'] += actual_cached
     _TSV_STATS['scraped'] += scraped_count
@@ -11199,6 +11179,46 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"  ✓ Episode data: {tsv_parts[0]}")
                     for part in tsv_parts[1:]:
                         print(f"    {part}")
+
+                    # Print failure details (grouped by type, with counts)
+                    if _TSV_FAILED_SHOWS:
+                        from collections import defaultdict
+                        by_type = defaultdict(list)
+                        for title, error_type, message, lib in _TSV_FAILED_SHOWS:
+                            by_type[error_type].append((title, lib))
+                        _ERROR_TYPE_LABELS = {
+                            'no_external_ids':    'No external IDs (fix in Plex)',
+                            'suspicious_title':   'Suspicious title',
+                            'misidentified_show': 'Misidentified show',
+                            'no_id_for_source':   'No ID for source',
+                            'source_not_found':   'Source not found',
+                            'scrape_failed':      'Scrape failed',
+                        }
+                        # Types that have a dedicated command for full details
+                        _ERROR_TYPE_HINT = {
+                            'no_external_ids':    '--unmatched',
+                            'suspicious_title':   '--potential-mismatch',
+                        }
+                        for etype, shows in by_type.items():
+                            label = _ERROR_TYPE_LABELS.get(etype, etype)
+                            hint = _ERROR_TYPE_HINT.get(etype)
+                            if hint:
+                                # Has dedicated command → show count + hint
+                                print(f"      {label}: {len(shows)}  (use {hint} for details)")
+                            else:
+                                # No dedicated command → show count + inline details
+                                print(f"      {label}: {len(shows)}")
+                                for title, lib in sorted(shows):
+                                    print(f"        {title:40s} {lib}")
+
+                    # Hints about related commands
+                    hints = []
+                    if _TSV_FAILED_SHOWS:
+                        hints.append('--problems --tsv for full TSV issue list')
+                    if _TSV_STATS['numbering_issues']:
+                        hints.append('--episode-numbering-issues for numbering details')
+                    if hints:
+                        print(f"    Use {', '.join(hints)}.")
 
             # --- Always write JSON update log ---
             _write_cache_update_log(
@@ -14212,9 +14232,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("PROBLEMS HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --problems")
+            print("Usage: my-plex --problems [--tsv]")
             print()
             print("Runs all problem detection checks and prints a summary at the end.")
+            print("Use --tsv (or --scrape) to show only episode data / scraping issues.")
             print("Currently equivalent to running:")
             print()
             print("  1. --broken           Detect broken/truncated media files")
@@ -14255,6 +14276,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --problems              # Run all checks")
+            print("  my-plex --problems --tsv        # Only episode data + numbering issues")
             print("  my-plex --excess-versions 2     # Show entries with 2+ versions")
             print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
             print("  my-plex --broken                # Show broken/truncated files only")
@@ -18421,37 +18443,46 @@ def execute_global_commands(args, cmd_args):
 
     # Handle --problems: run all problem detection checks with summary
     if safe_getattr(cmd_args, 'problems', False):
+        tsv_only = safe_getattr(cmd_args, 'tsv', False)
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys = collect_library_keys(library_name=None, media_type=media_type)
 
         print("\n" + "=" * 76)
-        print("PROBLEM DETECTION")
+        print("PROBLEM DETECTION" + (" — Episode Data (TSV/Scraping)" if tsv_only else ""))
         print("=" * 76)
 
-        # 1. Broken files
-        print("\n--- Broken / Truncated Files ---")
-        broken_count = PLEX_Media._list_broken_files(obj_keys, None) or 0
+        broken_count = 0
+        excess_file_count = excess_entry_count = 0
+        unmatched_count = 0
+        unsorted_count = 0
+        mismatch_count = 0
 
-        # 2. Excess versions
-        print("\n--- Excess Versions (3+) ---")
-        result = PLEX_Media._list_excess_versions(obj_keys, None, 3)
-        excess_file_count, excess_entry_count = result if result else (0, 0)
+        if not tsv_only:
+            # 1. Broken files
+            print("\n--- Broken / Truncated Files ---")
+            broken_count = PLEX_Media._list_broken_files(obj_keys, None) or 0
+
+            # 2. Excess versions
+            print("\n--- Excess Versions (3+) ---")
+            result = PLEX_Media._list_excess_versions(obj_keys, None, 3)
+            excess_file_count, excess_entry_count = result if result else (0, 0)
 
         # 3. Episode data issues
         print("\n--- Episode Data (TSV) Issues ---")
         tsv_problem_count = _list_tsv_problems()
 
-        # 4. Unmatched items
-        print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
-        unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
+        if not tsv_only:
+            # 4. Unmatched items
+            print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
+            unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
 
-        # 5. Unsorted shows
-        print("\n--- Unsorted Shows (episodes without season directories) ---")
-        unsorted_count = PLEX_Media._list_unsorted()
+            # 5. Unsorted shows
+            print("\n--- Unsorted Shows (episodes without season directories) ---")
+            unsorted_count = PLEX_Media._list_unsorted()
 
-        # 6. Potential mismatches
-        print("\n--- Potential Mismatches (Plex title vs directory name) ---")
-        mismatch_count = PLEX_Media._list_potential_mismatches(obj_keys, None)
+            # 6. Potential mismatches
+            print("\n--- Potential Mismatches (Plex title vs directory name) ---")
+            mismatch_count = PLEX_Media._list_potential_mismatches(obj_keys, None)
 
         # 7. Episode numbering issues
         print("\n--- Episode Numbering Issues (Plex vs Scraped) ---")
@@ -18461,12 +18492,14 @@ def execute_global_commands(args, cmd_args):
         print("\n" + "=" * 76)
         print("SUMMARY")
         print("=" * 76)
-        print(f"  Broken/truncated files:   {broken_count}")
-        print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
+        if not tsv_only:
+            print(f"  Broken/truncated files:   {broken_count}")
+            print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
         print(f"  Episode data issues:      {tsv_problem_count}")
-        print(f"  Unmatched items:          {unmatched_count}")
-        print(f"  Unsorted shows:           {unsorted_count}")
-        print(f"  Potential mismatches:     {mismatch_count}")
+        if not tsv_only:
+            print(f"  Unmatched items:          {unmatched_count}")
+            print(f"  Unsorted shows:           {unsorted_count}")
+            print(f"  Potential mismatches:     {mismatch_count}")
         print(f"  Numbering issues:        {numbering_count}")
         total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count
         if total_problems == 0:
@@ -18475,6 +18508,10 @@ def execute_global_commands(args, cmd_args):
             print(f"\n  Total: {total_problems} problem(s) found.")
         print("=" * 76)
         return
+
+    # --tsv/--scrape requires --problems (which already returned above)
+    if safe_getattr(cmd_args, 'tsv', False):
+        err(1076, "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
 
     # Handle --unmatched [LIBRARY]: list items not matched by Plex metadata agent
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
@@ -18906,6 +18943,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
@@ -19018,6 +19056,8 @@ def main():
             help_redirect = 'potential-mismatch'
         elif '--episode-numbering-issues' in remaining_args:
             help_redirect = 'episode-numbering-issues'
+        elif '--problems' in remaining_args or '--tsv' in remaining_args or '--scrape' in remaining_args:
+            help_redirect = 'problems'
 
         if help_redirect:
             args.help = help_redirect
