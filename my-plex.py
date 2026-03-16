@@ -680,6 +680,22 @@ def err(err_code, err_msg=""):
     print(f"\nERROR #{err_code}: {err_msg}\n")
     sys.exit(1)
 
+def _build_version_string(duration_ms, width, height, video_codec, audio_codec, filesize, part_id, existing_files=None):
+    """Build a version string for a media file, guaranteed unique within existing_files.
+    Format: '60.8min 720x576 (h264 mp3) 439MB'
+    On collision: appends ' part#<part_id>' to BOTH the existing and new entry."""
+    dur_min = round(int(duration_ms or 0) / 60000, 2) if duration_ms else 0
+    res_full = f"{width or 0}x{height or 0}"
+    size_mb = f" {round(int(filesize) / 1048576)}MB" if filesize else ""
+    version = f"{dur_min}min {res_full} ({video_codec or 'unknown'} {audio_codec or 'unknown'}){size_mb}"
+    if existing_files is not None and version in existing_files:
+        # Collision — disambiguate the existing entry too
+        old_info = existing_files.pop(version)
+        old_part_id = old_info.get('part_id', '?')
+        existing_files[f"{version} part#{old_part_id}"] = old_info
+        version = f"{version} part#{part_id}"
+    return version, res_full
+
 def _get_worker_prefix():
     """Get worker ID prefix for log messages. Empty string if not in a worker thread."""
     # Check if we're in a ThreadPoolExecutor worker thread
@@ -2751,17 +2767,15 @@ def fetch_movies_from_database(library_section_id):
             'external_ids': {}
         })
 
-        # Build version string (matching existing cache format)
-        duration_minutes = round(int(media_duration or 0) / 60000, 2) if media_duration else 0
-        resolution_full = f"{width or 0}x{height or 0}"
-        version = f"{duration_minutes}min {resolution_full} ({video_codec or 'unknown'} {audio_codec or 'unknown'})"
-
+        # Build version string with filesize, collision-safe
         if metadata_id in movies_by_id:
             # Additional media item for existing movie — merge into files dict
             existing = movies_by_id[metadata_id]
+            version, resolution_full = _build_version_string(media_duration, width, height, video_codec, audio_codec, filesize, part_id, existing['files'])
             existing['files'][version] = {
                 'filepath': filepath,
-                'filesize': int(filesize) if filesize else None
+                'filesize': int(filesize) if filesize else None,
+                'part_id': part_id
             }
             # Update media_cnt and type_str to reflect multi-version
             media_cnt = len(existing['files'])
@@ -2777,12 +2791,14 @@ def fetch_movies_from_database(library_section_id):
                     existing['subtitle_languages'].append(lang)
         else:
             # First row for this metadata_id — create the movie dict
+            version, resolution_full = _build_version_string(media_duration, width, height, video_codec, audio_codec, filesize, part_id)
             movie_dict = {
                 'file': filepath,
                 'files': {
                     version: {
                         'filepath': filepath,
-                        'filesize': int(filesize) if filesize else None
+                        'filesize': int(filesize) if filesize else None,
+                        'part_id': part_id
                     }
                 },
                 'type': 'Movie',
@@ -6842,11 +6858,8 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
     media_videoCodec = plex_retry_operation(lambda: media.videoCodec, context=f"{key} {ctx_title} media.videoCodec", library=lib_title)
     media_audioCodec = plex_retry_operation(lambda: media.audioCodec, context=f"{key} {ctx_title} media.audioCodec", library=lib_title)
     # Convert duration to minutes for VERSION field
-    duration_minutes = round(media_duration / 60000, 2) if media_duration else 0
     media_width = plex_retry_operation(lambda: media.width, context=f"{key} {ctx_title} media.width", library=lib_title)
     media_height = plex_retry_operation(lambda: media.height, context=f"{key} {ctx_title} media.height", library=lib_title)
-    resolution_full = f"{media_width}x{media_height}"
-    version = f"{duration_minutes}min {resolution_full} ({media_videoCodec} {media_audioCodec})"
 
     # Access obj properties (already loaded by reload() if FORCE_CACHE_UPDATE, otherwise lazy)
     obj_updatedAt = plex_retry_operation(lambda: obj.updatedAt, context=f"{key} {ctx_title} updatedAt", library=lib_title)
@@ -6861,8 +6874,9 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
     # Get filesize for this version
     part_size = plex_retry_operation(lambda: part.size if hasattr(part, 'size') else None, context=f"{key} {ctx_title} part.size", library=lib_title)
+    version, resolution_full = _build_version_string(media_duration, media_width, media_height, media_videoCodec, media_audioCodec, part_size, part_id)
 
-    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
+    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size, 'part_id': part_id}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
           'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
           'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
           'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
@@ -7827,14 +7841,11 @@ def fetch_shows_from_database(library_section_id):
         streams = streams_by_part.get(mp_id, {'audio_languages':[],'subtitle_languages':[]})
         ep_tags = tags_by_id.get(ep_id, {'genres':[],'actors':[],'directors':[],'writers':[],'countries':[],'collections':[],'external_ids':{}})
 
-        dur_min = round(int(md_dur or 0)/60000,2) if md_dur else 0
-        res_full = f"{width or 0}x{height or 0}"
-        version = f"{dur_min}min {res_full} ({v_codec or 'unknown'} {a_codec or 'unknown'})"
-
         if ep_id in episodes_seen:
             # Additional media item for existing episode — merge into files dict
             existing = episodes_seen[ep_id]
-            existing['files'][version] = {'filepath': filepath, 'filesize': int(filesize) if filesize else None}
+            version, res_full = _build_version_string(md_dur, width, height, v_codec, a_codec, filesize, mp_id, existing['files'])
+            existing['files'][version] = {'filepath': filepath, 'filesize': int(filesize) if filesize else None, 'part_id': mp_id}
             media_cnt = len(existing['files'])
             existing['media_cnt'] = media_cnt
             existing['type_str'] = 'Episode*'
@@ -7846,8 +7857,9 @@ def fetch_shows_from_database(library_section_id):
                 if lang not in existing['subtitle_languages']:
                     existing['subtitle_languages'].append(lang)
         else:
+            version, res_full = _build_version_string(md_dur, width, height, v_codec, a_codec, filesize, mp_id)
             ep_dict = {
-                'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None}},
+                'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None,'part_id':mp_id}},
                 'type':'Episode','type_str':'Episode','id':ep_id,'title':ep_title,'originalTitle':ep_orig or '',
                 'year':int(ep_year) if ep_year else 0,'library':lib_name,'item_id':ep_id,'media_id':md_id,'part_id':mp_id,
                 'version':version,'media_nr':'1/1','media_idx':0,'media_cnt':1,'part_nr':'1/1','part_idx':0,'part_cnt':1,
