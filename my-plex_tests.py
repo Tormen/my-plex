@@ -4178,6 +4178,79 @@ class TestUnsorted(unittest.TestCase):
         self.assertIn("Re-inject --unsorted", content)
 
 
+class TestVersionStringCollision(unittest.TestCase):
+    """Test version string uniqueness (filesize + part_id collision handling)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_build_version_string_exists(self):
+        """_build_version_string helper must be defined."""
+        content = self._read_script()
+        self.assertIn('def _build_version_string(', content)
+
+    def test_version_includes_filesize(self):
+        """Version string must include filesize (MB)."""
+        content = self._read_script()
+        self.assertIn('MB', content[content.index('def _build_version_string('):content.index('def _build_version_string(') + 500])
+
+    def test_collision_adds_part_id(self):
+        """On collision, must disambiguate with part#<id>."""
+        content = self._read_script()
+        self.assertIn('part#', content[content.index('def _build_version_string('):content.index('def _build_version_string(') + 500])
+
+    def test_movie_db_uses_helper(self):
+        """fetch_movies_from_database must use _build_version_string."""
+        import re
+        content = self._read_script()
+        match = re.search(r'def fetch_movies_from_database\(.*?\ndef ', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('_build_version_string(', body, "Movie DB path must use _build_version_string")
+
+    def test_episode_db_uses_helper(self):
+        """fetch_shows_from_database must use _build_version_string."""
+        import re
+        content = self._read_script()
+        match = re.search(r'def fetch_shows_from_database\(.*?\ndef ', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('_build_version_string(', body, "Episode DB path must use _build_version_string")
+
+    def test_api_path_uses_helper(self):
+        """API path (add_media_obj_via_PLEX_API) must use _build_version_string."""
+        import re
+        content = self._read_script()
+        match = re.search(r'def add_media_obj_via_PLEX_API\(.*?\ndef ', content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('_build_version_string(', body, "API path must use _build_version_string")
+
+    def test_file_info_has_part_id(self):
+        """File info dicts in files must include part_id for collision resolution."""
+        import re
+        content = self._read_script()
+        # In fetch_movies_from_database, the file info dict must include 'part_id'
+        match = re.search(r"def fetch_movies_from_database\(.*?'part_id':\s*part_id", content, re.DOTALL)
+        self.assertIsNotNone(match, "Movie file_info must include 'part_id'")
+
+    def test_no_old_version_format(self):
+        """Old version format without filesize must not remain in DB paths."""
+        import re
+        content = self._read_script()
+        # The old pattern: version = f"...min ...x... (...codec ...codec)"
+        # Should NOT appear in fetch_movies/shows_from_database anymore
+        for func_name in ['fetch_movies_from_database', 'fetch_shows_from_database']:
+            match = re.search(rf'def {func_name}\(.*?\ndef ', content, re.DOTALL)
+            if match:
+                body = match.group(0)
+                # Old pattern: direct f-string building version with dur_min/duration_minutes
+                old_patterns = re.findall(r'version\s*=\s*f".*?min.*?\(.*?codec.*?\)"', body)
+                self.assertEqual(len(old_patterns), 0,
+                    f"{func_name} still has old version string format without filesize")
+
+
 class TestForceTsv(unittest.TestCase):
     """Tests for --force-tsv flag."""
 
@@ -4425,6 +4498,7 @@ _UNITTEST_CLASSES = [
     TestEpisodesErrClassification,
     TestUnmatched,
     TestUnsorted,
+    TestVersionStringCollision,
     TestForceTsv,
     TestTsvScrapersE2E,
 ]
