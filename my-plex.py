@@ -2540,9 +2540,11 @@ def get_library_sections_from_database():
         Returns None on database error
     """
     query = """
-    SELECT id, name, section_type, updated_at, agent, language
-    FROM library_sections
-    ORDER BY id
+    SELECT ls.id, ls.name, ls.section_type, ls.updated_at, ls.agent, ls.language,
+           sl.root_path
+    FROM library_sections ls
+    LEFT JOIN section_locations sl ON sl.library_section_id = ls.id
+    ORDER BY ls.id
     """
 
     rows = query_plex_database(query, mode='rows')
@@ -2551,7 +2553,7 @@ def get_library_sections_from_database():
 
     libraries = []
     for row in rows:
-        lib_id, lib_name, section_type, updated_at, agent, language = row
+        lib_id, lib_name, section_type, updated_at, agent, language, root_path = row
         libraries.append({
             'id': int(lib_id),
             'name': lib_name,
@@ -2561,6 +2563,7 @@ def get_library_sections_from_database():
             'updated_at': int(updated_at) if updated_at else 0,
             'agent': agent or '',
             'language': language or '',
+            'root_path': root_path or '',
         })
 
     if VRB:
@@ -7887,14 +7890,6 @@ def fetch_shows_from_database(library_section_id):
         print(f"{VRBPFX}Fetched {len(shows)} shows with {total_eps} episodes from database")
     return shows
 
-_SEASON_DIR_RE = re.compile(
-    r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
-    re.IGNORECASE
-)
-
-def _is_season_dir(dirname):
-    """Return True if dirname looks like a season directory (e.g. 'Season 01', 'Staffel 2', 's01', 'Specials')."""
-    return bool(_SEASON_DIR_RE.match(dirname))
 
 def _process_shows_from_database(shows_data, library_name, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
     """Process shows/episodes fetched from database and populate cache
@@ -8089,8 +8084,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                     PLEX_Media.OBJ_BY_FILEPATH[season_dir].append(season_key)
 
         # Create Show object in OBJ_BY_ID (matching old API structure)
-        # Derive show directory: the show is always the FIRST subdirectory under the library root.
-        # Find the library root from PLEX_Library.PATHS_DICT, then take the next path component.
+        # Derive show directory: subtract library root from episode filepath, take first dir.
         # - Standard:  /library/show/Season 01/ep.mkv → show_dir = /library/show  ✓
         # - Flat:      /library/show/ep.mkv           → show_dir = /library/show  ✓
         show_dir = ''
@@ -8101,24 +8095,26 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 if first_episode_filepath.startswith(path + '/') or first_episode_filepath.startswith(path + os.sep):
                     if len(path) > len(lib_root):  # longest match wins
                         lib_root = path
-            if lib_root:
-                # Extract the show directory: first path component after lib_root
-                remainder = first_episode_filepath[len(lib_root):].lstrip('/')
-                show_subdir = remainder.split('/')[0] if '/' in remainder else ''
-                if show_subdir:
-                    show_dir = os.path.join(lib_root, show_subdir)
-                else:
-                    show_dir = lib_root  # shouldn't happen, but fallback
-            else:
-                # Fallback: derive show dir from episode filepath structure.
-                # Standard layout: show/Season 01/ep.mkv → go up 2 levels
-                # Flat layout:     show/ep.mkv           → go up 1 level
-                parent = os.path.dirname(first_episode_filepath)
-                parent_name = os.path.basename(parent)
-                if _is_season_dir(parent_name):
-                    show_dir = os.path.dirname(parent)
-                else:
-                    show_dir = parent
+            if not lib_root:
+                err(1073, f"Cannot determine library root for show '{show_info['title']}' in library '{library_name}'.\n"
+                    f"  Episode path: {first_episode_filepath}\n"
+                    f"  PATHS_DICT keys: {list(PLEX_Library.PATHS_DICT.keys())}\n"
+                    f"Possible reasons:\n"
+                    f"  - section_locations table in Plex DB is empty or corrupt\n"
+                    f"  - Library root path changed since last DB update\n"
+                    f"  - Episode file is outside the library root directory")
+            # Extract the show directory: first path component after lib_root
+            remainder = first_episode_filepath[len(lib_root):].lstrip('/')
+            show_subdir = remainder.split('/')[0] if '/' in remainder else ''
+            if not show_subdir:
+                err(1074, f"Cannot extract show directory from episode path for '{show_info['title']}' in library '{library_name}'.\n"
+                    f"  Episode path: {first_episode_filepath}\n"
+                    f"  Library root: {lib_root}\n"
+                    f"  Remainder after root: '{remainder}'\n"
+                    f"Possible reasons:\n"
+                    f"  - Episode file is directly in the library root (not in a show subdirectory)\n"
+                    f"  - Unusual directory structure")
+            show_dir = os.path.join(lib_root, show_subdir)
         show_dict = {
             'file': show_dir, 'files': {}, 'type': 'Show', 'type_str': 'Show',
             'id': show_id, 'title': show_info['title'],
@@ -9463,7 +9459,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         'updatedAt': lib_info['updated_at'],
                         'agent': lib_info.get('agent', ''),
                         'language': lib_info.get('language', ''),
-                        'locations': [],  # Will be populated if needed
+                        'locations': [lib_info['root_path']] if lib_info.get('root_path') else [],
                         'totalSize': 0  # Will be populated during cache build
                     })()
 
@@ -9475,6 +9471,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         PLEX_Library.OBJ_DICT_SUPPORTED[lib_obj.title] = lib_obj
 
                 if DBG: print(f"{DBGPFX}update_cache(): Populated OBJ_DICT with {len(PLEX_Library.OBJ_DICT)} libraries ({len(PLEX_Library.OBJ_DICT_SUPPORTED)} supported)")
+
+                # Recompute PATHS_DICT now that we have root_path from section_locations
+                PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
 
             except Exception as e:
                 print(f"\nERROR: Failed to fetch libraries from database: {e}")
