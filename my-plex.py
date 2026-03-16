@@ -12075,10 +12075,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Get the directory name to compare against
             if obj_type == 'Show':
                 dir_name = os.path.basename(filepath)  # show_dir basename
-                # Guard: if basename looks like a season dir (s01, s02, etc.),
-                # the cache may be outdated — go up one level
-                if dir_name and len(dir_name) <= 4 and dir_name.lower().startswith('s') and dir_name[1:].isdigit():
-                    dir_name = os.path.basename(os.path.dirname(filepath))
             else:  # Movie
                 dir_name = os.path.basename(os.path.dirname(filepath))  # movie folder
 
