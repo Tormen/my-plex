@@ -1038,6 +1038,7 @@ def build_media_cache_dict(include_paths=True, **extra):
         'obj_by_movie':          PLEX_Media.OBJ_BY_MOVIE,
         'obj_by_show':           PLEX_Media.OBJ_BY_SHOW,
         'obj_by_show_episodes':  PLEX_Media.OBJ_BY_SHOW_EPISODES,
+        'obj_by_show_scraped':   PLEX_Media.OBJ_BY_SHOW_SCRAPED,
         'obj_by_collection':     PLEX_Media.OBJ_BY_COLLECTION,
     }
     if include_paths:
@@ -1055,6 +1056,7 @@ def load_media_cache(source):
     PLEX_Media.OBJ_BY_MOVIE          = source.get('obj_by_movie', {})
     PLEX_Media.OBJ_BY_SHOW           = source.get('obj_by_show', {})
     PLEX_Media.OBJ_BY_SHOW_EPISODES  = source.get('obj_by_show_episodes', {})
+    PLEX_Media.OBJ_BY_SHOW_SCRAPED   = source.get('obj_by_show_scraped', {})
     PLEX_Media.OBJ_BY_COLLECTION     = source.get('obj_by_collection', {})
     PLEX_Media.OBJ_BY_FILEPATH       = source.get('obj_by_filepath', {})
     PLEX_Media.OBJ_BY_LIBRARY        = source.get('obj_by_library', {})
@@ -8176,7 +8178,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
 # Accumulates TSV errors across all libraries during --update-cache for cache-updates.json
 _TSV_FAILED_SHOWS = []
 # Accumulates TSV stats across all libraries during --update-cache for summary
-_TSV_STATS = {'cached': 0, 'scraped': 0, 'fallback': 0, 'failed': 0, 'normalized': 0, 'titles_filled': 0}
+_TSV_STATS = {'cached': 0, 'scraped': 0, 'fallback': 0, 'failed': 0, 'numbering_issues': 0, 'titles_filled': 0}
 
 def _classify_tsv_error(show_title, show_dir_name, source, external_ids, show_dict):
     """Classify a TSV scraping failure into an error_type and message.
@@ -8227,8 +8229,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     fallback_count = 0
     existing_count = 0
     failed_shows = []  # (title, error_type, reason, library_name)
-    normalized_total = 0
     titles_total = 0
+    numbering_issues_total = 0
 
     print(f"  Ensuring episodes.tsv for {total_shows} shows in '{library_name}'...")
 
@@ -8251,9 +8253,12 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         # Freshness of existing TSVs is handled by --missing (which checks staleness).
         # Use --update-cache --force/--from-scratch to re-scrape all TSVs.
         tsv_episodes = None
+        tsv_meta = {}
         needs_scrape = False
         if os.path.isfile(tsv_path):
             _meta, tsv_episodes = read_episodes_tsv(tsv_path)
+            if _meta:
+                tsv_meta = _meta
             if tsv_episodes:
                 existing_count += 1
                 if FORCE_TSV:
@@ -8274,6 +8279,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                                                        library_name=library_name)
                 if new_episodes:
                     tsv_episodes = new_episodes
+                    if _meta:
+                        tsv_meta = _meta
                     scraped_count += 1
                     # Track fallback usage
                     if _meta and _meta.get('_fallback_from'):
@@ -8310,8 +8317,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         if not tsv_episodes:
             continue
 
-        # Build TSV lookup: {season_num: [episodes sorted by episode_num]}
-        # Each entry: {'episode': int, 'title': str}
+        # Build TSV lookup: {season_num: {ep_num: title}}
         tsv_by_season = {}
         for ep in tsv_episodes:
             s = ep.get('season', 0)
@@ -8324,78 +8330,135 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         if not tsv_by_season:
             continue
 
-        # Compare and normalize each season's episodes
-        normalized_count = 0
+        # --- Store scraped data into OBJ_BY_SHOW_SCRAPED ---
+        scraped_title = tsv_meta.get('show_title', '')
+        scraped_source = tsv_meta.get('source', '')
+
+        # Build scraped episodes structure: {S_str: {E_str: {title, date}}}
+        scraped_episodes = {}
+        for ep in tsv_episodes:
+            s = ep.get('season', 0)
+            e = ep.get('episode', 0)
+            if s > 0 and e > 0:
+                s_str_sc = f"S{s:02d}"
+                e_str_sc = f"E{e:02d}"
+                if s_str_sc not in scraped_episodes:
+                    scraped_episodes[s_str_sc] = {}
+                scraped_episodes[s_str_sc][e_str_sc] = {
+                    'title': ep.get('title', ''),
+                    'date': ep.get('date', ''),
+                    'original_title': ep.get('original_title', ''),
+                }
+
+        # --- Compare Plex vs Scraped numbering and compute normalized IDs ---
         title_count = 0
+        numbering_issues = []
+        season_map = {}
+        episode_map = {}
+
         for s_key, season_data in show_data['seasons'].items():
             if s_key <= 0:
                 continue
             tsv_season = tsv_by_season.get(s_key, {})
+            s_str = f"S{s_key:02d}"
+
+            # Season mapping: Plex and scraped both use the same season numbers
+            season_map[s_str] = {'plex': s_str, 'scraped': s_str}
+
             if not tsv_season:
                 continue
-
-            s_str = f"S{s_key:02d}"
 
             # Sort Plex episodes by their current E_idx to establish position order
             plex_eps = sorted(season_data['episodes'], key=lambda e: e.get('E_idx', 0))
             # Sort TSV episode numbers
             tsv_ep_nums = sorted(tsv_season.keys())
 
+            # Determine zero-padding width for this season based on max episode count
+            max_ep = max(tsv_ep_nums) if tsv_ep_nums else 0
+            plex_max = max((ep.get('E_idx', 0) for ep in plex_eps), default=0)
+            overall_max = max(max_ep, plex_max)
+            ep_width = 3 if overall_max >= 100 else 2
+
+            ep_map_season = {}
+
             # Match by position: plex_eps[i] ↔ tsv_ep_nums[i]
             for i, ep_dict in enumerate(plex_eps):
-                if i >= len(tsv_ep_nums):
-                    break  # more Plex episodes than TSV — skip extras
+                plex_e_idx = ep_dict.get('E_idx', 0)
+                plex_e_str = ep_dict.get('E_str', f"E{plex_e_idx:02d}")
 
-                old_idx = ep_dict.get('E_idx', 0)
-                tsv_ep_num = tsv_ep_nums[i]
-                tsv_title = tsv_season[tsv_ep_num]
+                # Find matching scraped episode
+                scraped_e_num = tsv_ep_nums[i] if i < len(tsv_ep_nums) else None
+                scraped_e_str = f"E{scraped_e_num:0{ep_width}d}" if scraped_e_num is not None else None
+                tsv_title = tsv_season.get(scraped_e_num, '') if scraped_e_num is not None else ''
 
-                if old_idx == tsv_ep_num:
-                    # Episode number matches — just check title
+                # Fill missing episode titles from TSV (do NOT overwrite Plex E_idx/E_str)
+                if tsv_title:
                     ep_key = f"Episode:{ep_dict['id']}"
                     cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
-                    if cached_ep and not cached_ep.get('title') and tsv_title:
-                        cached_ep['title'] = tsv_title
-                        title_count += 1
-                    continue
-
-                # Episode number differs — normalize to TSV value
-                old_e_str = ep_dict['E_str']
-                new_e_str = f"E{tsv_ep_num:02d}"
-                new_s0xe0x = f"S{s_key:02d}E{tsv_ep_num:02d}"
-
-                ep_key = f"Episode:{ep_dict['id']}"
-                cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
-                if cached_ep:
-                    cached_ep['E_idx'] = tsv_ep_num
-                    cached_ep['episode'] = tsv_ep_num
-                    cached_ep['E_str'] = new_e_str
-                    cached_ep['S0XE0X'] = new_s0xe0x
-                    if not cached_ep.get('title') and tsv_title:
+                    if cached_ep and not cached_ep.get('title'):
                         cached_ep['title'] = tsv_title
                         title_count += 1
 
-                # Re-key in OBJ_BY_SHOW_EPISODES: old E_str → new E_str
-                show_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
-                if old_e_str in show_eps and old_e_str != new_e_str:
-                    if new_e_str not in show_eps:
-                        show_eps[new_e_str] = show_eps.pop(old_e_str)
+                if scraped_e_num is None:
+                    continue  # more Plex episodes than TSV — skip extras
+
+                # Determine normalized E_str
+                normalized_e_str = None
+
+                if plex_e_idx == scraped_e_num:
+                    # Plex and Scrape agree → normalized = scraped (with proper padding)
+                    normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"
+                elif plex_e_idx != scraped_e_num:
+                    # Plex says different number than scrape
+                    # Check: is Plex using absolute numbering?
+                    # If Plex E_idx > scraped E_num AND no Plex episodes < plex_e_idx exist
+                    # in this season, then Plex is using absolute numbering → trust scrape
+                    plex_e_indices = sorted(ep.get('E_idx', 0) for ep in plex_eps)
+                    has_lower = any(idx < plex_e_idx and idx > 0 for idx in plex_e_indices)
+
+                    if plex_e_idx > scraped_e_num and not has_lower:
+                        # Plex uses absolute numbering (e.g. E101 for S01E01) → trust scrape
+                        normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"
                     else:
-                        for ver, keys in show_eps.pop(old_e_str).items():
-                            if ver not in show_eps[new_e_str]:
-                                show_eps[new_e_str][ver] = []
-                            show_eps[new_e_str][ver].extend(keys)
+                        # Contradiction: Plex has lower episodes AND disagrees with scrape
+                        normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"  # still use scrape as default
+                        numbering_issues.append({
+                            'season': s_str,
+                            'episode_plex': plex_e_str,
+                            'episode_scraped': scraped_e_str,
+                            'plex_idx': plex_e_idx,
+                            'scraped_idx': scraped_e_num,
+                            'episode_id': ep_dict.get('id', ''),
+                            'reason': f"Plex {plex_e_str} vs Scraped {scraped_e_str}"
+                        })
 
-                normalized_count += 1
+                ep_map_season[normalized_e_str] = {
+                    'plex': plex_e_str,
+                    'scraped': scraped_e_str,
+                    'title': tsv_title,
+                }
 
-        normalized_total += normalized_count
+            if ep_map_season:
+                episode_map[s_str] = ep_map_season
+
+        # Store in OBJ_BY_SHOW_SCRAPED
+        PLEX_Media.OBJ_BY_SHOW_SCRAPED[show_key] = {
+            'title': scraped_title,
+            'source': scraped_source,
+            'episodes': scraped_episodes,
+            'season_map': season_map,
+            'episode_map': episode_map,
+            'numbering_issues': numbering_issues,
+        }
+
         titles_total += title_count
-        if VRB and (normalized_count > 0 or title_count > 0):
+        numbering_issues_total += len(numbering_issues)
+        if VRB and (title_count > 0 or numbering_issues):
             parts = []
-            if normalized_count > 0:
-                parts.append(f"{normalized_count} episode indices normalized")
             if title_count > 0:
-                parts.append(f"{title_count} titles filled from TSV")
+                parts.append(f"{title_count} titles filled from scraped data")
+            if numbering_issues:
+                parts.append(f"{len(numbering_issues)} numbering issues")
             print(f"{VRBPFX}'{show_title}': {', '.join(parts)}")
 
     # Summary
@@ -8413,8 +8476,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         parts.append(f"{fallback_count} fallback")
     if failed_shows:
         parts.append(f"{len(failed_shows)} failed")
-    if normalized_total > 0:
-        parts.append(f"{normalized_total} indices normalized")
+    if numbering_issues_total > 0:
+        parts.append(f"{numbering_issues_total} numbering issues")
     if titles_total > 0:
         parts.append(f"{titles_total} titles filled")
     w_prefix = _get_worker_prefix()
@@ -8449,7 +8512,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     _TSV_STATS['scraped'] += scraped_count
     _TSV_STATS['fallback'] += fallback_count
     _TSV_STATS['failed'] += len(failed_shows)
-    _TSV_STATS['normalized'] += normalized_total
+    _TSV_STATS['numbering_issues'] = _TSV_STATS.get('numbering_issues', 0) + numbering_issues_total
     _TSV_STATS['titles_filled'] += titles_total
 
 
@@ -8897,6 +8960,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
     argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). Use --help unsorted for details.")
     argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
+    argparser.add_argument('--episode-numbering-issues', action='store_true', help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
     argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
@@ -10310,6 +10374,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"\n--- Potential Mismatches in '{lib_name}' (Plex title vs directory name) ---")
             PLEX_Media._list_potential_mismatches(obj_keys, lib_name)
 
+        if safe_getattr(obj_args, 'episode_numbering_issues', False):
+            lib_name = obj
+            print(f"\n--- Episode Numbering Issues in '{lib_name}' (Plex vs Scraped) ---")
+            PLEX_Media._list_episode_numbering_issues(lib_name)
+
         if obj_args.create_library:     PLEX_Library.create(obj)
         if obj_args.delete:             PLEX_Library.delete(obj)
         if obj_args.search:
@@ -10464,6 +10533,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     OBJ_BY_MOVIE    = {}    # dict: key=movie_obj_key  -                        value=DICT: key=version, value=LIST of part_ids
     OBJ_BY_SHOW_EPISODES={} # dict: key=show_obj       - value=DICT: key='S0x'  value=DICT: key='E0x'    value=DICT: key=version, value=LIST of part_ids
     OBJ_BY_SHOW     = {}    # dict: key=show_obj_key   - value=DICT: key='S0x'  value=key ?!
+    OBJ_BY_SHOW_SCRAPED = {} # dict: key=show_key → scraped episode data (title, source, episodes, numbering_issues)
 
     init_done = False
     cache_rebuild_lock = None  # Will hold the lock during cache rebuild
@@ -10546,6 +10616,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 PLEX_Media.OBJ_BY_MOVIE = {}
                 PLEX_Media.OBJ_BY_SHOW = {}
                 PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                PLEX_Media.OBJ_BY_SHOW_SCRAPED = {}
                 PLEX_Media.items_processed = 0
                 PLEX_Media.completed_libraries = set()
 
@@ -10568,6 +10639,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     PLEX_Media.OBJ_BY_MOVIE = {}
                     PLEX_Media.OBJ_BY_SHOW = {}
                     PLEX_Media.OBJ_BY_SHOW_EPISODES = {}
+                    PLEX_Media.OBJ_BY_SHOW_SCRAPED = {}
                     PLEX_Media.items_processed = 0
                     PLEX_Media.completed_libraries = set()
 
@@ -11120,8 +11192,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         tsv_parts.append(f"{_TSV_STATS['fallback']} used fallback source (primary failed)")
                     if _TSV_STATS['failed']:
                         tsv_parts.append(f"{_TSV_STATS['failed']} failed")
-                    if _TSV_STATS['normalized']:
-                        tsv_parts.append(f"{_TSV_STATS['normalized']} episode numbers corrected (Plex → TSV numbering)")
+                    if _TSV_STATS['numbering_issues']:
+                        tsv_parts.append(f"{_TSV_STATS['numbering_issues']} episode numbering issues (Plex vs Scraped)")
                     if _TSV_STATS['titles_filled']:
                         tsv_parts.append(f"{_TSV_STATS['titles_filled']} missing episode titles filled from TSV")
                     print(f"  ✓ Episode data: {tsv_parts[0]}")
@@ -11289,6 +11361,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'obj_by_movie': copy.copy(PLEX_Media.OBJ_BY_MOVIE),
                 'obj_by_show': copy.copy(PLEX_Media.OBJ_BY_SHOW),
                 'obj_by_show_episodes': copy.copy(PLEX_Media.OBJ_BY_SHOW_EPISODES),
+                'obj_by_show_scraped': copy.copy(PLEX_Media.OBJ_BY_SHOW_SCRAPED),
                 'obj_by_collection': copy.copy(PLEX_Media.OBJ_BY_COLLECTION),
                 'items_processed': PLEX_Media.items_processed,
                 'completed_libraries': copy.copy(completed_libraries),
@@ -11993,21 +12066,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not filepath or not title:
                 continue
 
+            # Get scraped title if available
+            scraped_title = ''
+            if obj_type == 'Show':
+                scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(key, {})
+                scraped_title = scraped_data.get('title', '')
+
             # Get the directory name to compare against
             if obj_type == 'Show':
                 dir_name = os.path.basename(filepath)  # show_dir basename
+                # Guard: if basename looks like a season dir (s01, s02, etc.),
+                # the cache may be outdated — go up one level
+                if dir_name and len(dir_name) <= 4 and dir_name.lower().startswith('s') and dir_name[1:].isdigit():
+                    dir_name = os.path.basename(os.path.dirname(filepath))
             else:  # Movie
                 dir_name = os.path.basename(os.path.dirname(filepath))  # movie folder
 
             if not dir_name:
                 continue
 
-            ratio, matched_against = PLEX_Media._title_similarity(dir_name, title, original_title)
+            # Compare Plex title against: scraped title (if available) or directory name
+            if scraped_title:
+                ratio, matched_against = PLEX_Media._title_similarity(scraped_title, title, original_title)
+                comparison = f"SCRAPED-TITLE: {scraped_title}"
+            else:
+                ratio, matched_against = PLEX_Media._title_similarity(dir_name, title, original_title)
+                comparison = f"DIR: {dir_name}"
 
             if ratio < MISMATCH_THRESHOLD:
-                plex_id = obj.get('id', '?')
                 library = obj.get('library', '?')
-                mismatches.append((obj_type, plex_id, title, original_title, dir_name,
+                mismatches.append((key, title, original_title, dir_name, comparison,
                                    library, filepath, ratio))
 
         if not mismatches:
@@ -12015,21 +12103,75 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  No potential mismatches found{scope} — all titles match their directory names.")
             return 0
 
-        mismatches.sort(key=lambda x: (x[0], x[7], x[5].lower(), x[2].lower()))  # type, ratio, library, title
+        mismatches.sort(key=lambda x: (x[7], x[5].lower(), x[1].lower()))  # ratio, library, title
 
-        print(f"\n  {'TYPE':<7} {'PLEX-ID':<10} {'PLEX TITLE':<40} {'DIRECTORY NAME':<40} {'SIM':>4} {'LIBRARY':<15}")
-        print("  " + "-" * 130)
-        for obj_type, plex_id, title, orig_title, dir_name, library, filepath, ratio in mismatches:
+        print(f"\n  {'KEY':<14} {'LIBRARY':<15} {'PLEX TITLE':<35} {'SIM':>4}  COMPARISON")
+        print("  " + "-" * 120)
+        for cache_key, title, orig_title, dir_name, comparison, library, filepath, ratio in mismatches:
             pct = f"{ratio:.0%}"
-            title_display = title[:40]
-            dir_display = dir_name[:40]
-            print(f"  {obj_type:<7} ID:{plex_id:<7} {title_display:<40} {dir_display:<40} {pct:>4} {library:<15}")
+            title_disp = title[:35]
+            print(f"  {cache_key:<14} {library:<15} {title_disp:<35} {pct:>4}  {comparison}")
             if orig_title and orig_title != title:
-                print(f"  {'':7} {'':10} originalTitle: {orig_title[:60]}")
+                print(f"  {'':14} {'':15} originalTitle: {orig_title[:60]}")
+            # Always show directory for context if comparison was against scraped title
+            if comparison.startswith('SCRAPED-TITLE:'):
+                print(f"  {'':14} {'':15} DIR: {dir_name}")
 
         print(f"\n  {len(mismatches)} potential mismatch(es) found (similarity < {MISMATCH_THRESHOLD:.0%}).")
+        print(f"  SIM = similarity between Plex title and directory name (higher = better match).")
         print(f"  These items may need Fix Match in Plex.")
         return len(mismatches)
+
+    @staticmethod
+    def _list_episode_numbering_issues(library_name=None):
+        """List shows where Plex and scraped episode numbering disagree.
+        Returns count of issues found."""
+        issues = []
+        for show_key, scraped_data in PLEX_Media.OBJ_BY_SHOW_SCRAPED.items():
+            show_issues = scraped_data.get('numbering_issues', [])
+            if not show_issues:
+                continue
+
+            show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
+            if not show_dict:
+                continue
+            if library_name and show_dict.get('library') != library_name:
+                continue
+
+            show_title = show_dict.get('title', '?')
+            scraped_title = scraped_data.get('title', '')
+            lib = show_dict.get('library', '?')
+            source = scraped_data.get('source', '?')
+
+            for issue in show_issues:
+                issues.append({
+                    'show_key': show_key,
+                    'show_title': show_title,
+                    'scraped_title': scraped_title,
+                    'library': lib,
+                    'source': source,
+                    'season': issue['season'],
+                    'episode_plex': issue['episode_plex'],
+                    'episode_scraped': issue['episode_scraped'],
+                    'reason': issue['reason'],
+                })
+
+        if not issues:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No episode numbering issues found{scope}.")
+            return 0
+
+        issues.sort(key=lambda x: (x['library'].lower(), x['show_title'].lower(), x['season'], x['episode_plex']))
+
+        print(f"\n  {'SHOW':<35} {'SEASON':<8} {'PLEX':<8} {'SCRAPED':<8} {'SOURCE':<18} {'LIBRARY':<15}")
+        print("  " + "-" * 105)
+        for issue in issues:
+            title_disp = issue['show_title'][:35]
+            print(f"  {title_disp:<35} {issue['season']:<8} {issue['episode_plex']:<8} {issue['episode_scraped']:<8} {issue['source']:<18} {issue['library']:<15}")
+
+        print(f"\n  {len(issues)} episode numbering issue(s) found.")
+        print(f"  These shows have conflicting episode numbers between Plex and the scraped source.")
+        return len(issues)
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -13664,7 +13806,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -14099,6 +14241,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  6. --potential-mismatch Detect items where Plex title doesn't match directory")
             print("                          (wrong metadata match — Fix Match needed)")
             print()
+            print("  7. --episode-numbering-issues")
+            print("                          Detect shows where Plex and scraped episode numbering")
+            print("                          disagree (e.g. Plex E101 vs Scraped E01)")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -14119,6 +14265,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --unmatched             # Show unmatched items only")
             print("  my-plex --unsorted              # Show unsorted shows only")
             print("  my-plex --potential-mismatch    # Show potential mismatches only")
+            print("  my-plex --episode-numbering-issues  # Show numbering issues only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -14228,6 +14375,40 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --potential-mismatch series.en    # One library")
             print("  my-plex series.en --potential-mismatch    # Same")
             print("  my-plex --problems                        # Includes this in full report")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'episode-numbering-issues' | 'episode_numbering_issues' | 'numbering-issues' | 'numbering':
+            print()
+            print("=" * 76)
+            print("EPISODE NUMBERING ISSUES HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --episode-numbering-issues")
+            print("       my-plex --episode-numbering-issues <LIBRARY>")
+            print("       my-plex <library> --episode-numbering-issues")
+            print()
+            print("Detects shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de)")
+            print("disagree on episode numbering.")
+            print()
+            print("HOW IT WORKS:")
+            print("  Compares Plex episode indices against scraped episode indices per season.")
+            print("  If Plex uses absolute numbering (e.g. E101 for S01E01) and the scraped")
+            print("  source says E01, Plex is trusted ONLY if no lower episodes exist in that")
+            print("  season. Otherwise it's flagged as a contradiction.")
+            print()
+            print("NORMALIZATION:")
+            print("  Normalized episode IDs (stored in cache) pick the more standard numbering:")
+            print("  - E01, E02, ... E99 for shows with <100 episodes per season")
+            print("  - E001, E002, ... E100 for shows with 100+ episodes per season")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --episode-numbering-issues              # All libraries")
+            print("  my-plex --episode-numbering-issues series.de    # One library")
+            print("  my-plex series.de --episode-numbering-issues    # Same")
+            print("  my-plex --problems                              # Includes this in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -14510,7 +14691,7 @@ def read_episodes_tsv(tsv_path):
                     key, _, val = line.partition(':')
                     key = key.strip().lower()
                     val = val.strip()
-                    if key in ('source', 'slug', 'show_id', 'updated', 'specials_pattern'):
+                    if key in ('source', 'slug', 'show_id', 'updated', 'specials_pattern', 'show_title'):
                         metadata[key] = val
                 continue
 
@@ -14566,6 +14747,8 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     lines.append(f"# slug: {metadata.get('slug', '')}")
     if metadata.get('show_id'):
         lines.append(f"# show_id: {metadata['show_id']}")
+    if metadata.get('show_title'):
+        lines.append(f"# show_title: {metadata['show_title']}")
     if metadata.get('specials_pattern'):
         lines.append(f"# specials_pattern: {metadata['specials_pattern']}")
     lines.append(f"# updated: {metadata['updated']}")
@@ -15055,6 +15238,14 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
         if not episodes_data:
             break
 
+        # Capture series name from first page response
+        if page == 0:
+            series_info = data.get('data', {}).get('series', {})
+            if series_info and isinstance(series_info, dict):
+                _scrape_tvdb._series_name = series_info.get('name', '')
+            else:
+                _scrape_tvdb._series_name = ''
+
         for ep in episodes_data:
             season_num = ep.get('seasonNumber')
             ep_num = ep.get('number')
@@ -15084,6 +15275,9 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
         return None
 
     new_metadata = {'tvdb_id': str(tvdb_id)}
+    # Store the show title as reported by TVDB (may differ from Plex title)
+    if hasattr(_scrape_tvdb, '_series_name') and _scrape_tvdb._series_name:
+        new_metadata['show_title'] = _scrape_tvdb._series_name
     max_s = max(ep['season'] for ep in all_episodes)
     if max_s:
         new_metadata['latest_season'] = str(max_s)
@@ -15220,6 +15414,10 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
         return None
 
     new_metadata = {'tmdb_id': str(tmdb_id)}
+    # Store the show title as reported by TMDB (may differ from Plex title)
+    tmdb_name = series_data.get('name', '')
+    if tmdb_name:
+        new_metadata['show_title'] = tmdb_name
     max_s = max(ep['season'] for ep in all_episodes)
     if max_s:
         new_metadata['latest_season'] = str(max_s)
@@ -15353,6 +15551,12 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
                 except Exception:
                     break  # no more pages for this season
 
+                # Extract show title from first page (from <title> tag: "Show Name – Episodenguide ...")
+                if 'show_title' not in new_metadata:
+                    m_page_title = re.search(r'<title>([^–<]+)', html)
+                    if m_page_title:
+                        new_metadata['show_title'] = m_page_title.group(1).strip()
+
                 # Split by episode sections — first split chunk is before any episode
                 ep_sections = re.split(r'itemprop="episode"', html)[1:]
                 if not ep_sections:
@@ -15443,6 +15647,12 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
             except Exception as e:
                 print(f"  fetch offset {offset} failed: {e}")
                 break
+
+            # Extract show title from first page
+            if 'show_title' not in new_metadata:
+                m_page_title = re.search(r'<title>([^–<]+)', html)
+                if m_page_title:
+                    new_metadata['show_title'] = m_page_title.group(1).strip()
 
             pairs = re.findall(
                 r'role=rowgroup\s+href="/' + re.escape(slug) + r'/folgen/(\d+)-([^"]*)".*?datetime="(\d{4}-\d{2}-\d{2})T',
@@ -16628,7 +16838,7 @@ def show_system_info():
         # Calculate size for each cache structure
         for key in ['media_objs', 'library_stats', 'labels_index', 'obj_by_id',
                     'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
-                    'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
+                    'obj_by_show_scraped', 'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
             if key in CACHE:
                 data = CACHE[key]
                 size_bytes = len(pickle.dumps(data))
@@ -16806,7 +17016,7 @@ def show_system_info():
             obj_by_id_total_size = len(pickle.dumps(CACHE['obj_by_id']))
 
         # Calculate size of supporting structures
-        supporting_structures = ['obj_by_filepath', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes', 'obj_by_library']
+        supporting_structures = ['obj_by_filepath', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes', 'obj_by_show_scraped', 'obj_by_library']
         for struct_name in supporting_structures:
             if struct_name in CACHE:
                 supporting_structures_total_size += len(pickle.dumps(CACHE[struct_name]))
@@ -17724,7 +17934,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
             'scraped': _TSV_STATS['scraped'],
             'fallback': _TSV_STATS['fallback'],
             'failed': _TSV_STATS['failed'],
-            'indices_normalized': _TSV_STATS['normalized'],
+            'numbering_issues': _TSV_STATS['numbering_issues'],
             'titles_filled': _TSV_STATS['titles_filled'],
         }
 
@@ -17916,7 +18126,24 @@ def show_item_info(identifier, table_only=False):
     obj_type = obj.get('type')
     if obj_type == 'Episode':
         print(f"Series:\t{obj.get('series', 'N/A')}")
-        print(f"Episode:\t{obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))}")
+        plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
+        print(f"Episode (Plex):\t{plex_s0xe0x}")
+        # Show normalized ID from OBJ_BY_SHOW_SCRAPED if available
+        show_key = obj.get('show_key', '')
+        scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+        if scraped_data:
+            s_str = obj.get('S_str', '')
+            e_str = obj.get('E_str', '')
+            ep_map = scraped_data.get('episode_map', {}).get(s_str, {})
+            for norm_e, mapping in ep_map.items():
+                if mapping.get('plex') == e_str:
+                    norm_id = f"{s_str}{norm_e}"
+                    if norm_id != plex_s0xe0x:
+                        print(f"Episode (Normalized):\t{norm_id}")
+                    scraped_e = mapping.get('scraped', '')
+                    if scraped_e and scraped_e != e_str:
+                        print(f"Episode (Scraped):\t{s_str}{scraped_e}")
+                    break
     elif obj_type == 'Season':
         print(f"Series:\t{obj.get('series', 'N/A')}")
         print(f"Season:\t{obj.get('S_str', 'N/A')}")
@@ -17924,6 +18151,20 @@ def show_item_info(identifier, table_only=False):
         year = obj.get('year', 0)
         if year and year > 0:
             print(f"Year:\t{year}")
+
+        # Scraped info from OBJ_BY_SHOW_SCRAPED
+        scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(key, {})
+        if scraped_data:
+            scraped_title = scraped_data.get('title', '')
+            scraped_source = scraped_data.get('source', '')
+            if scraped_title:
+                print(f"Scraped Title:\t{scraped_title}")
+            if scraped_source:
+                print(f"Scraped Source:\t{scraped_source}")
+            num_issues = len(scraped_data.get('numbering_issues', []))
+            if num_issues:
+                print(f"Numbering Issues:\t{num_issues}")
+
         # Season table
         show_seasons = PLEX_Media.OBJ_BY_SHOW.get(key, {})
         show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(key, {})
@@ -17936,29 +18177,48 @@ def show_item_info(identifier, table_only=False):
                     for version_str, ep_keys in versions.items():
                         ep_count += len(ep_keys)
                 print(f"  {S_str:<8} {season_key:<16} {ep_count:>8}")
-        # Episode table (verbose mode)
-        if VRB and show_episodes:
+
+        # Episode table with normalized IDs
+        if show_episodes:
+            episode_map = scraped_data.get('episode_map', {}) if scraped_data else {}
             # Collect all episodes with their info
             all_eps = []
             for S_str in sorted(show_episodes.keys()):
+                season_ep_map = episode_map.get(S_str, {})
                 for E_str in sorted(show_episodes[S_str].keys()):
                     for version_str, ep_keys in show_episodes[S_str][E_str].items():
                         for ep_key in ep_keys:
                             ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
-                            s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
+                            plex_s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
                             title = ep.get('title', '')
                             ep_file = ep.get('file', '')
-                            all_eps.append((s0xe0x, ep_key, title, ep_file))
+                            # Find normalized ID for this episode
+                            normalized_id = ''
+                            scraped_e = ''
+                            for norm_e, mapping in season_ep_map.items():
+                                if mapping.get('plex') == E_str:
+                                    normalized_id = f"{S_str}{norm_e}"
+                                    scraped_e = mapping.get('scraped', '')
+                                    break
+                            all_eps.append((plex_s0xe0x, normalized_id, ep_key, title, ep_file))
             if all_eps:
-                col_ep = max(len(e[0]) for e in all_eps)
-                col_key = max(len(e[1]) for e in all_eps)
-                col_title = max((len(e[2]) for e in all_eps), default=5)
-                col_ep = max(col_ep, 7)
+                has_normalized = any(e[1] for e in all_eps)
+                col_plex = max(len(e[0]) for e in all_eps)
+                col_norm = max((len(e[1]) for e in all_eps), default=0) if has_normalized else 0
+                col_key = max(len(e[2]) for e in all_eps)
+                col_title = max((len(e[3]) for e in all_eps), default=5)
+                col_plex = max(col_plex, 4)
                 col_key = max(col_key, 3)
                 col_title = max(col_title, 5)
-                print(f"\n  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
-                for s0xe0x, ep_key, title, ep_file in all_eps:
-                    print(f"  {s0xe0x:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
+                if has_normalized:
+                    col_norm = max(col_norm, 10)
+                    print(f"\n  {'PLEX':<{col_plex}}  {'NORMALIZED':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
+                    for plex_id, norm_id, ep_key, title, ep_file in all_eps:
+                        print(f"  {plex_id:<{col_plex}}  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
+                else:
+                    print(f"\n  {'EPISODE':<{col_plex}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
+                    for plex_id, _, ep_key, title, ep_file in all_eps:
+                        print(f"  {plex_id:<{col_plex}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
 
@@ -18197,6 +18457,10 @@ def execute_global_commands(args, cmd_args):
         print("\n--- Potential Mismatches (Plex title vs directory name) ---")
         mismatch_count = PLEX_Media._list_potential_mismatches(obj_keys, None)
 
+        # 7. Episode numbering issues
+        print("\n--- Episode Numbering Issues (Plex vs Scraped) ---")
+        numbering_count = PLEX_Media._list_episode_numbering_issues()
+
         # Summary
         print("\n" + "=" * 76)
         print("SUMMARY")
@@ -18207,7 +18471,8 @@ def execute_global_commands(args, cmd_args):
         print(f"  Unmatched items:          {unmatched_count}")
         print(f"  Unsorted shows:           {unsorted_count}")
         print(f"  Potential mismatches:     {mismatch_count}")
-        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count
+        print(f"  Numbering issues:        {numbering_count}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
@@ -18245,6 +18510,15 @@ def execute_global_commands(args, cmd_args):
         scope = f" in '{library_name}'" if library_name else ""
         print(f"\n--- Potential Mismatches{scope} (Plex title vs directory name) ---")
         PLEX_Media._list_potential_mismatches(obj_keys, library_name)
+        return
+
+    # Handle --episode-numbering-issues [LIBRARY]: list shows with Plex vs scraped numbering conflicts
+    numbering_val = safe_getattr(cmd_args, 'episode_numbering_issues', None)
+    if numbering_val is not None:
+        library_name = None if numbering_val is True else numbering_val
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Episode Numbering Issues{scope} (Plex vs Scraped) ---")
+        PLEX_Media._list_episode_numbering_issues(library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -18597,6 +18871,7 @@ def main():
     main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
@@ -18634,10 +18909,11 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues). Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -18744,6 +19020,8 @@ def main():
             help_redirect = 'unmatched'
         elif '--potential-mismatch' in remaining_args:
             help_redirect = 'potential-mismatch'
+        elif '--episode-numbering-issues' in remaining_args:
+            help_redirect = 'episode-numbering-issues'
 
         if help_redirect:
             args.help = help_redirect
@@ -18946,6 +19224,18 @@ def main():
                 remaining_args.append('--potential-mismatch')
             else:
                 remaining_args.insert(0, '--potential-mismatch')
+
+    # Re-inject --episode-numbering-issues into remaining_args
+    # Same pattern as --unmatched: supports --episode-numbering-issues [LIBRARY], <PLEXOBJ> --episode-numbering-issues, bare
+    if safe_getattr(args, 'episode_numbering_issues', None) is not None:
+        if args.episode_numbering_issues is not True:
+            remaining_args.insert(0, '--episode-numbering-issues')
+            remaining_args.insert(1, args.episode_numbering_issues)
+        else:
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--episode-numbering-issues')
+            else:
+                remaining_args.insert(0, '--episode-numbering-issues')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):

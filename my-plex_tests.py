@@ -4571,6 +4571,206 @@ class TestShowDirDerivation(unittest.TestCase):
         self.assertNotIn("'locations': [],  # Will be populated if needed", content)
 
 
+class TestObjByShowScraped(unittest.TestCase):
+    """Test OBJ_BY_SHOW_SCRAPED cache structure and --episode-numbering-issues."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_cache_dict_declared(self):
+        """OBJ_BY_SHOW_SCRAPED must be declared on PLEX_Media."""
+        content = self._read_script()
+        self.assertIn('OBJ_BY_SHOW_SCRAPED', content)
+
+    def test_cache_save(self):
+        """OBJ_BY_SHOW_SCRAPED must be included in cache save."""
+        content = self._read_script()
+        self.assertIn("'obj_by_show_scraped'", content)
+
+    def test_cache_load(self):
+        """OBJ_BY_SHOW_SCRAPED must be loaded from cache."""
+        content = self._read_script()
+        self.assertIn("source.get('obj_by_show_scraped'", content)
+
+    def test_from_scratch_reset(self):
+        """OBJ_BY_SHOW_SCRAPED must be reset during --from-scratch."""
+        content = self._read_script()
+        self.assertIn('OBJ_BY_SHOW_SCRAPED = {}', content)
+
+    def test_checkpoint_data(self):
+        """OBJ_BY_SHOW_SCRAPED must be in checkpoint data."""
+        content = self._read_script()
+        self.assertIn("'obj_by_show_scraped': copy.copy(PLEX_Media.OBJ_BY_SHOW_SCRAPED)", content)
+
+    def test_scraped_title_in_tmdb(self):
+        """TMDB scraper must capture show_title in metadata."""
+        content = self._read_script()
+        # Find it in _scrape_tmdb
+        idx = content.index('def _scrape_tmdb(')
+        end = content.index('\ndef ', idx + 1)
+        tmdb_section = content[idx:end]
+        self.assertIn("new_metadata['show_title']", tmdb_section)
+
+    def test_scraped_title_in_tvdb(self):
+        """TVDB scraper must capture show_title in metadata."""
+        content = self._read_script()
+        idx = content.index('def _scrape_tvdb(')
+        end = content.index('\ndef ', idx + 1)
+        tvdb_section = content[idx:end]
+        self.assertIn("show_title", tvdb_section)
+
+    def test_scraped_title_in_fernsehserien(self):
+        """fernsehserien.de scraper must capture show_title from page."""
+        content = self._read_script()
+        idx = content.index('def _scrape_fernsehserien_de(')
+        end = content.index('\ndef ', idx + 1)
+        fs_section = content[idx:end]
+        self.assertIn("show_title", fs_section)
+
+    def test_show_title_in_tsv_header(self):
+        """show_title must be written to TSV file header."""
+        content = self._read_script()
+        idx = content.index('def write_episodes_tsv(')
+        end = content.index('\ndef ', idx + 1)
+        write_section = content[idx:end]
+        self.assertIn("show_title", write_section)
+
+    def test_show_title_read_from_tsv(self):
+        """show_title must be read from TSV metadata."""
+        content = self._read_script()
+        idx = content.index('def read_episodes_tsv(')
+        end = content.index('\ndef ', idx + 1)
+        read_section = content[idx:end]
+        self.assertIn("'show_title'", read_section)
+
+    def test_no_plex_overwrite(self):
+        """Scraped data must NOT overwrite Plex E_idx/E_str — old normalization removed."""
+        content = self._read_script()
+        idx = content.index('def _ensure_tsv_and_normalize_episodes(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        # Must NOT contain direct E_idx/E_str overwrites
+        self.assertNotIn("cached_ep['E_idx'] = tsv_ep_num", section,
+            "Must not overwrite Plex E_idx with scraped data")
+        self.assertNotIn("cached_ep['E_str'] = new_e_str", section,
+            "Must not overwrite Plex E_str with scraped data")
+
+
+class TestEpisodeNumberingIssues(unittest.TestCase):
+    """Test --episode-numbering-issues command integration (12 integration points)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_function_exists(self):
+        """_list_episode_numbering_issues must exist."""
+        content = self._read_script()
+        self.assertIn('def _list_episode_numbering_issues(', content)
+
+    def test_library_argparser(self):
+        """--episode-numbering-issues must be in library argparser."""
+        content = self._read_script()
+        self.assertIn("'--episode-numbering-issues'", content)
+
+    def test_global_cmd_parser(self):
+        """--episode-numbering-issues must be in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        idx = content.index('GLOBAL_CMD_PARSER.add_argument')
+        self.assertIn('--episode-numbering-issues', content[idx:])
+
+    def test_problems_integration(self):
+        """--problems must include episode numbering issues section."""
+        content = self._read_script()
+        self.assertIn('Episode Numbering Issues', content)
+        self.assertIn('numbering_count', content)
+
+    def test_help_exists(self):
+        """--help episode-numbering-issues must work."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'episode-numbering-issues'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help episode-numbering-issues failed: {result.stderr}")
+        self.assertIn('EPISODE NUMBERING ISSUES', result.stdout)
+
+    def test_e2e_runs(self):
+        """--episode-numbering-issues must run without error."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--episode-numbering-issues'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, f"--episode-numbering-issues failed: {result.stderr}")
+
+    def test_re_injection(self):
+        """--episode-numbering-issues must be re-injected into remaining_args."""
+        content = self._read_script()
+        self.assertIn("'episode_numbering_issues'", content)
+        self.assertIn("'--episode-numbering-issues'", content)
+
+    def test_has_standalone_cmd(self):
+        """--episode-numbering-issues must be in has_standalone_cmd check."""
+        content = self._read_script()
+        self.assertIn("'episode_numbering_issues'", content)
+
+    def test_main_parser_suppressed(self):
+        """--episode-numbering-issues must be in main_parser as suppressed."""
+        content = self._read_script()
+        self.assertIn("main_parser.add_argument('--episode-numbering-issues'", content)
+
+    def test_potential_mismatch_uses_key_format(self):
+        """--potential-mismatch output must use cache key format (Type:ID), not separate TYPE+ID columns."""
+        content = self._read_script()
+        idx = content.index('def _list_potential_mismatches(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        # Must NOT have separate TYPE and PLEX-ID columns
+        self.assertNotIn("{'TYPE'", section,
+            "Output must use KEY column, not separate TYPE column")
+        # Must have KEY column
+        self.assertIn("{'KEY'", section)
+
+    def test_potential_mismatch_comparison_column(self):
+        """--potential-mismatch output must have COMPARISON column."""
+        content = self._read_script()
+        idx = content.index('def _list_potential_mismatches(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('COMPARISON', section)
+        self.assertIn('SCRAPED-TITLE:', section)
+        self.assertIn('DIR:', section)
+
+
+class TestInfoScrapedData(unittest.TestCase):
+    """Test --info output includes scraped info for shows."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_info_shows_scraped_title(self):
+        """--info for shows must display scraped title."""
+        content = self._read_script()
+        self.assertIn('Scraped Title:', content)
+        self.assertIn('Scraped Source:', content)
+
+    def test_info_shows_numbering_issues(self):
+        """--info for shows must display numbering issue count."""
+        content = self._read_script()
+        self.assertIn('Numbering Issues:', content)
+
+    def test_info_shows_normalized_ids(self):
+        """--info episode table must include NORMALIZED column when available."""
+        content = self._read_script()
+        self.assertIn('NORMALIZED', content)
+
+    def test_info_episode_shows_scraped_episode(self):
+        """--info for episodes must show normalized and scraped episode IDs."""
+        content = self._read_script()
+        self.assertIn('Episode (Plex):', content)
+        self.assertIn('Episode (Normalized):', content)
+        self.assertIn('Episode (Scraped):', content)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -4613,6 +4813,9 @@ _UNITTEST_CLASSES = [
     TestTsvScrapersE2E,
     TestPotentialMismatch,
     TestShowDirDerivation,
+    TestObjByShowScraped,
+    TestEpisodeNumberingIssues,
+    TestInfoScrapedData,
 ]
 
 # ---------------------------------------------------------------------------
