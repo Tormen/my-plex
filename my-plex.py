@@ -8508,7 +8508,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
 
 
 def _list_tsv_problems():
-    """Scan all show directories for episodes.err files and print grouped results.
+    """Scan all show directories for episodes.tsv/err files and print grouped results.
     Returns: number of issues found."""
     import os
     from collections import defaultdict
@@ -8526,8 +8526,10 @@ def _list_tsv_problems():
         'no_external_ids':    '--unmatched',
     }
 
-    by_type = defaultdict(list)
-    total = 0
+    tsv_count = 0
+    err_count = 0
+    err_without_tsv = []   # (show_key, title, lib, err_path)
+    by_type = defaultdict(list)  # error_type → [(show_key, title, lib, err_path)]
 
     for show_key, show_seasons in PLEX_Media.OBJ_BY_SHOW.items():
         show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
@@ -8537,8 +8539,20 @@ def _list_tsv_problems():
         if not show_dir_server:
             continue
         show_dir = get_local_show_dir(show_dir_server)
-        err_data = read_episodes_err(show_dir)
-        if err_data:
+        tsv_path = get_episodes_tsv_path(show_dir)
+        err_path = get_episodes_err_path(show_dir)
+        has_tsv = os.path.isfile(tsv_path)
+        has_err = os.path.isfile(err_path)
+
+        if has_tsv:
+            tsv_count += 1
+        if has_err:
+            err_count += 1
+
+        if has_err:
+            err_data = read_episodes_err(show_dir)
+            if not err_data:
+                continue
             error_type = err_data.get('error_type', 'unknown')
             # Re-validate misidentified_show against actual episode count
             # (old .err files may have wrong classification due to bug)
@@ -8559,26 +8573,46 @@ def _list_tsv_problems():
                 if show_key in lib_data.get('Show', []):
                     lib = lib_name
                     break
-            by_type[error_type].append((title, lib))
-            total += 1
+            by_type[error_type].append((show_key, title, lib, err_path))
+            if not has_tsv:
+                err_without_tsv.append((show_key, title, lib, err_path))
 
-    if total == 0:
-        print("  No episode data issues found.")
+    total_shows = len(PLEX_Media.OBJ_BY_SHOW)
+    no_tsv_no_err = total_shows - tsv_count - len(err_without_tsv)  # shows with neither
+
+    # File statistics
+    print(f"  {total_shows} shows total, {tsv_count} with episodes.tsv, {err_count} with episodes.err")
+
+    # .err without .tsv = scraping never produced data
+    if err_without_tsv:
+        print(f"\n  episodes.err WITHOUT episodes.tsv ({len(err_without_tsv)}):")
+        print(f"  These shows have no scraped episode data at all.")
+        for show_key, title, lib, err_path in sorted(err_without_tsv, key=lambda x: (x[2].lower(), x[1].lower())):
+            print(f"    {show_key:<17} {title[:40]:<40} {lib}")
+            print(f"      {err_path}")
+
+    # Grouped by error type
+    total_issues = sum(len(shows) for shows in by_type.values())
+    if total_issues == 0:
+        if not err_without_tsv:
+            print("  No episode data issues found.")
         return 0
 
+    print(f"\n  Issues by type:")
     for etype, shows in by_type.items():
         label = _ERROR_TYPE_LABELS.get(etype, etype)
         hint = _ERROR_TYPE_HINT.get(etype)
         if hint:
             # Has dedicated command → show count + hint
-            print(f"  {label}: {len(shows)}  (use {hint} for details)")
+            print(f"    {label}: {len(shows)}  (use {hint} for details)")
         else:
             # No dedicated command → show inline details
-            print(f"  {label}:")
-            for title, lib in sorted(shows):
-                print(f"    {title:40s} {lib}")
-    print(f"\n  {total} issue(s) found.")
-    return total
+            print(f"    {label}: {len(shows)}")
+            for show_key, title, lib, err_path in sorted(shows, key=lambda x: (x[2].lower(), x[1].lower())):
+                print(f"      {show_key:<17} {title[:40]:<40} {lib}")
+                print(f"        {err_path}")
+    print(f"\n  {total_issues} issue(s) found.")
+    return total_issues
 
 
 def _store_collections_from_database(library_section_id, library_name):
