@@ -17521,6 +17521,24 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
 
     try:
         import json
+        # Preserve previous log file (rename with timestamp from its content)
+        if os.path.exists(CACHE_UPDATES_FILE):
+            try:
+                with open(CACHE_UPDATES_FILE, 'r') as f:
+                    old_log = json.load(f)
+                old_ts = old_log.get('timestamp', '')[:19].replace(':', '-')  # 2026-03-16T13-17-02
+                if old_ts:
+                    prev_path = CACHE_UPDATES_FILE.replace('.json', f'.{old_ts}.json')
+                else:
+                    prev_path = CACHE_UPDATES_FILE.replace('.json', '.prev.json')
+                os.rename(CACHE_UPDATES_FILE, prev_path)
+            except Exception:
+                # If we can't read the old log, just rename with .prev
+                prev_path = CACHE_UPDATES_FILE.replace('.json', '.prev.json')
+                try:
+                    os.rename(CACHE_UPDATES_FILE, prev_path)
+                except Exception:
+                    pass
         with open(CACHE_UPDATES_FILE, 'w') as f:
             json.dump(log, f, indent=2, ensure_ascii=False, default=str)
     except Exception as e:
