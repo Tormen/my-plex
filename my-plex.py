@@ -14366,42 +14366,77 @@ def read_episodes_tsv(tsv_path):
 
 
 def write_episodes_tsv(tsv_path, metadata, episodes):
-    """Write standardized episodes.tsv.
+    """Write standardized episodes.tsv via SSH to the Plex server.
+
+    If the file already exists, it is renamed to episodes.tsv.<updated-date> first.
 
     Args:
-        tsv_path: File path
+        tsv_path: Local file path (translated to server path for SSH)
         metadata: dict with keys: source, slug, show_id, updated, specials_pattern (all optional)
         episodes: list of dicts with keys: season, episode, date, title,
                   original_title, date_local, sender_local, date_original, sender_original
     """
     from datetime import datetime
+    import subprocess
 
     # Update timestamp
     metadata['updated'] = datetime.now().strftime('%Y-%m-%d')
 
-    with open(tsv_path, 'w', encoding='utf-8') as f:
-        f.write(f"# source: {metadata.get('source', '')}\n")
-        f.write(f"# slug: {metadata.get('slug', '')}\n")
-        if metadata.get('show_id'):
-            f.write(f"# show_id: {metadata['show_id']}\n")
-        if metadata.get('specials_pattern'):
-            f.write(f"# specials_pattern: {metadata['specials_pattern']}\n")
-        f.write(f"# updated: {metadata['updated']}\n")
-        f.write(f"# DO NOT edit or remove the header comments above\n")
-        f.write("season\tepisode\tdate\ttitle\toriginal_title\tdate_local\tsender_local\tdate_original\tsender_original\n")
+    # Build TSV content
+    lines = []
+    lines.append(f"# source: {metadata.get('source', '')}")
+    lines.append(f"# slug: {metadata.get('slug', '')}")
+    if metadata.get('show_id'):
+        lines.append(f"# show_id: {metadata['show_id']}")
+    if metadata.get('specials_pattern'):
+        lines.append(f"# specials_pattern: {metadata['specials_pattern']}")
+    lines.append(f"# updated: {metadata['updated']}")
+    lines.append("# DO NOT edit or remove the header comments above")
+    lines.append("season\tepisode\tdate\ttitle\toriginal_title\tdate_local\tsender_local\tdate_original\tsender_original")
 
-        # Sort by season, then episode
-        for ep in sorted(episodes, key=lambda e: (e.get('season', 0), e.get('episode', 0))):
-            s = ep.get('season', 0)
-            e = ep.get('episode', 0)
-            d = ep.get('date', '')
-            t = ep.get('title', '')
-            ot = ep.get('original_title', '')
-            dl = ep.get('date_local', '')
-            sl = ep.get('sender_local', '')
-            do = ep.get('date_original', '')
-            so = ep.get('sender_original', '')
-            f.write(f"{s}\t{e}\t{d}\t{t}\t{ot}\t{dl}\t{sl}\t{do}\t{so}\n")
+    for ep in sorted(episodes, key=lambda e: (e.get('season', 0), e.get('episode', 0))):
+        s = ep.get('season', 0)
+        e = ep.get('episode', 0)
+        d = ep.get('date', '')
+        t = ep.get('title', '')
+        ot = ep.get('original_title', '')
+        dl = ep.get('date_local', '')
+        sl = ep.get('sender_local', '')
+        do = ep.get('date_original', '')
+        so = ep.get('sender_original', '')
+        lines.append(f"{s}\t{e}\t{d}\t{t}\t{ot}\t{dl}\t{sl}\t{do}\t{so}")
+
+    content = '\n'.join(lines) + '\n'
+
+    # Translate local path to server path
+    server_path = get_server_show_dir(os.path.dirname(tsv_path))
+    server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
+    escaped_tsv = escape_path_for_ssh(server_tsv)
+
+    # Backup existing TSV via SSH (rename to episodes.tsv.<updated-date>)
+    # Read the old 'updated' date from the existing file header
+    old_updated = metadata.get('_prev_updated', '')
+    if not old_updated:
+        # Try to get it from the file we just read (passed in via metadata by caller)
+        # If not available, we'll use 'prev' as suffix
+        old_updated = ''
+    backup_suffix = f'.{old_updated}' if old_updated else '.prev'
+    escaped_backup = escape_path_for_ssh(server_tsv + backup_suffix)
+
+    # SSH: if file exists, rename it; then write new content via cat
+    rename_cmd = f'[ -f "{escaped_tsv}" ] && mv "{escaped_tsv}" "{escaped_backup}"; cat > "{escaped_tsv}"'
+    result = subprocess.run(
+        ["ssh", PLEX_DB_REMOTE_HOST, rename_cmd],
+        input=content, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"  WARNING: Failed to write {server_tsv} via SSH: {result.stderr.strip()}")
+        # Fallback: try local write
+        try:
+            with open(tsv_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e2:
+            print(f"  WARNING: Local fallback also failed: {e2}")
 
 
 def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
@@ -14709,6 +14744,9 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
         return metadata, existing_episodes
 
     new_metadata, new_episodes = result
+
+    # Preserve old 'updated' date for backup filename
+    metadata['_prev_updated'] = metadata.get('updated', '')
 
     # Merge metadata
     metadata.update(new_metadata)
