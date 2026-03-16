@@ -8266,6 +8266,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         tsv_episodes = None
         tsv_meta = {}
         needs_scrape = False
+        has_err = os.path.isfile(get_episodes_err_path(show_dir))
         if os.path.isfile(tsv_path):
             _meta, tsv_episodes = read_episodes_tsv(tsv_path)
             if _meta:
@@ -8274,6 +8275,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                 existing_count += 1
                 if FORCE_TSV:
                     needs_scrape = True  # --force-tsv: re-scrape everything
+                elif has_err:
+                    needs_scrape = True  # .err exists — re-evaluate (may be stale)
             else:
                 needs_scrape = True  # TSV exists but is empty/corrupt — re-scrape
         else:
