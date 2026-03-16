@@ -14376,6 +14376,19 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     """
     from datetime import datetime
 
+    # Preserve previous TSV file (rename with its 'updated' date)
+    if os.path.isfile(tsv_path):
+        try:
+            old_meta, _ = read_episodes_tsv(tsv_path)
+            old_date = old_meta.get('updated', '') if old_meta else ''
+            suffix = f'.{old_date}' if old_date else '.prev'
+            os.rename(tsv_path, tsv_path + suffix)
+        except Exception:
+            try:
+                os.rename(tsv_path, tsv_path + '.prev')
+            except Exception:
+                pass
+
     # Update timestamp
     metadata['updated'] = datetime.now().strftime('%Y-%m-%d')
 
