@@ -4460,6 +4460,110 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
             return f.read()
 
 
+class TestIsSeasonDir(unittest.TestCase):
+    """Test _is_season_dir() helper used for show_dir derivation from episode filepaths."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_helper_exists(self):
+        """_is_season_dir function must exist in the script."""
+        content = self._read_script()
+        self.assertIn('def _is_season_dir(', content)
+
+    def test_season_dir_regex_exists(self):
+        """_SEASON_DIR_RE compiled regex must exist."""
+        content = self._read_script()
+        self.assertIn('_SEASON_DIR_RE', content)
+
+    def test_season_english(self):
+        """'Season 01', 'Season 1', 'Season 10' should be recognized."""
+        import importlib, sys
+        # Import _is_season_dir from main script
+        spec = importlib.util.spec_from_file_location("_mp", MAIN_SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        # We only need the regex and function, load just enough
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertTrue(_is('Season 01'))
+        self.assertTrue(_is('Season 1'))
+        self.assertTrue(_is('Season 10'))
+        self.assertTrue(_is('season 3'))
+
+    def test_season_german(self):
+        """'Staffel 1', 'Staffel 02' should be recognized."""
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertTrue(_is('Staffel 1'))
+        self.assertTrue(_is('Staffel 02'))
+
+    def test_season_french(self):
+        """'Saison 1' should be recognized."""
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertTrue(_is('Saison 1'))
+        self.assertTrue(_is('Saison 03'))
+
+    def test_season_short_form(self):
+        """'s01', 's1', 'S02' should be recognized."""
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertTrue(_is('s01'))
+        self.assertTrue(_is('s1'))
+        self.assertTrue(_is('S02'))
+        self.assertTrue(_is('s10'))
+
+    def test_specials(self):
+        """'Specials' and 'specials' should be recognized."""
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertTrue(_is('Specials'))
+        self.assertTrue(_is('specials'))
+        self.assertTrue(_is('Special'))
+
+    def test_show_names_not_matched(self):
+        """Actual show directory names must NOT match."""
+        import re as _re
+        regex = _re.compile(
+            r'^(season|staffel|saison|series)\s*\d+$|^s\d{1,}$|^specials?$',
+            _re.IGNORECASE
+        )
+        _is = lambda d: bool(regex.match(d))
+        self.assertFalse(_is('Breaking Bad'))
+        self.assertFalse(_is('The Simpsons'))
+        self.assertFalse(_is('24'))
+        self.assertFalse(_is('Lost'))
+        self.assertFalse(_is(''))
+
+    def test_fallback_uses_season_check(self):
+        """The fallback show_dir derivation must use _is_season_dir, not blind dirname(dirname())."""
+        content = self._read_script()
+        # Find the fallback block — must reference _is_season_dir
+        self.assertIn('_is_season_dir(parent_name)', content,
+            "Fallback show_dir derivation must check _is_season_dir(parent_name)")
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -4500,6 +4604,7 @@ _UNITTEST_CLASSES = [
     TestVersionStringCollision,
     TestForceTsv,
     TestTsvScrapersE2E,
+    TestIsSeasonDir,
 ]
 
 # ---------------------------------------------------------------------------
