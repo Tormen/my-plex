@@ -14577,11 +14577,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Scans ALL show directories in series-type Plex libraries for unsorted")
             print("  video files and sorts them into season subdirectories with S##E## naming.")
             print()
-            print("  For each unsorted file:")
-            print("    1. Extract the air date from the filename (TVOON format: YY.MM.DD_HH-MM_)")
-            print("    2. Look up the date in episodes.tsv → get season + episode number")
-            print("    3. Also try previous day (for rebroadcasts that air after midnight)")
-            print("    4. Rename to 'S##E## - original_filename' and move to s##/ directory")
+            print("  For each unsorted file in the show root directory:")
+            print("    1. If filename contains S##E## (e.g. 'Show S01E05 - Title.mp4'):")
+            print("       → use season/episode directly, move to s##/ directory")
+            print("    2. Otherwise extract air date from filename (TVOON: YY.MM.DD_HH-MM_)")
+            print("       → look up date in episodes.tsv → get season + episode number")
+            print("       → also try previous day (for rebroadcasts after midnight)")
+            print("    3. Rename to 'S##E## - original_filename' and move to s##/ directory")
             print()
             print("  Special episodes (matching patterns like 'XXL', 'Promi', 'Spezial', etc.)")
             print("  go to specials/ as S00E##. If sort_specials.sh exists in the show directory,")
@@ -19123,34 +19125,43 @@ def main():
             sys.exit(0)
         print()
 
-    # Show detailed help if --<CMD> --help is used
+    # Show detailed help if --<CMD> --help is used (e.g. --sort-new --help → --help sort-new)
     if args.help:
         help_redirect = None
-        if args.update_cache:
-            help_redirect = 'update-cache'
-        elif safe_getattr(args, 'no_audio_language', False):
-            help_redirect = 'no-audio-language'
-        elif safe_getattr(args, 'watched', False):
-            help_redirect = 'watched'
-        elif safe_getattr(args, 'unwatched', False):
-            help_redirect = 'unwatched'
-        # Check remaining_args for GLOBAL_CMD_PARSER flags (cmd_args not parsed yet)
-        elif args.scan:
-            help_redirect = 'scan'
-        elif '--duplicates' in remaining_args:
-            help_redirect = 'duplicates'
-        elif '--broken' in remaining_args:
-            help_redirect = 'broken'
-        elif '--list' in remaining_args:
-            help_redirect = 'list'
-        elif '--unmatched' in remaining_args:
-            help_redirect = 'unmatched'
-        elif '--potential-mismatch' in remaining_args:
-            help_redirect = 'potential-mismatch'
-        elif '--episode-numbering-issues' in remaining_args:
-            help_redirect = 'episode-numbering-issues'
-        elif '--problems' in remaining_args or '--tsv' in remaining_args or '--scrape' in remaining_args:
-            help_redirect = 'problems'
+        # Flags consumed by main_parser (check args.*)
+        _MAIN_PARSER_HELP_REDIRECTS = {
+            'update_cache':      'update-cache',
+            'no_audio_language': 'no-audio-language',
+            'watched':           'watched',
+            'unwatched':         'unwatched',
+            'scan':              'scan',
+            'sort_new':          'sort-new',
+        }
+        for attr, topic in _MAIN_PARSER_HELP_REDIRECTS.items():
+            if safe_getattr(args, attr, False):
+                help_redirect = topic
+                break
+        # Flags in remaining_args (parsed later by GLOBAL_CMD_PARSER)
+        if not help_redirect:
+            _REMAINING_HELP_REDIRECTS = {
+                '--duplicates':              'duplicates',
+                '--broken':                  'broken',
+                '--list':                    'list',
+                '--unmatched':               'unmatched',
+                '--unsorted':                'unsorted',
+                '--potential-mismatch':      'potential-mismatch',
+                '--episode-numbering-issues':'episode-numbering-issues',
+                '--missing':                 'missing',
+                '--sort-new':                'sort-new',
+                '--rename':                  'rename',
+                '--problems':                'problems',
+                '--tsv':                     'problems',
+                '--scrape':                  'problems',
+            }
+            for flag, topic in _REMAINING_HELP_REDIRECTS.items():
+                if flag in remaining_args:
+                    help_redirect = topic
+                    break
 
         if help_redirect:
             args.help = help_redirect
