@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 # Coding guidelines, architecture docs, and test policies: see README.md
 # errCode range: 1001..1070
@@ -156,6 +156,7 @@ CONFIG_DEFAULTS = {
     'FORCE_PLEXDATA': False,
     'FROM_SCRATCH': False,
     'READ_ONLY_MODE': False,
+    'AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE': False,
 
     # Performance Configuration
     'MAX_PARALLEL_WORKERS': 4,
@@ -301,6 +302,11 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}
 # LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}
 # CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}
+
+# Auto-trigger Plex library scan on --update-cache (default: False)
+# When False, --update-cache only reads the database without scanning.
+# Use --scan explicitly to trigger a Plex library scan.
+# AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE = {CONFIG_DEFAULTS['AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE']}
 
 ###############################################################################
 # Performance Configuration
@@ -531,6 +537,7 @@ FORCE_TSV = False  # When True, force re-scraping all episode TSV files during -
 FORCE_METADATA = False  # When True with --update-cache, forces recollection of all video file metadata even if already cached
 RESCAN_BROKEN = False   # When True with --update-cache, re-queues broken files (ffprobe_error) for metadata collection
 SCAN_LIBRARIES = None   # When set (list of library names), --scan restricts Plex scan + cache update to these libraries only
+AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE = CONFIG_DEFAULTS['AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE']
 READ_ONLY_MODE = CONFIG_DEFAULTS['READ_ONLY_MODE']  # When True, prevents automatic cache rebuilds (for --info, --list, etc.)
 AUTO_YES = False  # When True with -Y/--yes flag, auto-answers 'yes' to all prompts
 AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
@@ -8069,8 +8076,17 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
             }
             is_new_season = season_key not in PLEX_Media.OBJ_BY_ID
-            PLEX_Media.OBJ_BY_ID[season_key] = season_dict
-            _track_delta(display_title, 'Season', is_new_season)
+            if not is_new_season and FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
+                # Skip tracking if season data hasn't changed
+                cached_season = PLEX_Media.OBJ_BY_ID[season_key]
+                if cached_season.get('file') == season_dict['file'] and cached_season.get('title') == season_dict['title']:
+                    PLEX_Media.OBJ_BY_ID[season_key] = season_dict
+                else:
+                    PLEX_Media.OBJ_BY_ID[season_key] = season_dict
+                    _track_delta(display_title, 'Season', False)
+            else:
+                PLEX_Media.OBJ_BY_ID[season_key] = season_dict
+                _track_delta(display_title, 'Season', is_new_season)
 
             # OBJ_BY_LIBRARY — Season
             if 'Season' not in lib_dict:
@@ -8143,8 +8159,19 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
         }
         is_new_show = show_key not in PLEX_Media.OBJ_BY_ID
-        PLEX_Media.OBJ_BY_ID[show_key] = show_dict
-        _track_delta(display_title, 'Show', is_new_show)
+        if not is_new_show and FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
+            # Skip tracking if show data hasn't changed
+            cached_show = PLEX_Media.OBJ_BY_ID[show_key]
+            changed = (cached_show.get('title') != show_dict['title']
+                       or cached_show.get('file') != show_dict['file']
+                       or cached_show.get('external_ids') != show_dict.get('external_ids')
+                       or cached_show.get('guid') != show_dict.get('guid'))
+            PLEX_Media.OBJ_BY_ID[show_key] = show_dict
+            if changed:
+                _track_delta(display_title, 'Show', False)
+        else:
+            PLEX_Media.OBJ_BY_ID[show_key] = show_dict
+            _track_delta(display_title, 'Show', is_new_show)
 
         # OBJ_BY_LIBRARY — Show
         if 'Show' not in lib_dict:
@@ -9649,7 +9676,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             SCAN_LIBRARIES = list(resolved_libraries)
             if DBG: print(f"{DBGPFX}update_cache(): --scan resolved SCAN_LIBRARIES={SCAN_LIBRARIES}")
 
-        plex = ensure_plex_api(required=False) if (FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT) else None
+        # Determine whether to trigger a Plex library scan
+        # Scan runs when: --scan is used, OR AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE is True
+        do_plex_scan = SCAN_LIBRARIES is not None or '--scan' in sys.argv or AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE
+        plex = ensure_plex_api(required=False) if (FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT and do_plex_scan) else None
         if FORCE_CACHE_UPDATE and not OFFLINE and PLEX_Library.OBJ_DICT and plex:
             global FORCE_PLEXDATA
 
@@ -13979,6 +14009,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Updates the cache by comparing with Plex server and adding missing items.")
             print()
+            print("NOTE: By default, --update-cache does NOT trigger a Plex library scan.")
+            print("Use --scan to explicitly trigger a scan before updating the cache.")
+            print("To auto-scan on every --update-cache, set in config file:")
+            print("  AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE = True")
+            print()
             print("MODIFIERS:")
             print()
             print("  --from-scratch")
@@ -17399,18 +17434,24 @@ def _verify_data_integrity():
     if total_files > 0:
         parts = []
         if missing_metadata > 0:
-            parts.append(f"{missing_metadata} missing")
+            parts.append(f"{missing_metadata} not yet collected")
         if broken_metadata > 0:
-            parts.append(f"{broken_metadata} broken")
+            parts.append(f"{broken_metadata} ffmpeg failed")
         if file_not_found_metadata > 0:
             parts.append(f"{file_not_found_metadata} not found on disk, but Plex still lists them")
-        detail = f" ({', '.join(parts)})" if parts else ""
-        needs_update = missing_metadata
-        if needs_update > 0 or broken_metadata > 0 or file_not_found_metadata > 0:
+        no_metadata = missing_metadata + broken_metadata + file_not_found_metadata
+        if no_metadata > 0:
+            detail = f" ({no_metadata} without: {', '.join(parts)})"
+            if truncated_files > 0:
+                detail += f"\n                     + {truncated_files} truncated (have metadata but duration mismatch)"
             print(f"File metadata:     ⚠ {has_metadata}/{total_files} files have metadata{detail}")
-            if needs_update > 0:
-                integrity_issues.append(f"{needs_update} files need metadata — run --update-cache to collect")
+            if missing_metadata > 0:
+                integrity_issues.append(f"{missing_metadata} files need metadata — run --update-cache to collect")
         else:
+            if truncated_files > 0:
+                detail = f" ({truncated_files} truncated — duration mismatch)"
+            else:
+                detail = ""
             print(f"File metadata:     ✓ {has_metadata}/{total_files} files have metadata{detail}")
     else:
         print(f"File metadata:     - no media files in cache")
