@@ -15846,6 +15846,15 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
 
     episodes = list(existing_by_key.values())
 
+    # If 0 episodes and slug came from TSV metadata (not freshly discovered),
+    # re-discover with year suffix — the cached slug may point to the wrong show
+    if not episodes and metadata.get('slug'):
+        if VRB: print(f"  0 episodes with cached slug '{slug}' — re-discovering with year...")
+        new_slug, new_show_id = _discover_fernsehserien_slug(show_title, year=year)
+        if new_slug and new_slug != slug:
+            if VRB: print(f"  Re-discovered slug: {new_slug} (was: {slug})")
+            return _scrape_fernsehserien_de(show_title, {'slug': new_slug, 'show_id': new_show_id}, existing_episodes, year=year)
+
     # Detect latest season
     max_s = max((ep['season'] for ep in episodes if ep['season'] > 0), default=0)
     if max_s:
