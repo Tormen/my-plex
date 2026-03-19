@@ -17363,7 +17363,7 @@ def _verify_data_integrity():
         obj_type = obj.get('type')
         if obj_type not in ('Movie', 'Episode'):
             continue
-        plex_duration = obj.get('duration', 0)
+        plex_duration = obj.get('duration') or 0
         for _version, file_info in obj.get('files', {}).items():
             if not isinstance(file_info, dict):
                 continue
@@ -18234,6 +18234,18 @@ def show_item_info(identifier, table_only=False):
         print(f"Plex ID:\t{plex_id}")
         print(f"Item ID:\t{item_id}")
     print(f"Library:\t{obj.get('library', 'N/A')}")
+
+    # Match status (guid) — highlight unmatched items
+    guid = obj.get('guid', '')
+    if guid.startswith('local://'):
+        print(f"Match:\t⚠ UNMATCHED (local://) — use Fix Match in Plex to identify this item")
+    elif guid:
+        ext_ids = obj.get('external_ids', {})
+        if ext_ids:
+            ids_str = ', '.join(f"{k.upper()}:{v}" for k, v in ext_ids.items())
+            print(f"Match:\t{ids_str}")
+        else:
+            print(f"Match:\t⚠ Matched but no external IDs — rematch in Plex recommended")
 
     # Type-specific info
     obj_type = obj.get('type')
