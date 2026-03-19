@@ -15227,7 +15227,7 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
                     result = _scrape_tvdb(show_title, metadata, existing_episodes, external_ids)
                 case 'tmdb':
                     result = _scrape_tmdb(show_title, metadata, existing_episodes, external_ids)
-            if result is not None:
+            if result is not None and (not isinstance(result, tuple) or result[1]):
                 source = fb_source
                 metadata['_fallback_from'] = original_source  # record original source that failed
                 break
@@ -15789,8 +15789,10 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
                 consecutive_empty += 1
             s += 1
             time.sleep(0.3)
-    else:
+
+    if not show_id or not existing_by_key:
         # Strategy 2: sendetermine pages (broadcast schedule)
+        # Also used as fallback when Strategy 1 returned 0 episodes (e.g. 404 on staffel URLs)
         for offset in [0, -1, -2, -3]:
             url = f"https://www.fernsehserien.de/{slug}/sendetermine/{offset}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
