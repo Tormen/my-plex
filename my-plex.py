@@ -15684,7 +15684,7 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
         # Start from season 1 (or last known - 1 for updates) and keep going until
         # two consecutive empty pages (some shows skip season numbers).
         max_existing = max((ep['season'] for ep in existing_episodes), default=0)
-        start_season = max(1, max_existing - 1) if existing_episodes else 1
+        start_season = max(0, max_existing - 1) if existing_episodes else 0
         consecutive_empty = 0
 
         s = start_season
@@ -18350,6 +18350,36 @@ def show_item_info(identifier, table_only=False):
         year = obj.get('year', 0)
         if year and year > 0:
             print(f"Year:\t{year}")
+
+        # TSV episode data summary (from episodes.tsv on disk)
+        show_dir_server = obj.get('file', '')
+        if show_dir_server:
+            show_dir = get_local_show_dir(show_dir_server)
+            tsv_path = get_episodes_tsv_path(show_dir)
+            tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
+            if tsv_meta:
+                tsv_source = tsv_meta.get('source', '')
+                tsv_slug = tsv_meta.get('slug', '')
+                tsv_show_id = tsv_meta.get('show_id', '')
+                tsv_updated = tsv_meta.get('updated', '')
+                tsv_ep_count = len(tsv_episodes) if tsv_episodes else 0
+                tsv_seasons = set()
+                if tsv_episodes:
+                    for ep in tsv_episodes:
+                        tsv_seasons.add(ep.get('season', 0))
+                tsv_seasons_str = len(tsv_seasons)
+                print(f"\nScraped Data (episodes.tsv):")
+                print(f"  Source:\t{tsv_source}")
+                if tsv_slug:
+                    print(f"  Slug:\t\t{tsv_slug}")
+                if tsv_show_id:
+                    print(f"  Show ID:\t{tsv_show_id}")
+                print(f"  Episodes:\t{tsv_ep_count} in {tsv_seasons_str} season(s)")
+                if tsv_updated:
+                    print(f"  Updated:\t{tsv_updated}")
+                print(f"  Path:\t\t{tsv_path}")
+            elif show_dir and os.path.isdir(show_dir):
+                print(f"\nScraped Data:\tNo episodes.tsv found")
 
         # Scraped info from OBJ_BY_SHOW_SCRAPED
         scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(key, {})
