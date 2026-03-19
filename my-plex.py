@@ -8387,11 +8387,10 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             # Sort TSV episode numbers
             tsv_ep_nums = sorted(tsv_season.keys())
 
-            # Determine zero-padding width for this season based on max episode count
+            # Determine zero-padding width based on scraped episode count
+            # (scraped numbers are the "correct" ones; Plex may use absolute numbering)
             max_ep = max(tsv_ep_nums) if tsv_ep_nums else 0
-            plex_max = max((ep.get('E_idx', 0) for ep in plex_eps), default=0)
-            overall_max = max(max_ep, plex_max)
-            ep_width = 3 if overall_max >= 100 else 2
+            ep_width = 3 if max_ep >= 100 else 2
 
             ep_map_season = {}
 
@@ -18336,10 +18335,17 @@ def show_item_info(identifier, table_only=False):
                 col_key = max(col_key, 3)
                 col_title = max(col_title, 5)
                 if has_normalized:
-                    col_norm = max(col_norm, 10)
-                    print(f"\n  {'PLEX':<{col_plex}}  {'NORMALIZED':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
-                    for plex_id, norm_id, ep_key, title, ep_file in all_eps:
-                        print(f"  {plex_id:<{col_plex}}  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
+                    col_norm = max(col_norm, 7)  # "EPISODE" header
+                    if VRB:
+                        # Verbose: show both PLEX and NORMALIZED columns
+                        print(f"\n  {'PLEX':<{col_plex}}  {'EPISODE':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
+                        for plex_id, norm_id, ep_key, title, ep_file in all_eps:
+                            print(f"  {plex_id:<{col_plex}}  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
+                    else:
+                        # Default: show normalized as EPISODE (hide PLEX column)
+                        print(f"\n  {'EPISODE':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
+                        for _, norm_id, ep_key, title, ep_file in all_eps:
+                            print(f"  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
                 else:
                     print(f"\n  {'EPISODE':<{col_plex}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
                     for plex_id, _, ep_key, title, ep_file in all_eps:
