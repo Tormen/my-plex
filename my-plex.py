@@ -15209,9 +15209,10 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
             if VRB: print(f"  WARNING: Unknown scraper source '{source}' for '{show_title}'")
             return metadata, existing_episodes
 
-    # Fallback chain: if primary source failed, try alternatives based on external_ids
+    # Fallback chain: if primary source failed or returned 0 episodes, try alternatives
     original_source = source
-    if result is None and external_ids:
+    result_empty = result is not None and isinstance(result, tuple) and not result[1]
+    if (result is None or result_empty) and external_ids:
         fallback_sources = []
         if source != 'tmdb' and external_ids.get('tmdb'):
             fallback_sources.append('tmdb')
