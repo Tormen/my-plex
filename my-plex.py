@@ -8317,7 +8317,8 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             try:
                 _meta, new_episodes = scrape_episodes(show_title, show_dir, source=source,
                                                        force=True, external_ids=external_ids,
-                                                       library_name=library_name)
+                                                       library_name=library_name,
+                                                       year=show_dict.get('year'))
                 if new_episodes:
                     tsv_episodes = new_episodes
                     if _meta:
@@ -15160,7 +15161,7 @@ def is_special_episode(filename, specials_pattern=None):
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
-def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids=None, library_name=None):
+def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids=None, library_name=None, year=None):
     """Main scraper dispatcher. Updates episodes.tsv for a show.
 
     1. Read existing episodes.tsv for metadata (slug, show_id, source)
@@ -15199,7 +15200,7 @@ def scrape_episodes(show_title, show_dir, source=None, force=False, external_ids
 
     match source:
         case 'fernsehserien.de':
-            result = _scrape_fernsehserien_de(show_title, metadata, existing_episodes)
+            result = _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=year)
         case 'tvdb':
             result = _scrape_tvdb(show_title, metadata, existing_episodes, external_ids)
         case 'tmdb':
@@ -15557,16 +15558,32 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
     return new_metadata, all_episodes
 
 
-def _discover_fernsehserien_slug(show_title):
+def _discover_fernsehserien_slug(show_title, year=None):
     """Search fernsehserien.de for the show's slug and ID.
 
     Strategy:
-    1. Try direct URL from title-to-slug heuristic
+    1. Try direct URL from title-to-slug heuristic (with and without year suffix)
     2. Fall back to search page
 
     Returns: (slug, show_id) or (None, None)
     """
     import urllib.request, urllib.parse, re
+
+    def _try_slug(slug_candidate):
+        """Try a slug and return (slug, show_id, has_episodenguide) or None."""
+        url = f"https://www.fernsehserien.de/{slug_candidate}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=10)
+            html = resp.read().decode("utf-8")
+            if '/episodenguide' in html or '/sendetermine' in html:
+                m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html)
+                show_id = m.group(1) if m else None
+                has_epguide = '/episodenguide' in html
+                return (slug_candidate, show_id, has_epguide)
+        except Exception:
+            pass
+        return None
 
     # Heuristic: title → slug  (e.g. "Wer weiß denn sowas?" → "wer-weiss-denn-sowas")
     slug_guess = show_title.lower()
@@ -15579,20 +15596,25 @@ def _discover_fernsehserien_slug(show_title):
     slug_guess = re.sub(r'[^a-z0-9\s-]', '', slug_guess)
     slug_guess = re.sub(r'[\s]+', '-', slug_guess).strip('-')
 
-    # Try direct URL
-    url = f"https://www.fernsehserien.de/{slug_guess}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        resp = urllib.request.urlopen(req, timeout=10)
-        html = resp.read().decode("utf-8")
-        # Check if this is a valid show page (has episodenguide link)
-        if '/episodenguide' in html or '/sendetermine' in html:
-            # Try to extract show_id from episodenguide links
-            m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html)
-            show_id = m.group(1) if m else None
-            return slug_guess, show_id
-    except Exception:
-        pass
+    # Build candidate list: base slug first, then with year suffix
+    candidates = [slug_guess]
+    if year and year > 0:
+        slug_with_year = f"{slug_guess}-{year}"
+        candidates.append(slug_with_year)
+
+    # Try each candidate; prefer one with episodenguide (structured data)
+    best = None
+    for candidate in candidates:
+        result = _try_slug(candidate)
+        if result:
+            slug, show_id, has_epguide = result
+            if has_epguide:
+                return slug, show_id  # best possible match
+            if not best:
+                best = (slug, show_id)  # remember sendetermine-only match as fallback
+
+    if best:
+        return best
 
     # Fall back to search
     search_url = f"https://www.fernsehserien.de/suche?q={urllib.parse.quote(show_title)}"
@@ -15620,7 +15642,7 @@ def _discover_fernsehserien_slug(show_title):
     return None, None
 
 
-def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
+def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None):
     """Scrape fernsehserien.de for episode data.
 
     Uses two strategies:
@@ -15637,7 +15659,7 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes):
     # Discover slug if not known
     if not slug:
         if VRB: print(f"  Discovering fernsehserien.de slug for '{show_title}'...")
-        slug, show_id = _discover_fernsehserien_slug(show_title)
+        slug, show_id = _discover_fernsehserien_slug(show_title, year=year)
         if not slug:
             if VRB: print(f"  WARNING: Could not find '{show_title}' on fernsehserien.de")
             return None
