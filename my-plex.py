@@ -11348,6 +11348,35 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"\n{action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
                 print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
 
+            # Print TSV failures (always, even when no library changes)
+            if not has_changes and _TSV_FAILED_SHOWS:
+                from collections import defaultdict
+                by_type = defaultdict(list)
+                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
+                    by_type[error_type].append((title, lib))
+                _ERROR_TYPE_LABELS = {
+                    'no_external_ids':    'No external IDs (fix in Plex)',
+                    'suspicious_title':   'Suspicious title',
+                    'misidentified_show': 'Single episode in series',
+                    'no_id_for_source':   'No ID for source',
+                    'source_not_found':   'Source not found',
+                    'scrape_failed':      'Scrape failed',
+                }
+                _ERROR_TYPE_HINT = {
+                    'no_external_ids':    '--unmatched',
+                    'suspicious_title':   '--potential-mismatch',
+                }
+                print(f"\n  ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
+                for etype, shows in by_type.items():
+                    label = _ERROR_TYPE_LABELS.get(etype, etype)
+                    hint = _ERROR_TYPE_HINT.get(etype)
+                    if hint:
+                        print(f"      {label}: {len(shows)}  (use {hint} for details)")
+                    else:
+                        print(f"      {label}: {len(shows)}")
+                        for title, lib in sorted(shows):
+                            print(f"        {title:40s} {lib}")
+
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
                 library_details = {}
