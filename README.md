@@ -1,5 +1,7 @@
 # my-plex
 
+Still under heavy development, but already somewhat usable.
+
 The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
 **17,000+ lines of Python** | **370 tests** | **Offline-capable** | **60x faster than Plex API**
@@ -16,10 +18,11 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 
 ### Episode Management
 - **Missing episode detection** (`--missing`) — compares what you have vs what should exist
-- **Multi-source episode data**:
+- **Multi-source episode data** with automatic fallback chain:
   - **TVDB** (API, most complete for TV, free key)
   - **TMDB** (API, good fallback, free key)
   - **fernsehserien.de** (web scraping, German TV, no key needed)
+  - Automatic fallback: if primary source returns 0 episodes, tries next source
 - **Auto-detection** of episode source from library agent + language
 - **Sort new recordings** (`--sort-new`) — organizes unsorted recordings into season directories
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
@@ -37,11 +40,16 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **System overview** — cache status, server stats, library summary
 
 ### Operations
-- **Library scanning** — trigger Plex filesystem scans, wait for completion
+- **Library scanning** (`--scan`) — trigger Plex filesystem scans, wait for completion
+- **Configurable scan behavior** — `AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE` controls whether `--update-cache` auto-scans
 - **File operations** — trash, rename, move with automatic alternative path resolution
 - **Label management** — add/remove labels
 - **Watch status** — mark watched/unwatched, set view offset
 - **Playlist management** — create, modify, delete playlists
+
+### Remote Operation
+- **SSH-transparent** — reads and writes episode data on the Plex server via SSH
+- **No mount required** — works without mounted volumes (SSH fallback for all file I/O)
 
 ## Installation
 
