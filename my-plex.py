@@ -11297,15 +11297,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         }
                         for etype, shows in by_type.items():
                             label = _ERROR_TYPE_LABELS.get(etype, etype)
-                            hint = _ERROR_TYPE_HINT.get(etype)
-                            if hint:
-                                # Has dedicated command → show count + hint
-                                print(f"      {label}: {len(shows)}  (use {hint} for details)")
-                            else:
-                                # No dedicated command → show count + inline details
-                                print(f"      {label}: {len(shows)}")
-                                for title, lib in sorted(shows):
-                                    print(f"        {title:40s} {lib}")
+                            print(f"      {label}: {len(shows)}")
+                            for title, lib in sorted(shows):
+                                print(f"        {title:40s} {lib}")
 
                     # Hints about related commands
                     hints = []
@@ -11369,13 +11363,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"\n  ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
                 for etype, shows in by_type.items():
                     label = _ERROR_TYPE_LABELS.get(etype, etype)
-                    hint = _ERROR_TYPE_HINT.get(etype)
-                    if hint:
-                        print(f"      {label}: {len(shows)}  (use {hint} for details)")
-                    else:
-                        print(f"      {label}: {len(shows)}")
-                        for title, lib in sorted(shows):
-                            print(f"        {title:40s} {lib}")
+                    print(f"      {label}: {len(shows)}")
+                    for title, lib in sorted(shows):
+                        print(f"        {title:40s} {lib}")
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
