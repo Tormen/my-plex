@@ -8534,8 +8534,9 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     _TSV_STATS['titles_filled'] += titles_total
 
 
-def _list_tsv_problems():
-    """Scan all show directories for episodes.tsv/err files and print grouped results.
+def _list_tsv_problems(library_name=None):
+    """Scan show directories for episodes.tsv/err files and print grouped results.
+    If library_name is given, only shows from that library are checked.
     Returns: number of issues found."""
     import os
     from collections import defaultdict
@@ -8558,9 +8559,17 @@ def _list_tsv_problems():
     err_without_tsv = []   # (show_key, title, lib, err_path)
     by_type = defaultdict(list)  # error_type → [(show_key, title, lib, err_path)]
 
+    # Build set of show keys for the target library (or all if None)
+    if library_name:
+        lib_show_keys = set(PLEX_Media.OBJ_BY_LIBRARY.get(library_name, {}).get('Show', []))
+    else:
+        lib_show_keys = None  # no filter
+
     # Collect all paths first, then batch-check which exist on remote
     show_info = []  # (show_key, show_dir, tsv_path, err_path)
     for show_key, show_seasons in PLEX_Media.OBJ_BY_SHOW.items():
+        if lib_show_keys is not None and show_key not in lib_show_keys:
+            continue
         show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
         if not show_dict:
             continue
@@ -8619,7 +8628,7 @@ def _list_tsv_problems():
             if not has_tsv:
                 err_without_tsv.append((show_key, title, lib, err_path))
 
-    total_shows = len(PLEX_Media.OBJ_BY_SHOW)
+    total_shows = len(show_info)
     no_tsv_no_err = total_shows - tsv_count - len(err_without_tsv)  # shows with neither
 
     # File statistics
@@ -18831,10 +18840,15 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'problems', False):
         tsv_only = safe_getattr(cmd_args, 'tsv', False)
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+        # Detect library filter from CMD_OR_PLEXOBJECT (e.g. "my-plex series.de --problems")
+        problems_library = None
+        if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT in PLEX_Library.OBJ_DICT:
+            problems_library = args.CMD_OR_PLEXOBJECT
+        obj_keys = collect_library_keys(library_name=problems_library, media_type=media_type)
 
+        lib_label = f" for '{problems_library}'" if problems_library else ""
         print("\n" + "=" * 76)
-        print("PROBLEM DETECTION" + (" — Episode Data (TSV/Scraping)" if tsv_only else ""))
+        print("PROBLEM DETECTION" + (" — Episode Data (TSV/Scraping)" if tsv_only else "") + lib_label)
         print("=" * 76)
 
         broken_count = 0
@@ -18855,7 +18869,7 @@ def execute_global_commands(args, cmd_args):
 
         # 3. Episode data issues
         print("\n--- Episode Data (TSV) Issues ---")
-        tsv_problem_count = _list_tsv_problems()
+        tsv_problem_count = _list_tsv_problems(library_name=problems_library)
 
         if not tsv_only:
             # 4. Unmatched items
@@ -18864,7 +18878,7 @@ def execute_global_commands(args, cmd_args):
 
             # 5. Unsorted shows
             print("\n--- Unsorted Shows (episodes without season directories) ---")
-            unsorted_count = PLEX_Media._list_unsorted()
+            unsorted_count = PLEX_Media._list_unsorted(library_name=problems_library)
 
             # 6. Potential mismatches
             print("\n--- Potential Mismatches (Plex title vs directory name) ---")
@@ -18872,7 +18886,7 @@ def execute_global_commands(args, cmd_args):
 
         # 7. Episode numbering issues
         print("\n--- Episode Numbering Issues (Plex vs Scraped) ---")
-        numbering_count = PLEX_Media._list_episode_numbering_issues()
+        numbering_count = PLEX_Media._list_episode_numbering_issues(library_name=problems_library)
 
         # Summary
         print("\n" + "=" * 76)
