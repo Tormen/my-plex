@@ -8294,20 +8294,17 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
         tsv_meta = {}
         needs_scrape = False
         has_err = os.path.isfile(get_episodes_err_path(show_dir))
-        if os.path.isfile(tsv_path):
-            _meta, tsv_episodes = read_episodes_tsv(tsv_path)
-            if _meta:
-                tsv_meta = _meta
-            if tsv_episodes:
-                existing_count += 1
-                if FORCE_TSV:
-                    needs_scrape = True  # --force-tsv: re-scrape everything
-                elif has_err:
-                    needs_scrape = True  # .err exists — re-evaluate (may be stale)
-            else:
-                needs_scrape = True  # TSV exists but is empty/corrupt — re-scrape
+        _meta, tsv_episodes = read_episodes_tsv(tsv_path)
+        if _meta:
+            tsv_meta = _meta
+        if tsv_episodes:
+            existing_count += 1
+            if FORCE_TSV:
+                needs_scrape = True  # --force-tsv: re-scrape everything
+            elif has_err:
+                needs_scrape = True  # .err exists — re-evaluate (may be stale)
         else:
-            needs_scrape = True  # No TSV at all — must scrape
+            needs_scrape = True  # No TSV or empty/corrupt — must scrape
         if needs_scrape:
             source = _determine_episode_source(show_dict)
             external_ids = show_dict.get('external_ids', {})
@@ -14790,7 +14787,7 @@ EPISODES_TSV_MAX_AGE = 86400  # 1 day in seconds
 # ---------------------------------------------------------------------------
 
 def read_episodes_tsv(tsv_path):
-    """Read episodes.tsv from local or remote path.
+    """Read episodes.tsv from local or remote path (falls back to SSH if local file missing).
 
     Returns: (metadata_dict, episodes_list) where
         metadata_dict: {'source': str, 'slug': str, 'show_id': str, 'updated': str,
@@ -14800,16 +14797,33 @@ def read_episodes_tsv(tsv_path):
                          'date_original': str, 'sender_original': str}, ...]
     Returns (None, None) if file doesn't exist.
     """
-    import os
-    if not os.path.isfile(tsv_path):
-        return None, None
+    import os, subprocess
+    lines_iter = None
+    if os.path.isfile(tsv_path):
+        lines_iter = open(tsv_path, 'r', encoding='utf-8')
+    else:
+        # Try reading via SSH from server path
+        server_path = get_server_show_dir(os.path.dirname(tsv_path))
+        server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
+        escaped = escape_path_for_ssh(server_tsv)
+        try:
+            result = subprocess.run(
+                ["ssh", PLEX_DB_REMOTE_HOST, f'cat "{escaped}"'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines_iter = result.stdout.splitlines(keepends=True)
+            else:
+                return None, None
+        except Exception:
+            return None, None
 
     metadata = {}
     episodes = []
     header_cols = None
 
-    with open(tsv_path, 'r', encoding='utf-8') as f:
-        for line in f:
+    try:
+        for line in lines_iter:
             line = line.rstrip('\n')
             if not line:
                 continue
@@ -14850,6 +14864,9 @@ def read_episodes_tsv(tsv_path):
                 ep['date_original'] = row.get('date_original', '')
                 ep['sender_original'] = row.get('sender_original', '')
                 episodes.append(ep)
+    finally:
+        if hasattr(lines_iter, 'close'):
+            lines_iter.close()
 
     return metadata, episodes
 
@@ -14954,23 +14971,38 @@ def get_episodes_err_path(show_dir):
 
 
 def write_episodes_err(show_dir, error_type, source, message):
-    """Write an episodes.err file recording an episode data problem.
+    """Write an episodes.err file via SSH to the Plex server.
     Args:
         show_dir: local show directory path
         error_type: machine-readable type (no_external_ids, source_not_found, etc.)
         source: data source that failed (tmdb, tvdb, fernsehserien.de, etc.)
         message: human-readable description
     """
-    import os
+    import os, subprocess
     from datetime import date
-    err_path = get_episodes_err_path(show_dir)
-    os.makedirs(show_dir, exist_ok=True)
-    with open(err_path, 'w', encoding='utf-8') as f:
-        f.write('# my-plex episode data error\n')
-        f.write(f'# updated: {date.today().isoformat()}\n')
-        f.write(f'error_type: {error_type}\n')
-        f.write(f'source: {source}\n')
-        f.write(f'message: {message}\n')
+    content = '# my-plex episode data error\n'
+    content += f'# updated: {date.today().isoformat()}\n'
+    content += f'error_type: {error_type}\n'
+    content += f'source: {source}\n'
+    content += f'message: {message}\n'
+
+    server_dir = get_server_show_dir(show_dir)
+    server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
+    escaped_dir = escape_path_for_ssh(server_dir)
+    escaped_err = escape_path_for_ssh(server_err)
+
+    result = subprocess.run(
+        ["ssh", PLEX_DB_REMOTE_HOST, f'mkdir -p "{escaped_dir}" && cat > "{escaped_err}"'],
+        input=content, capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        # Fallback: try local write
+        try:
+            os.makedirs(show_dir, exist_ok=True)
+            with open(os.path.join(show_dir, EPISODES_ERR_FILENAME), 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception:
+            pass  # Best effort
 
 
 def read_episodes_err(show_dir):
@@ -15004,11 +15036,17 @@ def get_local_show_dir(show_dir_server):
     """Translate a server path (e.g. /Volumes/2/watch.v/...) to local path using ALTERNATIVE_ROOTPATHS.
     Returns the first alternative path that exists locally, or the original path if it exists."""
     import os
-    if os.path.isdir(show_dir_server):
-        return show_dir_server
+    try:
+        if os.path.isdir(show_dir_server):
+            return show_dir_server
+    except OSError:
+        pass
     for alt in get_alternative_paths(show_dir_server):
-        if os.path.isdir(alt):
-            return alt
+        try:
+            if os.path.isdir(alt):
+                return alt
+        except OSError:
+            pass
     return show_dir_server  # fallback: return original (caller will handle missing)
 
 
@@ -15696,7 +15734,7 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
                 if page == 1:
                     url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}"
                 else:
-                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{show_id}/{page}"
+                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/{s}/{show_id}/{page}"
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 try:
                     html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
@@ -15775,9 +15813,10 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
                         if not existing.get('title') and title:
                             existing['title'] = title
 
-                # Check for next page link
-                next_page_url = f"/{slug}/episodenguide/staffel-{s}/{show_id}/{page + 1}"
-                if next_page_url in html:
+                # Check for next page link (site uses both formats)
+                next_page_url_a = f"/{slug}/episodenguide/staffel-{s}/{show_id}/{page + 1}"
+                next_page_url_b = f"/{slug}/episodenguide/{s}/{show_id}/{page + 1}"
+                if next_page_url_a in html or next_page_url_b in html:
                     page += 1
                     time.sleep(0.3)
                 else:
