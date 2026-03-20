@@ -8558,6 +8558,8 @@ def _list_tsv_problems():
     err_without_tsv = []   # (show_key, title, lib, err_path)
     by_type = defaultdict(list)  # error_type → [(show_key, title, lib, err_path)]
 
+    # Collect all paths first, then batch-check which exist on remote
+    show_info = []  # (show_key, show_dir, tsv_path, err_path)
     for show_key, show_seasons in PLEX_Media.OBJ_BY_SHOW.items():
         show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
         if not show_dict:
@@ -8568,8 +8570,21 @@ def _list_tsv_problems():
         show_dir = get_local_show_dir(show_dir_server)
         tsv_path = get_episodes_tsv_path(show_dir)
         err_path = get_episodes_err_path(show_dir)
-        has_tsv = os.path.isfile(tsv_path)
-        has_err = os.path.isfile(err_path)
+        show_info.append((show_key, show_dir, tsv_path, err_path))
+
+    # Batch-check file existence (local first, then SSH for remaining)
+    all_paths = []
+    for _, _, tsv_path, err_path in show_info:
+        all_paths.extend([tsv_path, err_path])
+    local_exists = {p for p in all_paths if os.path.isfile(p)}
+    remote_check = [p for p in all_paths if p not in local_exists]
+    remote_exists = _batch_file_exists_remote(remote_check) if remote_check else set()
+    all_existing = local_exists | remote_exists
+
+    for show_key, show_dir, tsv_path, err_path in show_info:
+        has_tsv = tsv_path in all_existing
+        has_err = err_path in all_existing
+        show_dict = PLEX_Media.OBJ_BY_ID.get(show_key, {})
 
         if has_tsv:
             tsv_count += 1
@@ -14805,6 +14820,61 @@ EPISODES_TSV_MAX_AGE = 86400  # 1 day in seconds
 # Episode TSV read/write
 # ---------------------------------------------------------------------------
 
+def _file_exists_local_or_remote(filepath):
+    """Check if a file exists locally or on the remote server via SSH.
+    Returns True if the file exists in either location.
+    Note: For bulk checks, use _batch_file_exists_remote() instead to avoid N SSH calls."""
+    import os, subprocess
+    if os.path.isfile(filepath):
+        return True
+    # Try SSH: translate to server path and check
+    server_dir = get_server_show_dir(os.path.dirname(filepath))
+    server_file = os.path.join(server_dir, os.path.basename(filepath))
+    escaped = escape_path_for_ssh(server_file)
+    try:
+        r = subprocess.run(
+            ["ssh", PLEX_DB_REMOTE_HOST, f'[ -f "{escaped}" ] && echo YES'],
+            capture_output=True, text=True, timeout=10
+        )
+        return r.returncode == 0 and 'YES' in r.stdout
+    except Exception:
+        return False
+
+
+def _batch_file_exists_remote(filepaths):
+    """Check which files exist on the remote server in a single SSH call.
+    Args: filepaths - list of local paths to check (translated to server paths)
+    Returns: set of local paths that exist on the server."""
+    import os, subprocess
+    if not filepaths:
+        return set()
+    # Build a shell script that checks each file and prints the index if it exists
+    checks = []
+    path_map = {}  # index -> local_path
+    for i, fp in enumerate(filepaths):
+        server_dir = get_server_show_dir(os.path.dirname(fp))
+        server_file = os.path.join(server_dir, os.path.basename(fp))
+        escaped = escape_path_for_ssh(server_file)
+        checks.append(f'[ -f "{escaped}" ] && echo {i}')
+        path_map[i] = fp
+    cmd = '; '.join(checks)
+    try:
+        r = subprocess.run(
+            ["ssh", PLEX_DB_REMOTE_HOST, cmd],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode in (0, 1):  # 1 is ok — means some files don't exist
+            existing = set()
+            for line in r.stdout.strip().splitlines():
+                idx = int(line.strip())
+                if idx in path_map:
+                    existing.add(path_map[idx])
+            return existing
+    except Exception:
+        pass
+    return set()
+
+
 def read_episodes_tsv(tsv_path):
     """Read episodes.tsv from local or remote path (falls back to SSH if local file missing).
 
@@ -14968,11 +15038,26 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
 
 def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
     """Check if episodes.tsv is missing or older than max_age seconds."""
-    import os, time
-    if not os.path.isfile(tsv_path):
-        return True
-    age = time.time() - os.path.getmtime(tsv_path)
-    return age > max_age
+    import os, time, subprocess
+    if os.path.isfile(tsv_path):
+        age = time.time() - os.path.getmtime(tsv_path)
+        return age > max_age
+    # Try SSH: check file age on server
+    server_dir = get_server_show_dir(os.path.dirname(tsv_path))
+    server_tsv = os.path.join(server_dir, EPISODES_TSV_FILENAME)
+    escaped = escape_path_for_ssh(server_tsv)
+    try:
+        r = subprocess.run(
+            ["ssh", PLEX_DB_REMOTE_HOST, f'stat -f %m "{escaped}"'],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            mtime = int(r.stdout.strip())
+            age = time.time() - mtime
+            return age > max_age
+    except Exception:
+        pass
+    return True  # can't determine → treat as stale
 
 
 def get_episodes_tsv_path(show_dir):
@@ -15025,30 +15110,57 @@ def write_episodes_err(show_dir, error_type, source, message):
 
 
 def read_episodes_err(show_dir):
-    """Read an episodes.err file and return a dict with keys error_type, source, message.
-    Returns None if the file does not exist."""
-    import os
+    """Read an episodes.err file (local or via SSH). Returns dict or None."""
+    import os, subprocess
     err_path = get_episodes_err_path(show_dir)
-    if not os.path.isfile(err_path):
+    lines = None
+    if os.path.isfile(err_path):
+        with open(err_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    else:
+        # Try reading via SSH
+        server_dir = get_server_show_dir(show_dir)
+        server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
+        escaped = escape_path_for_ssh(server_err)
+        try:
+            r = subprocess.run(
+                ["ssh", PLEX_DB_REMOTE_HOST, f'cat "{escaped}"'],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                lines = r.stdout.splitlines()
+        except Exception:
+            pass
+    if not lines:
         return None
     result = {}
-    with open(err_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if ':' in line:
-                key, _, value = line.partition(':')
-                result[key.strip()] = value.strip()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ':' in line:
+            key, _, value = line.partition(':')
+            result[key.strip()] = value.strip()
     return result if result else None
 
 
 def clear_episodes_err(show_dir):
-    """Delete episodes.err if it exists (problem resolved)."""
-    import os
+    """Delete episodes.err if it exists locally or on server (problem resolved)."""
+    import os, subprocess
     err_path = get_episodes_err_path(show_dir)
     if os.path.isfile(err_path):
         os.remove(err_path)
+    # Also remove on server via SSH
+    server_dir = get_server_show_dir(show_dir)
+    server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
+    escaped = escape_path_for_ssh(server_err)
+    try:
+        subprocess.run(
+            ["ssh", PLEX_DB_REMOTE_HOST, f'rm -f "{escaped}"'],
+            capture_output=True, text=True, timeout=10
+        )
+    except Exception:
+        pass
 
 
 def get_local_show_dir(show_dir_server):
@@ -16107,9 +16219,9 @@ def cmd_missing(show_ref, source_override=None):
     # Load or update episodes.tsv
     tsv_path = get_episodes_tsv_path(show_dir)
 
-    if os.path.isfile(tsv_path):
-        existing_meta, _ = read_episodes_tsv(tsv_path)
-        old_source = existing_meta.get('source', '') if existing_meta else ''
+    existing_meta, _ = read_episodes_tsv(tsv_path)
+    if existing_meta is not None:
+        old_source = existing_meta.get('source', '')
         if old_source and old_source != source:
             print(f"  Re-scraping: source changed ({old_source} → {source})...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
@@ -16295,11 +16407,9 @@ def cmd_sort_new(args, dry_run=False):
         tsv_path = get_episodes_tsv_path(show_dir)
         metadata, all_episodes = None, None
 
-        if os.path.isfile(tsv_path):
-            if is_episodes_tsv_stale(tsv_path):
-                metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
-            else:
-                metadata, all_episodes = read_episodes_tsv(tsv_path)
+        metadata, all_episodes = read_episodes_tsv(tsv_path)
+        if metadata is not None and is_episodes_tsv_stale(tsv_path):
+            metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
 
         if not all_episodes:
             # Try scraping
