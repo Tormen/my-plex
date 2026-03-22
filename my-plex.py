@@ -85,7 +85,8 @@ import requests.exceptions
 
 # Config file search paths (in order of precedence)
 CONFIG_FILE_PATHS = [
-    os.path.expanduser('~/.my-plex.conf'),
+    os.path.expanduser('~/.my-plex/my-plex.conf'),    # Preferred location (new)
+    os.path.expanduser('~/.my-plex.conf'),           # Legacy location (backward compat)
     '/etc/my-plex.conf',
     '/usr/local/etc/my-plex.conf'
 ]
@@ -148,8 +149,8 @@ CONFIG_DEFAULTS = {
     'OFFLINE': False,
 
     # Cache Configuration
-    'CACHE_FILE': '.plex_media_cache.pkl',
-    'LOCK_FILE': '.plex_media_cache.lock',
+    'CACHE_FILE': '.my-plex/cache.pkl',
+    'LOCK_FILE': '.my-plex/cache.lock',
     'CACHE_UPDATES_FILE': '/tmp/my-plex.cache-updates.json',
     'CACHE_CHECKPOINT_INTERVAL': 100,
     'FORCE_CACHE_UPDATE': False,
@@ -177,6 +178,20 @@ CONFIG_DEFAULTS = {
     # only in movies.de + movies.en is NOT a duplicate (both in group).
     # But a movie in movies.de + ,unsorted IS a duplicate (,unsorted not in group).
     'DUPLICATES_IGNORE_LIBRARY_COMBINATIONS': [],
+
+    # Filename Mapping Configuration (--map-to-filename / --map-from-filename)
+    # Maps Plex metadata into filenames using configurable [VARIABLE] markers.
+    # Dict of aspect_name → format string with [VARIABLE] markers.
+    # Example: {'watched': '[WATCHED]', 'rating': '[RATING_USER]', 'actors': '[ACTORS_TOP3]'}
+    # Available variables: WATCHED, WATCHED_DATE, VIEW_COUNT, RATING_USER, RATING_CRITICS,
+    #   RATING_AUDIENCE, CONTENT_RATING, ACTORS_TOP3, ACTORS_ALL, ACTOR1_FN, ACTOR1_LN,
+    #   ACTOR2_FN, ACTOR2_LN, ACTOR3_FN, ACTOR3_LN, COUNTRY, COUNTRIES, GENRE, GENRES,
+    #   DIRECTOR, DIRECTORS, WRITER, WRITERS, LANG, RESOLUTION, YEAR, IMDB_ID, TMDB_ID,
+    #   TVDB_ID, TITLE, SERIES
+    # Empty markers are skipped entirely (no empty brackets in filenames).
+    'FILENAME_MAP': {},
+    # Sidecar tracking file — records which [MARKER] segments were added to each file
+    'FILENAME_MAP_FILE': '.my-plex/filename_map.json',
 
     # External Tool Paths
     # LOCAL tools run on this machine, SERVER tools run on the Plex server (via SSH).
@@ -299,6 +314,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Cache Configuration
 ###############################################################################
 
+# Cache and lock files are stored in ~/.my-plex/ by default.
+# Legacy locations (~/.plex_media_cache.pkl) are auto-migrated on first run.
 # CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}
 # LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}
 # CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}
@@ -344,6 +361,31 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Example: A movie in movies.de AND movies.en only → NOT a duplicate (both in group).
 # But a movie in movies.de AND ,unsorted → IS a duplicate (,unsorted not in group).
 # DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
+
+###############################################################################
+# Filename Mapping (--map-to-filename / --map-from-filename)
+###############################################################################
+
+# Map Plex metadata into filenames using configurable [VARIABLE] markers.
+# Each key is an aspect name (your choice), each value is a format string with [VARIABLE] markers.
+# Markers are inserted before the file extension, dot-separated, sorted by aspect name.
+# If ALL variables in a marker resolve to empty, the marker is skipped entirely.
+#
+# Available variables:
+#   WATCHED (vu/nv), WATCHED_DATE, VIEW_COUNT
+#   RATING_USER (0-10), RATING_CRITICS, RATING_AUDIENCE
+#   CONTENT_RATING (TV-MA, PG-13, etc.)
+#   ACTORS_TOP3, ACTORS_ALL, ACTOR1_FN, ACTOR1_LN, ACTOR2_FN, ACTOR2_LN, ACTOR3_FN, ACTOR3_LN
+#   COUNTRY, COUNTRIES, GENRE, GENRES, DIRECTOR, DIRECTORS, WRITER, WRITERS
+#   LANG, RESOLUTION, YEAR, IMDB_ID, TMDB_ID, TVDB_ID, TITLE, SERIES
+#
+# Example:
+# FILENAME_MAP = {{
+#     'watched': '[WATCHED]',                     # → Movie.[vu].mkv
+#     'rating':  '[RATING_USER]',                 # → Movie.[7.5].mkv (skipped if no rating)
+#     'info':    '[RATING_CRITICS]-[COUNTRY]',    # → Movie.[8.2-US].mkv (skipped if either empty)
+#     'actors':  '[ACTORS_TOP3]',                 # → Movie.[Cranston, Paul, Gunn].mkv
+# }}
 
 ###############################################################################
 # External Tool Paths
@@ -479,6 +521,10 @@ TVDB_API_KEY = CONFIG_DEFAULTS['TVDB_API_KEY']
 TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
+
+# Filename mapping configuration (--map-to-filename / --map-from-filename)
+FILENAME_MAP = CONFIG_DEFAULTS['FILENAME_MAP']
+FILENAME_MAP_FILE = CONFIG_DEFAULTS['FILENAME_MAP_FILE']
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -1262,7 +1308,12 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'scrape_episodes', 'cmd_missing', '_determine_episode_source',
                        'EMPTY_LIBRARY_STATS', 'CONFIG_DEFAULTS', 'CACHE',
                        'write_episodes_err', 'read_episodes_err', 'clear_episodes_err',
-                       'get_episodes_err_path', 'EPISODES_ERR_FILENAME')
+                       'get_episodes_err_path', 'EPISODES_ERR_FILENAME',
+                       'FILENAME_MAP_VARIABLES', 'validate_filename_map',
+                       'resolve_filename_map_variables', 'compute_markers',
+                       'strip_our_markers', 'apply_markers',
+                       'load_filename_map_sidecar', 'save_filename_map_sidecar',
+                       'update_sidecar_entry', 'extract_vu_marker')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
     for _name in _EPISODE_FUNC_NAMES:
@@ -3167,6 +3218,279 @@ def add_vu_marker_to_file(file_path, vu_marker, remote_host=None):
     print(f"Adding {vu_marker} marker to file: {filename} -> {new_filename}")
 
     return rename_file(file_path, new_filename, remote_host)
+
+###########################################################################################
+#### FILENAME MAP — configurable metadata-to-filename mapping ([VARIABLE] markers)
+###########################################################################################
+
+# All known variables that can be used in FILENAME_MAP format strings as [VARIABLE]
+FILENAME_MAP_VARIABLES = {
+    'WATCHED', 'WATCHED_DATE', 'VIEW_COUNT',
+    'RATING_USER', 'RATING_CRITICS', 'RATING_AUDIENCE',
+    'CONTENT_RATING',
+    'ACTORS_TOP3', 'ACTORS_ALL',
+    'ACTOR1_FN', 'ACTOR1_LN', 'ACTOR2_FN', 'ACTOR2_LN', 'ACTOR3_FN', 'ACTOR3_LN',
+    'COUNTRY', 'COUNTRIES', 'GENRE', 'GENRES',
+    'DIRECTOR', 'DIRECTORS', 'WRITER', 'WRITERS',
+    'LANG', 'RESOLUTION', 'YEAR',
+    'IMDB_ID', 'TMDB_ID', 'TVDB_ID',
+    'TITLE', 'SERIES',
+}
+
+def validate_filename_map(filename_map):
+    """Validate FILENAME_MAP config dict. Returns list of error strings (empty = valid)."""
+    import re
+    errors = []
+    if not isinstance(filename_map, dict):
+        return [f"FILENAME_MAP must be a dict, got {type(filename_map).__name__}"]
+    for aspect, fmt in filename_map.items():
+        if not isinstance(aspect, str) or not aspect:
+            errors.append(f"FILENAME_MAP key must be a non-empty string, got {aspect!r}")
+            continue
+        if not isinstance(fmt, str) or not fmt:
+            errors.append(f"FILENAME_MAP[{aspect!r}] must be a non-empty string, got {fmt!r}")
+            continue
+        vars_in_fmt = re.findall(r'\[([A-Z0-9_]+)\]', fmt)
+        if not vars_in_fmt:
+            errors.append(f"FILENAME_MAP[{aspect!r}] = {fmt!r} contains no [VARIABLE] markers")
+            continue
+        for var in vars_in_fmt:
+            if var not in FILENAME_MAP_VARIABLES:
+                errors.append(f"FILENAME_MAP[{aspect!r}]: unknown variable [{var}]. Available: {', '.join(sorted(FILENAME_MAP_VARIABLES))}")
+    return errors
+
+def _actor_name_parts(actors, index):
+    """Extract first/last name from actor at given 0-based index. Returns (first_name, last_name)."""
+    if index >= len(actors):
+        return ('', '')
+    name = actors[index]
+    parts = name.split()
+    if len(parts) == 0:
+        return ('', '')
+    if len(parts) == 1:
+        return (parts[0], '')
+    return (parts[0], parts[-1])
+
+def resolve_filename_map_variables(obj, cache_key=None):
+    """Build variable dict from an OBJ_BY_ID cache entry for filename map substitution.
+
+    Args:
+        obj: Cache entry dict from PLEX_Media.OBJ_BY_ID
+        cache_key: Optional cache key (unused, for future use)
+
+    Returns:
+        dict[str, str]: Maps each FILENAME_MAP_VARIABLES name to its resolved string value.
+                        Empty string means "not available".
+    """
+    from datetime import datetime
+    var = {}
+
+    # Watched status
+    view_count = obj.get('viewCount', 0) or 0
+    var['WATCHED'] = 'vu' if view_count > 0 else 'nv'
+    var['VIEW_COUNT'] = str(view_count)
+
+    last_viewed = obj.get('lastViewedAt')
+    if last_viewed:
+        try:
+            var['WATCHED_DATE'] = datetime.fromtimestamp(last_viewed).strftime('%Y-%m-%d')
+        except (OSError, ValueError):
+            var['WATCHED_DATE'] = ''
+    else:
+        var['WATCHED_DATE'] = ''
+
+    # Ratings
+    user_rating = obj.get('userRating')
+    var['RATING_USER'] = str(user_rating) if user_rating is not None else ''
+    critics_rating = obj.get('criticsRating')
+    var['RATING_CRITICS'] = str(critics_rating) if critics_rating is not None else ''
+    audience_rating = obj.get('audienceRating')
+    var['RATING_AUDIENCE'] = str(audience_rating) if audience_rating is not None else ''
+    var['CONTENT_RATING'] = obj.get('contentRating', '') or ''
+
+    # Actors
+    actors = obj.get('actors', []) or []
+    var['ACTORS_TOP3'] = ', '.join(actors[:3]) if actors else ''
+    var['ACTORS_ALL'] = ', '.join(actors) if actors else ''
+    for i in range(3):
+        fn, ln = _actor_name_parts(actors, i)
+        var[f'ACTOR{i+1}_FN'] = fn
+        var[f'ACTOR{i+1}_LN'] = ln
+
+    # Countries
+    countries = obj.get('countries', []) or []
+    var['COUNTRY'] = countries[0] if countries else ''
+    var['COUNTRIES'] = ', '.join(countries) if countries else ''
+
+    # Genres
+    genres = obj.get('genres', []) or []
+    var['GENRE'] = genres[0] if genres else ''
+    var['GENRES'] = ', '.join(genres) if genres else ''
+
+    # Directors
+    directors = obj.get('directors', []) or []
+    var['DIRECTOR'] = directors[0] if directors else ''
+    var['DIRECTORS'] = ', '.join(directors) if directors else ''
+
+    # Writers
+    writers = obj.get('writers', []) or []
+    var['WRITER'] = writers[0] if writers else ''
+    var['WRITERS'] = ', '.join(writers) if writers else ''
+
+    # Language from library
+    lib_name = obj.get('library', '')
+    lang = ''
+    try:
+        lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
+    except Exception:
+        pass
+    if lang == 'xn':
+        lang = 'none'
+    var['LANG'] = lang
+
+    # Technical / metadata
+    var['RESOLUTION'] = obj.get('resolution', '') or ''
+    var['YEAR'] = str(obj.get('year', '')) if obj.get('year') else ''
+    var['TITLE'] = obj.get('title', '') or ''
+    var['SERIES'] = obj.get('series', '') or ''
+
+    # External IDs
+    ext_ids = obj.get('external_ids', {}) or {}
+    var['IMDB_ID'] = ext_ids.get('imdb', '') or ''
+    var['TMDB_ID'] = ext_ids.get('tmdb', '') or ''
+    var['TVDB_ID'] = ext_ids.get('tvdb', '') or ''
+
+    return var
+
+def compute_markers(obj, cache_key, filename_map):
+    """Compute resolved marker strings for each aspect in filename_map.
+
+    Args:
+        obj: Cache entry dict from PLEX_Media.OBJ_BY_ID
+        cache_key: Cache key string
+        filename_map: FILENAME_MAP config dict (aspect → format string with [VAR])
+
+    Returns:
+        dict[str, str]: Maps aspect name to resolved marker string.
+                        Empty string means "skip this marker" (all variables empty).
+    """
+    import re
+    variables = resolve_filename_map_variables(obj, cache_key)
+    markers = {}
+    for aspect, fmt in filename_map.items():
+        result = fmt
+        all_empty = True
+        for var_match in re.finditer(r'\[([A-Z0-9_]+)\]', fmt):
+            var_name = var_match.group(1)
+            value = variables.get(var_name, '')
+            if value:
+                all_empty = False
+            result = result.replace(f'[{var_name}]', value, 1)
+        # If all variables resolved to empty, skip this marker entirely
+        if all_empty:
+            markers[aspect] = ''
+        else:
+            # Wrap in brackets: the resolved content goes inside [...]
+            markers[aspect] = f'[{result}]'
+    return markers
+
+def strip_our_markers(filename, sidecar_entry):
+    """Strip markers that we previously added (tracked in sidecar) from a filename.
+
+    Args:
+        filename: Current filename (basename, not full path)
+        sidecar_entry: Dict with 'markers' key, or None
+
+    Returns:
+        str: Filename with our markers removed
+    """
+    if not sidecar_entry or 'markers' not in sidecar_entry:
+        return filename
+    for aspect in sorted(sidecar_entry['markers'].keys()):
+        marker_value = sidecar_entry['markers'][aspect]
+        if marker_value and f'.{marker_value}' in filename:
+            filename = filename.replace(f'.{marker_value}', '', 1)
+    return filename
+
+def apply_markers(clean_filename, markers):
+    """Insert non-empty markers into filename before extension, sorted by aspect name.
+
+    Args:
+        clean_filename: Filename without our markers (basename)
+        markers: dict[str, str] from compute_markers()
+
+    Returns:
+        str: Filename with markers inserted, e.g. "Movie Title.[vu].[7.5].mkv"
+    """
+    name, ext = os.path.splitext(clean_filename)
+    # Build marker string from non-empty markers, sorted by aspect name
+    marker_parts = []
+    for aspect in sorted(markers.keys()):
+        if markers[aspect]:  # skip empty markers
+            marker_parts.append(markers[aspect])
+    if marker_parts:
+        return name + '.' + '.'.join(marker_parts) + ext
+    return clean_filename
+
+
+###########################################################################################
+#### FILENAME MAP — Sidecar tracking file (filename_map.json)
+###########################################################################################
+
+def load_filename_map_sidecar():
+    """Load the filename map sidecar JSON from FILENAME_MAP_FILE.
+
+    Returns:
+        dict: Sidecar data keyed by filepath, or empty dict if file doesn't exist.
+    """
+    import json
+    if not os.path.isfile(FILENAME_MAP_FILE):
+        return {}
+    try:
+        with open(FILENAME_MAP_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  WARNING: Failed to load {FILENAME_MAP_FILE}: {e}")
+        return {}
+
+def save_filename_map_sidecar(sidecar):
+    """Save the filename map sidecar JSON to FILENAME_MAP_FILE.
+
+    Args:
+        sidecar: dict keyed by filepath
+    """
+    import json
+    # Ensure directory exists
+    sidecar_dir = os.path.dirname(FILENAME_MAP_FILE)
+    if sidecar_dir and not os.path.isdir(sidecar_dir):
+        os.makedirs(sidecar_dir, exist_ok=True)
+    with open(FILENAME_MAP_FILE, 'w', encoding='utf-8') as f:
+        json.dump(sidecar, f, indent=2, ensure_ascii=False)
+
+def update_sidecar_entry(sidecar, old_path, new_path, markers, clean_filename):
+    """Update sidecar: remove old_path entry, add new_path entry.
+
+    Args:
+        sidecar: The sidecar dict (mutated in place)
+        old_path: Previous filepath (may be None or same as new_path)
+        new_path: New filepath after rename
+        markers: dict of aspect → marker string (only non-empty ones)
+        clean_filename: The base filename without our markers
+    """
+    from datetime import date
+    if old_path and old_path in sidecar and old_path != new_path:
+        del sidecar[old_path]
+    # Only store non-empty markers
+    active_markers = {k: v for k, v in markers.items() if v}
+    if active_markers:
+        sidecar[new_path] = {
+            'markers': active_markers,
+            'clean_filename': clean_filename,
+            'last_updated': date.today().isoformat(),
+        }
+    elif new_path in sidecar:
+        del sidecar[new_path]
+
 
 def move_file(src_path, dst_dir, remote_host=None):
     """Move file from src to dst directory
@@ -8766,10 +9090,31 @@ def update_show_library_objs(library, library_idx=0, total_libraries=0, start_id
 
 
 def init(args):
-    global CACHE_FILE, LOCK_FILE
-    # FIXME determine if CACHE_FILE is absolut path... OR relative, then:
+    global CACHE_FILE, LOCK_FILE, FILENAME_MAP_FILE
+
+    # Ensure ~/.my-plex/ directory exists
+    plex_dir = os.path.join(Path.home(), '.my-plex')
+    if not os.path.isdir(plex_dir):
+        os.makedirs(plex_dir, exist_ok=True)
+        if VRB: print(f"{VRBPFX}Created directory: {plex_dir}")
+
+    # Migrate legacy cache files from ~/.plex_media_cache.* to ~/.my-plex/
+    legacy_cache = os.path.join(Path.home(), '.plex_media_cache.pkl')
+    new_cache = os.path.join(Path.home(), '.my-plex', 'cache.pkl')
+    if os.path.isfile(legacy_cache) and not os.path.isfile(new_cache):
+        import shutil
+        shutil.move(legacy_cache, new_cache)
+        print(f"  Migrated cache: {legacy_cache} → {new_cache}")
+    legacy_lock = os.path.join(Path.home(), '.plex_media_cache.lock')
+    new_lock = os.path.join(Path.home(), '.my-plex', 'cache.lock')
+    if os.path.isfile(legacy_lock) and not os.path.isfile(new_lock):
+        import shutil
+        shutil.move(legacy_lock, new_lock)
+
+    # Resolve relative paths to absolute (relative to home directory)
     CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
     LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
+    FILENAME_MAP_FILE = os.path.join(Path.home(), FILENAME_MAP_FILE)
 
 
 def init_plex(args=None, all=True, server=False, library=False, media=False):
@@ -14711,7 +15056,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  If {TITLE} is empty, trailing whitespace is stripped automatically.")
             print()
             print("CONFIGURATION:")
-            print("  Set in ~/.my-plex.conf:")
+            print("  Set in ~/.my-plex/my-plex.conf (or ~/.my-plex.conf):")
             print("    EPISODE_NAME_PATTERN = '{SERIES} {S0XE0X} {TITLE}'")
             print()
             print("EXAMPLES:")
@@ -14727,6 +15072,103 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex 'boston legal' --rename --dry-run    # Preview renames")
             print("  my-plex series.en --rename                   # Rename all in library")
             print("  my-plex ID:12345 --rename                    # Rename single episode")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'map-to-filename' | 'map_to_filename':
+            print()
+            print("=" * 76)
+            print("MAP METADATA TO FILENAMES (--map-to-filename) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --map-to-filename [--dry-run]              # All libraries")
+            print("       my-plex --map-to-filename <LIBRARY> [--dry-run]    # One library")
+            print("       my-plex --map-to-filename <MEDIA> [--dry-run]      # One item")
+            print("       my-plex <LIBRARY> --map-to-filename [--dry-run]    # Same (reverse order)")
+            print()
+            print("  Maps Plex metadata into filenames using configurable [VARIABLE] markers.")
+            print("  Replaces the legacy [vu] marker system with a generalized approach.")
+            print()
+            print("  --dry-run / -n   Show what would change without renaming")
+            print()
+            print("CONFIGURATION:")
+            print(f"  Set FILENAME_MAP in your config file (~/.my-plex/my-plex.conf):")
+            print()
+            print("    FILENAME_MAP = {")
+            print("        'watched': '[WATCHED]',                     # → Movie.[vu].mkv")
+            print("        'rating':  '[RATING_USER]',                 # → Movie.[7.5].mkv")
+            print("        'info':    '[RATING_CRITICS]-[COUNTRY]',    # → Movie.[8.2-US].mkv")
+            print("        'actors':  '[ACTORS_TOP3]',                 # → Movie.[A, B, C].mkv")
+            print("    }")
+            print()
+            print("  Each key is an aspect name (your choice), value is a format with [VARIABLE] markers.")
+            print("  Markers are inserted before the file extension, sorted by aspect name.")
+            print()
+            print("AVAILABLE VARIABLES:")
+            print("  [WATCHED]         vu (watched) / nv (not viewed)")
+            print("  [WATCHED_DATE]    Last viewed date (2026-03-14)")
+            print("  [VIEW_COUNT]      Times watched")
+            print("  [RATING_USER]     User rating (0-10)")
+            print("  [RATING_CRITICS]  Critics rating (source depends on Plex agent)")
+            print("  [RATING_AUDIENCE] Audience rating (source depends on Plex agent)")
+            print("  [CONTENT_RATING]  Content rating (TV-MA, PG-13, etc.)")
+            print("  [ACTORS_TOP3]     Top 3 actors (comma-separated)")
+            print("  [ACTORS_ALL]      All actors")
+            print("  [ACTOR1_FN]       First actor's first name")
+            print("  [ACTOR1_LN]       First actor's last name")
+            print("  [ACTOR2_FN/LN]    Second actor (same pattern)")
+            print("  [ACTOR3_FN/LN]    Third actor (same pattern)")
+            print("  [COUNTRY]         First country      [COUNTRIES]  All countries")
+            print("  [GENRE]           First genre        [GENRES]     All genres")
+            print("  [DIRECTOR]        First director     [DIRECTORS]  All directors")
+            print("  [WRITER]          First writer       [WRITERS]    All writers")
+            print("  [LANG]            Library language")
+            print("  [RESOLUTION]      Video resolution (1080p)")
+            print("  [YEAR]            Release year")
+            print("  [IMDB_ID]         IMDB ID (tt1234567)")
+            print("  [TMDB_ID]         TMDB ID            [TVDB_ID]   TVDB ID")
+            print("  [TITLE]           Media title         [SERIES]    Show title")
+            print()
+            print("EMPTY MARKER HANDLING:")
+            print("  If ALL variables in a marker resolve to empty, the marker is skipped entirely.")
+            print("  No empty brackets are left in the filename.")
+            print("  A warning is shown when a previously-filled marker becomes empty.")
+            print()
+            print("SIDECAR TRACKING:")
+            print(f"  Tracks which markers were added in: ~/.my-plex/filename_map.json")
+            print("  This ensures --map-from-filename can safely strip exactly what was added.")
+            print()
+            print("LEGACY [vu] MIGRATION:")
+            print("  Existing [vu] or [vu@TIMESTAMP] markers are auto-detected and migrated.")
+            print("  No manual migration needed.")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --map-to-filename --dry-run         # Preview all changes")
+            print("  my-plex movies.en --map-to-filename          # Map metadata for English movies")
+            print("  my-plex --map-from-filename                  # Undo all markers")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'map-from-filename' | 'map_from_filename':
+            print()
+            print("=" * 76)
+            print("REMOVE METADATA MARKERS (--map-from-filename) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --map-from-filename [--dry-run]              # All files")
+            print("       my-plex --map-from-filename <LIBRARY> [--dry-run]    # One library")
+            print("       my-plex --map-from-filename <MEDIA> [--dry-run]      # One item")
+            print()
+            print("  Removes all metadata markers previously added by --map-to-filename.")
+            print("  Uses the sidecar tracking file to know exactly which markers to strip.")
+            print()
+            print("  --dry-run / -n   Show what would change without renaming")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --map-from-filename --dry-run        # Preview removals")
+            print("  my-plex movies.en --map-from-filename         # Strip markers for English movies")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -16346,6 +16788,310 @@ def cmd_missing(show_ref, source_override=None):
 
     print()
     print(f"{'=' * 76}")
+
+
+# ---------------------------------------------------------------------------
+# --map-to-filename / --map-from-filename commands
+# ---------------------------------------------------------------------------
+
+def _get_filename_map_scope(target):
+    """Determine which cache entries to process for --map-to-filename / --map-from-filename.
+
+    Args:
+        target: None (all), library name (string), or media identifier
+
+    Returns:
+        list of (cache_key, obj_dict) tuples
+    """
+    items = []
+    if target is None:
+        # All media items with files
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            if obj.get('file') or obj.get('files'):
+                items.append((key, obj))
+    elif target in PLEX_Library.OBJ_DICT:
+        # Library scope — all items in that library
+        lib_types = PLEX_Media.OBJ_BY_LIBRARY.get(target, {})
+        for type_str, keys in lib_types.items():
+            for key in keys:
+                obj = PLEX_Media.OBJ_BY_ID.get(key)
+                if obj and (obj.get('file') or obj.get('files')):
+                    items.append((key, obj))
+    else:
+        # Single media item by cache key or title
+        obj = PLEX_Media.OBJ_BY_ID.get(target)
+        if obj and (obj.get('file') or obj.get('files')):
+            items.append((target, obj))
+        else:
+            # Try title search
+            target_lower = target.lower()
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                title = obj.get('title', '')
+                if title and target_lower in title.lower():
+                    if obj.get('file') or obj.get('files'):
+                        items.append((key, obj))
+    return items
+
+def _get_all_filepaths(obj):
+    """Get all file paths from a cache entry.
+
+    Returns:
+        list of filepath strings
+    """
+    paths = []
+    files = obj.get('files')
+    if files and isinstance(files, dict):
+        for version_str, file_info in files.items():
+            if isinstance(file_info, dict):
+                fp = file_info.get('filepath', '')
+            else:
+                fp = file_info
+            if fp:
+                paths.append(fp)
+    elif obj.get('file'):
+        paths.append(obj['file'])
+    return paths
+
+def cmd_map_to_filename(target, dry_run=False):
+    """Map Plex metadata to filenames using FILENAME_MAP config.
+
+    For each media file in scope:
+    1. Strip existing our-markers (from sidecar)
+    2. Compute new markers from current config + cache data
+    3. Warn if previously-filled marker is now empty
+    4. Rename file if markers changed
+    5. Update sidecar
+
+    Args:
+        target: None (all), library name, or media identifier
+        dry_run: If True, show changes without renaming
+    """
+    if not FILENAME_MAP:
+        print("ERROR: FILENAME_MAP is not configured.")
+        print(f"  Configure it in your config file ({FILENAME_MAP_FILE.replace('/filename_map.json', '/my-plex.conf')})")
+        print(f"  Example:")
+        print(f"    FILENAME_MAP = {{'watched': '[WATCHED]', 'rating': '[RATING_USER]'}}")
+        print(f"  Use --help map-to-filename for details.")
+        return
+
+    # Validate config
+    errors = validate_filename_map(FILENAME_MAP)
+    if errors:
+        print("ERROR: Invalid FILENAME_MAP configuration:")
+        for e in errors:
+            print(f"  {e}")
+        return
+
+    items = _get_filename_map_scope(target)
+    if not items:
+        print("No media items found for the given target.")
+        return
+
+    sidecar = load_filename_map_sidecar()
+    renamed_count = 0
+    skipped_count = 0
+    warning_count = 0
+    error_count = 0
+
+    if dry_run:
+        print(f"DRY RUN: --map-to-filename ({len(items)} items, {len(FILENAME_MAP)} aspects)")
+    else:
+        print(f"Mapping metadata to filenames ({len(items)} items, {len(FILENAME_MAP)} aspects)...")
+
+    for cache_key, obj in items:
+        filepaths = _get_all_filepaths(obj)
+        for filepath in filepaths:
+            basename = os.path.basename(filepath)
+            dirpath = os.path.dirname(filepath)
+
+            # Get existing sidecar entry
+            sidecar_entry = sidecar.get(filepath)
+
+            # Legacy VU migration: detect [vu] marker without sidecar
+            if not sidecar_entry:
+                vu_marker = extract_vu_marker(basename)
+                if vu_marker:
+                    sidecar_entry = {'markers': {'watched': vu_marker}, 'clean_filename': basename.replace(f'.{vu_marker}', '')}
+                    if VRB or dry_run:
+                        print(f"  Migrated legacy {vu_marker}: {basename}")
+
+            # Strip existing markers to get clean filename
+            clean = strip_our_markers(basename, sidecar_entry)
+
+            # Compute new markers
+            new_markers = compute_markers(obj, cache_key, FILENAME_MAP)
+
+            # Check for previously-filled markers now empty (data loss warning)
+            if sidecar_entry and 'markers' in sidecar_entry:
+                for aspect, old_val in sidecar_entry['markers'].items():
+                    if old_val and aspect in new_markers and not new_markers[aspect]:
+                        print(f"  WARNING: [{aspect}] was {old_val} but is now empty: {clean}")
+                        warning_count += 1
+
+            # Build new filename
+            new_basename = apply_markers(clean, new_markers)
+
+            if new_basename == basename:
+                skipped_count += 1
+                continue
+
+            new_filepath = os.path.join(dirpath, new_basename)
+
+            if dry_run:
+                print(f"  {basename}")
+                print(f"    → {new_basename}")
+                renamed_count += 1
+            else:
+                success, actual_new_path = rename_file(filepath, new_basename, PLEX_DB_REMOTE_HOST)
+                if success:
+                    renamed_count += 1
+                    # Update sidecar with new path
+                    update_sidecar_entry(sidecar, filepath, new_filepath, new_markers, clean)
+                    # Update cache entry filepath
+                    _update_cache_filepath(obj, filepath, new_filepath)
+                    if VRB:
+                        print(f"  {basename} → {new_basename}")
+                else:
+                    error_count += 1
+                    print(f"  ERROR renaming: {basename}")
+
+    # Save sidecar
+    if not dry_run and renamed_count > 0:
+        save_filename_map_sidecar(sidecar)
+
+    # Summary
+    prefix = "Would rename" if dry_run else "Renamed"
+    print(f"\n  {prefix}: {renamed_count}, unchanged: {skipped_count}, warnings: {warning_count}, errors: {error_count}")
+
+def cmd_map_from_filename(target, dry_run=False):
+    """Remove metadata markers from filenames (reverse of --map-to-filename).
+
+    Strips all our-markers from filenames and cleans up sidecar entries.
+
+    Args:
+        target: None (all), library name, or media identifier
+        dry_run: If True, show changes without renaming
+    """
+    sidecar = load_filename_map_sidecar()
+    if not sidecar:
+        print("No filename map sidecar found — nothing to undo.")
+        return
+
+    items = _get_filename_map_scope(target)
+    if not items:
+        print("No media items found for the given target.")
+        return
+
+    renamed_count = 0
+    skipped_count = 0
+    error_count = 0
+
+    if dry_run:
+        print(f"DRY RUN: --map-from-filename ({len(items)} items)")
+    else:
+        print(f"Removing metadata markers from filenames ({len(items)} items)...")
+
+    for cache_key, obj in items:
+        filepaths = _get_all_filepaths(obj)
+        for filepath in filepaths:
+            basename = os.path.basename(filepath)
+            dirpath = os.path.dirname(filepath)
+
+            sidecar_entry = sidecar.get(filepath)
+            if not sidecar_entry:
+                skipped_count += 1
+                continue
+
+            clean = strip_our_markers(basename, sidecar_entry)
+
+            if clean == basename:
+                # Already clean, just remove sidecar entry
+                if filepath in sidecar:
+                    del sidecar[filepath]
+                skipped_count += 1
+                continue
+
+            new_filepath = os.path.join(dirpath, clean)
+
+            if dry_run:
+                print(f"  {basename}")
+                print(f"    → {clean}")
+                renamed_count += 1
+            else:
+                success, actual_new_path = rename_file(filepath, clean, PLEX_DB_REMOTE_HOST)
+                if success:
+                    renamed_count += 1
+                    if filepath in sidecar:
+                        del sidecar[filepath]
+                    _update_cache_filepath(obj, filepath, new_filepath)
+                    if VRB:
+                        print(f"  {basename} → {clean}")
+                else:
+                    error_count += 1
+                    print(f"  ERROR renaming: {basename}")
+
+    if not dry_run:
+        save_filename_map_sidecar(sidecar)
+
+    prefix = "Would rename" if dry_run else "Renamed"
+    print(f"\n  {prefix}: {renamed_count}, unchanged: {skipped_count}, errors: {error_count}")
+
+def _update_cache_filepath(obj, old_path, new_path):
+    """Update filepath in cache entry after rename.
+
+    Args:
+        obj: Cache entry dict (mutated in place)
+        old_path: Previous filepath
+        new_path: New filepath
+    """
+    if obj.get('file') == old_path:
+        obj['file'] = new_path
+    files = obj.get('files')
+    if files and isinstance(files, dict):
+        for version_str, file_info in files.items():
+            if isinstance(file_info, dict) and file_info.get('filepath') == old_path:
+                file_info['filepath'] = new_path
+            elif file_info == old_path:
+                files[version_str] = new_path
+
+def transfer_filename_map_markers(src_path, dst_path, remote_host=None):
+    """Transfer filename map markers from one file to another (for duplicate resolution).
+
+    Looks up src_path in sidecar, applies those markers to dst_path.
+
+    Args:
+        src_path: Source filepath (being trashed/removed)
+        dst_path: Destination filepath (being kept)
+        remote_host: SSH host for rename operations
+    """
+    sidecar = load_filename_map_sidecar()
+    src_entry = sidecar.get(src_path)
+    if not src_entry:
+        return  # No markers to transfer
+
+    dst_basename = os.path.basename(dst_path)
+    dst_dir = os.path.dirname(dst_path)
+
+    # Strip any existing markers from destination
+    dst_sidecar_entry = sidecar.get(dst_path)
+    clean_dst = strip_our_markers(dst_basename, dst_sidecar_entry)
+
+    # Apply source markers to destination
+    new_basename = apply_markers(clean_dst, src_entry['markers'])
+
+    if new_basename != dst_basename:
+        new_dst_path = os.path.join(dst_dir, new_basename)
+        success, _ = rename_file(dst_path, new_basename, remote_host)
+        if success:
+            update_sidecar_entry(sidecar, dst_path, new_dst_path, src_entry['markers'], clean_dst)
+            print(f"  Transferred markers from {os.path.basename(src_path)} to {new_basename}")
+        else:
+            print(f"  WARNING: Failed to transfer markers to {dst_basename}")
+
+    # Remove source entry
+    if src_path in sidecar:
+        del sidecar[src_path]
+    save_filename_map_sidecar(sidecar)
 
 
 # ---------------------------------------------------------------------------
@@ -18737,6 +19483,20 @@ def execute_global_commands(args, cmd_args):
         cmd_sort_new(args, dry_run=dry_run)
         sys.exit(0)
 
+    # Handle --map-to-filename command
+    if safe_getattr(cmd_args, 'map_to_filename', None) is not None:
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        target = cmd_args.map_to_filename if cmd_args.map_to_filename is not True else None
+        cmd_map_to_filename(target, dry_run=dry_run)
+        sys.exit(0)
+
+    # Handle --map-from-filename command
+    if safe_getattr(cmd_args, 'map_from_filename', None) is not None:
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        target = cmd_args.map_from_filename if cmd_args.map_from_filename is not True else None
+        cmd_map_from_filename(target, dry_run=dry_run)
+        sys.exit(0)
+
     if cmd_args.list_libraries:
         AGENT_DISPLAY = {
             'tv.plex.agents.movie':            'Plex Movie (TMDB)',
@@ -19307,6 +20067,8 @@ def main():
     main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
     main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
@@ -19365,6 +20127,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
+    GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help="Map Plex metadata to filenames using FILENAME_MAP config. TARGET: library name or media item. Without TARGET: all libraries. Use --dry-run to preview. Use --help map-to-filename for details.")
+    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help="Remove metadata markers from filenames (reverse of --map-to-filename). Use --help map-from-filename for details.")
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
@@ -19458,6 +20222,8 @@ def main():
                 '--episode-numbering-issues':'episode-numbering-issues',
                 '--missing':                 'missing',
                 '--sort-new':                'sort-new',
+                '--map-to-filename':         'map-to-filename',
+                '--map-from-filename':       'map-from-filename',
                 '--rename':                  'rename',
                 '--problems':                'problems',
                 '--tsv':                     'problems',
@@ -19690,6 +20456,22 @@ def main():
     # Re-inject --sort-new into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
     if safe_getattr(args, 'sort_new', False):
         remaining_args.insert(0, '--sort-new')
+
+    # Re-inject --map-to-filename into remaining_args
+    if safe_getattr(args, 'map_to_filename', None) is not None:
+        if args.map_to_filename is not True and args.map_to_filename:
+            remaining_args.insert(0, args.map_to_filename)
+            remaining_args.insert(1, '--map-to-filename')
+        else:
+            remaining_args.insert(0, '--map-to-filename')
+
+    # Re-inject --map-from-filename into remaining_args
+    if safe_getattr(args, 'map_from_filename', None) is not None:
+        if args.map_from_filename is not True and args.map_from_filename:
+            remaining_args.insert(0, args.map_from_filename)
+            remaining_args.insert(1, '--map-from-filename')
+        else:
+            remaining_args.insert(0, '--map-from-filename')
 
     # Re-inject --rename into remaining_args
     # Two cases (mimics --info/--missing pattern):
