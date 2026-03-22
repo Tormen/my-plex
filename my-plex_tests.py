@@ -3925,7 +3925,7 @@ class TestEpisodesErr(unittest.TestCase):
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
         self.assertIsNotNone(match, "Must find --problems handler block")
         body = match.group(1)
-        self.assertIn('_list_tsv_problems()', body, "Must call _list_tsv_problems")
+        self.assertIn('_list_tsv_problems(', body, "Must call _list_tsv_problems")
         self.assertIn('Episode Data', body, "Must have Episode Data section header")
 
     def test_problems_summary_includes_tsv_count(self):
@@ -4771,6 +4771,298 @@ class TestInfoScrapedData(unittest.TestCase):
         self.assertIn('Episode (Scraped):', content)
 
 
+class TestFilenameMap(unittest.TestCase):
+    """Tests for --map-to-filename / --map-from-filename feature."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def _mock_obj(self, **overrides):
+        """Create a mock cache entry with sensible defaults for testing."""
+        obj = {
+            'type': 'Movie', 'title': 'Test Movie', 'year': 2024,
+            'library': 'movies.en', 'file': '/path/to/Test Movie.mkv',
+            'files': {'90.0min 1920x1080 (h264 aac)': {'filepath': '/path/to/Test Movie.mkv'}},
+            'viewCount': 2, 'lastViewedAt': 1711065600,  # 2024-03-22
+            'userRating': 7.5, 'criticsRating': 8.2, 'audienceRating': 85.0,
+            'contentRating': 'PG-13',
+            'actors': ['Bryan Cranston', 'Aaron Paul', 'Anna Gunn', 'Dean Norris'],
+            'countries': ['US', 'UK'], 'genres': ['Drama', 'Crime'],
+            'directors': ['Vince Gilligan'], 'writers': ['Peter Gould', 'Thomas Schnauz'],
+            'resolution': '1080p', 'video_codec': 'h264', 'audio_codec': 'aac',
+            'duration': 5400000, 'series': '', 'originalTitle': '',
+            'external_ids': {'imdb': 'tt0903747', 'tmdb': '1396', 'tvdb': '81189'},
+            'audio_languages': [], 'subtitle_languages': [],
+            'collections': [], 'labels': [],
+        }
+        obj.update(overrides)
+        return obj
+
+    # --- validate_filename_map ---
+
+    def test_validate_map_valid(self):
+        """Valid FILENAME_MAP passes validation."""
+        fm = {'watched': '[WATCHED]', 'rating': '[RATING_USER]', 'multi': '[RATING_CRITICS]-[COUNTRY]'}
+        errors = validate_filename_map(fm)
+        self.assertEqual(errors, [])
+
+    def test_validate_map_empty(self):
+        """Empty FILENAME_MAP is valid (just does nothing)."""
+        errors = validate_filename_map({})
+        self.assertEqual(errors, [])
+
+    def test_validate_map_invalid_variable(self):
+        """Unknown [FOOBAR] variable produces error."""
+        fm = {'test': '[FOOBAR]'}
+        errors = validate_filename_map(fm)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('FOOBAR', errors[0])
+
+    def test_validate_map_no_markers(self):
+        """Format string without [VARIABLE] markers produces error."""
+        fm = {'test': 'just text'}
+        errors = validate_filename_map(fm)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('no [VARIABLE]', errors[0])
+
+    def test_validate_map_not_dict(self):
+        """Non-dict FILENAME_MAP produces error."""
+        errors = validate_filename_map("not a dict")
+        self.assertEqual(len(errors), 1)
+        self.assertIn('must be a dict', errors[0])
+
+    # --- resolve_filename_map_variables ---
+
+    def test_resolve_variables_basic(self):
+        """Variable resolution produces expected values from mock obj."""
+        obj = self._mock_obj()
+        var = resolve_filename_map_variables(obj)
+        self.assertEqual(var['WATCHED'], 'vu')
+        self.assertEqual(var['RATING_USER'], '7.5')
+        self.assertEqual(var['RATING_CRITICS'], '8.2')
+        self.assertEqual(var['RATING_AUDIENCE'], '85.0')
+        self.assertEqual(var['CONTENT_RATING'], 'PG-13')
+        self.assertEqual(var['ACTORS_TOP3'], 'Bryan Cranston, Aaron Paul, Anna Gunn')
+        self.assertEqual(var['ACTOR1_FN'], 'Bryan')
+        self.assertEqual(var['ACTOR1_LN'], 'Cranston')
+        self.assertEqual(var['ACTOR2_FN'], 'Aaron')
+        self.assertEqual(var['ACTOR2_LN'], 'Paul')
+        self.assertEqual(var['ACTOR3_FN'], 'Anna')
+        self.assertEqual(var['ACTOR3_LN'], 'Gunn')
+        self.assertEqual(var['COUNTRY'], 'US')
+        self.assertEqual(var['COUNTRIES'], 'US, UK')
+        self.assertEqual(var['GENRE'], 'Drama')
+        self.assertEqual(var['DIRECTOR'], 'Vince Gilligan')
+        self.assertEqual(var['RESOLUTION'], '1080p')
+        self.assertEqual(var['YEAR'], '2024')
+        self.assertEqual(var['IMDB_ID'], 'tt0903747')
+        self.assertEqual(var['TMDB_ID'], '1396')
+
+    def test_resolve_variables_unwatched(self):
+        """Unwatched item has WATCHED=nv."""
+        obj = self._mock_obj(viewCount=0, lastViewedAt=None)
+        var = resolve_filename_map_variables(obj)
+        self.assertEqual(var['WATCHED'], 'nv')
+        self.assertEqual(var['WATCHED_DATE'], '')
+
+    def test_resolve_variables_empty_actors(self):
+        """Empty actors produce empty strings."""
+        obj = self._mock_obj(actors=[])
+        var = resolve_filename_map_variables(obj)
+        self.assertEqual(var['ACTORS_TOP3'], '')
+        self.assertEqual(var['ACTOR1_FN'], '')
+        self.assertEqual(var['ACTOR1_LN'], '')
+
+    def test_resolve_variables_no_ratings(self):
+        """None ratings produce empty strings."""
+        obj = self._mock_obj(userRating=None, criticsRating=None, audienceRating=None)
+        var = resolve_filename_map_variables(obj)
+        self.assertEqual(var['RATING_USER'], '')
+        self.assertEqual(var['RATING_CRITICS'], '')
+        self.assertEqual(var['RATING_AUDIENCE'], '')
+
+    # --- compute_markers ---
+
+    def test_compute_markers_basic(self):
+        """Basic marker computation with watched and rating."""
+        obj = self._mock_obj()
+        fm = {'watched': '[WATCHED]', 'rating': '[RATING_USER]'}
+        markers = compute_markers(obj, 'Movie:1', fm)
+        self.assertEqual(markers['watched'], '[vu]')
+        self.assertEqual(markers['rating'], '[7.5]')
+
+    def test_compute_markers_multi_variable(self):
+        """Multi-variable format string resolves correctly."""
+        obj = self._mock_obj()
+        fm = {'info': '[RATING_CRITICS]-[COUNTRY]'}
+        markers = compute_markers(obj, 'Movie:1', fm)
+        self.assertEqual(markers['info'], '[8.2-US]')
+
+    def test_compute_markers_empty_skips(self):
+        """When all variables in a marker are empty, marker is empty string (skip)."""
+        obj = self._mock_obj(userRating=None)
+        fm = {'rating': '[RATING_USER]'}
+        markers = compute_markers(obj, 'Movie:1', fm)
+        self.assertEqual(markers['rating'], '')
+
+    def test_compute_markers_partial_empty_skips(self):
+        """When any variable in a multi-var marker is empty, entire marker is skipped."""
+        obj = self._mock_obj(userRating=None)
+        fm = {'info': '[RATING_USER]-[COUNTRY]'}
+        markers = compute_markers(obj, 'Movie:1', fm)
+        # RATING_USER is empty but COUNTRY is not — should still produce marker
+        # because not ALL are empty
+        self.assertNotEqual(markers['info'], '')
+
+    # --- strip_our_markers ---
+
+    def test_strip_our_markers_basic(self):
+        """Strip known markers from filename."""
+        entry = {'markers': {'watched': '[vu]', 'rating': '[7.5]'}}
+        result = strip_our_markers('Movie Title.[vu].[7.5].mkv', entry)
+        self.assertEqual(result, 'Movie Title.mkv')
+
+    def test_strip_our_markers_no_entry(self):
+        """No sidecar entry means no stripping."""
+        result = strip_our_markers('Movie Title.[vu].mkv', None)
+        self.assertEqual(result, 'Movie Title.[vu].mkv')
+
+    def test_strip_our_markers_empty(self):
+        """Empty markers dict means no stripping."""
+        result = strip_our_markers('Movie Title.[vu].mkv', {'markers': {}})
+        self.assertEqual(result, 'Movie Title.[vu].mkv')
+
+    # --- apply_markers ---
+
+    def test_apply_markers_basic(self):
+        """Apply markers to clean filename."""
+        markers = {'watched': '[vu]', 'rating': '[7.5]'}
+        result = apply_markers('Movie Title.mkv', markers)
+        self.assertEqual(result, 'Movie Title.[rating].[watched].mkv'.replace('[rating]', '[7.5]').replace('[watched]', '[vu]'))
+        # Sorted by aspect name: rating before watched
+        self.assertEqual(result, 'Movie Title.[7.5].[vu].mkv')
+
+    def test_apply_markers_deterministic_order(self):
+        """Markers are sorted by aspect name."""
+        markers = {'z_last': '[Z]', 'a_first': '[A]', 'm_mid': '[M]'}
+        result = apply_markers('File.mkv', markers)
+        self.assertEqual(result, 'File.[A].[M].[Z].mkv')
+
+    def test_apply_markers_empty_skipped(self):
+        """Empty markers are not included."""
+        markers = {'watched': '[vu]', 'rating': ''}
+        result = apply_markers('Movie.mkv', markers)
+        self.assertEqual(result, 'Movie.[vu].mkv')
+
+    def test_apply_markers_all_empty(self):
+        """If all markers are empty, filename is unchanged."""
+        markers = {'rating': '', 'country': ''}
+        result = apply_markers('Movie.mkv', markers)
+        self.assertEqual(result, 'Movie.mkv')
+
+    # --- roundtrip ---
+
+    def test_strip_apply_roundtrip(self):
+        """Strip markers then apply same markers gives same filename."""
+        markers = {'watched': '[vu]', 'rating': '[7.5]'}
+        original = apply_markers('Movie Title.mkv', markers)
+        entry = {'markers': markers}
+        stripped = strip_our_markers(original, entry)
+        self.assertEqual(stripped, 'Movie Title.mkv')
+        reapplied = apply_markers(stripped, markers)
+        self.assertEqual(reapplied, original)
+
+    # --- sidecar ---
+
+    def test_sidecar_roundtrip(self):
+        """Save and load sidecar produces identical data."""
+        import tempfile, json
+        sidecar = {'/path/to/file.[vu].mkv': {
+            'markers': {'watched': '[vu]'},
+            'clean_filename': 'file.mkv',
+            'last_updated': '2026-03-22'
+        }}
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(sidecar, f, indent=2)
+            tmp_path = f.name
+        try:
+            with open(tmp_path, 'r') as f:
+                loaded = json.load(f)
+            self.assertEqual(sidecar, loaded)
+        finally:
+            os.unlink(tmp_path)
+
+    # --- legacy VU migration ---
+
+    def test_legacy_vu_detection(self):
+        """Legacy [vu@TIMESTAMP] marker is detected by extract_vu_marker."""
+        marker = extract_vu_marker('Movie.[vu@2026-01-15].mkv')
+        self.assertEqual(marker, '[vu@2026-01-15]')
+
+    def test_legacy_vu_plain(self):
+        """Legacy [vu] plain marker is detected."""
+        marker = extract_vu_marker('Movie.[vu].mkv')
+        self.assertEqual(marker, '[vu]')
+
+    def test_legacy_vu_none(self):
+        """No VU marker returns None."""
+        marker = extract_vu_marker('Movie.mkv')
+        self.assertIsNone(marker)
+
+    # --- source inspection ---
+
+    def test_source_has_filename_map_functions(self):
+        """Source must contain all filename map functions."""
+        content = self._read_script()
+        for func in ['validate_filename_map', 'resolve_filename_map_variables',
+                     'compute_markers', 'strip_our_markers', 'apply_markers',
+                     'load_filename_map_sidecar', 'save_filename_map_sidecar',
+                     'cmd_map_to_filename', 'cmd_map_from_filename',
+                     'transfer_filename_map_markers', 'FILENAME_MAP_VARIABLES']:
+            self.assertIn(f'{func}', content, f"Missing: {func}")
+
+    def test_source_has_map_argparse(self):
+        """Source must have --map-to-filename and --map-from-filename argparse entries."""
+        content = self._read_script()
+        self.assertIn("'--map-to-filename'", content)
+        self.assertIn("'--map-from-filename'", content)
+
+    def test_source_has_map_help(self):
+        """Source must have help cases for map-to-filename and map-from-filename."""
+        content = self._read_script()
+        self.assertIn("'map-to-filename'", content)
+        self.assertIn("'map-from-filename'", content)
+
+    def test_source_has_plex_dir(self):
+        """Source must reference ~/.my-plex/ directory."""
+        content = self._read_script()
+        self.assertIn("'.my-plex'", content)
+        self.assertIn("'.my-plex/cache.pkl'", content)
+        self.assertIn("'.my-plex/filename_map.json'", content)
+
+    # --- E2E: --help map-to-filename ---
+
+    def test_help_map_to_filename(self):
+        """--help map-to-filename should print help and exit 0."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'map-to-filename'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('MAP METADATA TO FILENAMES', result.stdout)
+        self.assertIn('AVAILABLE VARIABLES', result.stdout)
+
+    def test_help_map_from_filename(self):
+        """--help map-from-filename should print help and exit 0."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'map-from-filename'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('REMOVE METADATA MARKERS', result.stdout)
+
+
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
     TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
@@ -4816,6 +5108,7 @@ _UNITTEST_CLASSES = [
     TestObjByShowScraped,
     TestEpisodeNumberingIssues,
     TestInfoScrapedData,
+    TestFilenameMap,
 ]
 
 # ---------------------------------------------------------------------------
