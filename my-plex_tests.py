@@ -5558,11 +5558,11 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn("series_dir = show_obj.get('file'", content)
 
     def test_plex2disk_output_shows_full_path(self):
-        """Rename output shows full path, not just basename."""
+        """Rename output shows full path with 'Renaming:' prefix."""
         content = self._read_script()
         # The display_path variable should be used for output
         self.assertIn('display_path = path', content)
-        self.assertIn('{display_path}', content)
+        self.assertIn('Renaming: {display_path}', content)
 
 
 # List of all unittest classes for run_regression_tests()
