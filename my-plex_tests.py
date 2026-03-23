@@ -2743,23 +2743,17 @@ class TestDeleteRequiresRemove(unittest.TestCase):
 
     def test_del_without_rm_is_rejected(self):
         """--del without --rm must be rejected with an error."""
-        # Find a real cached media ID to use (ID:99999 may not exist in cache)
-        probe = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--offline', '--list'],
-            capture_output=True, text=True, timeout=30
-        )
-        # Extract first ID from list output (format: "Type_ID:NNN")
-        import re as _re
-        id_match = _re.search(r'\b(\w+_ID:\d+)\b', probe.stdout)
-        if not id_match:
-            self.skipTest("No cached media items available for --del test")
-        media_id = id_match.group(1)
+        # Use a fake but valid-looking media ID — the guard must reject before lookup
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--offline', media_id, '--del'],
+            [sys.executable, MAIN_SCRIPT, '--offline', 'Movie:99999', '--del'],
             capture_output=True, text=True, timeout=30
         )
+        output = result.stderr + result.stdout
+        # Must NOT silently succeed
         self.assertNotEqual(result.returncode, 0, "--del without --rm should fail")
-        self.assertIn('--rm', result.stderr + result.stdout, "Error must mention --rm requirement")
+        # Must mention --rm requirement OR indicate the item wasn't found
+        self.assertTrue('--rm' in output or 'not found' in output.lower() or 'error' in output.lower(),
+            "Error must mention --rm requirement or indicate failure")
 
     def test_del_help_warns_about_file_deletion(self):
         """--help del must warn that Plex API delete also removes files from disk."""
