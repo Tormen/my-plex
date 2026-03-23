@@ -5557,12 +5557,13 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn("show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)", content)
         self.assertIn("series_dir = show_obj.get('file'", content)
 
-    def test_plex2disk_output_shows_full_path(self):
-        """Rename output shows full path with 'Renaming:' prefix."""
+    def test_plex2disk_output_has_prefix_and_full_path(self):
+        """Rename output has LIBRARY|TYPE| prefix and shows full path."""
         content = self._read_script()
-        # The display_path variable should be used for output
-        self.assertIn('display_path = path', content)
-        self.assertIn('Renaming: {display_path}', content)
+        # Log prefix built from library and type
+        self.assertIn("prefix = f\"{lib}|{type_label}| \"", content)
+        # Rename lines use prefix and full path on single line
+        self.assertIn('Rename: {path}', content)
 
 
 # List of all unittest classes for run_regression_tests()
