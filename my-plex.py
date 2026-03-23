@@ -17339,53 +17339,9 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                 elif type_str == 'Show':
                     series_dir_items.append((filepath, cache_key, obj))
 
-    # --- Process scopes in order: outermost dirs first ---
-    # After each dir scope, update child paths in all remaining scopes.
-
-    def _apply_dir_renames(dir_renames, *item_lists):
-        """Update paths in item lists after parent directory renames."""
-        if not dir_renames:
-            return
-        for item_list in item_lists:
-            for i, (path, ck, o) in enumerate(item_list):
-                for old_dir, new_dir in dir_renames.items():
-                    if path.startswith(old_dir + os.sep):
-                        item_list[i] = (new_dir + path[len(old_dir):], ck, o)
-                    elif path == old_dir:
-                        item_list[i] = (new_dir, ck, o)
-
-    # Series dirs
-    if series_dir_items:
-        if dry_run or VRB:
-            print(f"\n  Series directories ({len(set(p for p,_,_ in series_dir_items))} unique):")
-        r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_SERIES_DIR', DISK_MAP_SERIES_DIR,
-                                               series_dir_items, sidecar, dry_run,
-                                               is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir, force=force)
-        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-        _apply_dir_renames(dir_renames, season_dir_items, movie_dir_items, file_items)
-
-    # Season dirs
-    if season_dir_items:
-        if dry_run or VRB:
-            print(f"\n  Season directories ({len(set(p for p,_,_ in season_dir_items))} unique):")
-        r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_SEASON_DIR', DISK_MAP_SEASON_DIR,
-                                               season_dir_items, sidecar, dry_run,
-                                               is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir, force=force)
-        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-        _apply_dir_renames(dir_renames, file_items)
-
-    # Movie dirs
-    if movie_dir_items:
-        if dry_run or VRB:
-            print(f"\n  Movie directories ({len(set(p for p,_,_ in movie_dir_items))} unique):")
-        r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_MOVIE_DIR', DISK_MAP_MOVIE_DIR,
-                                               movie_dir_items, sidecar, dry_run,
-                                               is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir, force=force)
-        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-        _apply_dir_renames(dir_renames, file_items)
+    # --- Process scopes: files → season dirs → series dirs → movie dirs ---
+    # Innermost first: renaming a child doesn't affect parent paths.
+    # After each dir rename, update child paths in cache + sidecar.
 
     # Files
     if file_items:
@@ -17395,6 +17351,36 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                file_items, sidecar, dry_run,
                                                is_dir=False, apply_fn=apply_markers,
                                                strip_fn=strip_our_markers, force=force)
+        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
+
+    # Season dirs
+    if season_dir_items:
+        if dry_run or VRB:
+            print(f"\n  Season directories ({len(set(p for p,_,_ in season_dir_items))} unique):")
+        r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SEASON_DIR', DISK_MAP_SEASON_DIR,
+                                               season_dir_items, sidecar, dry_run,
+                                               is_dir=True, apply_fn=apply_markers_to_dir,
+                                               strip_fn=strip_markers_from_dir, force=force)
+        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
+
+    # Series dirs
+    if series_dir_items:
+        if dry_run or VRB:
+            print(f"\n  Series directories ({len(set(p for p,_,_ in series_dir_items))} unique):")
+        r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SERIES_DIR', DISK_MAP_SERIES_DIR,
+                                               series_dir_items, sidecar, dry_run,
+                                               is_dir=True, apply_fn=apply_markers_to_dir,
+                                               strip_fn=strip_markers_from_dir, force=force)
+        total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
+
+    # Movie dirs
+    if movie_dir_items:
+        if dry_run or VRB:
+            print(f"\n  Movie directories ({len(set(p for p,_,_ in movie_dir_items))} unique):")
+        r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_MOVIE_DIR', DISK_MAP_MOVIE_DIR,
+                                               movie_dir_items, sidecar, dry_run,
+                                               is_dir=True, apply_fn=apply_markers_to_dir,
+                                               strip_fn=strip_markers_from_dir, force=force)
         total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
 
     # Save sidecar and cache
