@@ -5558,10 +5558,10 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn("series_dir = show_obj.get('file'", content)
 
     def test_plex2disk_output_has_prefix_and_full_path(self):
-        """Rename output has LIBRARY|TYPE| prefix and shows full path."""
+        """Rename output has LIBRARY|KEY| prefix and shows full path."""
         content = self._read_script()
-        # Log prefix built from library and type
-        self.assertIn("prefix = f\"{lib}|{type_label}| \"", content)
+        # Log prefix built from library and cache_key
+        self.assertIn("prefix = f\"{lib}|{cache_key}| \"", content)
         # Rename lines use prefix and full path on single line
         self.assertIn('Rename: {path}', content)
 
