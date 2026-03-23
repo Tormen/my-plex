@@ -17114,11 +17114,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 if VRB or dry_run:
                     watched_val = sidecar_entry['markers'].get('watched', '')
                     if ts_source == 'plex':
-                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {path}")
+                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {name}")
                     elif ts_source == 'today':
-                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {path}")
+                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {name}")
                     elif ts_source == 'marker':
-                        print(f"  Registered marker ({watched_val}): {path}")
+                        print(f"  Registered marker ({watched_val}): {name}")
 
         # Strip existing markers to get clean name
         # For legacy migration: use clean_name directly (disk has old [vu], sidecar has migrated [vu@...])
@@ -17170,8 +17170,8 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
         display_path = path
 
         if dry_run:
-            print(f"  {display_path}")
-            print(f"    → {new_name}")
+            print(f"  Renaming: {display_path}")
+            print(f"       → {new_name}")
             renamed_count += 1
             renames[path] = new_path
         else:
@@ -17187,7 +17187,7 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 else:
                     _update_cache_filepath(obj, path, new_path)
                 if VRB:
-                    print(f"  {display_path} → {new_name}")
+                    print(f"  Renaming: {display_path} → {new_name}")
             else:
                 error_count += 1
                 print(f"  ERROR renaming: {display_path}")
