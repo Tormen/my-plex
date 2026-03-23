@@ -17114,11 +17114,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 if VRB or dry_run:
                     watched_val = sidecar_entry['markers'].get('watched', '')
                     if ts_source == 'plex':
-                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {name}")
+                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {path}")
                     elif ts_source == 'today':
-                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {name}")
+                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {path}")
                     elif ts_source == 'marker':
-                        print(f"  Registered marker ({watched_val}): {name}")
+                        print(f"  Registered marker ({watched_val}): {path}")
 
         # Strip existing markers to get clean name
         # For legacy migration: use clean_name directly (disk has old [vu], sidecar has migrated [vu@...])
@@ -17150,12 +17150,12 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and aspect in new_markers and not new_markers[aspect]:
                     if force:
-                        print(f"  Removing [{aspect}] (was {old_val}): {clean}")
+                        print(f"  Removing [{aspect}] (was {old_val}): {path}")
                     else:
                         # Additive mode: preserve existing marker, don't remove
                         new_markers[aspect] = old_val
                         if VRB or dry_run:
-                            print(f"  Preserving [{aspect}] ({old_val}): {clean}  (Plex empty; use --force to remove)")
+                            print(f"  Preserving [{aspect}] ({old_val}): {path}  (Plex empty; use --force to remove)")
 
         # Build new name
         new_name = apply_fn(clean, new_markers)
@@ -17166,8 +17166,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
 
         new_path = os.path.join(parent, new_name)
 
+        # Show full path for self-explanatory output
+        display_path = path
+
         if dry_run:
-            print(f"  {name}")
+            print(f"  {display_path}")
             print(f"    → {new_name}")
             renamed_count += 1
             renames[path] = new_path
@@ -17184,10 +17187,10 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 else:
                     _update_cache_filepath(obj, path, new_path)
                 if VRB:
-                    print(f"  {name} → {new_name}")
+                    print(f"  {display_path} → {new_name}")
             else:
                 error_count += 1
-                print(f"  ERROR renaming: {name}")
+                print(f"  ERROR renaming: {display_path}")
 
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
@@ -17330,10 +17333,12 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                 elif type_str == 'Season':
                     season_dir_items.append((filepath, cache_key, obj))
 
-            # Series directory scope (grandparent of episode file, or Show object's own file)
+            # Series directory scope (from Show object's file field, or Show object directly)
             if DISK_MAP_SERIES_DIR:
                 if obj_type == 'Episode':
-                    series_dir = os.path.dirname(os.path.dirname(filepath))
+                    show_key = obj.get('show_key', '')
+                    show_obj = PLEX_Media.OBJ_BY_ID.get(show_key) if show_key else None
+                    series_dir = show_obj.get('file', '') if show_obj else ''
                     if series_dir:
                         series_dir_items.append((series_dir, cache_key, obj))
                 elif type_str == 'Show':
