@@ -4900,20 +4900,20 @@ class TestDiskMap(unittest.TestCase):
     # --- compute_markers ---
 
     def test_compute_markers_basic(self):
-        """Basic marker computation with eval expressions."""
+        """Basic marker computation with eval expressions — bare values without brackets."""
         obj = self._mock_obj()
         fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
               'rating': "RATING_USER"}
         markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], '[vu@2024-03-22]')
-        self.assertEqual(markers['rating'], '[7.5]')
+        self.assertEqual(markers['watched'], 'vu@2024-03-22')
+        self.assertEqual(markers['rating'], '7.5')
 
     def test_compute_markers_compound_expression(self):
         """Compound expression with f-string resolves correctly."""
         obj = self._mock_obj()
         fm = {'info': "f'{RATING_CRITICS}-{COUNTRY}' if RATING_CRITICS else ''"}
         markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['info'], '[8.2-US]')
+        self.assertEqual(markers['info'], '8.2-US')
 
     def test_compute_markers_falsy_skips(self):
         """When expression result is falsy, marker is empty string (skip)."""
@@ -4934,47 +4934,52 @@ class TestDiskMap(unittest.TestCase):
         obj = self._mock_obj()
         fm = {'watched': "'seen' if WATCHED else ''"}
         markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], '[seen]')
+        self.assertEqual(markers['watched'], 'seen')
 
     # --- strip_our_markers ---
 
     def test_strip_our_markers_basic(self):
-        """Strip known markers from filename."""
-        entry = {'markers': {'watched': '[vu]', 'rating': '[7.5]'}}
-        result = strip_our_markers('Movie Title.[vu].[7.5].mkv', entry)
+        """Strip known markers from filename (space+bracket format)."""
+        entry = {'markers': {'watched': 'vu', 'rating': '7.5'}}
+        result = strip_our_markers('Movie Title [vu] [7.5].mkv', entry)
         self.assertEqual(result, 'Movie Title.mkv')
 
     def test_strip_our_markers_no_entry(self):
         """No sidecar entry means no stripping."""
-        result = strip_our_markers('Movie Title.[vu].mkv', None)
-        self.assertEqual(result, 'Movie Title.[vu].mkv')
+        result = strip_our_markers('Movie Title [vu].mkv', None)
+        self.assertEqual(result, 'Movie Title [vu].mkv')
 
     def test_strip_our_markers_empty(self):
         """Empty markers dict means no stripping."""
-        result = strip_our_markers('Movie Title.[vu].mkv', {'markers': {}})
-        self.assertEqual(result, 'Movie Title.[vu].mkv')
+        result = strip_our_markers('Movie Title [vu].mkv', {'markers': {}})
+        self.assertEqual(result, 'Movie Title [vu].mkv')
+
+    def test_strip_our_markers_legacy_dot_format(self):
+        """Strip known markers from filename (legacy dot-separated format)."""
+        entry = {'markers': {'watched': 'vu', 'rating': '7.5'}}
+        result = strip_our_markers('Movie Title.vu.7.5.mkv', entry)
+        self.assertEqual(result, 'Movie Title.mkv')
 
     # --- apply_markers ---
 
     def test_apply_markers_basic(self):
-        """Apply markers to clean filename."""
-        markers = {'watched': '[vu]', 'rating': '[7.5]'}
+        """Apply markers to clean filename — space+bracket format."""
+        markers = {'watched': 'vu', 'rating': '7.5'}
         result = apply_markers('Movie Title.mkv', markers)
-        self.assertEqual(result, 'Movie Title.[rating].[watched].mkv'.replace('[rating]', '[7.5]').replace('[watched]', '[vu]'))
         # Sorted by aspect name: rating before watched
-        self.assertEqual(result, 'Movie Title.[7.5].[vu].mkv')
+        self.assertEqual(result, 'Movie Title [7.5] [vu].mkv')
 
     def test_apply_markers_deterministic_order(self):
         """Markers are sorted by aspect name."""
-        markers = {'z_last': '[Z]', 'a_first': '[A]', 'm_mid': '[M]'}
+        markers = {'z_last': 'Z', 'a_first': 'A', 'm_mid': 'M'}
         result = apply_markers('File.mkv', markers)
-        self.assertEqual(result, 'File.[A].[M].[Z].mkv')
+        self.assertEqual(result, 'File [A] [M] [Z].mkv')
 
     def test_apply_markers_empty_skipped(self):
         """Empty markers are not included."""
-        markers = {'watched': '[vu]', 'rating': ''}
+        markers = {'watched': 'vu', 'rating': ''}
         result = apply_markers('Movie.mkv', markers)
-        self.assertEqual(result, 'Movie.[vu].mkv')
+        self.assertEqual(result, 'Movie [vu].mkv')
 
     def test_apply_markers_all_empty(self):
         """If all markers are empty, filename is unchanged."""
@@ -4986,7 +4991,7 @@ class TestDiskMap(unittest.TestCase):
 
     def test_strip_apply_roundtrip(self):
         """Strip markers then apply same markers gives same filename."""
-        markers = {'watched': '[vu]', 'rating': '[7.5]'}
+        markers = {'watched': 'vu', 'rating': '7.5'}
         original = apply_markers('Movie Title.mkv', markers)
         entry = {'markers': markers}
         stripped = strip_our_markers(original, entry)
@@ -4999,8 +5004,8 @@ class TestDiskMap(unittest.TestCase):
     def test_sidecar_roundtrip(self):
         """Save and load sidecar produces identical data."""
         import tempfile, json
-        sidecar = {'/path/to/file.[vu@2026-03-22].mkv': {
-            'markers': {'watched': '[vu@2026-03-22]'},
+        sidecar = {'/path/to/file [vu@2026-03-22].mkv': {
+            'markers': {'watched': 'vu@2026-03-22'},
             'clean_name': 'file.mkv',
             'last_updated': '2026-03-22'
         }}
@@ -5044,10 +5049,10 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(_extract_legacy_vu_marker('Movie [VU@2026-01-15].mkv'), '[VU@2026-01-15]')
 
     def test_migrate_legacy_vu_sidecar(self):
-        """_migrate_legacy_vu_sidecar creates synthetic sidecar entry."""
+        """_migrate_legacy_vu_sidecar creates synthetic sidecar entry with bare value."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu@2026-01-15].mkv')
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2026-01-15]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2026-01-15')
         self.assertEqual(entry['clean_name'], 'Movie.mkv')
         self.assertEqual(ts_source, 'marker')
         self.assertNotIn('is_dir', entry)
@@ -5071,7 +5076,7 @@ class TestDiskMap(unittest.TestCase):
         obj = {'lastViewedAt': 1711065600}  # 2024-03-22
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu].mkv', obj=obj)
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2024-03-22]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2024-03-22')
         self.assertEqual(ts_source, 'plex')
 
     def test_migrate_legacy_vu_sidecar_bare_uppercase(self):
@@ -5095,10 +5100,10 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn('vu@', entry['markers']['watched'])
 
     def test_migrate_legacy_vu_incomplete_date_padded(self):
-        """Incomplete date [vu@2022-12] is padded to [vu@2022-12-01]."""
+        """Incomplete date [vu@2022-12] is padded to vu@2022-12-01."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi')
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-01]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2022-12-01')
         self.assertEqual(ts_source, 'marker')
 
     def test_migrate_legacy_vu_incomplete_date_plex_in_same_month(self):
@@ -5108,7 +5113,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2022-12-15', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-15]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2022-12-15')
         self.assertEqual(ts_source, 'plex')
 
     def test_migrate_legacy_vu_incomplete_date_plex_newer(self):
@@ -5117,7 +5122,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2023-05-10', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2023-05-10]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2023-05-10')
         self.assertEqual(ts_source, 'plex')
 
     def test_migrate_legacy_vu_incomplete_date_plex_older(self):
@@ -5126,7 +5131,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2022-06-01', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
-        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-01]')
+        self.assertEqual(entry['markers']['watched'], 'vu@2022-12-01')
         self.assertEqual(ts_source, 'marker')
 
     # --- source inspection ---
@@ -5241,8 +5246,8 @@ class TestDiskMap(unittest.TestCase):
     # --- dir markers ---
 
     def test_apply_markers_to_dir_basic(self):
-        """Apply markers to directory name (space-separated)."""
-        markers = {'watched': '[vu@2026-03-22]', 'rating': '[7.5]'}
+        """Apply markers to directory name (space+brackets)."""
+        markers = {'watched': 'vu@2026-03-22', 'rating': '7.5'}
         result = apply_markers_to_dir('Movie (2024)', markers)
         # Sorted by aspect name: rating before watched
         self.assertEqual(result, 'Movie (2024) [7.5] [vu@2026-03-22]')
@@ -5254,8 +5259,8 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(result, 'Movie (2024)')
 
     def test_strip_markers_from_dir_basic(self):
-        """Strip known markers from directory name."""
-        entry = {'markers': {'watched': '[vu@2026-03-22]', 'rating': '[7.5]'}}
+        """Strip known markers from directory name (bare values in sidecar)."""
+        entry = {'markers': {'watched': 'vu@2026-03-22', 'rating': '7.5'}}
         result = strip_markers_from_dir('Movie (2024) [7.5] [vu@2026-03-22]', entry)
         self.assertEqual(result, 'Movie (2024)')
 
@@ -5268,48 +5273,48 @@ class TestDiskMap(unittest.TestCase):
 
     def test_merge_marker_plex_strategy(self):
         """'plex' strategy: Plex always wins."""
-        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'plex'})
-        self.assertEqual(result, '[vu@2026-03-22]')
+        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'plex'})
+        self.assertEqual(result, 'vu@2026-03-22')
 
     def test_merge_marker_disk_strategy(self):
         """'disk' strategy: disk always wins."""
-        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'disk'})
-        self.assertEqual(result, '[vu@2026-01-15]')
+        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'disk'})
+        self.assertEqual(result, 'vu@2026-01-15')
 
     def test_merge_marker_newer_plex_wins(self):
         """'newer' strategy: Plex wins when newer timestamp."""
-        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'newer'})
-        self.assertEqual(result, '[vu@2026-03-22]')
+        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'newer'})
+        self.assertEqual(result, 'vu@2026-03-22')
 
     def test_merge_marker_newer_disk_wins(self):
         """'newer' strategy: disk wins when newer timestamp."""
-        result = _merge_marker('watched', '[vu@2026-01-15]', '[vu@2026-03-22]', {'watched': 'newer'})
-        self.assertEqual(result, '[vu@2026-03-22]')
+        result = _merge_marker('watched', 'vu@2026-01-15', 'vu@2026-03-22', {'watched': 'newer'})
+        self.assertEqual(result, 'vu@2026-03-22')
 
     def test_merge_marker_newer_with_time(self):
         """'newer' strategy: timestamp with time precision."""
-        result = _merge_marker('watched', '[vu@2026-03-22_1923]', '[vu@2026-03-22_0800]', {'watched': 'newer'})
-        self.assertEqual(result, '[vu@2026-03-22_1923]')
+        result = _merge_marker('watched', 'vu@2026-03-22_1923', 'vu@2026-03-22_0800', {'watched': 'newer'})
+        self.assertEqual(result, 'vu@2026-03-22_1923')
 
     def test_merge_marker_no_existing(self):
         """No existing value on disk → use Plex value."""
-        result = _merge_marker('watched', '[vu@2026-03-22]', '', {'watched': 'newer'})
-        self.assertEqual(result, '[vu@2026-03-22]')
+        result = _merge_marker('watched', 'vu@2026-03-22', '', {'watched': 'newer'})
+        self.assertEqual(result, 'vu@2026-03-22')
 
     def test_merge_marker_no_new_newer(self):
         """Plex empty + 'newer' strategy → keep disk value."""
-        result = _merge_marker('watched', '', '[vu@2026-01-15]', {'watched': 'newer'})
-        self.assertEqual(result, '[vu@2026-01-15]')
+        result = _merge_marker('watched', '', 'vu@2026-01-15', {'watched': 'newer'})
+        self.assertEqual(result, 'vu@2026-01-15')
 
     def test_merge_marker_no_new_plex(self):
         """Plex empty + 'plex' strategy → clear marker."""
-        result = _merge_marker('watched', '', '[vu@2026-01-15]', {'watched': 'plex'})
+        result = _merge_marker('watched', '', 'vu@2026-01-15', {'watched': 'plex'})
         self.assertEqual(result, '')
 
     def test_merge_marker_default_strategy(self):
         """Aspect not in merge config defaults to 'plex'."""
-        result = _merge_marker('rating', '[8.0]', '[7.5]', {})
-        self.assertEqual(result, '[8.0]')
+        result = _merge_marker('rating', '8.0', '7.5', {})
+        self.assertEqual(result, '8.0')
 
     # --- _PLEX_WRITABLE_FIELDS ---
 
@@ -5462,14 +5467,15 @@ class TestDiskMap(unittest.TestCase):
         try:
             # Even with 'plex' strategy, additive mode preserves existing markers
             main_mod.DISK_MAP_MERGE = {'watched': 'plex'}
-            sidecar = {'/fake/Movie.vu@2026-01-15.mkv': {
+            # Use bracket format (current standard) so no format migration rename
+            sidecar = {'/fake/Movie [vu@2026-01-15].mkv': {
                 'markers': {'watched': 'vu@2026-01-15'},
                 'clean_name': 'Movie.mkv',
                 'last_updated': '2026-01-15'
             }}
             obj = {'type': 'Movie', 'type_str': 'Movie', 'viewCount': 0, 'lastViewedAt': None,
                    'title': 'TestMovie', 'library': 'movies'}
-            items = [('/fake/Movie.vu@2026-01-15.mkv', 'Movie:1', obj)]
+            items = [('/fake/Movie [vu@2026-01-15].mkv', 'Movie:1', obj)]
             config = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
 
             buf = io.StringIO()
