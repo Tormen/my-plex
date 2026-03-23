@@ -3378,8 +3378,9 @@ def compute_markers(obj, cache_key, disk_map):
     """Compute resolved marker strings for each aspect in disk_map.
 
     Each aspect value is a Python expression evaluated with metadata variables in scope.
-    Truthy results are converted to string and wrapped in [...].
+    Truthy results are converted to string (bare value, no brackets).
     Falsy results (empty string, None, 0, False) → empty string (marker skipped).
+    Brackets are added by apply_markers() / apply_markers_to_dir() during filename construction.
 
     Args:
         obj: Cache entry dict from PLEX_Media.OBJ_BY_ID
@@ -3387,7 +3388,7 @@ def compute_markers(obj, cache_key, disk_map):
         disk_map: DISK_MAP config dict (aspect → Python expression string)
 
     Returns:
-        dict[str, str]: Maps aspect name to resolved marker string (e.g. '[vu@2026-03-22]').
+        dict[str, str]: Maps aspect name to resolved marker value (e.g. 'vu@2026-03-22').
                         Empty string means "skip this marker".
     """
     variables = resolve_disk_map_variables(obj, cache_key)
@@ -3398,13 +3399,17 @@ def compute_markers(obj, cache_key, disk_map):
         except Exception:
             result = None
         if result:
-            markers[aspect] = f'[{result}]'
+            markers[aspect] = str(result)
         else:
             markers[aspect] = ''
     return markers
 
 def strip_our_markers(filename, sidecar_entry):
     """Strip markers that we previously added (tracked in sidecar) from a filename.
+
+    Handles both formats:
+      - Space+brackets: "Movie [vu@2026-01-15].mkv"  (preferred)
+      - Dot-separated:  "Movie.vu@2026-01-15.mkv"    (legacy)
 
     Args:
         filename: Current filename (basename, not full path)
@@ -3417,28 +3422,41 @@ def strip_our_markers(filename, sidecar_entry):
         return filename
     for aspect in sorted(sidecar_entry['markers'].keys()):
         marker_value = sidecar_entry['markers'][aspect]
-        if marker_value and f'.{marker_value}' in filename:
-            filename = filename.replace(f'.{marker_value}', '', 1)
+        if not marker_value:
+            continue
+        # Normalize: strip brackets if sidecar still has old format
+        bare = marker_value.strip('[]')
+        # Try space+brackets format first, then dot-separated (legacy)
+        bracketed = f' [{bare}]'
+        if bracketed in filename:
+            filename = filename.replace(bracketed, '', 1)
+        elif f'.{bare}' in filename:
+            filename = filename.replace(f'.{bare}', '', 1)
     return filename
 
 def apply_markers(clean_filename, markers):
     """Insert non-empty markers into filename before extension, sorted by aspect name.
+
+    Format: space + brackets before extension.
+    Example: "Movie Title [vu@2026-03-22].mkv"
 
     Args:
         clean_filename: Filename without our markers (basename)
         markers: dict[str, str] from compute_markers()
 
     Returns:
-        str: Filename with markers inserted, e.g. "Movie Title.[vu].[7.5].mkv"
+        str: Filename with markers inserted
     """
     name, ext = os.path.splitext(clean_filename)
     # Build marker string from non-empty markers, sorted by aspect name
     marker_parts = []
     for aspect in sorted(markers.keys()):
-        if markers[aspect]:  # skip empty markers
-            marker_parts.append(markers[aspect])
+        val = markers[aspect]
+        if val:  # skip empty markers
+            bare = val.strip('[]')  # normalize: strip brackets if present
+            marker_parts.append(f'[{bare}]')
     if marker_parts:
-        return name + '.' + '.'.join(marker_parts) + ext
+        return name + ' ' + ' '.join(marker_parts) + ext
     return clean_filename
 
 def apply_markers_to_dir(clean_dirname, markers):
@@ -3446,15 +3464,17 @@ def apply_markers_to_dir(clean_dirname, markers):
 
     Args:
         clean_dirname: Directory name without our markers
-        markers: dict[str, str] from compute_markers()
+        markers: dict[str, str] from compute_markers() — bare values without brackets
 
     Returns:
         str: Directory name with markers appended, e.g. "Movie (2024) [vu@2026-03-22]"
     """
     marker_parts = []
     for aspect in sorted(markers.keys()):
-        if markers[aspect]:
-            marker_parts.append(markers[aspect])
+        val = markers[aspect]
+        if val:
+            bare = val.strip('[]')  # normalize: strip brackets if present
+            marker_parts.append(f'[{bare}]')
     if marker_parts:
         return clean_dirname + ' ' + ' '.join(marker_parts)
     return clean_dirname
@@ -3462,9 +3482,13 @@ def apply_markers_to_dir(clean_dirname, markers):
 def strip_markers_from_dir(dirname, sidecar_entry):
     """Strip markers that we previously added (tracked in sidecar) from a directory name.
 
+    Handles both formats (bare value stored in sidecar):
+      - Bracketed: "Movie (2024) [vu@2026-01-15]"  (preferred)
+      - Bare:      "Movie (2024) vu@2026-01-15"     (legacy)
+
     Args:
         dirname: Current directory name (basename, not full path)
-        sidecar_entry: Dict with 'markers' key, or None
+        sidecar_entry: Dict with 'markers' key (bare values without brackets), or None
 
     Returns:
         str: Directory name with our markers removed
@@ -3473,8 +3497,16 @@ def strip_markers_from_dir(dirname, sidecar_entry):
         return dirname
     for aspect in sorted(sidecar_entry['markers'].keys()):
         marker_value = sidecar_entry['markers'][aspect]
-        if marker_value and f' {marker_value}' in dirname:
-            dirname = dirname.replace(f' {marker_value}', '', 1)
+        if not marker_value:
+            continue
+        # Normalize: strip brackets if sidecar still has old format
+        bare = marker_value.strip('[]')
+        # Try bracketed format first, then bare (legacy)
+        bracketed = f' [{bare}]'
+        if bracketed in dirname:
+            dirname = dirname.replace(bracketed, '', 1)
+        elif f' {bare}' in dirname:
+            dirname = dirname.replace(f' {bare}', '', 1)
     return dirname
 
 def _merge_marker(aspect, new_value, existing_value, merge_config):
@@ -15120,7 +15152,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("CONFIGURATION (in ~/.my-plex/my-plex.conf):")
             print()
-            print("  # File markers (before extension, dot-separated)")
+            print("  # File markers (space+brackets before extension)")
             print("  DISK_MAP = {'watched': \"'vu@' + WATCHED_DATE if WATCHED else ''\"}")
             print()
             print("  # Directory markers (appended, space-separated)")
@@ -17019,7 +17051,9 @@ def _migrate_legacy_vu_sidecar(name, is_dir=False, obj=None):
     else:
         clean = name.replace(f'.{vu_marker}', '').replace(f' {vu_marker}', '').replace(vu_marker, '')
     clean = clean.rstrip('. ')  # remove trailing dots/spaces from stripping
-    entry = {'markers': {'watched': migrated_marker}, 'clean_name': clean}
+    # Store bare value without brackets (brackets are added by apply_markers/apply_markers_to_dir)
+    bare_value = migrated_marker.strip('[]')
+    entry = {'markers': {'watched': bare_value}, 'clean_name': clean}
     if is_dir:
         entry['is_dir'] = True
     return entry, ts_source
@@ -17595,16 +17629,16 @@ def cmd_disk2plex(target, dry_run=False, force=False):
                 # Resolve current Plex metadata for comparison
                 variables = resolve_disk_map_variables(obj, cache_key)
 
-                # Compute what Plex currently has for this aspect
+                # Compute what Plex currently has for this aspect (bare value, no brackets)
                 plex_value = ''
                 if plex_field == 'WATCHED' and variables.get('WATCHED'):
-                    plex_value = f"[vu@{variables.get('WATCHED_DATE', '')}]" if variables.get('WATCHED_DATE') else '[vu]'
+                    plex_value = f"vu@{variables.get('WATCHED_DATE', '')}" if variables.get('WATCHED_DATE') else 'vu'
                 elif plex_field == 'RATING_USER' and variables.get('RATING_USER') is not None:
-                    plex_value = f"[{variables['RATING_USER']}]"
+                    plex_value = str(variables['RATING_USER'])
                 elif plex_field == 'LABELS' and variables.get('LABELS'):
-                    plex_value = f"[{variables['LABELS']}]"
+                    plex_value = variables['LABELS']
                 elif plex_field == 'COLLECTIONS' and variables.get('COLLECTIONS'):
-                    plex_value = f"[{variables['COLLECTIONS']}]"
+                    plex_value = variables['COLLECTIONS']
 
                 # --force with no disk marker: remove value from Plex
                 if not disk_value and force:
@@ -17714,46 +17748,42 @@ def cmd_disk2plex(target, dry_run=False, force=False):
 
                 elif plex_field == 'RATING_USER':
                     try:
-                        # Extract numeric rating from marker like [7.5]
-                        rating_match = re.search(r'\[(\d+\.?\d*)\]', disk_value)
-                        if rating_match:
-                            rating_val = float(rating_match.group(1))
-                            if not dry_run:
-                                plex = ensure_plex_api()
-                                item_id = obj.get('item_id')
-                                if item_id:
-                                    media = plex.fetchItem(int(item_id))
-                                    media.userRating = rating_val
-                                    media.save()
-                                    print(f"  Pushed rating {rating_val} to Plex: {media.title}")
-                                    pushed_count += 1
-                                else:
-                                    error_count += 1
-                            else:
-                                print(f"  Would set rating to {rating_val}: {obj.get('title', cache_key)}")
+                        # Bare numeric rating value e.g. '7.5'
+                        rating_val = float(disk_value)
+                        if not dry_run:
+                            plex = ensure_plex_api()
+                            item_id = obj.get('item_id')
+                            if item_id:
+                                media = plex.fetchItem(int(item_id))
+                                media.userRating = rating_val
+                                media.save()
+                                print(f"  Pushed rating {rating_val} to Plex: {media.title}")
                                 pushed_count += 1
-                    except Exception as ex:
+                            else:
+                                error_count += 1
+                        else:
+                            print(f"  Would set rating to {rating_val}: {obj.get('title', cache_key)}")
+                            pushed_count += 1
+                    except (ValueError, Exception) as ex:
                         print(f"  ERROR pushing rating for {cache_key}: {ex}")
                         error_count += 1
 
                 elif plex_field == 'LABELS':
                     try:
-                        # Extract label from marker like [label_name]
-                        label_match = re.search(r'\[([^\]]+)\]', disk_value)
-                        if label_match:
-                            label = label_match.group(1)
+                        # Bare label value e.g. 'my-label'
+                        if disk_value:
                             if not dry_run:
                                 plex = ensure_plex_api()
                                 item_id = obj.get('item_id')
                                 if item_id:
                                     media = plex.fetchItem(int(item_id))
-                                    media.addLabel(label)
-                                    print(f"  Pushed label '{label}' to Plex: {media.title}")
+                                    media.addLabel(disk_value)
+                                    print(f"  Pushed label '{disk_value}' to Plex: {media.title}")
                                     pushed_count += 1
                                 else:
                                     error_count += 1
                             else:
-                                print(f"  Would add label '{label}': {obj.get('title', cache_key)}")
+                                print(f"  Would add label '{disk_value}': {obj.get('title', cache_key)}")
                                 pushed_count += 1
                     except Exception as ex:
                         print(f"  ERROR pushing label for {cache_key}: {ex}")
@@ -17761,21 +17791,19 @@ def cmd_disk2plex(target, dry_run=False, force=False):
 
                 elif plex_field == 'COLLECTIONS':
                     try:
-                        coll_match = re.search(r'\[([^\]]+)\]', disk_value)
-                        if coll_match:
-                            collection = coll_match.group(1)
+                        if disk_value:
                             if not dry_run:
                                 plex = ensure_plex_api()
                                 item_id = obj.get('item_id')
                                 if item_id:
                                     media = plex.fetchItem(int(item_id))
-                                    media.addCollection(collection)
-                                    print(f"  Pushed collection '{collection}' to Plex: {media.title}")
+                                    media.addCollection(disk_value)
+                                    print(f"  Pushed collection '{disk_value}' to Plex: {media.title}")
                                     pushed_count += 1
                                 else:
                                     error_count += 1
                             else:
-                                print(f"  Would add collection '{collection}': {obj.get('title', cache_key)}")
+                                print(f"  Would add collection '{disk_value}': {obj.get('title', cache_key)}")
                                 pushed_count += 1
                     except Exception as ex:
                         print(f"  ERROR pushing collection for {cache_key}: {ex}")
