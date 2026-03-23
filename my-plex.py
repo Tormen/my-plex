@@ -17126,11 +17126,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 if VRB or dry_run:
                     watched_val = sidecar_entry['markers'].get('watched', '')
                     if ts_source == 'plex':
-                        print(f"  {prefix}Registered marker (bare [vu] → {watched_val} from Plex): {name}")
+                        print(f"{prefix}Registered marker (bare [vu] → {watched_val} from Plex): {name}")
                     elif ts_source == 'today':
-                        print(f"  {prefix}Registered marker (bare [vu] → {watched_val} using today): {name}")
+                        print(f"{prefix}Registered marker (bare [vu] → {watched_val} using today): {name}")
                     elif ts_source == 'marker':
-                        print(f"  {prefix}Registered marker ({watched_val}): {name}")
+                        print(f"{prefix}Registered marker ({watched_val}): {name}")
 
         # Strip existing markers to get clean name
         # For legacy migration: use clean_name directly (disk has old [vu], sidecar has migrated [vu@...])
@@ -17162,12 +17162,12 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and aspect in new_markers and not new_markers[aspect]:
                     if force:
-                        print(f"  {prefix}Removing [{aspect}] (was {old_val}): {name}")
+                        print(f"{prefix}Removing [{aspect}] (was {old_val}): {name}")
                     else:
                         # Additive mode: preserve existing marker, don't remove
                         new_markers[aspect] = old_val
                         if VRB or dry_run:
-                            print(f"  {prefix}Preserving [{aspect}] ({old_val}): {name}  (Plex empty; use --force to remove)")
+                            print(f"{prefix}Preserving [{aspect}] ({old_val}): {name}  (Plex empty; use --force to remove)")
 
         # Build new name
         new_name = apply_fn(clean, new_markers)
@@ -17179,7 +17179,7 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
         new_path = os.path.join(parent, new_name)
 
         if dry_run:
-            print(f"  {prefix}Rename: {path} → {new_name}")
+            print(f"{prefix}Rename: {path} → {new_name}")
             renamed_count += 1
             renames[path] = new_path
         else:
@@ -17195,10 +17195,10 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 else:
                     _update_cache_filepath(obj, path, new_path)
                 if VRB:
-                    print(f"  {prefix}Rename: {path} → {new_name}")
+                    print(f"{prefix}Rename: {path} → {new_name}")
             else:
                 error_count += 1
-                print(f"  {prefix}ERROR renaming: {path}")
+                print(f"{prefix}ERROR renaming: {path}")
 
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
@@ -17359,7 +17359,7 @@ def cmd_plex2disk(target, dry_run=False, force=False):
     # Files
     if file_items:
         if dry_run or VRB:
-            print(f"\n  Files ({len(file_items)}):")
+            print(f"\nFiles ({len(file_items)}):")
         r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP', DISK_MAP,
                                                file_items, sidecar, dry_run,
                                                is_dir=False, apply_fn=apply_markers,
@@ -17369,7 +17369,7 @@ def cmd_plex2disk(target, dry_run=False, force=False):
     # Season dirs
     if season_dir_items:
         if dry_run or VRB:
-            print(f"\n  Season directories ({len(set(p for p,_,_ in season_dir_items))} unique):")
+            print(f"\nSeason directories ({len(set(p for p,_,_ in season_dir_items))} unique):")
         r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SEASON_DIR', DISK_MAP_SEASON_DIR,
                                                season_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
@@ -17379,7 +17379,7 @@ def cmd_plex2disk(target, dry_run=False, force=False):
     # Series dirs
     if series_dir_items:
         if dry_run or VRB:
-            print(f"\n  Series directories ({len(set(p for p,_,_ in series_dir_items))} unique):")
+            print(f"\nSeries directories ({len(set(p for p,_,_ in series_dir_items))} unique):")
         r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SERIES_DIR', DISK_MAP_SERIES_DIR,
                                                series_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
@@ -17389,7 +17389,7 @@ def cmd_plex2disk(target, dry_run=False, force=False):
     # Movie dirs
     if movie_dir_items:
         if dry_run or VRB:
-            print(f"\n  Movie directories ({len(set(p for p,_,_ in movie_dir_items))} unique):")
+            print(f"\nMovie directories ({len(set(p for p,_,_ in movie_dir_items))} unique):")
         r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_MOVIE_DIR', DISK_MAP_MOVIE_DIR,
                                                movie_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
