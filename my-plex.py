@@ -17356,10 +17356,13 @@ def cmd_plex2disk(target, dry_run=False, force=False):
     # Innermost first: renaming a child doesn't affect parent paths.
     # After each dir rename, update child paths in cache + sidecar.
 
+    # Per-scope stats for summary
+    scope_stats = []
+
     # Files
     if DISK_MAP:
         n_files = len(set(p for p,_,_ in file_items))
-        if dry_run or VRB:
+        if VRB:
             print(f"\nFiles ({n_files}):")
         if file_items:
             r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP', DISK_MAP,
@@ -17367,13 +17370,12 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                    is_dir=False, apply_fn=apply_markers,
                                                    strip_fn=strip_our_markers, force=force)
             total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-            if dry_run or VRB:
-                print(f"  → {r} renamed, {s} unchanged")
+            scope_stats.append(f"Files: {r} renamed, {s} unchanged (of {n_files})")
 
     # Season dirs
     if DISK_MAP_SEASON_DIR:
         n_seasons = len(set(p for p,_,_ in season_dir_items))
-        if dry_run or VRB:
+        if VRB:
             print(f"\nSeason directories ({n_seasons} unique):")
         if season_dir_items:
             r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SEASON_DIR', DISK_MAP_SEASON_DIR,
@@ -17381,13 +17383,12 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                    is_dir=True, apply_fn=apply_markers_to_dir,
                                                    strip_fn=strip_markers_from_dir, force=force)
             total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-            if dry_run or VRB:
-                print(f"  → {r} renamed, {s} unchanged")
+            scope_stats.append(f"Season dirs: {r} renamed, {s} unchanged (of {n_seasons})")
 
     # Series dirs
     if DISK_MAP_SERIES_DIR:
         n_series = len(set(p for p,_,_ in series_dir_items))
-        if dry_run or VRB:
+        if VRB:
             print(f"\nSeries directories ({n_series} unique):")
         if series_dir_items:
             r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_SERIES_DIR', DISK_MAP_SERIES_DIR,
@@ -17395,13 +17396,12 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                    is_dir=True, apply_fn=apply_markers_to_dir,
                                                    strip_fn=strip_markers_from_dir, force=force)
             total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-            if dry_run or VRB:
-                print(f"  → {r} renamed, {s} unchanged")
+            scope_stats.append(f"Series dirs: {r} renamed, {s} unchanged (of {n_series})")
 
     # Movie dirs
     if DISK_MAP_MOVIE_DIR:
         n_movies = len(set(p for p,_,_ in movie_dir_items))
-        if dry_run or VRB:
+        if VRB:
             print(f"\nMovie directories ({n_movies} unique):")
         if movie_dir_items:
             r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP_MOVIE_DIR', DISK_MAP_MOVIE_DIR,
@@ -17409,8 +17409,7 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                    is_dir=True, apply_fn=apply_markers_to_dir,
                                                    strip_fn=strip_markers_from_dir, force=force)
             total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
-            if dry_run or VRB:
-                print(f"  → {r} renamed, {s} unchanged")
+            scope_stats.append(f"Movie dirs: {r} renamed, {s} unchanged (of {n_movies})")
 
     # Save sidecar and cache
     if not dry_run and total_renamed > 0:
@@ -17418,8 +17417,11 @@ def cmd_plex2disk(target, dry_run=False, force=False):
         update_and_save_cache(CACHE)
 
     # Summary
-    prefix = "Would rename" if dry_run else "Renamed"
-    print(f"\n  {prefix}: {total_renamed}, unchanged: {total_skipped}, warnings: {total_warnings}, errors: {total_errors}")
+    label = "Would rename" if dry_run else "Renamed"
+    print(f"\n{label}: {total_renamed}, unchanged: {total_skipped}, warnings: {total_warnings}, errors: {total_errors}")
+    if VRB:
+        for stat in scope_stats:
+            print(f"  {stat}")
 
 def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
     """Strip markers from a set of paths using sidecar data.
