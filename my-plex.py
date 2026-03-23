@@ -15194,9 +15194,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("    If a SERIES or SEASON dir is marked as watched (on disk or in Plex),")
             print("    then ALL child episodes/seasons are considered watched.")
             print()
-            print("LEGACY MARKER MIGRATION:")
-            print("  Existing watched markers without a date are auto-detected and migrated.")
-            print("  The marker value from DISK_MAP is used. Date sources, in priority order:")
+            print("MARKER REGISTRATION:")
+            print("  Existing markers on disk are auto-detected and registered in the sidecar.")
+            print("  Bare [vu] markers (without date) are upgraded. Date sources, in priority order:")
             print("    1. Plex lastViewedAt (if available and newer)")
             print("    2. Existing date in marker (padded to full date if incomplete)")
             print("    3. Today's date (fallback)")
@@ -17114,11 +17114,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 if VRB or dry_run:
                     watched_val = sidecar_entry['markers'].get('watched', '')
                     if ts_source == 'plex':
-                        print(f"  Migrated legacy marker: {name}  (Plex lastViewedAt → {watched_val})")
+                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {name}")
                     elif ts_source == 'today':
-                        print(f"  Migrated legacy marker: {name}  (no Plex date — using today → {watched_val})")
+                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {name}")
                     elif ts_source == 'marker':
-                        print(f"  Migrated legacy marker: {name}  (timestamp from marker → {watched_val})")
+                        print(f"  Registered marker ({watched_val}): {name}")
 
         # Strip existing markers to get clean name
         # For legacy migration: use clean_name directly (disk has old [vu], sidecar has migrated [vu@...])
@@ -17859,7 +17859,7 @@ def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None
         src_basename = os.path.basename(src_path)
         src_entry, ts_source = _migrate_legacy_vu_sidecar(src_basename)
         if src_entry and VRB:
-            print(f"  Migrated legacy marker from {src_basename} ({ts_source})")
+            print(f"  Registered marker from {src_basename} ({ts_source})")
 
     if not src_entry:
         if owns_sidecar:
@@ -17923,7 +17923,7 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
         src_dirname = os.path.basename(src_dir)
         src_entry, ts_source = _migrate_legacy_vu_sidecar(src_dirname, is_dir=True)
         if src_entry and VRB:
-            print(f"  Migrated legacy marker from dir {src_dirname} ({ts_source})")
+            print(f"  Registered marker from dir {src_dirname} ({ts_source})")
 
     if not src_entry:
         if owns_sidecar:
