@@ -14305,7 +14305,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -15069,6 +15069,29 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'plex-disk-sync' | 'plex_disk_sync' | 'sync':
+            print()
+            print("=" * 76)
+            print("BIDIRECTIONAL SYNC (--plex-disk-sync / --sync) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --plex-disk-sync [--dry-run]              # All libraries")
+            print("       my-plex --plex-disk-sync <TARGET> [--dry-run]     # One library/item")
+            print("       my-plex --sync [--dry-run]                        # Alias")
+            print()
+            print("  Runs both directions in sequence:")
+            print("    Phase 1: --disk2plex  Push manual disk changes to Plex")
+            print("    Phase 2: --plex2disk  Write unified state back to disk")
+            print()
+            print("  This ensures manual marker edits on disk are picked up by Plex first,")
+            print("  then the now-unified state is written back to all files and directories.")
+            print()
+            print("  Supports --dry-run to preview without making changes.")
+            print("  See --help plex2disk and --help disk2plex for configuration details.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'plex2disk' | 'map-to-filename' | 'map_to_filename':
             print()
             print("=" * 76)
@@ -15155,6 +15178,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Uses DISK_MAP_MERGE to resolve conflicts (e.g. 'newer' keeps most recent).")
             print()
             print("  Only Plex-writable fields are supported: WATCHED, RATING_USER, LABELS, COLLECTIONS")
+            print()
+            print("  IMPORTANT: --disk2plex is ADDITIVE ONLY. If a file has no watched marker")
+            print("  on disk, Plex is NOT changed. Absence of a marker never removes metadata.")
             print()
             print("CONFIGURATION:")
             print("  DISK_MAP_PUSH = {'watched': 'WATCHED'}  # aspect → Plex field")
@@ -17508,7 +17534,7 @@ def cmd_disk2plex(target, dry_run=False):
             for aspect, plex_field in DISK_MAP_PUSH.items():
                 disk_value = sidecar_entry['markers'].get(aspect, '')
                 if not disk_value:
-                    continue
+                    continue  # Additive only: no disk marker → don't touch Plex
 
                 # Check if field is writable for this object type
                 writable = _PLEX_WRITABLE_FIELDS.get(obj_type, set())
@@ -20166,6 +20192,18 @@ def execute_global_commands(args, cmd_args):
         cmd_sort_new(args, dry_run=dry_run)
         sys.exit(0)
 
+    # Handle --plex-disk-sync / --sync (bidirectional: disk2plex first, then plex2disk)
+    sync_target = safe_getattr(cmd_args, 'plex_disk_sync', None) or safe_getattr(cmd_args, 'sync', None)
+    if sync_target is not None:
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        target = sync_target if sync_target is not True else None
+        print("=== Phase 1: Syncing disk markers → Plex ===")
+        cmd_disk2plex(target, dry_run=dry_run)
+        print()
+        print("=== Phase 2: Syncing Plex metadata → disk ===")
+        cmd_plex2disk(target, dry_run=dry_run)
+        sys.exit(0)
+
     # Handle --plex2disk command (and --map-to-filename alias)
     plex2disk_target = safe_getattr(cmd_args, 'plex2disk', None) or safe_getattr(cmd_args, 'map_to_filename', None)
     if plex2disk_target is not None:
@@ -20764,6 +20802,8 @@ def main():
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--disk2plex', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--plex-disk-sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--clean', action='store_true', default=False, help=argparse.SUPPRESS)
     main_parser.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
     main_parser.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
@@ -20827,6 +20867,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). TARGET: library name or media item. Without TARGET: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='TARGET', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
+    GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='TARGET', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
     GLOBAL_CMD_PARSER.add_argument('--clean', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
     GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
     GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
@@ -20925,6 +20967,8 @@ def main():
                 '--sort-new':                'sort-new',
                 '--plex2disk':               'plex2disk',
                 '--disk2plex':               'disk2plex',
+                '--plex-disk-sync':          'plex-disk-sync',
+                '--sync':                    'plex-disk-sync',
                 '--map-to-filename':         'plex2disk',
                 '--map-from-filename':       'plex2disk',
                 '--rename':                  'rename',

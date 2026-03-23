@@ -5217,6 +5217,26 @@ class TestDiskMap(unittest.TestCase):
             capture_output=True, text=True, timeout=30
         )
         self.assertEqual(result.returncode, 0)
+        self.assertIn('ADDITIVE ONLY', result.stdout)
+
+    def test_help_plex_disk_sync(self):
+        """--help plex-disk-sync should print help and exit 0."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'plex-disk-sync'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('Phase 1', result.stdout)
+        self.assertIn('Phase 2', result.stdout)
+
+    def test_help_sync_alias(self):
+        """--help sync should route to plex-disk-sync help."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'sync'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('BIDIRECTIONAL SYNC', result.stdout)
 
     # --- dir markers ---
 
