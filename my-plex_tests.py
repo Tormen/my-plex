@@ -5548,6 +5548,22 @@ class TestDiskMap(unittest.TestCase):
         content = self._read_script()
         self.assertIn('cmd_disk2plex(target, dry_run=dry_run, force=force)', content)
 
+    def test_series_dir_uses_show_obj_not_dirname(self):
+        """Series dir routing uses Show object's file field, not dirname(dirname(filepath))."""
+        content = self._read_script()
+        # Must NOT use os.path.dirname(os.path.dirname(filepath)) for series dirs
+        # Instead should look up show_key and use the Show object's file field
+        self.assertIn("show_key = obj.get('show_key'", content)
+        self.assertIn("show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)", content)
+        self.assertIn("series_dir = show_obj.get('file'", content)
+
+    def test_plex2disk_output_shows_full_path(self):
+        """Rename output shows full path, not just basename."""
+        content = self._read_script()
+        # The display_path variable should be used for output
+        self.assertIn('display_path = path', content)
+        self.assertIn('{display_path}', content)
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [
