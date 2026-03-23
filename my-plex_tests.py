@@ -5427,6 +5427,121 @@ class TestDiskMap(unittest.TestCase):
         # Season only supports WATCHED
         self.assertEqual(_PLEX_WRITABLE_FIELDS['Season'], {'WATCHED'})
 
+    # --- --force tests ---
+
+    def test_plex2disk_process_scope_force_removes_marker(self):
+        """--force: when Plex has no value, marker is removed from disk."""
+        # File markers use dot-separated format WITHOUT brackets: Movie.vu@DATE.mkv
+        sidecar = {'/fake/Movie.vu@2026-01-15.mkv': {
+            'markers': {'watched': 'vu@2026-01-15'},
+            'clean_name': 'Movie.mkv',
+            'last_updated': '2026-01-15'
+        }}
+        obj = {'type': 'Movie', 'type_str': 'Movie', 'viewCount': 0, 'lastViewedAt': None,
+               'title': 'TestMovie', 'library': 'movies'}
+        items = [('/fake/Movie.vu@2026-01-15.mkv', 'Movie:1', obj)]
+        config = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+
+        buf = io.StringIO()
+        import contextlib
+        with contextlib.redirect_stdout(buf):
+            r, s, w, e, renames = _plex2disk_process_scope(
+                'DISK_MAP', config, items, sidecar, dry_run=True,
+                is_dir=False, apply_fn=apply_markers, strip_fn=strip_our_markers,
+                force=True)
+        output = buf.getvalue()
+        # Force should rename the file (remove marker)
+        self.assertEqual(r, 1, f"Expected 1 rename, got {r}. Output: {output}")
+        self.assertIn('Removing', output)
+
+    def test_plex2disk_process_scope_no_force_preserves(self):
+        """Without --force: existing marker is preserved even when Plex is empty."""
+        # Access main module globals via the function's module
+        main_mod = sys.modules[_plex2disk_process_scope.__module__]
+        saved_merge = main_mod.DISK_MAP_MERGE
+        try:
+            # Even with 'plex' strategy, additive mode preserves existing markers
+            main_mod.DISK_MAP_MERGE = {'watched': 'plex'}
+            sidecar = {'/fake/Movie.vu@2026-01-15.mkv': {
+                'markers': {'watched': 'vu@2026-01-15'},
+                'clean_name': 'Movie.mkv',
+                'last_updated': '2026-01-15'
+            }}
+            obj = {'type': 'Movie', 'type_str': 'Movie', 'viewCount': 0, 'lastViewedAt': None,
+                   'title': 'TestMovie', 'library': 'movies'}
+            items = [('/fake/Movie.vu@2026-01-15.mkv', 'Movie:1', obj)]
+            config = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+
+            buf = io.StringIO()
+            import contextlib
+            with contextlib.redirect_stdout(buf):
+                r, s, w, e, renames = _plex2disk_process_scope(
+                    'DISK_MAP', config, items, sidecar, dry_run=True,
+                    is_dir=False, apply_fn=apply_markers, strip_fn=strip_our_markers,
+                    force=False)
+            output = buf.getvalue()
+            # Without force: marker preserved (no rename), message about Plex empty
+            self.assertEqual(r, 0, f"Should not rename. Output: {output}")
+            self.assertIn('Preserving', output)
+            self.assertIn('--force', output)
+        finally:
+            main_mod.DISK_MAP_MERGE = saved_merge
+
+    def test_sync_force_error_in_source(self):
+        """--sync --force error message exists in source."""
+        content = self._read_script()
+        self.assertIn('--force cannot be used with --sync', content)
+
+    def test_help_plex2disk_mentions_force(self):
+        """--help plex2disk mentions --force."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'plex2disk'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('--force', result.stdout)
+        self.assertIn('Plex is authoritative', result.stdout)
+
+    def test_help_disk2plex_mentions_force(self):
+        """--help disk2plex mentions --force."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'disk2plex'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('--force', result.stdout)
+        self.assertIn('DESTRUCTIVE', result.stdout)
+
+    def test_help_sync_mentions_force_incompatible(self):
+        """--help sync mentions --force cannot be used."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'sync'],
+            capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('--force cannot be used', result.stdout)
+
+    def test_cmd_plex2disk_accepts_force(self):
+        """cmd_plex2disk accepts force parameter."""
+        # Verify the function signature accepts force
+        sig = inspect.signature(cmd_plex2disk)
+        self.assertIn('force', sig.parameters)
+
+    def test_cmd_disk2plex_accepts_force(self):
+        """cmd_disk2plex accepts force parameter."""
+        sig = inspect.signature(cmd_disk2plex)
+        self.assertIn('force', sig.parameters)
+
+    def test_plex2disk_dispatch_passes_force(self):
+        """--plex2disk dispatch passes force to cmd_plex2disk."""
+        content = self._read_script()
+        self.assertIn('cmd_plex2disk(target, dry_run=dry_run, force=force)', content)
+
+    def test_disk2plex_dispatch_passes_force(self):
+        """--disk2plex dispatch passes force to cmd_disk2plex."""
+        content = self._read_script()
+        self.assertIn('cmd_disk2plex(target, dry_run=dry_run, force=force)', content)
+
 
 # List of all unittest classes for run_regression_tests()
 _UNITTEST_CLASSES = [

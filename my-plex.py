@@ -1319,6 +1319,7 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        '_extract_legacy_vu_marker', '_migrate_legacy_vu_sidecar',
                        '_check_all_children_watched', '_update_cache_child_paths',
                        'transfer_disk_map_markers_dir',
+                       '_plex2disk_process_scope', 'cmd_plex2disk', 'cmd_disk2plex',
                        'PLEX_Media')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
@@ -15087,6 +15088,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  then the now-unified state is written back to all files and directories.")
             print()
             print("  Supports --dry-run to preview without making changes.")
+            print()
+            print("  NOTE: --force cannot be used with --sync. --force is destructive and")
+            print("  requires an explicit direction. Use --plex2disk --force or --disk2plex --force.")
+            print()
             print("  See --help plex2disk and --help disk2plex for configuration details.")
             print()
             print("=" * 76)
@@ -15101,6 +15106,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex --plex2disk [--dry-run]              # All libraries")
             print("       my-plex --plex2disk <LIBRARY> [--dry-run]    # One library")
             print("       my-plex --plex2disk <MEDIA> [--dry-run]      # One item")
+            print("       my-plex --plex2disk --force [--dry-run]      # Plex is authoritative")
             print("       my-plex --plex2disk --clean [--dry-run]      # Strip all markers")
             print()
             print("  Encodes Plex metadata into filenames and directory names using configurable")
@@ -15108,6 +15114,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  scope. Truthy results are wrapped in [...] brackets; falsy results are skipped.")
             print()
             print("  --dry-run / -n   Show what would change without renaming")
+            print("  --force          Plex is authoritative: REMOVE markers when Plex has no value")
+            print("                   Without --force, existing markers are preserved (additive)")
             print("  --clean          Strip all markers from disk (reverse of --plex2disk)")
             print()
             print("CONFIGURATION (in ~/.my-plex/my-plex.conf):")
@@ -15135,6 +15143,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print("  my-plex --plex2disk --dry-run              # Preview all changes")
             print("  my-plex movies.en --plex2disk               # Map metadata for English movies")
+            print("  my-plex --plex2disk --force --dry-run       # Preview destructive sync (Plex wins)")
             print("  my-plex --plex2disk --clean                 # Strip all markers")
             print()
             print("WATCHED STATE FOR SERIES (applies to --plex2disk and --disk2plex):")
@@ -15172,6 +15181,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex --disk2plex [--dry-run]              # All items")
             print("       my-plex --disk2plex <LIBRARY> [--dry-run]    # One library")
+            print("       my-plex --disk2plex --force [--dry-run]      # Disk is authoritative")
             print()
             print("  Reads markers from disk (via sidecar) and pushes changes back to Plex.")
             print("  Uses DISK_MAP_PUSH config to determine which aspects to sync.")
@@ -15179,8 +15189,17 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  Only Plex-writable fields are supported: WATCHED, RATING_USER, LABELS, COLLECTIONS")
             print()
-            print("  IMPORTANT: --disk2plex is ADDITIVE ONLY. If a file has no watched marker")
-            print("  on disk, Plex is NOT changed. Absence of a marker never removes metadata.")
+            print("  Without --force (default, ADDITIVE ONLY):")
+            print("    If a file has no marker on disk, Plex is NOT changed.")
+            print("    Absence of a marker never removes metadata from Plex.")
+            print()
+            print("  With --force (DESTRUCTIVE):")
+            print("    Disk is authoritative. If a file has NO marker for an aspect,")
+            print("    that value is actively REMOVED from Plex:")
+            print("      - WATCHED → marks as unwatched")
+            print("      - RATING_USER → removes user rating")
+            print("      - LABELS → removes all labels")
+            print("      - COLLECTIONS → removes all collections")
             print()
             print("CONFIGURATION:")
             print("  DISK_MAP_PUSH = {'watched': 'WATCHED'}  # aspect → Plex field")
@@ -17006,7 +17025,7 @@ def _migrate_legacy_vu_sidecar(name, is_dir=False, obj=None):
     return entry, ts_source
 
 def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, sidecar, dry_run,
-                              is_dir=False, apply_fn=None, strip_fn=None):
+                              is_dir=False, apply_fn=None, strip_fn=None, force=False):
     """Process one scope (files, movie dirs, season dirs, series dirs) for --plex2disk.
 
     Args:
@@ -17018,9 +17037,10 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
         is_dir: True if processing directories
         apply_fn: Function to apply markers (apply_markers or apply_markers_to_dir)
         strip_fn: Function to strip markers (strip_our_markers or strip_markers_from_dir)
+        force: If True, remove markers when Plex has no value (destructive)
 
     Returns:
-        tuple: (renamed_count, skipped_count, warning_count, error_count)
+        tuple: (renamed_count, skipped_count, warning_count, error_count, renames_dict)
     """
     if not disk_map_config:
         return (0, 0, 0, 0, {})
@@ -17081,18 +17101,27 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
             for aspect in set(list(new_markers.keys()) + list(sidecar_entry['markers'].keys())):
                 new_val = new_markers.get(aspect, '')
                 old_val = sidecar_entry['markers'].get(aspect, '')
-                merged = _merge_marker(aspect, new_val, old_val, DISK_MAP_MERGE)
-                if aspect in new_markers:
-                    new_markers[aspect] = merged
-                elif merged:
-                    new_markers[aspect] = merged
+                if force:
+                    # --force: Plex is authoritative — always use Plex value (even empty)
+                    new_markers[aspect] = new_val
+                else:
+                    merged = _merge_marker(aspect, new_val, old_val, DISK_MAP_MERGE)
+                    if aspect in new_markers:
+                        new_markers[aspect] = merged
+                    elif merged:
+                        new_markers[aspect] = merged
 
-        # Warn if previously-filled marker is now empty
+        # Handle previously-filled markers that are now empty
         if sidecar_entry and 'markers' in sidecar_entry:
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and aspect in new_markers and not new_markers[aspect]:
-                    print(f"  WARNING: [{aspect}] was {old_val} but is now empty: {clean}")
-                    warning_count += 1
+                    if force:
+                        print(f"  Removing [{aspect}] (was {old_val}): {clean}")
+                    else:
+                        # Additive mode: preserve existing marker, don't remove
+                        new_markers[aspect] = old_val
+                        if VRB or dry_run:
+                            print(f"  Preserving [{aspect}] ({old_val}): {clean}  (Plex empty; use --force to remove)")
 
         # Build new name
         new_name = apply_fn(clean, new_markers)
@@ -17184,7 +17213,7 @@ def _update_sidecar_child_paths(sidecar, old_dir, new_dir):
         del sidecar[path]
     sidecar.update(updates)
 
-def cmd_plex2disk(target, dry_run=False):
+def cmd_plex2disk(target, dry_run=False, force=False):
     """Sync Plex metadata to disk markers (files + directories) using DISK_MAP config.
 
     Processes 4 scopes in order: series dirs → season dirs → movie dirs → files.
@@ -17197,9 +17226,16 @@ def cmd_plex2disk(target, dry_run=False):
     4. Rename file/dir if markers changed
     5. Update sidecar
 
+    Without --force (default, additive): existing markers on disk are preserved even
+    if Plex has no value for that aspect. Only a WARNING is shown.
+
+    With --force (destructive): Plex is authoritative. If Plex has no value for an
+    aspect, the marker is actively REMOVED from disk.
+
     Args:
         target: None (all), library name, or media identifier
         dry_run: If True, show changes without renaming
+        force: If True, Plex is authoritative — remove markers when Plex has no value
     """
     any_config = DISK_MAP or DISK_MAP_MOVIE_DIR or DISK_MAP_SERIES_DIR or DISK_MAP_SEASON_DIR
     if not any_config:
@@ -17222,10 +17258,11 @@ def cmd_plex2disk(target, dry_run=False):
     total_errors = 0
 
     scope_count = sum(1 for m in [DISK_MAP, DISK_MAP_MOVIE_DIR, DISK_MAP_SERIES_DIR, DISK_MAP_SEASON_DIR] if m)
+    force_label = " --force" if force else ""
     if dry_run:
-        print(f"DRY RUN: --plex2disk ({len(items)} items, {scope_count} scope(s))")
+        print(f"DRY RUN: --plex2disk{force_label} ({len(items)} items, {scope_count} scope(s))")
     else:
-        print(f"Syncing Plex metadata to disk ({len(items)} items, {scope_count} scope(s))...")
+        print(f"Syncing Plex metadata to disk{force_label} ({len(items)} items, {scope_count} scope(s))...")
 
     # --- Collect paths for each scope ---
     file_items = []       # (filepath, cache_key, obj)
@@ -17290,7 +17327,7 @@ def cmd_plex2disk(target, dry_run=False):
         r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_SERIES_DIR', DISK_MAP_SERIES_DIR,
                                                series_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir)
+                                               strip_fn=strip_markers_from_dir, force=force)
         total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
         _apply_dir_renames(dir_renames, season_dir_items, movie_dir_items, file_items)
 
@@ -17301,7 +17338,7 @@ def cmd_plex2disk(target, dry_run=False):
         r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_SEASON_DIR', DISK_MAP_SEASON_DIR,
                                                season_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir)
+                                               strip_fn=strip_markers_from_dir, force=force)
         total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
         _apply_dir_renames(dir_renames, file_items)
 
@@ -17312,7 +17349,7 @@ def cmd_plex2disk(target, dry_run=False):
         r, s, w, e, dir_renames = _plex2disk_process_scope('DISK_MAP_MOVIE_DIR', DISK_MAP_MOVIE_DIR,
                                                movie_dir_items, sidecar, dry_run,
                                                is_dir=True, apply_fn=apply_markers_to_dir,
-                                               strip_fn=strip_markers_from_dir)
+                                               strip_fn=strip_markers_from_dir, force=force)
         total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
         _apply_dir_renames(dir_renames, file_items)
 
@@ -17323,7 +17360,7 @@ def cmd_plex2disk(target, dry_run=False):
         r, s, w, e, _ = _plex2disk_process_scope('DISK_MAP', DISK_MAP,
                                                file_items, sidecar, dry_run,
                                                is_dir=False, apply_fn=apply_markers,
-                                               strip_fn=strip_our_markers)
+                                               strip_fn=strip_our_markers, force=force)
         total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
 
     # Save sidecar and cache
@@ -17481,7 +17518,7 @@ def _disk2plex_push_watched(media, marker_value, dry_run):
     print(f"  Pushed watched to Plex: {media.title}")
     return True
 
-def cmd_disk2plex(target, dry_run=False):
+def cmd_disk2plex(target, dry_run=False, force=False):
     """Sync disk markers to Plex metadata using DISK_MAP_PUSH config.
 
     For each item with sidecar entries:
@@ -17490,18 +17527,28 @@ def cmd_disk2plex(target, dry_run=False):
     3. Apply merge strategy (DISK_MAP_MERGE)
     4. If disk wins → push to Plex API (only writable fields)
 
+    Without --force (default, additive): items without disk markers are skipped.
+    No metadata is ever removed from Plex.
+
+    With --force (destructive): disk is authoritative. If disk has NO marker for
+    an aspect, the corresponding value is actively REMOVED from Plex (e.g. mark
+    as unwatched, remove rating, remove labels/collections).
+
     Args:
         target: None (all), library name, or media identifier
         dry_run: If True, show what would be pushed without making changes
+        force: If True, disk is authoritative — clear Plex values when no marker
     """
     if not DISK_MAP_PUSH:
         print("ERROR: DISK_MAP_PUSH is not configured — nothing to push.")
         return
 
     sidecar = load_disk_map_sidecar()
-    if not sidecar:
+    if not sidecar and not force:
         print("No disk map sidecar found — nothing to push.")
         return
+    if not sidecar:
+        sidecar = {}
 
     items = _get_disk_map_scope(target)
     if not items:
@@ -17515,10 +17562,13 @@ def cmd_disk2plex(target, dry_run=False):
     skipped_count = 0
     error_count = 0
 
+    force_label = " --force" if force else ""
     if dry_run:
-        print(f"DRY RUN: --disk2plex ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)")
+        print(f"DRY RUN: --disk2plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)")
     else:
-        print(f"Syncing disk markers to Plex ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)...")
+        print(f"Syncing disk markers to Plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)...")
+
+    removed_count = 0
 
     for cache_key, obj in items:
         obj_type = obj.get('type', '')
@@ -17526,14 +17576,14 @@ def cmd_disk2plex(target, dry_run=False):
 
         for filepath in filepaths:
             sidecar_entry = sidecar.get(filepath)
-            if not sidecar_entry or 'markers' not in sidecar_entry:
-                skipped_count += 1
-                continue
 
             # For each aspect in DISK_MAP_PUSH, compare disk vs Plex
             for aspect, plex_field in DISK_MAP_PUSH.items():
-                disk_value = sidecar_entry['markers'].get(aspect, '')
-                if not disk_value:
+                disk_value = ''
+                if sidecar_entry and 'markers' in sidecar_entry:
+                    disk_value = sidecar_entry['markers'].get(aspect, '')
+                if not disk_value and not force:
+                    skipped_count += 1
                     continue  # Additive only: no disk marker → don't touch Plex
 
                 # Check if field is writable for this object type
@@ -17551,9 +17601,91 @@ def cmd_disk2plex(target, dry_run=False):
                     plex_value = f"[vu@{variables.get('WATCHED_DATE', '')}]" if variables.get('WATCHED_DATE') else '[vu]'
                 elif plex_field == 'RATING_USER' and variables.get('RATING_USER') is not None:
                     plex_value = f"[{variables['RATING_USER']}]"
+                elif plex_field == 'LABELS' and variables.get('LABELS'):
+                    plex_value = f"[{variables['LABELS']}]"
+                elif plex_field == 'COLLECTIONS' and variables.get('COLLECTIONS'):
+                    plex_value = f"[{variables['COLLECTIONS']}]"
+
+                # --force with no disk marker: remove value from Plex
+                if not disk_value and force:
+                    if not plex_value:
+                        skipped_count += 1
+                        continue  # Already empty in Plex, nothing to remove
+                    title = obj.get('title', cache_key)
+                    try:
+                        if plex_field in ('WATCHED', 'WATCHED_DATE', 'WATCHED_TS'):
+                            if not dry_run:
+                                plex = ensure_plex_api()
+                                item_id = obj.get('item_id')
+                                if item_id:
+                                    media = plex.fetchItem(int(item_id))
+                                    media.markUnwatched()
+                                    print(f"  Removed watched from Plex: {title}")
+                                    removed_count += 1
+                                else:
+                                    error_count += 1
+                            else:
+                                print(f"  Would mark unwatched: {title}")
+                                removed_count += 1
+                        elif plex_field == 'RATING_USER':
+                            if not dry_run:
+                                plex = ensure_plex_api()
+                                item_id = obj.get('item_id')
+                                if item_id:
+                                    media = plex.fetchItem(int(item_id))
+                                    media.rate(None)
+                                    print(f"  Removed rating from Plex: {title}")
+                                    removed_count += 1
+                                else:
+                                    error_count += 1
+                            else:
+                                print(f"  Would remove rating: {title}")
+                                removed_count += 1
+                        elif plex_field == 'LABELS':
+                            if not dry_run:
+                                plex = ensure_plex_api()
+                                item_id = obj.get('item_id')
+                                if item_id:
+                                    media = plex.fetchItem(int(item_id))
+                                    for lbl in (media.labels or []):
+                                        media.removeLabel(lbl.tag)
+                                    print(f"  Removed labels from Plex: {title}")
+                                    removed_count += 1
+                                else:
+                                    error_count += 1
+                            else:
+                                print(f"  Would remove labels: {title}")
+                                removed_count += 1
+                        elif plex_field == 'COLLECTIONS':
+                            if not dry_run:
+                                plex = ensure_plex_api()
+                                item_id = obj.get('item_id')
+                                if item_id:
+                                    media = plex.fetchItem(int(item_id))
+                                    for coll in (media.collections or []):
+                                        media.removeCollection(coll.tag)
+                                    print(f"  Removed collections from Plex: {title}")
+                                    removed_count += 1
+                                else:
+                                    error_count += 1
+                            else:
+                                print(f"  Would remove collections: {title}")
+                                removed_count += 1
+                    except Exception as ex:
+                        print(f"  ERROR removing {plex_field} from Plex for {cache_key}: {ex}")
+                        error_count += 1
+                    continue
+
+                # No disk value (and not force) was already handled above
+                if not disk_value:
+                    continue
 
                 # Apply merge strategy
-                merged = _merge_marker(aspect, plex_value, disk_value, DISK_MAP_MERGE)
+                if force:
+                    # --force: disk is authoritative, skip merge
+                    merged = disk_value
+                else:
+                    merged = _merge_marker(aspect, plex_value, disk_value, DISK_MAP_MERGE)
 
                 if merged == plex_value:
                     # Plex already has the winning value
@@ -17650,7 +17782,8 @@ def cmd_disk2plex(target, dry_run=False):
                         error_count += 1
 
     prefix = "Would push" if dry_run else "Pushed"
-    print(f"\n  {prefix}: {pushed_count}, unchanged: {skipped_count}, errors: {error_count}")
+    removed_label = f", removed: {removed_count}" if removed_count or force else ""
+    print(f"\n  {prefix}: {pushed_count}, unchanged: {skipped_count}{removed_label}, errors: {error_count}")
 
 def _update_cache_filepath(obj, old_path, new_path):
     """Update filepath in cache entry after rename.
@@ -20195,6 +20328,11 @@ def execute_global_commands(args, cmd_args):
     # Handle --plex-disk-sync / --sync (bidirectional: disk2plex first, then plex2disk)
     sync_target = safe_getattr(cmd_args, 'plex_disk_sync', None) or safe_getattr(cmd_args, 'sync', None)
     if sync_target is not None:
+        if args.force:
+            err(1092, "--force cannot be used with --sync / --plex-disk-sync\n"
+                "  --force is destructive and requires an explicit direction:\n"
+                "    my-plex --plex2disk --force   (Plex overwrites disk — removes markers for unwatched items)\n"
+                "    my-plex --disk2plex --force   (disk overwrites Plex — marks unwatched in Plex where no marker)")
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         target = sync_target if sync_target is not True else None
         print("=== Phase 1: Syncing disk markers → Plex ===")
@@ -20208,12 +20346,13 @@ def execute_global_commands(args, cmd_args):
     plex2disk_target = safe_getattr(cmd_args, 'plex2disk', None) or safe_getattr(cmd_args, 'map_to_filename', None)
     if plex2disk_target is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        force = args.force
         clean = safe_getattr(cmd_args, 'clean', False) or safe_getattr(cmd_args, 'map_from_filename', None) is not None
         target = plex2disk_target if plex2disk_target is not True else None
         if clean:
             cmd_plex2disk_clean(target, dry_run=dry_run)
         else:
-            cmd_plex2disk(target, dry_run=dry_run)
+            cmd_plex2disk(target, dry_run=dry_run, force=force)
         sys.exit(0)
 
     # Handle --map-from-filename alias (standalone, without --plex2disk)
@@ -20226,8 +20365,9 @@ def execute_global_commands(args, cmd_args):
     # Handle --disk2plex command
     if safe_getattr(cmd_args, 'disk2plex', None) is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        force = args.force
         target = cmd_args.disk2plex if cmd_args.disk2plex is not True else None
-        cmd_disk2plex(target, dry_run=dry_run)
+        cmd_disk2plex(target, dry_run=dry_run, force=force)
         sys.exit(0)
 
     if cmd_args.list_libraries:
