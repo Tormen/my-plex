@@ -17092,27 +17092,27 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
     warning_count = 0
     error_count = 0
 
-    # Map scope_name to media object type label
-    _SCOPE_TYPE_LABELS = {
-        'DISK_MAP_SEASON_DIR': 'SEASON',
-        'DISK_MAP_SERIES_DIR': 'SERIES',
-        'DISK_MAP_MOVIE_DIR': 'MOVIE',
-    }
-
-    # Deduplicate paths (multiple items can share a directory)
-    seen_paths = set()
+    # Deduplicate paths — for dir scopes, prefer Season/Show objects over Episode objects
+    seen_paths = {}  # path → (cache_key, obj)
     for path, cache_key, obj in items_with_paths:
+        type_str = obj.get('type_str', '')
         if path in seen_paths:
+            # Prefer the "owner" object for this scope (Season/Show over Episode)
+            existing_type = seen_paths[path][1].get('type_str', '')
+            if scope_name == 'DISK_MAP_SEASON_DIR' and type_str == 'Season' and existing_type != 'Season':
+                seen_paths[path] = (cache_key, obj)
+            elif scope_name == 'DISK_MAP_SERIES_DIR' and type_str == 'Show' and existing_type != 'Show':
+                seen_paths[path] = (cache_key, obj)
             continue
-        seen_paths.add(path)
+        seen_paths[path] = (cache_key, obj)
 
+    for path, (cache_key, obj) in seen_paths.items():
         name = os.path.basename(path)
         parent = os.path.dirname(path)
 
-        # Build log prefix: LIBRARY|TYPE|
+        # Build log prefix: LIBRARY|CACHE_KEY|
         lib = obj.get('library', '?')
-        type_label = _SCOPE_TYPE_LABELS.get(scope_name, obj.get('type_str', '?').upper())
-        prefix = f"{lib}|{type_label}| "
+        prefix = f"{lib}|{cache_key}| "
 
         # Get existing sidecar entry
         sidecar_entry = sidecar.get(path)
