@@ -17092,6 +17092,13 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
     warning_count = 0
     error_count = 0
 
+    # Map scope_name to media object type label
+    _SCOPE_TYPE_LABELS = {
+        'DISK_MAP_SEASON_DIR': 'SEASON',
+        'DISK_MAP_SERIES_DIR': 'SERIES',
+        'DISK_MAP_MOVIE_DIR': 'MOVIE',
+    }
+
     # Deduplicate paths (multiple items can share a directory)
     seen_paths = set()
     for path, cache_key, obj in items_with_paths:
@@ -17101,6 +17108,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
 
         name = os.path.basename(path)
         parent = os.path.dirname(path)
+
+        # Build log prefix: LIBRARY|TYPE|
+        lib = obj.get('library', '?')
+        type_label = _SCOPE_TYPE_LABELS.get(scope_name, obj.get('type_str', '?').upper())
+        prefix = f"{lib}|{type_label}| "
 
         # Get existing sidecar entry
         sidecar_entry = sidecar.get(path)
@@ -17114,11 +17126,11 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 if VRB or dry_run:
                     watched_val = sidecar_entry['markers'].get('watched', '')
                     if ts_source == 'plex':
-                        print(f"  Registered marker (bare [vu] → {watched_val} from Plex): {name}")
+                        print(f"  {prefix}Registered marker (bare [vu] → {watched_val} from Plex): {name}")
                     elif ts_source == 'today':
-                        print(f"  Registered marker (bare [vu] → {watched_val} using today): {name}")
+                        print(f"  {prefix}Registered marker (bare [vu] → {watched_val} using today): {name}")
                     elif ts_source == 'marker':
-                        print(f"  Registered marker ({watched_val}): {name}")
+                        print(f"  {prefix}Registered marker ({watched_val}): {name}")
 
         # Strip existing markers to get clean name
         # For legacy migration: use clean_name directly (disk has old [vu], sidecar has migrated [vu@...])
@@ -17150,12 +17162,12 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and aspect in new_markers and not new_markers[aspect]:
                     if force:
-                        print(f"  Removing [{aspect}] (was {old_val}): {path}")
+                        print(f"  {prefix}Removing [{aspect}] (was {old_val}): {name}")
                     else:
                         # Additive mode: preserve existing marker, don't remove
                         new_markers[aspect] = old_val
                         if VRB or dry_run:
-                            print(f"  Preserving [{aspect}] ({old_val}): {path}  (Plex empty; use --force to remove)")
+                            print(f"  {prefix}Preserving [{aspect}] ({old_val}): {name}  (Plex empty; use --force to remove)")
 
         # Build new name
         new_name = apply_fn(clean, new_markers)
@@ -17166,12 +17178,8 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
 
         new_path = os.path.join(parent, new_name)
 
-        # Show full path for self-explanatory output
-        display_path = path
-
         if dry_run:
-            print(f"  Renaming: {display_path}")
-            print(f"       → {new_name}")
+            print(f"  {prefix}Rename: {path} → {new_name}")
             renamed_count += 1
             renames[path] = new_path
         else:
@@ -17187,10 +17195,10 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
                 else:
                     _update_cache_filepath(obj, path, new_path)
                 if VRB:
-                    print(f"  Renaming: {display_path} → {new_name}")
+                    print(f"  {prefix}Rename: {path} → {new_name}")
             else:
                 error_count += 1
-                print(f"  ERROR renaming: {display_path}")
+                print(f"  {prefix}ERROR renaming: {path}")
 
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
