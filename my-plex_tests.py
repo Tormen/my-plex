@@ -4771,8 +4771,8 @@ class TestInfoScrapedData(unittest.TestCase):
         self.assertIn('Episode (Scraped):', content)
 
 
-class TestFilenameMap(unittest.TestCase):
-    """Tests for --map-to-filename / --map-from-filename feature."""
+class TestDiskMap(unittest.TestCase):
+    """Tests for --plex2disk / --disk2plex disk marker system."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
@@ -4799,49 +4799,52 @@ class TestFilenameMap(unittest.TestCase):
         obj.update(overrides)
         return obj
 
-    # --- validate_filename_map ---
+    # --- validate_disk_map ---
 
     def test_validate_map_valid(self):
-        """Valid FILENAME_MAP passes validation."""
-        fm = {'watched': '[WATCHED]', 'rating': '[RATING_USER]', 'multi': '[RATING_CRITICS]-[COUNTRY]'}
-        errors = validate_filename_map(fm)
+        """Valid DISK_MAP with Python expressions passes validation."""
+        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
+              'rating': "RATING_USER",
+              'info': "f'{RATING_CRITICS}-{COUNTRY}' if RATING_CRITICS else ''"}
+        errors = validate_disk_map(fm)
         self.assertEqual(errors, [])
 
     def test_validate_map_empty(self):
-        """Empty FILENAME_MAP is valid (just does nothing)."""
-        errors = validate_filename_map({})
+        """Empty DISK_MAP is valid (just does nothing)."""
+        errors = validate_disk_map({})
         self.assertEqual(errors, [])
 
-    def test_validate_map_invalid_variable(self):
-        """Unknown [FOOBAR] variable produces error."""
-        fm = {'test': '[FOOBAR]'}
-        errors = validate_filename_map(fm)
+    def test_validate_map_syntax_error(self):
+        """Invalid Python expression produces error."""
+        fm = {'test': "if WATCHED"}
+        errors = validate_disk_map(fm)
         self.assertEqual(len(errors), 1)
-        self.assertIn('FOOBAR', errors[0])
+        self.assertIn('not a valid Python expression', errors[0])
 
-    def test_validate_map_no_markers(self):
-        """Format string without [VARIABLE] markers produces error."""
-        fm = {'test': 'just text'}
-        errors = validate_filename_map(fm)
+    def test_validate_map_empty_value(self):
+        """Empty expression string produces error."""
+        fm = {'test': ''}
+        errors = validate_disk_map(fm)
         self.assertEqual(len(errors), 1)
-        self.assertIn('no [VARIABLE]', errors[0])
+        self.assertIn('non-empty string', errors[0])
 
     def test_validate_map_not_dict(self):
-        """Non-dict FILENAME_MAP produces error."""
-        errors = validate_filename_map("not a dict")
+        """Non-dict DISK_MAP produces error."""
+        errors = validate_disk_map("not a dict")
         self.assertEqual(len(errors), 1)
         self.assertIn('must be a dict', errors[0])
 
-    # --- resolve_filename_map_variables ---
+    # --- resolve_disk_map_variables ---
 
     def test_resolve_variables_basic(self):
         """Variable resolution produces expected values from mock obj."""
         obj = self._mock_obj()
-        var = resolve_filename_map_variables(obj)
-        self.assertEqual(var['WATCHED'], 'vu')
-        self.assertEqual(var['RATING_USER'], '7.5')
-        self.assertEqual(var['RATING_CRITICS'], '8.2')
-        self.assertEqual(var['RATING_AUDIENCE'], '85.0')
+        var = resolve_disk_map_variables(obj)
+        self.assertIs(var['WATCHED'], True)                   # bool
+        self.assertEqual(var['VIEW_COUNT'], 2)                # int
+        self.assertEqual(var['RATING_USER'], 7.5)             # float
+        self.assertEqual(var['RATING_CRITICS'], 8.2)          # float
+        self.assertEqual(var['RATING_AUDIENCE'], 85.0)        # float
         self.assertEqual(var['CONTENT_RATING'], 'PG-13')
         self.assertEqual(var['ACTORS_TOP3'], 'Bryan Cranston, Aaron Paul, Anna Gunn')
         self.assertEqual(var['ACTOR1_FN'], 'Bryan')
@@ -4855,65 +4858,89 @@ class TestFilenameMap(unittest.TestCase):
         self.assertEqual(var['GENRE'], 'Drama')
         self.assertEqual(var['DIRECTOR'], 'Vince Gilligan')
         self.assertEqual(var['RESOLUTION'], '1080p')
-        self.assertEqual(var['YEAR'], '2024')
+        self.assertEqual(var['YEAR'], 2024)                   # int
         self.assertEqual(var['IMDB_ID'], 'tt0903747')
         self.assertEqual(var['TMDB_ID'], '1396')
+        self.assertEqual(var['LABELS'], '')
+        self.assertEqual(var['COLLECTIONS'], '')
+
+    def test_resolve_variables_watched_dates(self):
+        """Watched date/timestamp variables resolve correctly."""
+        obj = self._mock_obj()  # lastViewedAt=1711065600 → 2024-03-22
+        var = resolve_disk_map_variables(obj)
+        self.assertEqual(var['WATCHED_DATE'], '2024-03-22')
+        self.assertRegex(var['WATCHED_TS'], r'2024-03-22_\d{4}')
 
     def test_resolve_variables_unwatched(self):
-        """Unwatched item has WATCHED=nv."""
+        """Unwatched item has WATCHED=False."""
         obj = self._mock_obj(viewCount=0, lastViewedAt=None)
-        var = resolve_filename_map_variables(obj)
-        self.assertEqual(var['WATCHED'], 'nv')
+        var = resolve_disk_map_variables(obj)
+        self.assertIs(var['WATCHED'], False)
+        self.assertEqual(var['VIEW_COUNT'], 0)
         self.assertEqual(var['WATCHED_DATE'], '')
+        self.assertEqual(var['WATCHED_TS'], '')
 
     def test_resolve_variables_empty_actors(self):
         """Empty actors produce empty strings."""
         obj = self._mock_obj(actors=[])
-        var = resolve_filename_map_variables(obj)
+        var = resolve_disk_map_variables(obj)
         self.assertEqual(var['ACTORS_TOP3'], '')
         self.assertEqual(var['ACTOR1_FN'], '')
         self.assertEqual(var['ACTOR1_LN'], '')
 
     def test_resolve_variables_no_ratings(self):
-        """None ratings produce empty strings."""
+        """None ratings produce None (falsy for eval expressions)."""
         obj = self._mock_obj(userRating=None, criticsRating=None, audienceRating=None)
-        var = resolve_filename_map_variables(obj)
-        self.assertEqual(var['RATING_USER'], '')
-        self.assertEqual(var['RATING_CRITICS'], '')
-        self.assertEqual(var['RATING_AUDIENCE'], '')
+        var = resolve_disk_map_variables(obj)
+        self.assertIsNone(var['RATING_USER'])
+        self.assertIsNone(var['RATING_CRITICS'])
+        self.assertIsNone(var['RATING_AUDIENCE'])
+
+    def test_resolve_variables_labels_collections(self):
+        """Labels and collections resolve to comma-separated strings."""
+        obj = self._mock_obj(labels=['favorite', 'horror'], collections=['Halloween', 'Slashers'])
+        var = resolve_disk_map_variables(obj)
+        self.assertEqual(var['LABELS'], 'favorite, horror')
+        self.assertEqual(var['COLLECTIONS'], 'Halloween, Slashers')
 
     # --- compute_markers ---
 
     def test_compute_markers_basic(self):
-        """Basic marker computation with watched and rating."""
+        """Basic marker computation with eval expressions."""
         obj = self._mock_obj()
-        fm = {'watched': '[WATCHED]', 'rating': '[RATING_USER]'}
+        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
+              'rating': "RATING_USER"}
         markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], '[vu]')
+        self.assertEqual(markers['watched'], '[vu@2024-03-22]')
         self.assertEqual(markers['rating'], '[7.5]')
 
-    def test_compute_markers_multi_variable(self):
-        """Multi-variable format string resolves correctly."""
+    def test_compute_markers_compound_expression(self):
+        """Compound expression with f-string resolves correctly."""
         obj = self._mock_obj()
-        fm = {'info': '[RATING_CRITICS]-[COUNTRY]'}
+        fm = {'info': "f'{RATING_CRITICS}-{COUNTRY}' if RATING_CRITICS else ''"}
         markers = compute_markers(obj, 'Movie:1', fm)
         self.assertEqual(markers['info'], '[8.2-US]')
 
-    def test_compute_markers_empty_skips(self):
-        """When all variables in a marker are empty, marker is empty string (skip)."""
+    def test_compute_markers_falsy_skips(self):
+        """When expression result is falsy, marker is empty string (skip)."""
         obj = self._mock_obj(userRating=None)
-        fm = {'rating': '[RATING_USER]'}
+        fm = {'rating': "RATING_USER"}
         markers = compute_markers(obj, 'Movie:1', fm)
         self.assertEqual(markers['rating'], '')
 
-    def test_compute_markers_partial_empty_skips(self):
-        """When any variable in a multi-var marker is empty, entire marker is skipped."""
-        obj = self._mock_obj(userRating=None)
-        fm = {'info': '[RATING_USER]-[COUNTRY]'}
+    def test_compute_markers_unwatched_skips(self):
+        """Unwatched item with conditional expression produces empty marker."""
+        obj = self._mock_obj(viewCount=0, lastViewedAt=None)
+        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
         markers = compute_markers(obj, 'Movie:1', fm)
-        # RATING_USER is empty but COUNTRY is not — should still produce marker
-        # because not ALL are empty
-        self.assertNotEqual(markers['info'], '')
+        self.assertEqual(markers['watched'], '')
+
+    def test_compute_markers_simple_label(self):
+        """Simple string expression like 'seen' if WATCHED else ''."""
+        obj = self._mock_obj()
+        fm = {'watched': "'seen' if WATCHED else ''"}
+        markers = compute_markers(obj, 'Movie:1', fm)
+        self.assertEqual(markers['watched'], '[seen]')
 
     # --- strip_our_markers ---
 
@@ -4978,9 +5005,9 @@ class TestFilenameMap(unittest.TestCase):
     def test_sidecar_roundtrip(self):
         """Save and load sidecar produces identical data."""
         import tempfile, json
-        sidecar = {'/path/to/file.[vu].mkv': {
-            'markers': {'watched': '[vu]'},
-            'clean_filename': 'file.mkv',
+        sidecar = {'/path/to/file.[vu@2026-03-22].mkv': {
+            'markers': {'watched': '[vu@2026-03-22]'},
+            'clean_name': 'file.mkv',
             'last_updated': '2026-03-22'
         }}
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -4996,71 +5023,395 @@ class TestFilenameMap(unittest.TestCase):
     # --- legacy VU migration ---
 
     def test_legacy_vu_detection(self):
-        """Legacy [vu@TIMESTAMP] marker is detected by extract_vu_marker."""
-        marker = extract_vu_marker('Movie.[vu@2026-01-15].mkv')
+        """Legacy [vu@TIMESTAMP] marker is detected by _extract_legacy_vu_marker."""
+        marker = _extract_legacy_vu_marker('Movie.[vu@2026-01-15].mkv')
         self.assertEqual(marker, '[vu@2026-01-15]')
 
     def test_legacy_vu_plain(self):
         """Legacy [vu] plain marker is detected."""
-        marker = extract_vu_marker('Movie.[vu].mkv')
+        marker = _extract_legacy_vu_marker('Movie.[vu].mkv')
         self.assertEqual(marker, '[vu]')
 
     def test_legacy_vu_none(self):
         """No VU marker returns None."""
-        marker = extract_vu_marker('Movie.mkv')
+        marker = _extract_legacy_vu_marker('Movie.mkv')
         self.assertIsNone(marker)
+
+    def test_legacy_vu_in_dir(self):
+        """Legacy [vu@TIMESTAMP] marker in directory name is detected."""
+        marker = _extract_legacy_vu_marker('Movie (2024) [vu@2026-01-15]')
+        self.assertEqual(marker, '[vu@2026-01-15]')
+
+    def test_legacy_vu_case_insensitive(self):
+        """[VU], [Vu], [vU] are all detected case-insensitively."""
+        self.assertEqual(_extract_legacy_vu_marker('Movie [VU].mkv'), '[VU]')
+        self.assertEqual(_extract_legacy_vu_marker('Movie [Vu].mkv'), '[Vu]')
+        self.assertEqual(_extract_legacy_vu_marker('Movie [vU].mkv'), '[vU]')
+        self.assertEqual(_extract_legacy_vu_marker('Movie [VU@2026-01-15].mkv'), '[VU@2026-01-15]')
+
+    def test_migrate_legacy_vu_sidecar(self):
+        """_migrate_legacy_vu_sidecar creates synthetic sidecar entry."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu@2026-01-15].mkv')
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2026-01-15]')
+        self.assertEqual(entry['clean_name'], 'Movie.mkv')
+        self.assertEqual(ts_source, 'marker')
+        self.assertNotIn('is_dir', entry)
+
+    def test_migrate_legacy_vu_sidecar_dir(self):
+        """_migrate_legacy_vu_sidecar with is_dir creates dir entry."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie (2024) [vu@2026-01-15]', is_dir=True)
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry.get('is_dir'))
+        self.assertEqual(ts_source, 'marker')
+
+    def test_migrate_legacy_vu_sidecar_bare_no_obj(self):
+        """_migrate_legacy_vu_sidecar for bare [vu] without obj uses today's date."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu].mkv')
+        self.assertIsNotNone(entry)
+        self.assertIn('vu@', entry['markers']['watched'])
+        self.assertEqual(ts_source, 'today')
+
+    def test_migrate_legacy_vu_sidecar_bare_with_plex_date(self):
+        """_migrate_legacy_vu_sidecar for bare [vu] with Plex obj uses lastViewedAt."""
+        obj = {'lastViewedAt': 1711065600}  # 2024-03-22
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu].mkv', obj=obj)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2024-03-22]')
+        self.assertEqual(ts_source, 'plex')
+
+    def test_migrate_legacy_vu_sidecar_bare_uppercase(self):
+        """_migrate_legacy_vu_sidecar handles [VU] case-insensitively."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie [VU].mkv')
+        self.assertIsNotNone(entry)
+        self.assertIn('vu@', entry['markers']['watched'])
+        self.assertEqual(ts_source, 'today')
+
+    def test_migrate_legacy_vu_sidecar_none(self):
+        """_migrate_legacy_vu_sidecar returns None when no legacy marker."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie.mkv')
+        self.assertIsNone(entry)
+        self.assertEqual(ts_source, '')
+
+    def test_migrate_legacy_vu_no_space(self):
+        """Legacy [VU] with no space before bracket is detected and stripped."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Betty[VU].mp4')
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['clean_name'], 'Betty.mp4')
+        self.assertIn('vu@', entry['markers']['watched'])
+
+    def test_migrate_legacy_vu_incomplete_date_padded(self):
+        """Incomplete date [vu@2022-12] is padded to [vu@2022-12-01]."""
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi')
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-01]')
+        self.assertEqual(ts_source, 'marker')
+
+    def test_migrate_legacy_vu_incomplete_date_plex_in_same_month(self):
+        """Incomplete date uses Plex date when Plex date is in the same month."""
+        import calendar, time
+        # 2022-12-15 as epoch
+        ts = calendar.timegm(time.strptime('2022-12-15', '%Y-%m-%d'))
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-15]')
+        self.assertEqual(ts_source, 'plex')
+
+    def test_migrate_legacy_vu_incomplete_date_plex_newer(self):
+        """Incomplete date uses Plex date when Plex date is newer than the month."""
+        import calendar, time
+        ts = calendar.timegm(time.strptime('2023-05-10', '%Y-%m-%d'))
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2023-05-10]')
+        self.assertEqual(ts_source, 'plex')
+
+    def test_migrate_legacy_vu_incomplete_date_plex_older(self):
+        """Incomplete date keeps padded date when Plex date is older."""
+        import calendar, time
+        ts = calendar.timegm(time.strptime('2022-06-01', '%Y-%m-%d'))
+        entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['markers']['watched'], '[vu@2022-12-01]')
+        self.assertEqual(ts_source, 'marker')
 
     # --- source inspection ---
 
-    def test_source_has_filename_map_functions(self):
-        """Source must contain all filename map functions."""
+    def test_source_has_disk_map_functions(self):
+        """Source must contain all disk map functions."""
         content = self._read_script()
-        for func in ['validate_filename_map', 'resolve_filename_map_variables',
+        for func in ['validate_disk_map', 'resolve_disk_map_variables',
                      'compute_markers', 'strip_our_markers', 'apply_markers',
-                     'load_filename_map_sidecar', 'save_filename_map_sidecar',
-                     'cmd_map_to_filename', 'cmd_map_from_filename',
-                     'transfer_filename_map_markers', 'FILENAME_MAP_VARIABLES']:
+                     'apply_markers_to_dir', 'strip_markers_from_dir',
+                     'load_disk_map_sidecar', 'save_disk_map_sidecar',
+                     'cmd_plex2disk', 'cmd_plex2disk_clean', 'cmd_disk2plex',
+                     'transfer_disk_map_markers', 'transfer_disk_map_markers_dir',
+                     '_merge_marker', '_extract_legacy_vu_marker',
+                     '_migrate_legacy_vu_sidecar', 'DISK_MAP_VARIABLES',
+                     '_PLEX_WRITABLE_FIELDS']:
             self.assertIn(f'{func}', content, f"Missing: {func}")
 
-    def test_source_has_map_argparse(self):
-        """Source must have --map-to-filename and --map-from-filename argparse entries."""
+    def test_source_has_disk_map_argparse(self):
+        """Source must have --plex2disk, --disk2plex, and legacy alias argparse entries."""
         content = self._read_script()
+        self.assertIn("'--plex2disk'", content)
+        self.assertIn("'--disk2plex'", content)
+        # Legacy aliases still present
         self.assertIn("'--map-to-filename'", content)
         self.assertIn("'--map-from-filename'", content)
 
-    def test_source_has_map_help(self):
-        """Source must have help cases for map-to-filename and map-from-filename."""
+    def test_source_has_plex2disk_help(self):
+        """Source must have help cases for plex2disk and disk2plex."""
         content = self._read_script()
-        self.assertIn("'map-to-filename'", content)
-        self.assertIn("'map-from-filename'", content)
+        self.assertIn("'plex2disk'", content)
+        self.assertIn("'disk2plex'", content)
 
     def test_source_has_plex_dir(self):
         """Source must reference ~/.my-plex/ directory."""
         content = self._read_script()
         self.assertIn("'.my-plex'", content)
         self.assertIn("'.my-plex/cache.pkl'", content)
-        self.assertIn("'.my-plex/filename_map.json'", content)
+        self.assertIn("'.my-plex/disk_map.json'", content)
 
-    # --- E2E: --help map-to-filename ---
+    # --- Source inspection: transfer_disk_map_markers integration ---
 
-    def test_help_map_to_filename(self):
-        """--help map-to-filename should print help and exit 0."""
+    def test_transfer_markers_in_dup_resolution(self):
+        """transfer_disk_map_markers must be called unconditionally from dup resolution."""
+        content = self._read_script()
+        # Pattern A: _execute_trash_and_move
+        idx_func = content.find('def _execute_trash_and_move(')
+        idx_next = content.find('\ndef ', idx_func + 1)
+        func_body = content[idx_func:idx_next]
+        self.assertIn('transfer_disk_map_markers(', func_body,
+                       "_execute_trash_and_move must call transfer_disk_map_markers")
+        # Patterns B+C: execute_resolution_action
+        idx_func = content.find('def execute_resolution_action(')
+        idx_next = content.find('\ndef ', idx_func + 1)
+        func_body = content[idx_func:idx_next]
+        count = func_body.count('transfer_disk_map_markers(')
+        self.assertGreaterEqual(count, 2,
+                                f"execute_resolution_action must call transfer_disk_map_markers at least 2x, found {count}")
+
+    def test_no_vu_conditional_in_dup_resolution(self):
+        """Dup resolution must NOT have 'if DISK_MAP:' conditionals — calls are unconditional."""
+        content = self._read_script()
+        for func_name in ('_execute_trash_and_move', 'execute_resolution_action'):
+            idx_func = content.find(f'def {func_name}(')
+            idx_next = content.find('\ndef ', idx_func + 1)
+            func_body = content[idx_func:idx_next]
+            self.assertNotIn('if DISK_MAP:', func_body,
+                             f"{func_name} must NOT have 'if DISK_MAP:' conditional — calls must be unconditional")
+            self.assertNotIn('add_vu_marker_to_file(', func_body,
+                             f"{func_name} must NOT contain legacy add_vu_marker_to_file")
+
+    # --- E2E: --help plex2disk / disk2plex ---
+
+    def test_help_plex2disk(self):
+        """--help plex2disk should print help and exit 0."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--help', 'map-to-filename'],
+            [sys.executable, MAIN_SCRIPT, '--help', 'plex2disk'],
             capture_output=True, text=True, timeout=30
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn('MAP METADATA TO FILENAMES', result.stdout)
-        self.assertIn('AVAILABLE VARIABLES', result.stdout)
+        self.assertIn('SYNC PLEX METADATA TO DISK', result.stdout)
+        self.assertIn('Available variables', result.stdout)
 
-    def test_help_map_from_filename(self):
-        """--help map-from-filename should print help and exit 0."""
+    def test_help_disk2plex(self):
+        """--help disk2plex should print help and exit 0."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--help', 'map-from-filename'],
+            [sys.executable, MAIN_SCRIPT, '--help', 'disk2plex'],
             capture_output=True, text=True, timeout=30
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn('REMOVE METADATA MARKERS', result.stdout)
+
+    # --- dir markers ---
+
+    def test_apply_markers_to_dir_basic(self):
+        """Apply markers to directory name (space-separated)."""
+        markers = {'watched': '[vu@2026-03-22]', 'rating': '[7.5]'}
+        result = apply_markers_to_dir('Movie (2024)', markers)
+        # Sorted by aspect name: rating before watched
+        self.assertEqual(result, 'Movie (2024) [7.5] [vu@2026-03-22]')
+
+    def test_apply_markers_to_dir_empty(self):
+        """Empty markers leave directory name unchanged."""
+        markers = {'watched': '', 'rating': ''}
+        result = apply_markers_to_dir('Movie (2024)', markers)
+        self.assertEqual(result, 'Movie (2024)')
+
+    def test_strip_markers_from_dir_basic(self):
+        """Strip known markers from directory name."""
+        entry = {'markers': {'watched': '[vu@2026-03-22]', 'rating': '[7.5]'}}
+        result = strip_markers_from_dir('Movie (2024) [7.5] [vu@2026-03-22]', entry)
+        self.assertEqual(result, 'Movie (2024)')
+
+    def test_strip_markers_from_dir_no_entry(self):
+        """No sidecar entry means no stripping."""
+        result = strip_markers_from_dir('Movie (2024) [vu@2026-03-22]', None)
+        self.assertEqual(result, 'Movie (2024) [vu@2026-03-22]')
+
+    # --- merge logic ---
+
+    def test_merge_marker_plex_strategy(self):
+        """'plex' strategy: Plex always wins."""
+        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'plex'})
+        self.assertEqual(result, '[vu@2026-03-22]')
+
+    def test_merge_marker_disk_strategy(self):
+        """'disk' strategy: disk always wins."""
+        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'disk'})
+        self.assertEqual(result, '[vu@2026-01-15]')
+
+    def test_merge_marker_newer_plex_wins(self):
+        """'newer' strategy: Plex wins when newer timestamp."""
+        result = _merge_marker('watched', '[vu@2026-03-22]', '[vu@2026-01-15]', {'watched': 'newer'})
+        self.assertEqual(result, '[vu@2026-03-22]')
+
+    def test_merge_marker_newer_disk_wins(self):
+        """'newer' strategy: disk wins when newer timestamp."""
+        result = _merge_marker('watched', '[vu@2026-01-15]', '[vu@2026-03-22]', {'watched': 'newer'})
+        self.assertEqual(result, '[vu@2026-03-22]')
+
+    def test_merge_marker_newer_with_time(self):
+        """'newer' strategy: timestamp with time precision."""
+        result = _merge_marker('watched', '[vu@2026-03-22_1923]', '[vu@2026-03-22_0800]', {'watched': 'newer'})
+        self.assertEqual(result, '[vu@2026-03-22_1923]')
+
+    def test_merge_marker_no_existing(self):
+        """No existing value on disk → use Plex value."""
+        result = _merge_marker('watched', '[vu@2026-03-22]', '', {'watched': 'newer'})
+        self.assertEqual(result, '[vu@2026-03-22]')
+
+    def test_merge_marker_no_new_newer(self):
+        """Plex empty + 'newer' strategy → keep disk value."""
+        result = _merge_marker('watched', '', '[vu@2026-01-15]', {'watched': 'newer'})
+        self.assertEqual(result, '[vu@2026-01-15]')
+
+    def test_merge_marker_no_new_plex(self):
+        """Plex empty + 'plex' strategy → clear marker."""
+        result = _merge_marker('watched', '', '[vu@2026-01-15]', {'watched': 'plex'})
+        self.assertEqual(result, '')
+
+    def test_merge_marker_default_strategy(self):
+        """Aspect not in merge config defaults to 'plex'."""
+        result = _merge_marker('rating', '[8.0]', '[7.5]', {})
+        self.assertEqual(result, '[8.0]')
+
+    # --- _PLEX_WRITABLE_FIELDS ---
+
+    def test_check_all_children_watched_all_watched(self):
+        """Season is WATCHED when all child episodes are watched in Plex."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        try:
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 2, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            watched, max_lv = _check_all_children_watched(season_obj, 'Season')
+            self.assertTrue(watched)
+            self.assertEqual(max_lv, 2000)
+        finally:
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+
+    def test_check_all_children_watched_not_all(self):
+        """Season is NOT WATCHED when some episodes are unwatched."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        try:
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            watched, _ = _check_all_children_watched(season_obj, 'Season')
+            self.assertFalse(watched)
+        finally:
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+
+    def test_check_all_children_watched_disk_vu_counts(self):
+        """Episode with [vu] on disk but unwatched in Plex still counts as watched."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        try:
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.[vu@2026-01-01].mkv'}
+            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            watched, _ = _check_all_children_watched(season_obj, 'Season')
+            self.assertTrue(watched)
+        finally:
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+
+    def test_check_all_children_watched_show_all_seasons(self):
+        """Show is WATCHED only if ALL seasons' episodes are watched."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        try:
+            PLEX_Media.OBJ_BY_ID['Show:1'] = {'type_str': 'Show'}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {
+                'S01': {'E01': {'v': ['Episode:1']}},
+                'S02': {'E01': {'v': ['Episode:2']}}
+            }
+            show_obj = PLEX_Media.OBJ_BY_ID['Show:1']
+            watched, _ = _check_all_children_watched(show_obj, 'Show')
+            self.assertFalse(watched)
+        finally:
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+
+    def test_resolve_variables_season_watched_from_children(self):
+        """resolve_disk_map_variables for Season derives WATCHED from child episodes."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        try:
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 1, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1',
+                          'viewCount': 0, 'lastViewedAt': None}
+            var = resolve_disk_map_variables(season_obj)
+            self.assertTrue(var['WATCHED'])
+            self.assertNotEqual(var['WATCHED_DATE'], '')
+        finally:
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+
+    def test_migrate_legacy_vu_dir_trailing_dot(self):
+        """Legacy migration strips trailing dots from dir names after removing [vu]."""
+        entry, ts = _migrate_legacy_vu_sidecar('movie.[2020].[vu]', is_dir=True)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['clean_name'], 'movie.[2020]')
+        self.assertFalse(entry['clean_name'].endswith('.'))
+
+    def test_update_cache_child_paths_exact_match(self):
+        """_update_cache_child_paths updates paths that exactly match old_dir (not just children)."""
+        saved = (PLEX_Media.OBJ_BY_ID.copy(),
+                 PLEX_Media.OBJ_BY_FILEPATH.copy() if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else {})
+        try:
+            PLEX_Media.OBJ_BY_ID['Season:1'] = {'file': '/a/b/s01', 'files': {}}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'file': '/a/b/s01/e1.mkv', 'files': {}}
+            _update_cache_child_paths('/a/b/s01', '/a/b/s01 [vu]')
+            self.assertEqual(PLEX_Media.OBJ_BY_ID['Season:1']['file'], '/a/b/s01 [vu]')
+            self.assertEqual(PLEX_Media.OBJ_BY_ID['Episode:1']['file'], '/a/b/s01 [vu]/e1.mkv')
+        finally:
+            PLEX_Media.OBJ_BY_ID = saved[0]
+            if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH'):
+                PLEX_Media.OBJ_BY_FILEPATH = saved[1]
+
+    def test_file_scope_excludes_season_show(self):
+        """File scope should only process Movie and Episode types, not Season/Show."""
+        # Season with type_str='Season' should NOT be in file_items
+        obj = {'type_str': 'Season', 'type': 'Season', 'file': '/a/b/s01'}
+        type_str = obj.get('type_str', '')
+        self.assertNotIn(type_str, ('Movie', 'Episode'))
+
+    def test_plex_writable_fields_structure(self):
+        """_PLEX_WRITABLE_FIELDS has correct structure."""
+        self.assertIn('Movie', _PLEX_WRITABLE_FIELDS)
+        self.assertIn('Episode', _PLEX_WRITABLE_FIELDS)
+        self.assertIn('Show', _PLEX_WRITABLE_FIELDS)
+        self.assertIn('Season', _PLEX_WRITABLE_FIELDS)
+        # Movie and Episode support all writable fields
+        self.assertIn('WATCHED', _PLEX_WRITABLE_FIELDS['Movie'])
+        self.assertIn('RATING_USER', _PLEX_WRITABLE_FIELDS['Movie'])
+        self.assertIn('LABELS', _PLEX_WRITABLE_FIELDS['Episode'])
+        # Season only supports WATCHED
+        self.assertEqual(_PLEX_WRITABLE_FIELDS['Season'], {'WATCHED'})
 
 
 # List of all unittest classes for run_regression_tests()
@@ -5108,7 +5459,7 @@ _UNITTEST_CLASSES = [
     TestObjByShowScraped,
     TestEpisodeNumberingIssues,
     TestInfoScrapedData,
-    TestFilenameMap,
+    TestDiskMap,
 ]
 
 # ---------------------------------------------------------------------------
