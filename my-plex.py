@@ -1326,9 +1326,9 @@ def _inject_episode_funcs_into_test_mod():
     for _name in _EPISODE_FUNC_NAMES:
         if _name in globals():
             setattr(_test_mod, _name, globals()[_name])
-def run_regression_tests():
+def run_regression_tests(scope=None):
     _inject_episode_funcs_into_test_mod()
-    _original_run_regression_tests(globals())
+    _original_run_regression_tests(globals(), scope=scope)
 
 
 ############################################################
@@ -1550,63 +1550,58 @@ def get_alternative_paths(path, including_path=False, path_2nd=None):
     return res
 
 
-def resolve_filepath_with_alternatives(filepath, remote_host=None):
-    """Resolve filepath by checking all alternative paths and returning the first existing one.
+def resolve_path(filepath, remote_host=None, check='file'):
+    """Resolve a path by checking all ALTERNATIVE_ROOTPATHS and returning the first existing one.
 
-    This function checks:
-    1. The original filepath
-    2. All alternative paths generated from ALTERNATIVE_ROOTPATHS
+    This is the SINGLE function for resolving any path (file or directory) across
+    alternative root paths, with optional SSH fallback for remote checks.
 
     Args:
-        filepath: Original file path to check
-        remote_host: SSH host for remote operations, None for local
+        filepath: Original path to resolve
+        remote_host: SSH host for remote checks (None = local only)
+        check: 'file' (os.path.isfile), 'dir' (os.path.isdir), or 'any' (os.path.exists)
 
     Returns:
         tuple: (resolved_path, exists)
             - resolved_path: First existing path found, or original filepath if none exist
-            - exists: True if file was found, False otherwise
-
-    Example:
-        If ALTERNATIVE_ROOTPATHS = [('/j2/watch.v/', '/Volumes/2/watch.v/')]
-        And filepath = '/j2/watch.v/movie.mp4' doesn't exist
-        But '/Volumes/2/watch.v/movie.mp4' does exist
-        Returns: ('/Volumes/2/watch.v/movie.mp4', True)
+            - exists: True if found, False otherwise
     """
-    # Get list of paths to check: [original, alternative1, alternative2, ...]
     paths_to_check = get_alternative_paths(filepath, including_path=True)
 
     if DEEPDBG:
-        print(f"{DBGPFX}resolve_filepath_with_alternatives: checking {len(paths_to_check)} paths for '{filepath}'")
+        print(f"{DBGPFX}resolve_path({check}): checking {len(paths_to_check)} paths for '{filepath}'")
 
-    # Check each path for existence
+    local_check = {'file': os.path.isfile, 'dir': os.path.isdir, 'any': os.path.exists}.get(check, os.path.isfile)
+
     for check_path in paths_to_check:
         if check_path is None:
             continue
 
-        if remote_host:
-            # Remote check
+        # Local check first
+        try:
+            if local_check(check_path):
+                if DEEPDBG: print(f"{DBGPFX}  -> FOUND locally: {check_path}")
+                return (check_path, True)
+        except OSError:
+            pass
+
+        if DEEPDBG:
+            print(f"{DBGPFX}  -> not found locally: {check_path}")
+
+    # SSH fallback: if remote_host given, check all paths on remote
+    if remote_host:
+        for check_path in paths_to_check:
+            if check_path is None:
+                continue
             escaped_path = escape_path_for_ssh(check_path)
             cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_path}\\\" ] && echo EXISTS || echo NOTFOUND\""
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             if result.returncode == 0 and result.stdout.strip() == 'EXISTS':
-                if DEEPDBG:
-                    print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
+                if DEEPDBG: print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
                 return (check_path, True)
             elif DEEPDBG:
                 print(f"{DBGPFX}  -> not found on remote {remote_host}: {check_path}")
-        else:
-            # Local check
-            # IMPORTANT: Use os.path.isfile() instead of os.path.exists() to ensure we're checking for FILES only
-            # os.path.exists() returns True for directories too, which can cause issues when the directory exists
-            # but the specific file doesn't (leading to false positives)
-            if os.path.isfile(check_path):
-                if DEEPDBG:
-                    print(f"{DBGPFX}  -> FOUND locally: {check_path}")
-                return (check_path, True)
-            elif DEEPDBG:
-                print(f"{DBGPFX}  -> not found locally: {check_path}")
 
-    # None of the paths exist - return original filepath with exists=False
     if DEEPDBG:
         print(f"{DBGPFX}  -> NOT FOUND in any alternative path, returning original: {filepath}")
     return (filepath, False)
@@ -2105,7 +2100,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
     # Resolve filepath using alternative paths (unless explicitly disabled)
     skip_alternatives = kwargs.get('skip_alternatives', False)
     if not skip_alternatives:
-        resolved_filepath, exists = resolve_filepath_with_alternatives(filepath, remote_host)
+        resolved_filepath, exists = resolve_path(filepath, remote_host)
         if operation == 'CHECK':
             # For CHECK operation, return the resolved path if it exists
             return (exists, resolved_filepath if exists else None)
@@ -2468,7 +2463,7 @@ def query_plex_database(query, mode='rows'):
             print(f"{DBGPFX}  Command: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding='utf-8', errors='replace')
 
         if result.returncode != 0:
             print(f"ERROR: Plex database query failed")
@@ -8022,6 +8017,14 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
 
         # Populate cache directly (bypassing add_media_obj_via_PLEX_API for Plex metadata)
         is_new_movie = movie_key not in PLEX_Media.OBJ_BY_ID
+        # Preserve file_metadata from existing cache entry (expensive to re-collect via ffmpeg)
+        if not is_new_movie:
+            cached_files = PLEX_Media.OBJ_BY_ID[movie_key].get('files', {})
+            for ver, new_fi in movie_dict.get('files', {}).items():
+                if isinstance(new_fi, dict) and new_fi.get('file_metadata') is None:
+                    cached_fi = cached_files.get(ver)
+                    if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
+                        new_fi['file_metadata'] = cached_fi['file_metadata']
         PLEX_Media.OBJ_BY_ID[movie_key] = movie_dict
         _track_delta(display_title, 'Movie', is_new_movie)
 
@@ -8376,6 +8379,15 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                 is_new_episode = episode_key not in PLEX_Media.OBJ_BY_ID
                 processed_count += 1
 
+                # Preserve file_metadata from existing cache entry (expensive to re-collect via ffmpeg)
+                if not is_new_episode:
+                    cached_files = PLEX_Media.OBJ_BY_ID[episode_key].get('files', {})
+                    for ver, new_fi in episode_dict.get('files', {}).items():
+                        if isinstance(new_fi, dict) and new_fi.get('file_metadata') is None:
+                            cached_fi = cached_files.get(ver)
+                            if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
+                                new_fi['file_metadata'] = cached_fi['file_metadata']
+
                 # Populate cache — Episode in OBJ_BY_ID
                 PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
                 _track_delta(display_title, 'Episode', is_new_episode)
@@ -8634,7 +8646,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             failed_shows.append((show_title, 'no directory'))
             continue
 
-        show_dir = get_local_show_dir(show_dir_server)
+        show_dir = get_local_path(show_dir_server)
         tsv_path = get_episodes_tsv_path(show_dir)
 
         # Ensure TSV exists — during --update-cache we only scrape MISSING TSVs.
@@ -8892,7 +8904,7 @@ def _list_tsv_problems(library_name=None):
     from collections import defaultdict
 
     _ERROR_TYPE_LABELS = {
-        'no_external_ids':    'No external IDs (fix in Plex)',
+        'no_external_ids':    'No external IDs (fix in Plex: rematch)',
         'suspicious_title':   'Suspicious title (may be truncated)',
         'misidentified_show': 'Single episode in series — please verify',
         'no_id_for_source':   'No ID for source',
@@ -8926,7 +8938,7 @@ def _list_tsv_problems(library_name=None):
         show_dir_server = show_dict.get('file', '')
         if not show_dir_server:
             continue
-        show_dir = get_local_show_dir(show_dir_server)
+        show_dir = get_local_path(show_dir_server)
         tsv_path = get_episodes_tsv_path(show_dir)
         err_path = get_episodes_err_path(show_dir)
         show_info.append((show_key, show_dir, tsv_path, err_path))
@@ -9399,7 +9411,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                 PLEX_Library.OBJ_DICT[library_name] = lib_obj
                 PLEX_Library.OBJ_DICT_TYPE[library_name] = l_type
-                if l_type in PLEX_Library.SUPPORTED_TYPES:
+                lib_agent = cached_library_stats.get('agent', {}).get(library_name, '')
+                is_personal = lib_agent in ('com.plexapp.agents.none', 'tv.plex.agents.none')
+                if l_type in PLEX_Library.SUPPORTED_TYPES and not is_personal:
                     PLEX_Library.OBJ_DICT_SUPPORTED[library_name] = lib_obj
 
         # No API fallback — if cache is empty, user must run --update-cache (which uses DB)
@@ -9999,8 +10013,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     PLEX_Library.OBJ_DICT[lib_obj.title] = lib_obj
                     PLEX_Library.OBJ_DICT_TYPE[lib_obj.title] = lib_obj.type.capitalize()
 
-                    # Only add movie and show libraries to SUPPORTED
-                    if lib_obj.type in ['movie', 'show']:
+                    # Only add movie and show libraries with a real metadata agent to SUPPORTED
+                    is_personal = lib_obj.agent in ('com.plexapp.agents.none', 'tv.plex.agents.none')
+                    if lib_obj.type in ['movie', 'show'] and not is_personal:
                         PLEX_Library.OBJ_DICT_SUPPORTED[lib_obj.title] = lib_obj
 
                 if DBG: print(f"{DBGPFX}update_cache(): Populated OBJ_DICT with {len(PLEX_Library.OBJ_DICT)} libraries ({len(PLEX_Library.OBJ_DICT_SUPPORTED)} supported)")
@@ -10861,11 +10876,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if not PLEX_Library.init_done: PLEX_Library.init()
         if only_supported:
             for l in PLEX_Library.OBJ_DICT_SUPPORTED.values():
-                print(f"{prefix}{l.title}{postfix}") if l.type in PLEX_Library.SUPPORTED_TYPES else next
+                print(f"{prefix}{l.title}{postfix}")
         else: # return ALL libraries:
             for l in PLEX_Library.OBJ_DICT.values():
-                l_type = PLEX_Library.OBJ_DICT_TYPE.get(l.title, l.type)
-                print(f"{prefix}{l.title} [{'supported' if l_type in PLEX_Library.SUPPORTED_TYPES else 'UNSUPPORTED'}]{postfix}")
+                is_supported = l.title in PLEX_Library.OBJ_DICT_SUPPORTED
+                print(f"{l.title}\t{'supported' if is_supported else 'UNSUPPORTED'}")
 
     @staticmethod
     def create(library_name):
@@ -11368,6 +11383,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             for key, obj in PLEX_Media.OBJ_BY_ID.items():
                 if obj.get('type') not in ('Movie', 'Episode'):
                     continue
+                if obj.get('library') not in PLEX_Library.OBJ_DICT_SUPPORTED:
+                    continue
                 if SCAN_LIBRARIES is not None and obj.get('library') not in SCAN_LIBRARIES:
                     continue
                 for version, file_info in obj.get('files', {}).items():
@@ -11392,6 +11409,24 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _run_batch_metadata_collection()
             # Save cache after metadata collection (before labels index)
             update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
+
+        # Remove items from unsupported libraries
+        if FORCE_CACHE_UPDATE:
+            unsupported_libs = set(PLEX_Library.OBJ_DICT.keys()) - set(PLEX_Library.OBJ_DICT_SUPPORTED.keys())
+            if unsupported_libs:
+                removed = 0
+                keys_to_remove = [k for k, obj in PLEX_Media.OBJ_BY_ID.items() if obj.get('library') in unsupported_libs]
+                for key in keys_to_remove:
+                    obj = PLEX_Media.OBJ_BY_ID.pop(key, None)
+                    if obj:
+                        lib = obj.get('library', '')
+                        obj_type = obj.get('type', '')
+                        if lib in PLEX_Media.OBJ_BY_LIBRARY and obj_type in PLEX_Media.OBJ_BY_LIBRARY[lib]:
+                            if key in PLEX_Media.OBJ_BY_LIBRARY[lib][obj_type]:
+                                PLEX_Media.OBJ_BY_LIBRARY[lib][obj_type].remove(key)
+                        removed += 1
+                if removed:
+                    print(f"  Removed {removed} items from unsupported libraries: {', '.join(sorted(unsupported_libs))}")
 
         # Rebuild OBJ_BY_FILEPATH from OBJ_BY_ID to remove stale entries
         if FORCE_CACHE_UPDATE:
@@ -11678,7 +11713,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         for title, error_type, message, lib in _TSV_FAILED_SHOWS:
                             by_type[error_type].append((title, lib))
                         _ERROR_TYPE_LABELS = {
-                            'no_external_ids':    'No external IDs (fix in Plex)',
+                            'no_external_ids':    'No external IDs (fix in Plex: rematch)',
                             'suspicious_title':   'Suspicious title',
                             'misidentified_show': 'Single episode in series',
                             'no_id_for_source':   'No ID for source',
@@ -11744,7 +11779,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 for title, error_type, message, lib in _TSV_FAILED_SHOWS:
                     by_type[error_type].append((title, lib))
                 _ERROR_TYPE_LABELS = {
-                    'no_external_ids':    'No external IDs (fix in Plex)',
+                    'no_external_ids':    'No external IDs (fix in Plex: rematch)',
                     'suspicious_title':   'Suspicious title',
                     'misidentified_show': 'Single episode in series',
                     'no_id_for_source':   'No ID for source',
@@ -12240,7 +12275,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
         if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
-            print("\nAvailable Libraries:")
             PLEX_Library.print()
             return audio_filter, media_type, False  # False = should not continue
         if library_name is None:
@@ -12608,22 +12642,31 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(key, {})
                 scraped_title = scraped_data.get('title', '')
 
-            # Get the directory name to compare against
+            # Get the directory/file name to compare against
             if obj_type == 'Show':
                 dir_name = os.path.basename(filepath)  # show_dir basename
             else:  # Movie
-                dir_name = os.path.basename(os.path.dirname(filepath))  # movie folder
+                parent_dir = os.path.basename(os.path.dirname(filepath))
+                # If parent is the library root, use filename instead
+                library = obj.get('library', '')
+                if parent_dir == library or not parent_dir:
+                    dir_name = os.path.splitext(os.path.basename(filepath))[0]
+                else:
+                    dir_name = parent_dir
 
             if not dir_name:
                 continue
 
-            # Compare Plex title against: scraped title (if available) or directory name
+            # Always compare Plex title against directory name (strongest signal for user intent)
+            dir_ratio, dir_matched = PLEX_Media._title_similarity(dir_name, title, original_title)
+            comparison = f"DIR: {dir_name}"
+            ratio = dir_ratio
+
+            # If scraped title is also available and ALSO mismatches, note it
             if scraped_title:
-                ratio, matched_against = PLEX_Media._title_similarity(scraped_title, title, original_title)
-                comparison = f"SCRAPED-TITLE: {scraped_title}"
-            else:
-                ratio, matched_against = PLEX_Media._title_similarity(dir_name, title, original_title)
-                comparison = f"DIR: {dir_name}"
+                scraped_ratio, _ = PLEX_Media._title_similarity(scraped_title, title, original_title)
+                if scraped_ratio < MISMATCH_THRESHOLD:
+                    comparison += f" | SCRAPED-TITLE: {scraped_title}"
 
             if ratio < MISMATCH_THRESHOLD:
                 library = obj.get('library', '?')
@@ -15370,7 +15413,7 @@ def _file_exists_local_or_remote(filepath):
     if os.path.isfile(filepath):
         return True
     # Try SSH: translate to server path and check
-    server_dir = get_server_show_dir(os.path.dirname(filepath))
+    server_dir = get_server_path(os.path.dirname(filepath))
     server_file = os.path.join(server_dir, os.path.basename(filepath))
     escaped = escape_path_for_ssh(server_file)
     try:
@@ -15394,7 +15437,7 @@ def _batch_file_exists_remote(filepaths):
     checks = []
     path_map = {}  # index -> local_path
     for i, fp in enumerate(filepaths):
-        server_dir = get_server_show_dir(os.path.dirname(fp))
+        server_dir = get_server_path(os.path.dirname(fp))
         server_file = os.path.join(server_dir, os.path.basename(fp))
         escaped = escape_path_for_ssh(server_file)
         checks.append(f'[ -f "{escaped}" ] && echo {i}')
@@ -15434,7 +15477,7 @@ def read_episodes_tsv(tsv_path):
         lines_iter = open(tsv_path, 'r', encoding='utf-8')
     else:
         # Try reading via SSH from server path
-        server_path = get_server_show_dir(os.path.dirname(tsv_path))
+        server_path = get_server_path(os.path.dirname(tsv_path))
         server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
         escaped = escape_path_for_ssh(server_tsv)
         try:
@@ -15548,7 +15591,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     content = '\n'.join(lines) + '\n'
 
     # Translate local path to server path
-    server_path = get_server_show_dir(os.path.dirname(tsv_path))
+    server_path = get_server_path(os.path.dirname(tsv_path))
     server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
     escaped_tsv = escape_path_for_ssh(server_tsv)
 
@@ -15585,7 +15628,7 @@ def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
         age = time.time() - os.path.getmtime(tsv_path)
         return age > max_age
     # Try SSH: check file age on server
-    server_dir = get_server_show_dir(os.path.dirname(tsv_path))
+    server_dir = get_server_path(os.path.dirname(tsv_path))
     server_tsv = os.path.join(server_dir, EPISODES_TSV_FILENAME)
     escaped = escape_path_for_ssh(server_tsv)
     try:
@@ -15632,7 +15675,7 @@ def write_episodes_err(show_dir, error_type, source, message):
     content += f'source: {source}\n'
     content += f'message: {message}\n'
 
-    server_dir = get_server_show_dir(show_dir)
+    server_dir = get_server_path(show_dir)
     server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
     escaped_dir = escape_path_for_ssh(server_dir)
     escaped_err = escape_path_for_ssh(server_err)
@@ -15661,7 +15704,7 @@ def read_episodes_err(show_dir):
             lines = f.readlines()
     else:
         # Try reading via SSH
-        server_dir = get_server_show_dir(show_dir)
+        server_dir = get_server_path(show_dir)
         server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
         escaped = escape_path_for_ssh(server_err)
         try:
@@ -15693,7 +15736,7 @@ def clear_episodes_err(show_dir):
     if os.path.isfile(err_path):
         os.remove(err_path)
     # Also remove on server via SSH
-    server_dir = get_server_show_dir(show_dir)
+    server_dir = get_server_path(show_dir)
     server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
     escaped = escape_path_for_ssh(server_err)
     try:
@@ -15705,31 +15748,20 @@ def clear_episodes_err(show_dir):
         pass
 
 
-def get_local_show_dir(show_dir_server):
-    """Translate a server path (e.g. /Volumes/2/watch.v/...) to local path using ALTERNATIVE_ROOTPATHS.
-    Returns the first alternative path that exists locally, or the original path if it exists."""
-    import os
-    try:
-        if os.path.isdir(show_dir_server):
-            return show_dir_server
-    except OSError:
-        pass
-    for alt in get_alternative_paths(show_dir_server):
-        try:
-            if os.path.isdir(alt):
-                return alt
-        except OSError:
-            pass
-    return show_dir_server  # fallback: return original (caller will handle missing)
+def get_local_path(server_path):
+    """Translate a server path to local path using ALTERNATIVE_ROOTPATHS.
+    Returns the first alternative path that exists locally, or the original path if none exist."""
+    resolved, _ = resolve_path(server_path, check='dir')
+    return resolved
 
 
-def get_server_show_dir(show_dir_local):
-    """Translate a local path (e.g. /j2/watch.v/...) to server path using ALTERNATIVE_ROOTPATHS.
+def get_server_path(local_path):
+    """Translate a local path to server path using ALTERNATIVE_ROOTPATHS.
     Returns the first alternative path, or the original path."""
     import os
-    for alt in get_alternative_paths(show_dir_local):
+    for alt in get_alternative_paths(local_path):
         return alt  # first alternative = server path
-    return show_dir_local
+    return local_path
 
 
 # ---------------------------------------------------------------------------
@@ -16745,7 +16777,7 @@ def cmd_missing(show_ref, source_override=None):
         err(1088, f"Show '{show_title}' ({show_key}) has no directory path in cache.\n"
             "  Run my-plex --update-cache to refresh.")
 
-    show_dir = get_local_show_dir(show_dir_server)
+    show_dir = get_local_path(show_dir_server)
 
     # Determine episode source for this show
     source = _determine_episode_source(show_dict, source_override)
@@ -17108,6 +17140,9 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
 
     for path, (cache_key, obj) in seen_paths.items():
         name = os.path.basename(path)
+        if name.startswith('.'):
+            skipped_count += 1
+            continue
         parent = os.path.dirname(path)
 
         # Build log prefix: LIBRARY|CACHE_KEY|
@@ -17304,10 +17339,11 @@ def cmd_plex2disk(target, dry_run=False, force=False):
 
     scope_count = sum(1 for m in [DISK_MAP, DISK_MAP_MOVIE_DIR, DISK_MAP_SERIES_DIR, DISK_MAP_SEASON_DIR] if m)
     force_label = " --force" if force else ""
-    if dry_run:
-        print(f"DRY RUN: --plex2disk{force_label} ({len(items)} items, {scope_count} scope(s))")
-    else:
-        print(f"Syncing Plex metadata to disk{force_label} ({len(items)} items, {scope_count} scope(s))...")
+    if VRB:
+        if dry_run:
+            print(f"DRY RUN: --plex2disk{force_label} ({len(items)} items, {scope_count} scope(s))")
+        else:
+            print(f"Syncing Plex metadata to disk{force_label} ({len(items)} items, {scope_count} scope(s))...")
 
     # --- Collect paths for each scope ---
     file_items = []       # (filepath, cache_key, obj)
@@ -17416,10 +17452,10 @@ def cmd_plex2disk(target, dry_run=False, force=False):
         save_disk_map_sidecar(sidecar)
         update_and_save_cache(CACHE)
 
-    # Summary
-    label = "Would rename" if dry_run else "Renamed"
-    print(f"\n{label}: {total_renamed}, unchanged: {total_skipped}, warnings: {total_warnings}, errors: {total_errors}")
+    # Summary (only with -V)
     if VRB:
+        label = "Would rename" if dry_run else "Renamed"
+        print(f"\n{label}: {total_renamed}, unchanged: {total_skipped}, warnings: {total_warnings}, errors: {total_errors}")
         for stat in scope_stats:
             print(f"  {stat}")
 
@@ -17614,10 +17650,11 @@ def cmd_disk2plex(target, dry_run=False, force=False):
     error_count = 0
 
     force_label = " --force" if force else ""
-    if dry_run:
-        print(f"DRY RUN: --disk2plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)")
-    else:
-        print(f"Syncing disk markers to Plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)...")
+    if VRB:
+        if dry_run:
+            print(f"DRY RUN: --disk2plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)")
+        else:
+            print(f"Syncing disk markers to Plex{force_label} ({len(items)} items, {len(DISK_MAP_PUSH)} aspects)...")
 
     removed_count = 0
 
@@ -17826,9 +17863,10 @@ def cmd_disk2plex(target, dry_run=False, force=False):
                         print(f"  ERROR pushing collection for {cache_key}: {ex}")
                         error_count += 1
 
-    prefix = "Would push" if dry_run else "Pushed"
-    removed_label = f", removed: {removed_count}" if removed_count or force else ""
-    print(f"\n  {prefix}: {pushed_count}, unchanged: {skipped_count}{removed_label}, errors: {error_count}")
+    if VRB:
+        label = "Would push" if dry_run else "Pushed"
+        removed_label = f", removed: {removed_count}" if removed_count or force else ""
+        print(f"\n{label}: {pushed_count}, unchanged: {skipped_count}{removed_label}, errors: {error_count}")
 
 def _update_cache_filepath(obj, old_path, new_path):
     """Update filepath in cache entry after rename.
@@ -17987,20 +18025,24 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
 
 VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv', '.mov'}
 
-def cmd_sort_new(args, dry_run=False):
+def cmd_sort_new(args, dry_run=False, target=None):
     """Sort unsorted recordings into season directories for all series.
 
     Scans all show directories in series-type libraries for unsorted video files
     (files in the show root, not in season subdirs, without S##E## prefix).
     Matches file dates to episodes.tsv, renames with S##E## prefix, moves to season dir.
+
+    If target is a library name, only process that library.
     """
     import os, subprocess, shlex
     from datetime import timedelta
 
     shows = get_all_shows_in_series_libraries()
-    if not shows:
+    if target:
+        shows = [(k, d, lib) for k, d, lib in shows if lib == target]
+    if not shows and not target:
         print("No shows found in series-type libraries.")
-        return
+        # Fall through to movie section below
 
     total_sorted = 0
     total_failed = 0
@@ -18012,7 +18054,7 @@ def cmd_sort_new(args, dry_run=False):
         if not show_dir_server:
             continue
 
-        show_dir = get_local_show_dir(show_dir_server)
+        show_dir = get_local_path(show_dir_server)
         if not os.path.isdir(show_dir):
             continue
 
@@ -18020,6 +18062,8 @@ def cmd_sort_new(args, dry_run=False):
         unsorted = []
         try:
             for fn in os.listdir(show_dir):
+                if fn.startswith('.'):
+                    continue
                 fp = os.path.join(show_dir, fn)
                 if not os.path.isfile(fp):
                     continue
@@ -18181,7 +18225,134 @@ def cmd_sort_new(args, dry_run=False):
         total_sorted += sorted_count
         total_failed += failed_count
 
-    print(f"\nDone: {total_sorted} sorted, {total_failed} failed across {total_shows_processed} show(s)")
+    # --- Movie libraries: create directories for bare video files ---
+    movie_sorted = 0
+    movie_failed = 0
+    movie_libs_processed = 0
+
+    for lib_name, lib_type in PLEX_Library.OBJ_DICT_TYPE.items():
+        if lib_type != 'Movie':
+            continue
+        if lib_name not in PLEX_Library.OBJ_DICT_SUPPORTED:
+            continue
+        if target and lib_name != target:
+            continue
+
+        # Derive library root(s) from cached movie file paths in OBJ_BY_MOVIE
+        lib_roots = set()
+        lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
+        for movie_key in lib_data.get('Movie', []):
+            versions = PLEX_Media.OBJ_BY_MOVIE.get(movie_key, {})
+            for fp in versions.values():
+                if fp and isinstance(fp, str):
+                    parent = os.path.dirname(fp)
+                    grandparent = os.path.dirname(parent)
+                    # If parent dir name matches library name, file is bare in library root
+                    if os.path.basename(parent) == lib_name:
+                        lib_roots.add(parent)
+                    else:
+                        lib_roots.add(grandparent)
+        if not lib_roots:
+            continue
+
+        remote_host = PLEX_DB_REMOTE_HOST
+
+        for lib_root_server in sorted(lib_roots):
+            # READ: try local alternative path first, SSH fallback
+            lib_root_local = get_local_path(lib_root_server)
+            use_local = os.path.isdir(lib_root_local)
+
+            if use_local:
+                # List files locally via alternative path
+                bare_files = []
+                all_root_files = []
+                try:
+                    for fn in os.listdir(lib_root_local):
+                        if fn.startswith('.'):
+                            continue
+                        fp = os.path.join(lib_root_local, fn)
+                        if not os.path.isfile(fp):
+                            continue
+                        all_root_files.append(fn)
+                        ext = os.path.splitext(fn)[1].lower()
+                        if ext in VIDEO_EXTENSIONS:
+                            bare_files.append(fn)
+                except OSError:
+                    continue
+            else:
+                # SSH fallback: list files on server
+                success, file_list = my_plex_file_operation('LIST_DIR', lib_root_server, remote_host, maxdepth=1)
+                if not success or not file_list:
+                    continue
+                all_root_files = []
+                bare_files = []
+                for fp in file_list:
+                    fn = os.path.basename(fp)
+                    if fn.startswith('.'):
+                        continue
+                    all_root_files.append(fn)
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext in VIDEO_EXTENSIONS:
+                        bare_files.append(fn)
+
+            if not bare_files:
+                continue
+
+            movie_libs_processed += 1
+            bare_files.sort()
+            print(f"\n  [{lib_name}] {len(bare_files)} movie file(s) without directory")
+
+            for fn in bare_files:
+                stem = os.path.splitext(fn)[0]
+                # Directory name: lowercase, spaces/underscores → dots
+                dir_name = stem.lower()
+                dir_name = _re.sub(r'[\s_]+', '.', dir_name)
+
+                # Collect sibling files (same stem, different extensions including .de.srt etc.)
+                stem_dot = stem + '.'
+                siblings = [s for s in all_root_files if s != fn and s.startswith(stem_dot)]
+                all_files = [fn] + sorted(siblings)
+
+                if dry_run:
+                    print(f"    [dry-run] mkdir {dir_name}/")
+                    for f in all_files:
+                        print(f"    [dry-run]   mv {f} → {dir_name}/{f}")
+                    movie_sorted += 1
+                else:
+                    # WRITE: always use SSH on server path
+                    target_dir_server = os.path.join(lib_root_server, dir_name)
+                    escaped_dir = escape_path_for_ssh(target_dir_server)
+                    mkdir_cmd = ["ssh", remote_host, f"mkdir -p \"{escaped_dir}\""]
+                    result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}")
+                        movie_failed += 1
+                        continue
+
+                    move_ok = True
+                    for f in all_files:
+                        src_server = os.path.join(lib_root_server, f)
+                        dst_server = os.path.join(target_dir_server, f)
+                        success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
+                        if not success:
+                            move_ok = False
+
+                    if move_ok:
+                        print(f"    {fn} → {dir_name}/ ({len(all_files)} file(s))")
+                        movie_sorted += 1
+                    else:
+                        print(f"    ERROR: {fn}: some files failed to move")
+                        movie_failed += 1
+
+    if total_shows_processed > 0 or movie_libs_processed > 0:
+        parts = []
+        if total_shows_processed > 0:
+            parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_shows_processed} show(s)")
+        if movie_libs_processed > 0:
+            parts.append(f"{movie_sorted} movies sorted, {movie_failed} failed across {movie_libs_processed} library(ies)")
+        print(f"\nDone: {'; '.join(parts)}")
+    else:
+        print("\nNothing to sort.")
 
 
 def _next_episode_in_dir(directory, season_num):
@@ -20164,7 +20335,7 @@ def show_item_info(identifier, table_only=False):
         # TSV episode data summary (from episodes.tsv on disk)
         show_dir_server = obj.get('file', '')
         if show_dir_server:
-            show_dir = get_local_show_dir(show_dir_server)
+            show_dir = get_local_path(show_dir_server)
             tsv_path = get_episodes_tsv_path(show_dir)
             tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
             if tsv_meta:
@@ -20349,8 +20520,14 @@ def execute_global_commands(args, cmd_args):
         sys.exit(0)
 
     # Handle --test command
-    if cmd_args.test:
-        run_regression_tests()
+    if cmd_args.test is not None:
+        scope = cmd_args.test if cmd_args.test else None
+        if scope and scope.lower() == 'all':
+            run_regression_tests(scope='all')
+        elif scope:
+            run_regression_tests(scope=scope)
+        else:
+            run_regression_tests(scope=None)
         # run_regression_tests() calls sys.exit(), so we never reach here
 
     # Handle --missing command
@@ -20367,7 +20544,8 @@ def execute_global_commands(args, cmd_args):
     # Handle --sort-new command
     if safe_getattr(cmd_args, 'sort_new', False):
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-        cmd_sort_new(args, dry_run=dry_run)
+        target = args.CMD_OR_PLEXOBJECT if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT in PLEX_Library.OBJ_DICT else None
+        cmd_sort_new(args, dry_run=dry_run, target=target)
         sys.exit(0)
 
     # Handle --plex-disk-sync / --sync (bidirectional: disk2plex first, then plex2disk)
@@ -20435,7 +20613,7 @@ def execute_global_commands(args, cmd_args):
         print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODE-DATA-SOURCE")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
-            supported = 'yes' if l_type in PLEX_Library.SUPPORTED_TYPES else 'no'
+            supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
             lang = languages.get(lib_name, '-')
@@ -20977,6 +21155,7 @@ def main():
     main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
+    main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='SCOPE', help=argparse.SUPPRESS)  # Consumed here to protect SCOPE from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -20996,7 +21175,7 @@ def main():
     main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
-    main_parser.add_argument('-U', '--update-cache', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --force-tsv (with --from-scratch: re-scrape all episode TSVs), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', '--cache-update', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --force-tsv (with --from-scratch: re-scrape all episode TSVs), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
     main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-tsv', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - force re-scrape ALL episode TSVs
@@ -21021,7 +21200,7 @@ def main():
     GLOBAL_CMD_PARSER = argparse.ArgumentParser(description=None, add_help=False, usage="my-pex-api.py <GLOBAL_COMMAND>", allow_abbrev=False, exit_on_error=False)
     GLOBAL_CMD_PARSER._positionals.title = ''
     GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
-    GLOBAL_CMD_PARSER.add_argument('--list-libraries', action='store_true', help="List all libraries in the Plex server.")
+    GLOBAL_CMD_PARSER.add_argument('--list-libraries', '--libraries', action='store_true', help="List all libraries in the Plex server.")
     GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates, --broken to show broken files, --type to filter by media type (movie/show), --resolve for interactive duplicate resolution, --watched/--unwatched to filter by watch status, --audio/--en/--de/--fr to filter by audio language, or --no-audio-language to find items with missing language info.")
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
@@ -21060,7 +21239,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
-    GLOBAL_CMD_PARSER.add_argument('--test', action='store_true', help="Run regression tests to verify script functionality.")
+    GLOBAL_CMD_PARSER.add_argument('--test', nargs='?', const='', default=None, metavar='SCOPE', help="Run tests. --test: list available scopes. --test <scope>: run tests for that scope. --test all: run all tests.")
 
     add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
     add_PLEX_OBJ_TYPE( PLEX_Collection ) # Collection commands (fast: local cache lookup)
@@ -21212,6 +21391,11 @@ def main():
         remaining_args.insert(0, '--info')
         if args.info != '':  # --info with argument: re-inject the value too
             remaining_args.insert(1, args.info)
+    # Re-inject --test (consumed by main_parser to protect SCOPE from CMD_OR_PLEXOBJECT)
+    if safe_getattr(args, 'test', None) is not None:
+        remaining_args.insert(0, '--test')
+        if args.test != '':  # --test with scope: re-inject the value too
+            remaining_args.insert(1, args.test)
     # Re-inject --excess-versions (consumed by main_parser to protect LIMIT from CMD_OR_PLEXOBJECT)
     if safe_getattr(args, 'excess_versions', None) is not None:
         remaining_args.insert(0, '--excess-versions')
