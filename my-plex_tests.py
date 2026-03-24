@@ -2526,10 +2526,11 @@ class TestEndToEnd(unittest.TestCase):
         self.assertTrue(len(result.stdout) > 0, "Must produce output")
 
     def test_list_no_library(self):
-        """my-plex --list without library must show available libraries."""
+        """my-plex --list without library must show library names with supported status."""
         result = self._run_cmd('--list')
         self.assertEqual(result.returncode, 0, f"--list failed: {result.stderr}")
-        self.assertIn("Available Libraries", result.stdout)
+        # Output is tab-separated: library_name\tsupported/UNSUPPORTED
+        self.assertIn("\tsupported", result.stdout)
 
     def test_duplicates(self):
         """my-plex --duplicates must list duplicate media."""
@@ -3470,6 +3471,24 @@ class TestSortNew(unittest.TestCase):
         """--dry-run must be in argument parsers."""
         src = self._read_script()
         self.assertIn("'--dry-run'", src, "--dry-run not found in argparse")
+
+    def test_sort_new_handles_movie_libraries(self):
+        """cmd_sort_new must process Movie libraries for bare files."""
+        src = self._read_script()
+        self.assertIn("lib_type != 'Movie'", src, "sort-new must handle Movie libraries")
+        self.assertIn('VIDEO_EXTENSIONS', src, "sort-new must check video extensions")
+
+    def test_sort_new_movie_dir_name_convention(self):
+        """Movie directory names must be lowercase with dot separators."""
+        src = self._read_script()
+        # Check for the lowercase + dot conversion
+        self.assertIn('.lower()', src, "sort-new must lowercase movie dir names")
+        self.assertIn("'.'", src, "sort-new must use dot as separator")
+
+    def test_sort_new_moves_siblings(self):
+        """sort-new must detect and move sibling files (.srt, .nfo, etc.)."""
+        src = self._read_script()
+        self.assertIn('siblings', src, "sort-new must handle sibling files")
 
 
 class TestMissingE2E(unittest.TestCase):
@@ -5566,59 +5585,78 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn('Rename: {path}', content)
 
 
+# Test scopes: logical groupings of test classes by feature area
+# Usage: --test <scope>  runs only the classes in that scope
+#        --test --all    runs everything
+#        --test          lists available scopes
+_UNITTEST_SCOPES = {
+    'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
+                   TestPlexUpdatedAtTracking, TestCacheSkipLogic,
+                   TestVerifyCacheIntegrity, TestCacheFormatValidation,
+                   TestCacheStructureParity, TestVerifyCacheSplit,
+                   TestUpdateCacheSplit, TestCacheUpdateLog,
+                   TestObjByLibraryDedup],
+    'duplicates': [TestMultiVersionMerge, TestDuplicateKeyGeneration,
+                   TestClassifyMultiVersion, TestDuplicatesIgnoreLibraryCombinations,
+                   TestExcessVersions, TestExcessVersionsMainParser,
+                   TestVersionStringCollision],
+    'episodes':   [TestEpisodesTSV, TestDateExtraction, TestSpecialDetection,
+                   TestMissingEpisodes, TestMissingE2E, TestCustomDateExtractors,
+                   TestEpisodeSourceSelection, TestExternalIdsInCache,
+                   TestEpisodeSourceConfig, TestSourceE2E,
+                   TestEpisodesErr, TestEpisodesErrClassification,
+                   TestForceTsv, TestTsvScrapersE2E,
+                   TestEpisodeNumberingIssues, TestObjByShowScraped,
+                   TestInfoScrapedData],
+    'disk-map':   [TestDiskMap],
+    'rename':     [TestRename],
+    'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
+                   TestSortNew, TestUnmatched, TestUnsorted],
+    'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
+    'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
+                   TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
+                   TestDbQueriesUseLibraryName],
+    'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
+                   TestMediaApiActionConsolidation, TestListMethodSplit,
+                   TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
+    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems,
+                   TestWaitForPlexScanComplete, TestErrorOutputConventions,
+                   TestBrokenCrossValidation, TestEndToEnd,
+                   TestShowInfoSeasonTable, TestPotentialMismatch,
+                   TestShowDirDerivation],
+}
+
 # List of all unittest classes for run_regression_tests()
-_UNITTEST_CLASSES = [
-    TestObjTypeHandling, TestMultiVersionMerge, TestCacheResumeWithMultiVersion,
-    TestDuplicateKeyGeneration, TestInitLoopRobustness, TestClassifyMultiVersion,
-    TestDuplicatesIgnoreLibraryCombinations, TestRunToolLocally, TestRunToolOnPLEXServer,
-    TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
-    TestLongHelp, TestPlexUpdatedAtTracking, TestCacheSkipLogic,
-    TestNoAPIFallbacks, TestVerifyCacheIntegrity, TestResolveMediaByNumericID,
-    TestCacheFormatValidation, TestCacheStructureParity, TestDbQueriesUseLibraryName,
-    TestRefactoredMethodNames, TestDeadCodeRemoval, TestMediaApiActionConsolidation,
-    TestListMethodSplit, TestExecuteTrashAndMoveSplit, TestVerifyCacheSplit,
-    TestUpdateCacheSplit, TestBrokenHeaderOrder, TestExcessVersions,
-    TestProblems, TestExcessVersionsMainParser, TestRemoveCommand,
-    TestListMethodsGuardMissingKeys, TestWaitForPlexScanComplete, TestErrorOutputConventions,
-    TestObjByLibraryDedup,
-    TestDeleteRequiresRemove,
-    TestScan,
-    TestBrokenCrossValidation,
-    TestCacheUpdateLog,
-    TestEndToEnd,
-    TestEpisodesTSV,
-    TestDateExtraction,
-    TestSpecialDetection,
-    TestMissingEpisodes,
-    TestSortNew,
-    TestMissingE2E,
-    TestCustomDateExtractors,
-    TestEpisodeSourceSelection,
-    TestExternalIdsInCache,
-    TestEpisodeSourceConfig,
-    TestSourceE2E,
-    TestRename,
-    TestShowInfoSeasonTable,
-    TestEpisodesErr,
-    TestEpisodesErrClassification,
-    TestUnmatched,
-    TestUnsorted,
-    TestVersionStringCollision,
-    TestForceTsv,
-    TestTsvScrapersE2E,
-    TestPotentialMismatch,
-    TestShowDirDerivation,
-    TestObjByShowScraped,
-    TestEpisodeNumberingIssues,
-    TestInfoScrapedData,
-    TestDiskMap,
-]
+_UNITTEST_CLASSES = [cls for scope in _UNITTEST_SCOPES.values() for cls in scope]
 
 # ---------------------------------------------------------------------------
 # Inline regression tests + unittest runner
 # ---------------------------------------------------------------------------
 
-def run_regression_tests(main_globals):
+def _run_unittest_only(unittest_classes):
+    """Run only the unittest suite (no inline regression tests)."""
+    import sys
+    print("=" * 76)
+    print("UNITTEST SUITE")
+    print("=" * 76)
+    loader = unittest.TestLoader()
+    try:
+        suite = unittest.TestSuite()
+        for cls in unittest_classes:
+            suite.addTests(loader.loadTestsFromTestCase(cls))
+        runner = unittest.TextTestRunner(verbosity=2)
+        result = runner.run(suite)
+        if result.wasSuccessful():
+            print(f"\n✓ All tests PASSED!")
+            sys.exit(0)
+        else:
+            print(f"\n✗ Tests FAILED!")
+            sys.exit(1)
+    except Exception as e:
+        print(f"✗ FAIL: Could not run unittest suite: {e}")
+        sys.exit(1)
+
+def run_regression_tests(main_globals, scope=None):
     """Run regression tests to verify script functionality
 
     POLICY: Whenever a bug is fixed in my-plex.py, a regression test MUST be added here
@@ -5628,9 +5666,59 @@ def run_regression_tests(main_globals):
     - Show clear PASS/FAIL/SKIP status with helpful output
     - Increment passed/failed counters appropriately
 
-    Usage: my-plex.py --test
+    Usage: my-plex.py --test          (list available scopes)
+           my-plex.py --test <scope>  (run tests for one scope)
+           my-plex.py --test all      (run all tests)
     Exit codes: 0 = all tests passed, 1 = one or more tests failed
+
+    Args:
+        main_globals: globals dict from main script
+        scope: None = list scopes, '--all' = all, else scope name
     """
+    import sys
+
+    # --test without scope: list available scopes and exit
+    if scope is None:
+        print("Available test scopes:")
+        print()
+        for name, classes in _UNITTEST_SCOPES.items():
+            n_tests = sum(unittest.TestLoader().loadTestsFromTestCase(cls).countTestCases() for cls in classes)
+            class_names = ', '.join(c.__name__ for c in classes)
+            print(f"  {name:12s}  {n_tests:3d} tests  ({class_names})")
+        total = sum(sum(unittest.TestLoader().loadTestsFromTestCase(cls).countTestCases() for cls in classes)
+                    for classes in _UNITTEST_SCOPES.values())
+        print(f"\n  {'all':12s}  {total:3d} tests  (all scopes + inline regression tests)")
+        print(f"\nUsage: my-plex --test <scope>")
+        sys.exit(0)
+
+    # Determine which unittest classes to run
+    if scope.lower() == 'all':
+        unittest_classes = _UNITTEST_CLASSES
+        run_inline = True
+    else:
+        scope_lower = scope.lower()
+        matched = {k: v for k, v in _UNITTEST_SCOPES.items() if scope_lower in k.lower()}
+        if not matched:
+            print(f"ERROR: Unknown test scope '{scope}'")
+            print(f"Available scopes: {', '.join(_UNITTEST_SCOPES.keys())}")
+            sys.exit(1)
+        if len(matched) > 1:
+            print(f"ERROR: Ambiguous scope '{scope}' matches: {', '.join(matched.keys())}")
+            sys.exit(1)
+        scope_name = list(matched.keys())[0]
+        unittest_classes = matched[scope_name]
+        run_inline = False
+        print(f"Running test scope: {scope_name}")
+        print(f"  Classes: {', '.join(c.__name__ for c in unittest_classes)}")
+        print()
+
+    import pickle
+    import sys
+
+    if not run_inline:
+        # Scoped run: skip inline regression tests, go straight to unittest suite
+        return _run_unittest_only(unittest_classes)
+
     # Extract globals from main script
     CACHE_FILE = main_globals['CACHE_FILE']
     PLEX_Media = main_globals['PLEX_Media']
@@ -5653,16 +5741,13 @@ def run_regression_tests(main_globals):
     DBG = main_globals.get('DBG', False)
     inject_before_first_match = main_globals.get('inject_before_first_match')
 
-    import pickle
-    import sys
+    passed = 0
+    failed = 0
+    tests = []
 
     print("=" * 76)
     print("REGRESSION TEST SUITE")
     print("=" * 76)
-
-    passed = 0
-    failed = 0
-    tests = []
 
     # Test 1: Cache timestamp preservation
     print("\n[TEST 1] Cache Timestamp Preservation")
@@ -6785,16 +6870,17 @@ def run_regression_tests(main_globals):
         traceback.print_exc()
         failed += 1
 
-    # Print inline test summary
-    print("\n" + "=" * 76)
-    print("INLINE TEST SUMMARY")
-    print("=" * 76)
-    inline_total = passed + failed
-    print(f"Total:  {inline_total} tests")
-    print(f"Passed: {passed} tests ({100*passed//inline_total if inline_total > 0 else 0}%)")
-    print(f"Failed: {failed} tests ({100*failed//inline_total if inline_total > 0 else 0}%)")
+    # Print inline test summary (only when inline tests were run)
+    if run_inline:
+        print("\n" + "=" * 76)
+        print("INLINE TEST SUMMARY")
+        print("=" * 76)
+        inline_total = passed + failed
+        print(f"Total:  {inline_total} tests")
+        print(f"Passed: {passed} tests ({100*passed//inline_total if inline_total > 0 else 0}%)")
+        print(f"Failed: {failed} tests ({100*failed//inline_total if inline_total > 0 else 0}%)")
 
-    # Run unittest suite (inline test classes)
+    # Run unittest suite
     print("\n" + "=" * 76)
     print("UNITTEST SUITE")
     print("=" * 76)
@@ -6802,7 +6888,7 @@ def run_regression_tests(main_globals):
     unittest_ok = True
     try:
         suite = unittest.TestSuite()
-        for cls in _UNITTEST_CLASSES:
+        for cls in unittest_classes:
             suite.addTests(loader.loadTestsFromTestCase(cls))
         runner = unittest.TextTestRunner(verbosity=2)
         unittest_result = runner.run(suite)
