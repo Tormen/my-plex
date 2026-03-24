@@ -633,7 +633,7 @@ US=os.path.basename(__file__); # "my-plex-api.py"
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{} }
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{} }
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
@@ -1634,6 +1634,7 @@ def get_library_stats(supported=True):
         library_stats['plexUpdatedAt'][title] = library.updatedAt
         library_stats['agent'][title] = getattr(library, 'agent', '')
         library_stats['language'][title] = getattr(library, 'language', '')
+        library_stats['locations'][title] = getattr(library, 'locations', [])
 
         # Get item count from database
         item_count = 0
@@ -9404,7 +9405,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 lib_obj = type('Library', (), {
                     'title': library_name,
                     'type': l_type.lower(),
-                    'locations': [],  # Path locations - not available from cache
+                    'locations': cached_library_stats.get('locations', {}).get(library_name, []),
                     'updatedAt': cached_library_stats.get('updatedAt', {}).get(library_name),
                     'totalSize': cached_library_stats.get('itemsCount', {}).get(library_name, 0)
                 })()
@@ -18238,22 +18239,11 @@ def cmd_sort_new(args, dry_run=False, target=None):
         if target and lib_name != target:
             continue
 
-        # Derive library root(s) from cached movie file paths in OBJ_BY_MOVIE
-        lib_roots = set()
-        lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
-        for movie_key in lib_data.get('Movie', []):
-            versions = PLEX_Media.OBJ_BY_MOVIE.get(movie_key, {})
-            for fp in versions.values():
-                if fp and isinstance(fp, str):
-                    parent = os.path.dirname(fp)
-                    grandparent = os.path.dirname(parent)
-                    # If parent dir name matches library name, file is bare in library root
-                    if os.path.basename(parent) == lib_name:
-                        lib_roots.add(parent)
-                    else:
-                        lib_roots.add(grandparent)
-        if not lib_roots:
+        # Get library root path(s) from cache
+        lib_obj = PLEX_Library.OBJ_DICT.get(lib_name)
+        if not lib_obj or not getattr(lib_obj, 'locations', []):
             continue
+        lib_roots = lib_obj.locations
 
         remote_host = PLEX_DB_REMOTE_HOST
 
