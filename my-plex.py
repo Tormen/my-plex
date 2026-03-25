@@ -4905,6 +4905,73 @@ def get_movie_dir_from_path(filepath, library_name):
     # Ultimate fallback: return the parent directory of the file
     return os.path.dirname(filepath)
 
+def get_episode_dir(obj):
+    """Get the directory containing an episode file, from the cache object's 'file' field.
+
+    Args:
+        obj: Episode cache dict (must have 'file')
+
+    Returns:
+        Directory path (str), or '' if not available
+    """
+    filepath = obj.get('file', '')
+    return os.path.dirname(filepath) if filepath else ''
+
+def get_movie_dir(obj):
+    """Get the movie directory from cache, using the object's file path and library name.
+
+    Delegates to get_movie_dir_from_path() which knows the library directory structure.
+
+    Args:
+        obj: Movie cache dict (must have 'file' and 'library')
+
+    Returns:
+        Movie directory path (str), or '' if not available
+    """
+    filepath = obj.get('file', '')
+    library = obj.get('library', '')
+    if not filepath:
+        return ''
+    return get_movie_dir_from_path(filepath, library)
+
+def get_season_dir(obj):
+    """Get the season directory path from cache for an Episode object.
+
+    Looks up the Season object via show_key + S_str → OBJ_BY_SHOW → OBJ_BY_ID.
+
+    Args:
+        obj: Episode cache dict (must have 'show_key' and 'S_str')
+
+    Returns:
+        Season directory path (str), or '' if not found in cache
+    """
+    show_key = obj.get('show_key', '')
+    s_str = obj.get('S_str', '')
+    if not show_key or not s_str:
+        return ''
+    season_key = PLEX_Media.OBJ_BY_SHOW.get(show_key, {}).get(s_str, '')
+    if not season_key:
+        return ''
+    season_obj = PLEX_Media.OBJ_BY_ID.get(season_key)
+    return season_obj.get('file', '') if season_obj else ''
+
+def get_show_dir(obj):
+    """Get the show/series directory path from cache for an Episode or Season object.
+
+    Looks up the Show object via show_key → OBJ_BY_ID.
+
+    Args:
+        obj: Episode or Season cache dict (must have 'show_key')
+
+    Returns:
+        Show directory path (str), or '' if not found in cache
+    """
+    show_key = obj.get('show_key', '')
+    if not show_key:
+        return ''
+    show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)
+    return show_obj.get('file', '') if show_obj else ''
+
 def undo_resolution_action(undo_info, remote_host):
     """Undo a previously performed resolution action
 
@@ -17364,26 +17431,23 @@ def cmd_plex2disk(target, dry_run=False, force=False):
 
             # Movie directory scope
             if DISK_MAP_MOVIE_DIR and obj_type == 'Movie':
-                lib_name = obj.get('library', '')
-                movie_dir = get_movie_dir_from_path(filepath, lib_name)
+                movie_dir = get_movie_dir(obj)
                 if movie_dir and os.path.basename(movie_dir) != os.path.basename(filepath):
                     movie_dir_items.append((movie_dir, cache_key, obj))
 
-            # Season directory scope (parent of episode file, or Season object's own file)
+            # Season directory scope (from Season cache object, or Season object directly)
             if DISK_MAP_SEASON_DIR:
                 if obj_type == 'Episode':
-                    season_dir = os.path.dirname(filepath)
+                    season_dir = get_season_dir(obj)
                     if season_dir:
                         season_dir_items.append((season_dir, cache_key, obj))
                 elif type_str == 'Season':
                     season_dir_items.append((filepath, cache_key, obj))
 
-            # Series directory scope (from Show object's file field, or Show object directly)
+            # Series directory scope (from Show cache object, or Show object directly)
             if DISK_MAP_SERIES_DIR:
                 if obj_type == 'Episode':
-                    show_key = obj.get('show_key', '')
-                    show_obj = PLEX_Media.OBJ_BY_ID.get(show_key) if show_key else None
-                    series_dir = show_obj.get('file', '') if show_obj else ''
+                    series_dir = get_show_dir(obj)
                     if series_dir:
                         series_dir_items.append((series_dir, cache_key, obj))
                 elif type_str == 'Show':
@@ -17549,15 +17613,14 @@ def cmd_plex2disk_clean(target, dry_run=False):
         for filepath in filepaths:
             file_paths.add(filepath)
             if obj_type == 'Movie':
-                lib_name = obj.get('library', '')
-                movie_dir = get_movie_dir_from_path(filepath, lib_name)
+                movie_dir = get_movie_dir(obj)
                 if movie_dir and os.path.basename(movie_dir) != os.path.basename(filepath):
                     movie_dir_paths.add(movie_dir)
             if obj_type == 'Episode':
-                season_dir_paths.add(os.path.dirname(filepath))
-                show_key = obj.get('show_key', '')
-                show_obj = PLEX_Media.OBJ_BY_ID.get(show_key) if show_key else None
-                series_dir = show_obj.get('file', '') if show_obj else ''
+                season_dir = get_season_dir(obj)
+                if season_dir:
+                    season_dir_paths.add(season_dir)
+                series_dir = get_show_dir(obj)
                 if series_dir:
                     series_dir_paths.add(series_dir)
 
