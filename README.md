@@ -4,14 +4,17 @@ Still under heavy development, but already somewhat usable.
 
 The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
-**17,000+ lines of Python** | **370 tests** | **Offline-capable** | **60x faster than Plex API**
+**21,000+ lines of Python** | **568 tests** | **Offline-capable** | **60x faster than Plex API**
 
 ## Features
 
 ### Library & Media Management
+- **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
+- **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations
 - **Duplicate detection** with intelligent classification (exact duplicates vs re-encodes vs true multi-version)
 - **Broken file detection** — finds truncated/corrupt media by comparing container vs Plex duration
+- **Potential mismatch detection** (`--potential-mismatch`) — finds items where Plex title doesn't match directory name
 - **Excess version detection** — finds entries with too many file versions
 - **Problem scanner** — runs all checks in one pass (`--problems`)
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
@@ -25,7 +28,21 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - Automatic fallback: if primary source returns 0 episodes, tries next source
 - **Auto-detection** of episode source from library agent + language
 - **Sort new recordings** (`--sort-new`) — organizes unsorted recordings into season directories
+  - Series libraries: matches file dates to episode data, renames with S##E## prefix
+  - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
+  - Target a specific library: `my-plex movies.fr --sort-new --dry-run`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
+
+### Disk Map (Metadata Markers)
+- **Bidirectional sync** between Plex metadata and filesystem markers
+  - `--plex2disk` — sync Plex metadata → disk (add `[marker]` tags to filenames/directories)
+  - `--disk2plex` — sync disk markers → Plex (push watched status, ratings, labels back)
+  - `--plex-disk-sync` — bidirectional: disk→plex first, then plex→disk
+- **4 scopes**: media files, movie directories, series directories, season directories
+- **Python expressions** for marker values — fully configurable, no hardcoded labels
+- **Merge strategies**: `newer` (compare timestamps), `plex` (Plex wins), `disk` (disk wins)
+- **Legacy migration** — automatically converts old `[vu@TIMESTAMP]` markers to new system
+- **Sidecar tracking** — JSON file tracks which markers were applied to each file/directory
 
 ### Cache Architecture
 - **Three-tier data access**: Cache → Plex DB → Plex API
@@ -33,9 +50,11 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Direct database access** via SSH — 60x faster than Plex API for bulk operations
 - **Incremental updates** — only refreshes changed libraries
 - **Checkpoint/resume** — cache updates survive interruptions
+- **Library locations cached** — root paths stored for offline directory operations
 
 ### Search & Info
 - **Flexible search** (`--info`) by Plex ID, cache key, filepath, or partial title
+- **Filepath fallback** — when title search fails, searches directory names (catches Plex mismatches)
 - **Detailed item info** with metadata, file versions, external IDs, ratings
 - **System overview** — cache status, server stats, library summary
 
@@ -50,6 +69,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 ### Remote Operation
 - **SSH-transparent** — reads and writes episode data on the Plex server via SSH
 - **No mount required** — works without mounted volumes (SSH fallback for all file I/O)
+- **Path resolution** — automatic translation between server and local paths via `ALTERNATIVE_ROOTPATHS`
 
 ## Installation
 
@@ -80,14 +100,17 @@ That's it. On first run, the `my-plex` shell wrapper automatically:
 # First time: build the cache (reads entire Plex DB, takes ~1 minute)
 my-plex --update-cache --from-scratch
 
-# List all media
+# List all libraries (with supported status)
 my-plex --list
 
-# Show system info
-my-plex --info
+# Show detailed library info
+my-plex --libraries
 
 # Search for a title
 my-plex --info 'boston legal'
+
+# Search by directory name (when Plex title doesn't match)
+my-plex --info 'die millionenshow'
 
 # Find duplicates
 my-plex --duplicates
@@ -104,11 +127,17 @@ my-plex --missing 'boston legal'
 # Missing episodes for all shows in a library
 my-plex series.en --missing
 
-# Override episode source
-my-plex 'friends' --missing --source tvdb
-
-# Sort new recordings
+# Sort new recordings (preview)
 my-plex --sort-new --dry-run
+
+# Sort movies in a specific library
+my-plex movies.fr --sort-new --dry-run
+
+# Sync Plex metadata to disk markers
+my-plex --plex2disk --dry-run
+
+# Sync disk markers back to Plex
+my-plex --disk2plex --dry-run
 ```
 
 ## Configuration
@@ -134,6 +163,14 @@ MISSING_EPISODES_SOURCE = {'series.de': 'fernsehserien.de', 'series.en': 'tvdb'}
 
 # Optional: Duplicate detection — ignore cross-library duplicates
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
+
+# Optional: Disk map markers (sync Plex metadata to filenames)
+DISK_MAP = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+DISK_MAP_MOVIE_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+DISK_MAP_SERIES_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+DISK_MAP_SEASON_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
+DISK_MAP_MERGE = {'watched': 'newer'}
+DISK_MAP_PUSH = {'watched': 'WATCHED'}
 ```
 
 Use `my-plex --help <topic>` for detailed help on any command.
@@ -151,7 +188,7 @@ Use `my-plex --help <topic>` for detailed help on any command.
 │ --info   │   -cache  │ --rm (media.delete)           │
 │ --broken │           │ --resolve (labels, ratings)   │
 │ --missing│           │ --playlist (CRUD)             │
-│ --search │           │                               │
+│ --plex2d.│           │ --disk2plex (push)            │
 │ (offline)│ (via SSH) │ (HTTP API)                    │
 └──────────┴───────────┴───────────────────────────────┘
 ```
@@ -159,8 +196,16 @@ Use `my-plex --help <topic>` for detailed help on any command.
 ## Testing
 
 ```bash
-# Run all 370 tests
+# List available test scopes
 my-plex --test
+
+# Run all 568 tests
+my-plex --test all
+
+# Run tests for a specific scope
+my-plex --test disk-map
+my-plex --test commands
+my-plex --test duplicates
 
 # Or with unittest flags
 my-plex --unittest -v

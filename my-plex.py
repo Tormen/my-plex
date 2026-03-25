@@ -17555,7 +17555,11 @@ def cmd_plex2disk_clean(target, dry_run=False):
                     movie_dir_paths.add(movie_dir)
             if obj_type == 'Episode':
                 season_dir_paths.add(os.path.dirname(filepath))
-                series_dir_paths.add(os.path.dirname(os.path.dirname(filepath)))
+                show_key = obj.get('show_key', '')
+                show_obj = PLEX_Media.OBJ_BY_ID.get(show_key) if show_key else None
+                series_dir = show_obj.get('file', '') if show_obj else ''
+                if series_dir:
+                    series_dir_paths.add(series_dir)
 
     # Process innermost first: files → movie dirs → season dirs → series dirs
     r, s, e = _plex2disk_clean_scope(sidecar, file_paths, strip_our_markers, dry_run)
@@ -20155,6 +20159,10 @@ def _get_broken_reason(file_info, plex_duration=0):
                 return f"suspiciously small ({avg_kbps:.1f} kbps)"
     return None
 
+def _normalize_alpha(s):
+    """Strip everything except a-z for fuzzy path matching."""
+    return _re.sub(r'[^a-z]', '', s.lower())
+
 def resolve_cache_items(identifier):
     """Resolve a media identifier (ID, key, title, filepath) to a list of (key, obj) cache matches.
     Used by show_item_info, resolve_show_for_episodes, and any other code that needs to find cache items.
@@ -20164,6 +20172,7 @@ def resolve_cache_items(identifier):
       2. Full cache key (e.g. "Show:4925", "Episode:2579")
       3. Filepath lookup via OBJ_BY_FILEPATH (with path translation)
       4. Partial key match or title/originalTitle search (case-insensitive)
+      5. Normalized filepath search (strip non-a-z, match against file paths)
 
     Returns: list of (key, obj) tuples, sorted by type (Movie→Show→Season→Episode)
     """
@@ -20215,6 +20224,31 @@ def resolve_cache_items(identifier):
             orig_title = obj.get('originalTitle', '').lower()
             if search_lower in key.lower() or search_lower in title or search_lower in orig_title:
                 found_items.append((key, obj))
+
+    # Strategy 6: Normalized filepath search (strip non-a-z, match against file paths)
+    # Catches cases where Plex title doesn't match directory name (e.g. Plex says "Heimatbilder"
+    # but directory is "die.millionenshow_[quiz]")
+    if not found_items:
+        search_norm = _normalize_alpha(identifier)
+        if len(search_norm) >= 3:  # avoid matching everything with very short strings
+            seen_keys = set()
+            for filepath, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
+                if search_norm in _normalize_alpha(filepath):
+                    for key in keys:
+                        obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+                        if not obj:
+                            continue
+                        # For episodes, prefer their parent Show object
+                        if obj.get('type') == 'Episode':
+                            show_key = obj.get('show_key', '')
+                            if show_key and show_key not in seen_keys:
+                                show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+                                if show_obj:
+                                    found_items.append((show_key, show_obj))
+                                    seen_keys.add(show_key)
+                        elif key not in seen_keys:
+                            found_items.append((key, obj))
+                            seen_keys.add(key)
 
     # Sort: Movies first, then Shows, then Seasons, then Episodes
     type_order = {'Movie': 0, 'Show': 1, 'Season': 2, 'Episode': 3}
