@@ -18276,6 +18276,27 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             sorted_count += 1
                             continue
 
+            # 1d. Check for bare leading episode number (e.g., "1.manimal.avi", "8.night of the beast.avi")
+            #     Filename starts with 1-2 digit number followed by dot/separator, assume S01E##
+            #     Excludes 3+ digits to avoid collision with absolute numbering and years
+            bare_num_match = _re.match(r'^(\d{1,2})[.\-_ ]', fn)
+            if bare_num_match:
+                ep_num = int(bare_num_match.group(1))
+                if 1 <= ep_num <= 99:
+                    season = 1
+                    target_dir = os.path.join(show_dir, f"s{season:02d}")
+                    new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                    target_path = os.path.join(target_dir, new_name)
+
+                    if dry_run:
+                        print(f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}")
+                    else:
+                        os.makedirs(target_dir, exist_ok=True)
+                        os.rename(fp, target_path)
+                        print(f"    [leading-num] {fn} -> s{season:02d}/{new_name}")
+                    sorted_count += 1
+                    continue
+
             # 2. Parse date from filename
             file_date = extract_episode_date(fn)
             if file_date is None:
