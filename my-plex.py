@@ -18192,6 +18192,21 @@ def cmd_sort_new(args, dry_run=False, target=None):
         sorted_count = 0
         failed_count = 0
 
+        # Determine max episode number per season from cache (for absolute numbering detection)
+        show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+        max_ep_per_season = {}
+        for s_str, eps in show_episodes.items():
+            for e_str in eps:
+                try:
+                    max_ep_per_season[s_str] = max(max_ep_per_season.get(s_str, 0), int(e_str[1:]))
+                except (ValueError, IndexError):
+                    pass
+        # Also check TSV data for max episode numbers
+        if all_episodes:
+            for ep in all_episodes:
+                s_str = f"S{ep['season']:02d}"
+                max_ep_per_season[s_str] = max(max_ep_per_season.get(s_str, 0), ep['episode'])
+
         for fn, fp in unsorted:
             # 1. Check if filename already contains S##E## — use directly, no date needed
             sxex_match = _re.search(r'S(\d+)E(\d+)', fn, _re.IGNORECASE)
@@ -18211,9 +18226,96 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 sorted_count += 1
                 continue
 
+            # 1b. Check for NxNN format (e.g., "1x01", "12x05")
+            nxnn_match = _re.search(r'(?<!\d)(\d{1,2})x(\d{2,})(?!\d)', fn, _re.IGNORECASE)
+            if nxnn_match:
+                season = int(nxnn_match.group(1))
+                ep_num = int(nxnn_match.group(2))
+                target_dir = os.path.join(show_dir, f"s{season:02d}")
+                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                target_path = os.path.join(target_dir, new_name)
+
+                if dry_run:
+                    print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
+                else:
+                    os.makedirs(target_dir, exist_ok=True)
+                    os.rename(fp, target_path)
+                    print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
+                sorted_count += 1
+                continue
+
+            # 1c. Check for absolute numbering (e.g., "101" → S01E01, "1203" → S12E03)
+            #     Standalone 3+ digit number, bounded by non-digits (or separators like - _ .)
+            abs_match = _re.search(r'(?:^|[^0-9])(\d{3,4})(?:[^0-9]|$)', fn)
+            if abs_match:
+                abs_num = int(abs_match.group(1))
+                if abs_num >= 100:
+                    candidate_season = abs_num // 100
+                    candidate_ep = abs_num % 100
+                    if candidate_ep > 0:
+                        # Check: does any season already have episodes numbered >= abs_num?
+                        # If so, this is a true episode number, not absolute S##E## encoding
+                        is_true_episode_num = False
+                        for s_str, max_ep in max_ep_per_season.items():
+                            if max_ep >= abs_num:
+                                is_true_episode_num = True
+                                break
+                        if not is_true_episode_num:
+                            season = candidate_season
+                            ep_num = candidate_ep
+                            target_dir = os.path.join(show_dir, f"s{season:02d}")
+                            new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                            target_path = os.path.join(target_dir, new_name)
+
+                            if dry_run:
+                                print(f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}")
+                            else:
+                                os.makedirs(target_dir, exist_ok=True)
+                                os.rename(fp, target_path)
+                                print(f"    [absolute] {fn} -> s{season:02d}/{new_name}")
+                            sorted_count += 1
+                            continue
+
             # 2. Parse date from filename
             file_date = extract_episode_date(fn)
             if file_date is None:
+                # 2b. Try year-based matching: extract year from (YYYY) or [YYYY] and match by title in TSV
+                year_match = _re.search(r'[\(\[]((?:19|20)\d{2})[\)\]]', fn)
+                if year_match and all_episodes:
+                    file_year = year_match.group(1)
+                    # Find TSV entries with matching year
+                    year_candidates = [ep for ep in all_episodes if ep['date'].startswith(file_year)]
+                    matched_ep = None
+                    if len(year_candidates) == 1:
+                        matched_ep = year_candidates[0]
+                    elif len(year_candidates) > 1:
+                        # Multiple entries in same year — match by title
+                        fn_norm = _normalize_alpha(fn)
+                        for ep in year_candidates:
+                            if _normalize_alpha(ep.get('title', '')) in fn_norm or fn_norm in _normalize_alpha(ep.get('title', '') or ''):
+                                matched_ep = ep
+                                break
+                        if not matched_ep:
+                            # Try: normalized title is substring of normalized filename
+                            for ep in year_candidates:
+                                ep_title_norm = _normalize_alpha(ep.get('title', ''))
+                                if ep_title_norm and ep_title_norm in fn_norm:
+                                    matched_ep = ep
+                                    break
+                    if matched_ep:
+                        season = matched_ep['season']
+                        ep_num = matched_ep['episode']
+                        target_dir = os.path.join(show_dir, f"s{season:02d}")
+                        new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                        target_path = os.path.join(target_dir, new_name)
+                        if dry_run:
+                            print(f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}")
+                        else:
+                            os.makedirs(target_dir, exist_ok=True)
+                            os.rename(fp, target_path)
+                            print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
+                        sorted_count += 1
+                        continue
                 print(f"    WARNING: Cannot parse date from: {fn}")
                 failed_count += 1
                 continue

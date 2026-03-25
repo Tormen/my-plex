@@ -3490,6 +3490,35 @@ class TestSortNew(unittest.TestCase):
         src = self._read_script()
         self.assertIn('siblings', src, "sort-new must handle sibling files")
 
+    def test_sort_new_nxnn_pattern(self):
+        """--sort-new must support NxNN format (e.g., 1x01, 12x05)."""
+        content = self._read_script()
+        sort_start = content.find('def cmd_sort_new(')
+        sort_end = content.find('\ndef ', sort_start + 1)
+        sort_body = content[sort_start:sort_end]
+        self.assertIn('nxnn_match', sort_body)
+
+    def test_sort_new_absolute_numbering(self):
+        """--sort-new must support absolute numbering (e.g., 101 → S01E01)."""
+        content = self._read_script()
+        sort_start = content.find('def cmd_sort_new(')
+        sort_end = content.find('\ndef ', sort_start + 1)
+        sort_body = content[sort_start:sort_end]
+        self.assertIn('abs_match', sort_body)
+        self.assertIn('[absolute]', sort_body)
+        self.assertIn('max_ep_per_season', sort_body)
+        self.assertIn('is_true_episode_num', sort_body)
+
+    def test_sort_new_year_matching(self):
+        """--sort-new must support year-based matching from (YYYY) or [YYYY]."""
+        content = self._read_script()
+        sort_start = content.find('def cmd_sort_new(')
+        sort_end = content.find('\ndef ', sort_start + 1)
+        sort_body = content[sort_start:sort_end]
+        self.assertIn('year_match', sort_body)
+        self.assertIn('[year]', sort_body)
+        self.assertIn('_normalize_alpha', sort_body)
+
 
 class TestMissingE2E(unittest.TestCase):
     """End-to-end tests for --missing."""
