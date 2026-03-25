@@ -18184,7 +18184,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
         specials_script = os.path.join(show_dir, 'sort_specials.sh')
         has_specials_script = os.path.isfile(specials_script)
 
-        print(f"\n  [{show_title}] {len(unsorted)} unsorted file(s)")
+        print(f"\n  [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
 
         # Sort files by name (chronological for TVOON dates)
         unsorted.sort(key=lambda x: x[0])
@@ -18423,7 +18423,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 status = f"{sorted_count} sorted"
                 if failed_count > 0:
                     status += f", {failed_count} failed"
-                print(f"  [{show_title}] {unsorted_count} unsorted file(s), {status}")
+                print(f"  [{lib_name}] [{show_title}] {unsorted_count} unsorted file(s), {status}")
             for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
                 status = f"{sorted_count} sorted"
                 if failed_count > 0:
