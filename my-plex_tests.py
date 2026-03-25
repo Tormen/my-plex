@@ -3519,6 +3519,15 @@ class TestSortNew(unittest.TestCase):
         self.assertIn('[year]', sort_body)
         self.assertIn('_normalize_alpha', sort_body)
 
+    def test_sort_new_leading_number(self):
+        """--sort-new must support bare leading episode numbers (e.g., 1.manimal.avi)."""
+        content = self._read_script()
+        sort_start = content.find('def cmd_sort_new(')
+        sort_end = content.find('\ndef ', sort_start + 1)
+        sort_body = content[sort_start:sort_end]
+        self.assertIn('bare_num_match', sort_body)
+        self.assertIn('[leading-num]', sort_body)
+
 
 class TestMissingE2E(unittest.TestCase):
     """End-to-end tests for --missing."""
