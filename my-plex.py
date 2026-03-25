@@ -9511,7 +9511,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). Use --help unsorted for details.")
     argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
+    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -12046,7 +12046,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--unsorted', action='store_true',        help="Check if this show has episodes without season subdirs. Use --help unsorted for details.")
     argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
-    argparser.add_argument('--dry-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
+    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -21288,7 +21288,7 @@ def main():
     main_parser.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
     main_parser.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
     main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
-    main_parser.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
+    main_parser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
     main_parser.add_argument('-U', '--update-cache', '--cache-update', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --force-tsv (with --from-scratch: re-scrape all episode TSVs), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
@@ -21353,7 +21353,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
     GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
-    GLOBAL_CMD_PARSER.add_argument('--dry-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
+    GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
     GLOBAL_CMD_PARSER.add_argument('--test', nargs='?', const='', default=None, metavar='SCOPE', help="Run tests. --test: list available scopes. --test <scope>: run tests for that scope. --test all: run all tests.")
 
