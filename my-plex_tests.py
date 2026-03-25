@@ -5567,28 +5567,59 @@ class TestDiskMap(unittest.TestCase):
         content = self._read_script()
         self.assertIn('cmd_disk2plex(target, dry_run=dry_run, force=force)', content)
 
-    def test_series_dir_uses_show_obj_not_dirname(self):
-        """Series dir routing uses Show object's file field, not dirname(dirname(filepath))."""
+    def test_series_dir_uses_get_show_dir_helper(self):
+        """Series dir routing uses get_show_dir() helper, which looks up Show object's file field."""
         content = self._read_script()
-        # Must NOT use os.path.dirname(os.path.dirname(filepath)) for series dirs
-        # Instead should look up show_key and use the Show object's file field
-        self.assertIn("show_key = obj.get('show_key'", content)
-        self.assertIn("show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)", content)
-        self.assertIn("series_dir = show_obj.get('file'", content)
+        # get_show_dir must exist and use show_key → OBJ_BY_ID lookup
+        self.assertIn("def get_show_dir(obj):", content)
+        func_start = content.find('def get_show_dir(obj):')
+        func_end = content.find('\ndef ', func_start + 1)
+        func_body = content[func_start:func_end]
+        self.assertIn("show_key", func_body)
+        self.assertIn("OBJ_BY_ID", func_body)
+        self.assertIn(".get('file'", func_body)
 
-    def test_plex2disk_clean_uses_show_obj_not_dirname(self):
-        """cmd_plex2disk_clean must use show_key lookup for series dirs, not dirname(dirname())."""
+    def test_plex2disk_clean_uses_cache_helpers(self):
+        """cmd_plex2disk_clean must use get_season_dir/get_show_dir/get_movie_dir, not dirname()."""
         content = self._read_script()
-        # Find the cmd_plex2disk_clean function
         clean_start = content.find('def cmd_plex2disk_clean(')
         self.assertGreater(clean_start, 0, "cmd_plex2disk_clean function not found")
         clean_end = content.find('\ndef ', clean_start + 1)
         clean_body = content[clean_start:clean_end]
-        # Must NOT use dirname(dirname()) for series dirs
+        # Must NOT use dirname() for season/series dirs
         self.assertNotIn('dirname(os.path.dirname(filepath))', clean_body,
                         "cmd_plex2disk_clean still uses dirname(dirname()) for series dirs")
-        # Must use show_key lookup
-        self.assertIn("show_key = obj.get('show_key'", clean_body)
+        self.assertNotIn('dirname(filepath)', clean_body,
+                        "cmd_plex2disk_clean still uses dirname(filepath) — should use cache helpers")
+        # Must use cache helper functions
+        self.assertIn('get_season_dir(obj)', clean_body)
+        self.assertIn('get_show_dir(obj)', clean_body)
+        self.assertIn('get_movie_dir(obj)', clean_body)
+
+    def test_plex2disk_uses_cache_helpers(self):
+        """cmd_plex2disk must use get_season_dir/get_show_dir/get_movie_dir, not dirname()."""
+        content = self._read_script()
+        plex2disk_start = content.find('def cmd_plex2disk(')
+        self.assertGreater(plex2disk_start, 0, "cmd_plex2disk function not found")
+        plex2disk_end = content.find('\ndef ', plex2disk_start + 1)
+        plex2disk_body = content[plex2disk_start:plex2disk_end]
+        # Must use cache helper functions, not inline dirname/lookups
+        self.assertIn('get_season_dir(obj)', plex2disk_body)
+        self.assertIn('get_show_dir(obj)', plex2disk_body)
+        self.assertIn('get_movie_dir(obj)', plex2disk_body)
+        # Season dir section must NOT use dirname(filepath)
+        season_section_start = plex2disk_body.find('Season directory scope')
+        series_section_start = plex2disk_body.find('Series directory scope')
+        season_section = plex2disk_body[season_section_start:series_section_start]
+        self.assertNotIn('dirname(filepath)', season_section)
+
+    def test_cache_dir_helpers_exist(self):
+        """get_episode_dir, get_movie_dir, get_season_dir, get_show_dir helpers must exist."""
+        content = self._read_script()
+        self.assertIn('def get_episode_dir(obj):', content)
+        self.assertIn('def get_movie_dir(obj):', content)
+        self.assertIn('def get_season_dir(obj):', content)
+        self.assertIn('def get_show_dir(obj):', content)
 
     def test_normalize_alpha(self):
         """_normalize_alpha strips non-a-z characters for fuzzy path matching."""
