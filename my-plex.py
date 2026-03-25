@@ -18115,6 +18115,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
     total_sorted = 0
     total_failed = 0
     total_shows_processed = 0
+    show_summaries = []  # (library_name, show_title, unsorted_count, sorted_count, failed_count)
 
     for show_key, show_dict, library_name in shows:
         show_title = show_dict.get('title', '?')
@@ -18292,11 +18293,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         total_sorted += sorted_count
         total_failed += failed_count
+        show_summaries.append((library_name, show_title, len(unsorted), sorted_count, failed_count))
 
     # --- Movie libraries: create directories for bare video files ---
     movie_sorted = 0
     movie_failed = 0
     movie_libs_processed = 0
+    movie_summaries = []  # (lib_name, bare_count, sorted_count, failed_count)
 
     for lib_name, lib_type in PLEX_Library.OBJ_DICT_TYPE.items():
         if lib_type != 'Movie':
@@ -18313,6 +18316,9 @@ def cmd_sort_new(args, dry_run=False, target=None):
         lib_roots = lib_obj.locations
 
         remote_host = PLEX_DB_REMOTE_HOST
+        lib_bare_count = 0
+        lib_sorted_count = 0
+        lib_failed_count = 0
 
         for lib_root_server in sorted(lib_roots):
             # READ: try local alternative path first, SSH fallback
@@ -18356,6 +18362,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 continue
 
             movie_libs_processed += 1
+            lib_bare_count += len(bare_files)
             bare_files.sort()
             print(f"\n  [{lib_name}] {len(bare_files)} movie file(s) without directory")
 
@@ -18375,6 +18382,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     for f in all_files:
                         print(f"    [dry-run]   mv {f} → {dir_name}/{f}")
                     movie_sorted += 1
+                    lib_sorted_count += 1
                 else:
                     # WRITE: always use SSH on server path
                     target_dir_server = os.path.join(lib_root_server, dir_name)
@@ -18384,6 +18392,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     if result.returncode != 0:
                         print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}")
                         movie_failed += 1
+                        lib_failed_count += 1
                         continue
 
                     move_ok = True
@@ -18397,11 +18406,31 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     if move_ok:
                         print(f"    {fn} → {dir_name}/ ({len(all_files)} file(s))")
                         movie_sorted += 1
+                        lib_sorted_count += 1
                     else:
                         print(f"    ERROR: {fn}: some files failed to move")
                         movie_failed += 1
+                        lib_failed_count += 1
+
+        if lib_bare_count > 0:
+            movie_summaries.append((lib_name, lib_bare_count, lib_sorted_count, lib_failed_count))
 
     if total_shows_processed > 0 or movie_libs_processed > 0:
+        # Per-item summary
+        if show_summaries or movie_summaries:
+            print(f"\nSummary:")
+            for lib_name, show_title, unsorted_count, sorted_count, failed_count in show_summaries:
+                status = f"{sorted_count} sorted"
+                if failed_count > 0:
+                    status += f", {failed_count} failed"
+                print(f"  [{show_title}] {unsorted_count} unsorted file(s), {status}")
+            for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
+                status = f"{sorted_count} sorted"
+                if failed_count > 0:
+                    status += f", {failed_count} failed"
+                print(f"  [{lib_name}] {bare_count} movie file(s) without directory, {status}")
+
+        # Totals
         parts = []
         if total_shows_processed > 0:
             parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_shows_processed} show(s)")
