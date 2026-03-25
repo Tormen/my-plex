@@ -18173,6 +18173,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
         total_shows_processed += 1
         show_dir = show_dir_server  # All paths are server paths; writes go via SSH
 
+        print(f"\n  [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
+
         # Determine episode source for this show
         source = _determine_episode_source(show_dict)
         external_ids = show_dict.get('external_ids', {})
@@ -18187,7 +18189,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         if not all_episodes:
             # Try scraping
-            print(f"\n  [{show_title}] No episodes.tsv — attempting to scrape...")
+            print(f"    No episodes.tsv — attempting to scrape...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
 
         # Build date lookup: date_str -> (season, episode, title)
@@ -18205,8 +18207,6 @@ def cmd_sort_new(args, dry_run=False, target=None):
             has_specials_script = os.path.isfile(os.path.join(show_dir_local, 'sort_specials.sh'))
         else:
             has_specials_script = False  # Can't run local scripts via SSH
-
-        print(f"\n  [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
 
         def _sort_move(src_server, target_dir_server, new_name):
             """mkdir + move via SSH. Returns True on success."""
