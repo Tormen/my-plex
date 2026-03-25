@@ -18117,49 +18117,68 @@ def cmd_sort_new(args, dry_run=False, target=None):
     total_shows_processed = 0
     show_summaries = []  # (library_name, show_title, unsorted_count, sorted_count, failed_count)
 
+    remote_host = PLEX_DB_REMOTE_HOST
+
     for show_key, show_dict, library_name in shows:
         show_title = show_dict.get('title', '?')
         show_dir_server = show_dict.get('file', '')
         if not show_dir_server:
             continue
 
-        show_dir = get_local_path(show_dir_server)
-        if not os.path.isdir(show_dir):
-            continue
+        # READ: try local alternative path first, SSH fallback
+        show_dir_local = get_local_path(show_dir_server)
+        use_local = os.path.isdir(show_dir_local)
 
         # Find unsorted video files in show root (not in subdirs)
         unsorted = []
-        try:
-            for fn in os.listdir(show_dir):
+        if use_local:
+            try:
+                for fn in os.listdir(show_dir_local):
+                    if fn.startswith('.'):
+                        continue
+                    fp = os.path.join(show_dir_local, fn)
+                    if not os.path.isfile(fp):
+                        continue
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext not in VIDEO_EXTENSIONS:
+                        continue
+                    if _re.match(r'^S\d+E\d+', fn):
+                        continue
+                    if fn.endswith('.sh') or fn.endswith('.tsv'):
+                        continue
+                    unsorted.append((fn, os.path.join(show_dir_server, fn)))
+            except OSError:
+                continue
+        else:
+            # SSH fallback: list files on server
+            success, file_list = my_plex_file_operation('LIST_DIR', show_dir_server, remote_host, maxdepth=1)
+            if not success or not file_list:
+                continue
+            for server_fp in file_list:
+                fn = os.path.basename(server_fp)
                 if fn.startswith('.'):
-                    continue
-                fp = os.path.join(show_dir, fn)
-                if not os.path.isfile(fp):
                     continue
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in VIDEO_EXTENSIONS:
                     continue
-                # Skip already-sorted files (S##E## prefix)
                 if _re.match(r'^S\d+E\d+', fn):
                     continue
-                # Skip scripts and metadata
                 if fn.endswith('.sh') or fn.endswith('.tsv'):
                     continue
-                unsorted.append((fn, fp))
-        except OSError:
-            continue
+                unsorted.append((fn, os.path.join(show_dir_server, fn)))
 
         if not unsorted:
             continue
 
         total_shows_processed += 1
+        show_dir = show_dir_server  # All paths are server paths; writes go via SSH
 
         # Determine episode source for this show
         source = _determine_episode_source(show_dict)
         external_ids = show_dict.get('external_ids', {})
 
-        # Load / update episodes.tsv
-        tsv_path = get_episodes_tsv_path(show_dir)
+        # Load / update episodes.tsv (reads via local path or SSH)
+        tsv_path = get_episodes_tsv_path(show_dir_local if use_local else show_dir_server)
         metadata, all_episodes = None, None
 
         metadata, all_episodes = read_episodes_tsv(tsv_path)
@@ -18180,11 +18199,26 @@ def cmd_sort_new(args, dry_run=False, target=None):
         # Get specials pattern from metadata
         specials_pattern = metadata.get('specials_pattern') if metadata else None
 
-        # Check for sort_specials.sh
-        specials_script = os.path.join(show_dir, 'sort_specials.sh')
-        has_specials_script = os.path.isfile(specials_script)
+        # Check for sort_specials.sh (local or SSH)
+        specials_script = os.path.join(show_dir_server, 'sort_specials.sh')
+        if use_local:
+            has_specials_script = os.path.isfile(os.path.join(show_dir_local, 'sort_specials.sh'))
+        else:
+            has_specials_script = False  # Can't run local scripts via SSH
 
         print(f"\n  [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
+
+        def _sort_move(src_server, target_dir_server, new_name):
+            """mkdir + move via SSH. Returns True on success."""
+            escaped_dir = escape_path_for_ssh(target_dir_server)
+            mkdir_cmd = ["ssh", remote_host, f"mkdir -p \"{escaped_dir}\""]
+            result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"    ERROR: mkdir {os.path.basename(target_dir_server)}/: {result.stderr.strip()}")
+                return False
+            dst_server = os.path.join(target_dir_server, new_name)
+            success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
+            return success
 
         # Sort files by name (chronological for TVOON dates)
         unsorted.sort(key=lambda x: x[0])
@@ -18220,8 +18254,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if dry_run:
                     print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
                 else:
-                    os.makedirs(target_dir, exist_ok=True)
-                    os.rename(fp, target_path)
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
                 sorted_count += 1
                 continue
@@ -18238,8 +18274,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if dry_run:
                     print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
                 else:
-                    os.makedirs(target_dir, exist_ok=True)
-                    os.rename(fp, target_path)
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
                 sorted_count += 1
                 continue
@@ -18270,8 +18308,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             if dry_run:
                                 print(f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}")
                             else:
-                                os.makedirs(target_dir, exist_ok=True)
-                                os.rename(fp, target_path)
+                                if not _sort_move(fp, target_dir, new_name):
+                                    print(f"    ERROR: Failed to move {fn}")
+                                    failed_count += 1
+                                    continue
                                 print(f"    [absolute] {fn} -> s{season:02d}/{new_name}")
                             sorted_count += 1
                             continue
@@ -18291,8 +18331,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     if dry_run:
                         print(f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}")
                     else:
-                        os.makedirs(target_dir, exist_ok=True)
-                        os.rename(fp, target_path)
+                        if not _sort_move(fp, target_dir, new_name):
+                            print(f"    ERROR: Failed to move {fn}")
+                            failed_count += 1
+                            continue
                         print(f"    [leading-num] {fn} -> s{season:02d}/{new_name}")
                     sorted_count += 1
                     continue
@@ -18332,8 +18374,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         if dry_run:
                             print(f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}")
                         else:
-                            os.makedirs(target_dir, exist_ok=True)
-                            os.rename(fp, target_path)
+                            if not _sort_move(fp, target_dir, new_name):
+                                print(f"    ERROR: Failed to move {fn}")
+                                failed_count += 1
+                                continue
                             print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
                         sorted_count += 1
                         continue
@@ -18366,8 +18410,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     if dry_run:
                         print(f"    [dry-run] {fn} -> specials/{new_name}")
                     else:
-                        os.makedirs(target_dir, exist_ok=True)
-                        os.rename(fp, target_path)
+                        if not _sort_move(fp, target_dir, new_name):
+                            print(f"    ERROR: Failed to move {fn}")
+                            failed_count += 1
+                            continue
                         print(f"    {fn} -> specials/{new_name}")
                 sorted_count += 1
                 continue
@@ -18392,8 +18438,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if dry_run:
                     print(f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}")
                 else:
-                    os.makedirs(target_dir, exist_ok=True)
-                    os.rename(fp, target_path)
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
                     print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
                 sorted_count += 1
             else:
@@ -18409,8 +18457,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if dry_run:
                     print(f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}")
                 else:
-                    os.makedirs(target_dir, exist_ok=True)
-                    os.rename(fp, os.path.join(target_dir, new_name))
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
                     print(f"    [fallback] {iso_date} -> s{latest_season:02d}/{new_name}")
                 sorted_count += 1
 
