@@ -864,7 +864,7 @@ class TestCacheSkipLogic(unittest.TestCase):
     update_cache_after_resolution = main_globals['update_cache_after_resolution']
     escape_path_for_ssh = main_globals['escape_path_for_ssh']
     determine_remote_host = main_globals['determine_remote_host']
-    resolve_filepath_with_alternatives = main_globals['resolve_filepath_with_alternatives']
+    resolve_path = main_globals['resolve_path']
     format_filesize = main_globals['format_filesize']
     build_media_cache_dict = main_globals['build_media_cache_dict']
     load_media_cache = main_globals['load_media_cache']
@@ -5576,6 +5576,41 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn("show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)", content)
         self.assertIn("series_dir = show_obj.get('file'", content)
 
+    def test_plex2disk_clean_uses_show_obj_not_dirname(self):
+        """cmd_plex2disk_clean must use show_key lookup for series dirs, not dirname(dirname())."""
+        content = self._read_script()
+        # Find the cmd_plex2disk_clean function
+        clean_start = content.find('def cmd_plex2disk_clean(')
+        self.assertGreater(clean_start, 0, "cmd_plex2disk_clean function not found")
+        clean_end = content.find('\ndef ', clean_start + 1)
+        clean_body = content[clean_start:clean_end]
+        # Must NOT use dirname(dirname()) for series dirs
+        self.assertNotIn('dirname(os.path.dirname(filepath))', clean_body,
+                        "cmd_plex2disk_clean still uses dirname(dirname()) for series dirs")
+        # Must use show_key lookup
+        self.assertIn("show_key = obj.get('show_key'", clean_body)
+
+    def test_normalize_alpha(self):
+        """_normalize_alpha strips non-a-z characters for fuzzy path matching."""
+        content = self._read_script()
+        self.assertIn("def _normalize_alpha(", content)
+        # Verify it's used in resolve_cache_items
+        self.assertIn("_normalize_alpha(identifier)", content)
+        self.assertIn("_normalize_alpha(filepath)", content)
+
+    def test_resolve_cache_items_has_filepath_fallback(self):
+        """resolve_cache_items has a Stage 6 normalized filepath search."""
+        content = self._read_script()
+        resolve_start = content.find('def resolve_cache_items(')
+        self.assertGreater(resolve_start, 0)
+        resolve_end = content.find('\ndef ', resolve_start + 1)
+        resolve_body = content[resolve_start:resolve_end]
+        # Must have filepath fallback using OBJ_BY_FILEPATH
+        self.assertIn('OBJ_BY_FILEPATH', resolve_body)
+        self.assertIn('_normalize_alpha', resolve_body)
+        # Must deduplicate episodes to their parent Show
+        self.assertIn("show_key = obj.get('show_key'", resolve_body)
+
     def test_plex2disk_output_has_prefix_and_full_path(self):
         """Rename output has LIBRARY|KEY| prefix and shows full path."""
         content = self._read_script()
@@ -5731,7 +5766,7 @@ def run_regression_tests(main_globals, scope=None):
     update_cache_after_resolution = main_globals['update_cache_after_resolution']
     escape_path_for_ssh = main_globals['escape_path_for_ssh']
     determine_remote_host = main_globals['determine_remote_host']
-    resolve_filepath_with_alternatives = main_globals['resolve_filepath_with_alternatives']
+    resolve_path = main_globals['resolve_path']
     format_filesize = main_globals['format_filesize']
     build_media_cache_dict = main_globals['build_media_cache_dict']
     load_media_cache = main_globals['load_media_cache']
@@ -6460,7 +6495,7 @@ def run_regression_tests(main_globals, scope=None):
         # when trying to play them.
         #
         # The fix:
-        # 1. Changed os.path.exists() to os.path.isfile() in resolve_filepath_with_alternatives()
+        # 1. Changed os.path.exists() to os.path.isfile() in resolve_path()
         # 2. Modified determine_remote_host() to return (remote_host, exists, resolved_filepath) tuple
         # 3. Updated all callers to use the resolved filepath instead of the original path
 
@@ -6495,29 +6530,29 @@ def run_regression_tests(main_globals, scope=None):
             print(f"✗ FAIL: determine_remote_host function not found")
             failed += 1
 
-        # Test that resolve_filepath_with_alternatives uses os.path.isfile() not os.path.exists()
-        if 'resolve_filepath_with_alternatives' in locals():
+        # Test that resolve_path uses os.path.isfile not os.path.exists for file checks
+        if 'resolve_path' in locals():
             import inspect
-            source = inspect.getsource(resolve_filepath_with_alternatives)
+            source = inspect.getsource(resolve_path)
 
-            # Check that we're using os.path.isfile() for file checks
-            uses_isfile = 'os.path.isfile(' in source
+            # Check that we're using os.path.isfile for file checks (may be in dict or direct call)
+            uses_isfile = 'os.path.isfile' in source
             uses_exists_incorrectly = 'os.path.exists(check_path)' in source
 
             if uses_isfile and not uses_exists_incorrectly:
-                print(f"✓ PASS: resolve_filepath_with_alternatives correctly uses os.path.isfile()")
+                print(f"✓ PASS: resolve_path correctly uses os.path.isfile()")
                 print(f"  This prevents false positives when directory exists but file doesn't")
                 passed += 1
             else:
                 if uses_exists_incorrectly:
-                    print(f"✗ FAIL: resolve_filepath_with_alternatives still uses os.path.exists(check_path)")
+                    print(f"✗ FAIL: resolve_path still uses os.path.exists(check_path)")
                     print(f"  REGRESSION: This causes remote files to be incorrectly detected as local")
                     failed += 1
                 elif not uses_isfile:
-                    print(f"✗ FAIL: resolve_filepath_with_alternatives doesn't use os.path.isfile()")
+                    print(f"✗ FAIL: resolve_path doesn't use os.path.isfile()")
                     failed += 1
         else:
-            print(f"✗ FAIL: resolve_filepath_with_alternatives function not found")
+            print(f"✗ FAIL: resolve_path function not found")
             failed += 1
     except Exception as e:
         print(f"✗ FAIL: Exception during test: {e}")
