@@ -18606,28 +18606,32 @@ def cmd_sort_new(args, dry_run=False, target=None):
         if lib_bare_count > 0:
             movie_summaries.append((lib_name, lib_bare_count, lib_sorted_count, lib_failed_count))
 
-    if total_shows_processed > 0 or movie_libs_processed > 0:
-        # Per-item summary
-        if show_summaries or movie_summaries:
-            print(f"\nSummary:")
-            for s_key, lib_name, show_title, unsorted_count, sorted_count, failed_count in show_summaries:
-                status = f"{sorted_count} sorted"
-                if failed_count > 0:
-                    status += f", {failed_count} failed"
-                print(f"  {s_key}: [{lib_name}] [{show_title}] {unsorted_count} unsorted file(s), {status}")
-            for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
-                status = f"{sorted_count} sorted"
-                if failed_count > 0:
-                    status += f", {failed_count} failed"
-                print(f"  [{lib_name}] {bare_count} movie file(s) without directory, {status}")
+    # Skip summary when targeting a specific show (not a library)
+    single_target = target and target not in PLEX_Library.OBJ_DICT
 
-        # Totals
-        parts = []
-        if total_shows_processed > 0:
-            parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_shows_processed} show(s)")
-        if movie_libs_processed > 0:
-            parts.append(f"{movie_sorted} movies sorted, {movie_failed} failed across {movie_libs_processed} library(ies)")
-        print(f"\nDone: {'; '.join(parts)}")
+    if total_shows_processed > 0 or movie_libs_processed > 0:
+        if not single_target:
+            # Per-item summary
+            if show_summaries or movie_summaries:
+                print(f"\nSummary:")
+                for s_key, lib_name, show_title, unsorted_count, sorted_count, failed_count in show_summaries:
+                    status = f"{sorted_count} sorted"
+                    if failed_count > 0:
+                        status += f", {failed_count} failed"
+                    print(f"  {s_key}: [{lib_name}] [{show_title}] {unsorted_count} unsorted file(s), {status}")
+                for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
+                    status = f"{sorted_count} sorted"
+                    if failed_count > 0:
+                        status += f", {failed_count} failed"
+                    print(f"  [{lib_name}] {bare_count} movie file(s) without directory, {status}")
+
+            # Totals
+            parts = []
+            if total_shows_processed > 0:
+                parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_shows_processed} show(s)")
+            if movie_libs_processed > 0:
+                parts.append(f"{movie_sorted} movies sorted, {movie_failed} failed across {movie_libs_processed} library(ies)")
+            print(f"\nDone: {'; '.join(parts)}")
     else:
         print("\nNothing to sort.")
 
