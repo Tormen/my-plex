@@ -18107,7 +18107,9 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
     shows = get_all_shows_in_series_libraries()
     if target:
-        shows = [(k, d, lib) for k, d, lib in shows if lib == target]
+        # target can be a library name, a show cache key (e.g. "Show:12345"), or a show title
+        shows = [(k, d, lib) for k, d, lib in shows
+                 if lib == target or k == target or d.get('title', '').lower() == target.lower()]
     if not shows and not target:
         print("No shows found in series-type libraries.")
         # Fall through to movie section below
@@ -18173,7 +18175,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
         total_shows_processed += 1
         show_dir = show_dir_server  # All paths are server paths; writes go via SSH
 
-        print(f"\n  [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
+        print(f"\n{show_key}: [{library_name}] [{show_title}] {len(unsorted)} unsorted file(s)")
 
         # Determine episode source for this show
         source = _determine_episode_source(show_dict)
@@ -20849,7 +20851,7 @@ def execute_global_commands(args, cmd_args):
     # Handle --sort-new command
     if safe_getattr(cmd_args, 'sort_new', False):
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-        target = args.CMD_OR_PLEXOBJECT if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT in PLEX_Library.OBJ_DICT else None
+        target = args.CMD_OR_PLEXOBJECT if args.CMD_OR_PLEXOBJECT else None
         cmd_sort_new(args, dry_run=dry_run, target=target)
         sys.exit(0)
 
