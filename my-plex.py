@@ -18192,6 +18192,12 @@ def cmd_sort_new(args, dry_run=False, target=None):
             print(f"    No episodes.tsv — attempting to scrape...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
 
+        # Print episode data summary
+        if all_episodes:
+            ep_source = metadata.get('source', source) if metadata else source
+            max_s = max((ep['season'] for ep in all_episodes), default=0)
+            print(f"    {ep_source}: {len(all_episodes)} episodes in {max_s} season(s)")
+
         # Build date lookup: date_str -> (season, episode, title)
         date_lookup = {}
         if all_episodes:
