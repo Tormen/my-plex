@@ -18555,7 +18555,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             movie_libs_processed += 1
             lib_bare_count += len(bare_files)
             bare_files.sort()
-            print(f"\n  [{lib_name}] {len(bare_files)} movie file(s) without directory")
+            print(f"\n[{lib_name}] {len(bare_files)} movie file(s) without directory")
 
             for fn in bare_files:
                 stem = os.path.splitext(fn)[0]
