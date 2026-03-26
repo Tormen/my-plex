@@ -18196,7 +18196,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
         if all_episodes:
             ep_source = metadata.get('source', source) if metadata else source
             max_s = max((ep['season'] for ep in all_episodes), default=0)
-            print(f"    {ep_source}: {len(all_episodes)} episodes in {max_s} season(s)")
+            print(f"    {ep_source.upper()}: {len(all_episodes)} episodes in {max_s} season(s)")
 
         # Build date lookup: date_str -> (season, episode, title)
         date_lookup = {}
