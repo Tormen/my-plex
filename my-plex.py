@@ -18231,6 +18231,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         sorted_count = 0
         failed_count = 0
+        dry_run_lines = []  # (sort_key, line) for sorted dry-run output
 
         # Determine max episode number per season from cache (for absolute numbering detection)
         show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
@@ -18258,7 +18259,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
-                    print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
                         print(f"    ERROR: Failed to move {fn}")
@@ -18278,7 +18279,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
-                    print(f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}")
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
                         print(f"    ERROR: Failed to move {fn}")
@@ -18312,7 +18313,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             target_path = os.path.join(target_dir, new_name)
 
                             if dry_run:
-                                print(f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}")
+                                dry_run_lines.append((season, ep_num, f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}"))
                             else:
                                 if not _sort_move(fp, target_dir, new_name):
                                     print(f"    ERROR: Failed to move {fn}")
@@ -18335,7 +18336,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     target_path = os.path.join(target_dir, new_name)
 
                     if dry_run:
-                        print(f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}")
+                        dry_run_lines.append((season, ep_num, f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
                             print(f"    ERROR: Failed to move {fn}")
@@ -18378,7 +18379,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
                         target_path = os.path.join(target_dir, new_name)
                         if dry_run:
-                            print(f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}")
+                            dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
                         else:
                             if not _sort_move(fp, target_dir, new_name):
                                 print(f"    ERROR: Failed to move {fn}")
@@ -18387,7 +18388,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
                         sorted_count += 1
                         continue
-                print(f"    WARNING: Cannot parse date from: {fn}")
+                if dry_run:
+                    dry_run_lines.append((9999, 0, f"    WARNING: Cannot parse date from: {fn}"))
+                else:
+                    print(f"    WARNING: Cannot parse date from: {fn}")
                 failed_count += 1
                 continue
 
@@ -18398,7 +18402,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if has_specials_script:
                     # Delegate to sort_specials.sh
                     if dry_run:
-                        print(f"    [dry-run] {fn} -> sort_specials.sh")
+                        dry_run_lines.append((0, 0, f"    [dry-run] {fn} -> sort_specials.sh"))
                     else:
                         try:
                             subprocess.run(['bash', specials_script, fp], check=True, cwd=show_dir)
@@ -18414,7 +18418,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     new_name = f"S00E{ep_num:02d} - {fn}"
                     target_path = os.path.join(target_dir, new_name)
                     if dry_run:
-                        print(f"    [dry-run] {fn} -> specials/{new_name}")
+                        dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
                             print(f"    ERROR: Failed to move {fn}")
@@ -18442,7 +18446,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
-                    print(f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}")
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
                         print(f"    ERROR: Failed to move {fn}")
@@ -18461,7 +18465,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 new_name = f"S{latest_season:02d}E{ep_num:02d} - {fn}"
 
                 if dry_run:
-                    print(f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}")
+                    dry_run_lines.append((latest_season, ep_num, f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
                         print(f"    ERROR: Failed to move {fn}")
@@ -18469,6 +18473,12 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         continue
                     print(f"    [fallback] {iso_date} -> s{latest_season:02d}/{new_name}")
                 sorted_count += 1
+
+        # Print collected dry-run lines sorted by S##E##
+        if dry_run and dry_run_lines:
+            dry_run_lines.sort(key=lambda x: (x[0], x[1]))
+            for _, _, line in dry_run_lines:
+                print(line)
 
         total_sorted += sorted_count
         total_failed += failed_count
