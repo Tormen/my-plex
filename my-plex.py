@@ -18484,7 +18484,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         total_sorted += sorted_count
         total_failed += failed_count
-        show_summaries.append((library_name, show_title, len(unsorted), sorted_count, failed_count))
+        show_summaries.append((show_key, library_name, show_title, len(unsorted), sorted_count, failed_count))
 
     # --- Movie libraries: create directories for bare video files ---
     movie_sorted = 0
@@ -18610,11 +18610,11 @@ def cmd_sort_new(args, dry_run=False, target=None):
         # Per-item summary
         if show_summaries or movie_summaries:
             print(f"\nSummary:")
-            for lib_name, show_title, unsorted_count, sorted_count, failed_count in show_summaries:
+            for s_key, lib_name, show_title, unsorted_count, sorted_count, failed_count in show_summaries:
                 status = f"{sorted_count} sorted"
                 if failed_count > 0:
                     status += f", {failed_count} failed"
-                print(f"  [{lib_name}] [{show_title}] {unsorted_count} unsorted file(s), {status}")
+                print(f"  {s_key}: [{lib_name}] [{show_title}] {unsorted_count} unsorted file(s), {status}")
             for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
                 status = f"{sorted_count} sorted"
                 if failed_count > 0:
