@@ -9307,6 +9307,31 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
             if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} {'(alternative path)' if filepath == normalized_filepath else ''} '{filepath}' is NOT part of PLEX_Media.OBJ_BY_FILEPATH")
 
     if DBG and len(mediae) == 0: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> Unable to match part.file of all parts of all items of all potential libraries")
+
+    # Cache-based title search (case-insensitive) — works offline, no API needed
+    stage = "2c"
+    search_lower = media_identifier.lower()
+    exact_matches = []
+    partial_matches = []
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        if library_name is not None and obj.get('library', '') != library_name:
+            continue
+        obj_title = obj.get('title', '')
+        obj_orig = obj.get('originalTitle', '')
+        title_lower = obj_title.lower()
+        orig_lower = obj_orig.lower() if obj_orig else ''
+        if title_lower == search_lower or orig_lower == search_lower:
+            exact_matches.append(obj)
+        elif search_lower in title_lower or (orig_lower and search_lower in orig_lower):
+            partial_matches.append(obj)
+    if exact_matches:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND {len(exact_matches)} exact title match(es) in cache")
+        return get_media_list_from_PLEX_OBJ_list(exact_matches)
+    if partial_matches:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND {len(partial_matches)} partial title match(es) in cache")
+        return get_media_list_from_PLEX_OBJ_list(partial_matches)
+    if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> No title match in cache for '{media_identifier}'")
+
     stage = "3rd"
 
     # Try to lookup by title if library_name is provided
@@ -12063,6 +12088,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Fast path: check if obj is a full cache key (e.g. "Show:4925", "Episode:2579")
         if obj in PLEX_Media.OBJ_BY_ID:
             return True
+        # Fast path: cache title search (exact or partial, case-insensitive) — no API needed
+        search_lower = obj.lower()
+        for cached_obj in PLEX_Media.OBJ_BY_ID.values():
+            title_lower = cached_obj.get('title', '').lower()
+            orig_lower = (cached_obj.get('originalTitle', '') or '').lower()
+            if search_lower == title_lower or search_lower == orig_lower:
+                return True
+            if search_lower in title_lower or (orig_lower and search_lower in orig_lower):
+                return True
         return (len(resolve_plex_media_obj(obj)) > 0)
 
     @staticmethod
@@ -14349,6 +14383,9 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
         # Use DB query instead of API — playlists are metadata_type=15
+        if OFFLINE:
+            if DBG: print(f"{DBGPFX}PLEX_Playlist.detect_if_of_OBJ_TYPE(): skipped (offline mode)")
+            return False
         try:
             safe_obj = obj.replace("'", "''")
             query = f"SELECT COUNT(*) FROM metadata_items WHERE metadata_type = 15 AND title = '{safe_obj}' AND deleted_at IS NULL"
