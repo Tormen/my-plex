@@ -9332,6 +9332,11 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
         return get_media_list_from_PLEX_OBJ_list(partial_matches)
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> No title match in cache for '{media_identifier}'")
 
+    # Stages 3-4 require API access — skip in offline mode
+    if OFFLINE:
+        if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): skipping API stages 3-4 (offline mode)")
+        return []
+
     stage = "3rd"
 
     # Try to lookup by title if library_name is provided
@@ -9356,11 +9361,6 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
     except:
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT found media by search in library!")
         return []
-        #raise Exception(f"Media not found for title or file path: {media_identifier}")
-
-    # mediae == [] in case potential_libraries would be empty /or/ in case NON of the attempts in LOOP over potential_libraries was able to find 'media':
-    if len(mediae) != 0: err(1039)
-    return [] # Return the found item(s)
 
 
 def print_details(media):
@@ -10014,12 +10014,27 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print("  Your existing cache is preserved. Run --update-cache again.")
             return
 
+        # Collect server info for offline display
+        server_info = CACHE.get('server_info', {})
+        plex = ensure_plex_api(required=False)
+        if plex:
+            try:
+                server_info = {
+                    'friendlyName': plex.friendlyName,
+                    'version': plex.version,
+                    'platform': plex.platform,
+                    'myPlexUsername': getattr(plex, 'myPlexUsername', ''),
+                }
+            except Exception:
+                pass  # Keep existing server_info from cache
+
         # Save cache to disk
         if DBG:
             print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {new_count} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SHOW has {len(PLEX_Media.OBJ_BY_SHOW)} items")
         update_and_save_cache(build_media_cache_dict(
             library_stats=current_library_stats,
-            library_object_counts=updated_library_object_counts
+            library_object_counts=updated_library_object_counts,
+            server_info=server_info,
         ))
         if DBG:
             print(f"{DBGPFX}AFTER save: CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items")
@@ -12097,7 +12112,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return True
             if search_lower in title_lower or (orig_lower and search_lower in orig_lower):
                 return True
-        return (len(resolve_plex_media_obj(obj)) > 0)
+        # Fast path: cache filepath search — no API needed
+        normalized = os.path.normpath(obj)
+        for filepath in get_alternative_paths(normalized):
+            if filepath in PLEX_Media.OBJ_BY_FILEPATH:
+                return True
+        return False
 
     @staticmethod
     def execute_cmd(args, obj, obj_args):         # Handling action(s) on media
@@ -19177,90 +19197,103 @@ def show_system_info():
 
     # Server information
     print("\nSERVER:")
-    plex = ensure_plex_api(required=False)
-    if plex:
-        try:
-            print(f"  {'Name':<12} {plex.friendlyName}")
-            print(f"  {'Version':<12} {plex.version}")
-            print(f"  {'Platform':<12} {plex.platform}")
-            if hasattr(plex, 'myPlexUsername') and plex.myPlexUsername:
-                print(f"  {'User':<12} {plex.myPlexUsername}")
-        except Exception as e:
-            print(f"  ⚠ Could not retrieve server info: {e}")
-    elif OFFLINE:
-        print(f"  {'Status':<12} OFFLINE MODE")
+    if OFFLINE:
+        # Use cached server info in offline mode
+        server_info = CACHE.get('server_info', {})
+        if server_info:
+            print(f"  {'Name':<12} {server_info.get('friendlyName', 'N/A')} (cached)")
+            print(f"  {'Version':<12} {server_info.get('version', 'N/A')} (cached)")
+            print(f"  {'Platform':<12} {server_info.get('platform', 'N/A')} (cached)")
+            if server_info.get('myPlexUsername'):
+                print(f"  {'User':<12} {server_info['myPlexUsername']} (cached)")
+        else:
+            print(f"  {'Status':<12} OFFLINE MODE (no cached server info — run --update-cache to populate)")
     else:
-        print(f"  {'Status':<12} Not connected")
+        plex = ensure_plex_api(required=False)
+        if plex:
+            try:
+                print(f"  {'Name':<12} {plex.friendlyName}")
+                print(f"  {'Version':<12} {plex.version}")
+                print(f"  {'Platform':<12} {plex.platform}")
+                if hasattr(plex, 'myPlexUsername') and plex.myPlexUsername:
+                    print(f"  {'User':<12} {plex.myPlexUsername}")
+            except Exception as e:
+                print(f"  ⚠ Could not retrieve server info: {e}")
+        else:
+            print(f"  {'Status':<12} Not connected")
 
     # API & connectivity status
     print("\nAPI STATUS:")
     import subprocess, urllib.request, json
 
-    # 1. Plex API
-    if plex:
-        print(f"  {'Plex API':<16} ✓ connected ({PLEX_URL})")
-    elif OFFLINE:
-        print(f"  {'Plex API':<16} - skipped (offline mode)")
-    elif PLEX_URL and PLEX_TOKEN:
-        print(f"  {'Plex API':<16} ✗ configured but not connected")
-    else:
-        print(f"  {'Plex API':<16} ✗ not configured (set PLEX_URL + PLEX_TOKEN)")
-
-    # 2. Plex DB via SSH
     if OFFLINE:
+        print(f"  {'Plex API':<16} - skipped (offline mode)")
         print(f"  {'Plex DB (SSH)':<16} - skipped (offline mode)")
-    elif PLEX_DB_REMOTE_HOST:
-        try:
-            result = subprocess.run(
-                ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', PLEX_DB_REMOTE_HOST, 'echo ok'],
-                capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
-            else:
+        print(f"  {'TVDB API':<16} - skipped (offline mode)")
+        print(f"  {'TMDB API':<16} - skipped (offline mode)")
+    else:
+        # 1. Plex API
+        plex = ensure_plex_api(required=False)
+        if plex:
+            print(f"  {'Plex API':<16} ✓ connected ({PLEX_URL})")
+        elif PLEX_URL and PLEX_TOKEN:
+            print(f"  {'Plex API':<16} ✗ configured but not connected")
+        else:
+            print(f"  {'Plex API':<16} ✗ not configured (set PLEX_URL + PLEX_TOKEN)")
+
+        # 2. Plex DB via SSH
+        if PLEX_DB_REMOTE_HOST:
+            try:
+                result = subprocess.run(
+                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', PLEX_DB_REMOTE_HOST, 'echo ok'],
+                    capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
+                else:
+                    print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
+            except Exception:
                 print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
-        except Exception:
-            print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
-    else:
-        print(f"  {'Plex DB (SSH)':<16} ✗ not configured (set PLEX_DB_REMOTE_HOST)")
+        else:
+            print(f"  {'Plex DB (SSH)':<16} ✗ not configured (set PLEX_DB_REMOTE_HOST)")
 
-    # 3. TVDB API
-    if TVDB_API_KEY:
-        try:
-            # Try a fresh login to actually test connectivity
-            url = 'https://api4.thetvdb.com/v4/login'
-            payload = json.dumps({'apikey': TVDB_API_KEY}).encode('utf-8')
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                if data.get('data', {}).get('token'):
-                    print(f"  {'TVDB API':<16} ✓ authenticated (key: ...{TVDB_API_KEY[-6:]})")
-                else:
-                    print(f"  {'TVDB API':<16} ✗ login returned no token")
-        except Exception as e:
-            print(f"  {'TVDB API':<16} ✗ login failed: {e}")
-    else:
-        print(f"  {'TVDB API':<16} - not configured (optional, for --missing)")
+        # 3. TVDB API
+        if TVDB_API_KEY:
+            try:
+                # Try a fresh login to actually test connectivity
+                url = 'https://api4.thetvdb.com/v4/login'
+                payload = json.dumps({'apikey': TVDB_API_KEY}).encode('utf-8')
+                req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    if data.get('data', {}).get('token'):
+                        print(f"  {'TVDB API':<16} ✓ authenticated (key: ...{TVDB_API_KEY[-6:]})")
+                    else:
+                        print(f"  {'TVDB API':<16} ✗ login returned no token")
+            except Exception as e:
+                print(f"  {'TVDB API':<16} ✗ login failed: {e}")
+        else:
+            print(f"  {'TVDB API':<16} - not configured (optional, for --missing)")
 
-    # 4. TMDB API
-    if TMDB_API_KEY:
-        try:
-            req = urllib.request.Request(
-                'https://api.themoviedb.org/3/configuration',
-                headers={'Authorization': f'Bearer {TMDB_API_KEY}', 'Accept': 'application/json'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status == 200:
-                    print(f"  {'TMDB API':<16} ✓ authenticated (token: ...{TMDB_API_KEY[-6:]})")
+        # 4. TMDB API
+        if TMDB_API_KEY:
+            try:
+                req = urllib.request.Request(
+                    'https://api.themoviedb.org/3/configuration',
+                    headers={'Authorization': f'Bearer {TMDB_API_KEY}', 'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status == 200:
+                        print(f"  {'TMDB API':<16} ✓ authenticated (token: ...{TMDB_API_KEY[-6:]})")
+                    else:
+                        print(f"  {'TMDB API':<16} ✗ unexpected status {resp.status}")
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    print(f"  {'TMDB API':<16} ✗ authentication failed (invalid token)")
                 else:
-                    print(f"  {'TMDB API':<16} ✗ unexpected status {resp.status}")
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                print(f"  {'TMDB API':<16} ✗ authentication failed (invalid token)")
-            else:
+                    print(f"  {'TMDB API':<16} ✗ request failed: {e}")
+            except Exception as e:
                 print(f"  {'TMDB API':<16} ✗ request failed: {e}")
-        except Exception as e:
-            print(f"  {'TMDB API':<16} ✗ request failed: {e}")
-    else:
-        print(f"  {'TMDB API':<16} - not configured (optional, for --missing)")
+        else:
+            print(f"  {'TMDB API':<16} - not configured (optional, for --missing)")
 
     # Cache information
     print("\nCACHE:")
@@ -19310,7 +19343,6 @@ def show_system_info():
         print("  " + "-"*70)
 
         import pickle
-        global CACHE
 
         total_size = 0
         structure_sizes = []
@@ -19986,9 +20018,8 @@ def verify_cache():
     print("="*76)
 
     if OFFLINE:
-        print("\n⚠ Cannot verify cache in offline mode")
-        print("Run without --offline to verify against server")
-        return
+        print("  (offline mode — showing cached counts only, no server comparison)")
+        print()
 
     if len(PLEX_Media.OBJ_BY_ID) == 0:
         print("\n⚠ Cache is empty - nothing to verify")
@@ -19999,8 +20030,12 @@ def verify_cache():
     max_name = max(len(name) for name in PLEX_Library.OBJ_DICT.keys()) if PLEX_Library.OBJ_DICT else 12
     name_width = min(max(max_name, 12), 40)
 
-    print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>28}  {'PLEX Server':>28}  {'CACHE Timestamp':<19}  {'PLEX Timestamp':<19}  {'Status'}")
-    print(f"{'-'*name_width}  {'-'*8}  {'-'*28}  {'-'*28}  {'-'*19}  {'-'*19}  {'-'*10}")
+    if OFFLINE:
+        print(f"{'Library':<{name_width}}  {'Type':<8}  {'Cached Items':>28}  {'CACHE Timestamp':<19}")
+        print(f"{'-'*name_width}  {'-'*8}  {'-'*28}  {'-'*19}")
+    else:
+        print(f"{'Library':<{name_width}}  {'Type':<8}  {'Local Cache':>28}  {'PLEX Server':>28}  {'CACHE Timestamp':<19}  {'PLEX Timestamp':<19}  {'Status'}")
+        print(f"{'-'*name_width}  {'-'*8}  {'-'*28}  {'-'*28}  {'-'*19}  {'-'*19}  {'-'*10}")
 
     # Track inconsistencies for detailed reporting
     inconsistencies = []
@@ -20086,33 +20121,34 @@ def verify_cache():
             server_episodes = 0
             server_collections = 0
 
-            try:
-                safe_name = lib_name.replace("'", "''")
-                if lib_type == 'Movie':
+            if not OFFLINE:
+                try:
+                    safe_name = lib_name.replace("'", "''")
+                    if lib_type == 'Movie':
+                        rows = query_plex_database(
+                            f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL",
+                            mode='rows')
+                        server_items = int(rows[0][0]) if rows else 0
+                    elif lib_type == 'Show':
+                        rows = query_plex_database(
+                            f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL",
+                            mode='rows')
+                        server_items = int(rows[0][0]) if rows else 0
+                        rows = query_plex_database(
+                            f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 3 AND mi.deleted_at IS NULL",
+                            mode='rows')
+                        server_seasons = int(rows[0][0]) if rows else 0
+                        rows = query_plex_database(
+                            f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL",
+                            mode='rows')
+                        server_episodes = int(rows[0][0]) if rows else 0
+                    # Collections (metadata_type=18) can exist in both Movie and Show libraries
                     rows = query_plex_database(
-                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL",
+                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 18 AND mi.deleted_at IS NULL",
                         mode='rows')
-                    server_items = int(rows[0][0]) if rows else 0
-                elif lib_type == 'Show':
-                    rows = query_plex_database(
-                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL",
-                        mode='rows')
-                    server_items = int(rows[0][0]) if rows else 0
-                    rows = query_plex_database(
-                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 3 AND mi.deleted_at IS NULL",
-                        mode='rows')
-                    server_seasons = int(rows[0][0]) if rows else 0
-                    rows = query_plex_database(
-                        f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL",
-                        mode='rows')
-                    server_episodes = int(rows[0][0]) if rows else 0
-                # Collections (metadata_type=18) can exist in both Movie and Show libraries
-                rows = query_plex_database(
-                    f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 18 AND mi.deleted_at IS NULL",
-                    mode='rows')
-                server_collections = int(rows[0][0]) if rows else 0
-            except Exception as e:
-                if DBG: print(f"{DBGPFX}Failed to get counts from DB for '{lib_name}': {e}")
+                    server_collections = int(rows[0][0]) if rows else 0
+                except Exception as e:
+                    if DBG: print(f"{DBGPFX}Failed to get counts from DB for '{lib_name}': {e}")
 
             # Check if shutdown was requested during processing
             if _shutdown_requested:
@@ -20200,10 +20236,13 @@ def verify_cache():
                 status = "✓ OK"
 
             # Print line immediately as we process each library
-            print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>28}  {server_str:>28}  {cache_ts_str:<19}  {plex_ts_str:<19}  {status}", flush=True)
+            if OFFLINE:
+                print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>28}  {cache_ts_str:<19}", flush=True)
+            else:
+                print(f"{truncated_name:<{name_width}}  {lib_type:<8}  {cached_str:>28}  {server_str:>28}  {cache_ts_str:<19}  {plex_ts_str:<19}  {status}", flush=True)
 
             # In -V mode: immediately show differences inline after the library row
-            if VRB and not VERYVRB and lib_name in inconsistencies:
+            if not OFFLINE and VRB and not VERYVRB and lib_name in inconsistencies:
                 # Get differences for this library
                 lib_type_for_diff = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
                 diffs = get_library_differences(lib_name, lib_type_for_diff, deep_episode_check=False)
@@ -20212,7 +20251,7 @@ def verify_cache():
                     print()  # Blank line after differences
 
         # In -VV mode only: show detailed comparison with full episode-level analysis
-        if VERYVRB:
+        if not OFFLINE and VERYVRB:
             print(f"\nDETAILED DIFFERENCES:")
             print(f"(Very verbose mode: Including episode-level analysis - this may take a while...)")
 
@@ -20292,9 +20331,13 @@ def verify_cache():
             print(f"\n{'='*76}")
             print(f"✓ VERIFICATION COMPLETE")
             print(f"{'='*76}")
-            print(f"  All libraries are in sync with the server.")
-            print(f"  Cache is consistent and up to date.")
-            print(f"  All timestamps are properly synchronized (CACHE >= PLEX).")
+            if OFFLINE:
+                print(f"  Cache contents listed above (offline mode — no server comparison).")
+                print(f"  Run without --offline to verify against server.")
+            else:
+                print(f"  All libraries are in sync with the server.")
+                print(f"  Cache is consistent and up to date.")
+                print(f"  All timestamps are properly synchronized (CACHE >= PLEX).")
 
     except (KeyboardInterrupt, BrokenPipeError):
         # User pressed Ctrl+C - exit gracefully without showing inconsistency summary
