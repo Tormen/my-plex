@@ -12546,6 +12546,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if total < version_limit:
                 continue
             title = obj.get('title', 'Unknown')
+            # For episodes, show series + S##E## for better identification
+            obj_type = obj.get('type', '')
+            if obj_type in ('Episode', 'Episode*'):
+                series = obj.get('series', '')
+                s_str = obj.get('S_str', '')
+                e_str = obj.get('E_str', '')
+                title = f"{series} {s_str}{e_str}" + (f" {title}" if title else "")
             plex_id = obj.get('id', 'N/A')
             library = obj.get('library', 'Unknown')
             for idx, (version, file_info) in enumerate(files_dict.items(), 1):
@@ -12556,17 +12563,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"No entries with {version_limit}+ versions{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
             return 0, 0
 
-        excess_files.sort(key=lambda x: (x[1].lower(), x[2]))  # sort by title, then version nr
+        excess_files.sort(key=lambda x: (x[4].lower(), x[1].lower(), x[0], x[2]))  # sort by library, title, plex_id, version nr
 
-        print(f"\n{'PLEX-ID':<10} | {'ENTRY TITLE':<40} | {'VERSION':<9} | {'LIBRARY':<15} | FILEPATH")
-        print("-" * 150)
+        # Group by entry (plex_id) and print versions together
+        print()
+        prev_plex_id = None
+        entry_count = 0
         for plex_id, title, idx, total, library, filepath in excess_files:
-            plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
-            title_str = title[:40]
-            version_str = f"{idx} / {total}"
-            library_str = library[:15]
-            print(f"{plex_id_str:<10} | {title_str:<40} | {version_str:<9} | {library_str:<15} | {filepath}")
-        entry_count = len(set((plex_id, title) for plex_id, title, _, _, _, _ in excess_files))
+            if plex_id != prev_plex_id:
+                if prev_plex_id is not None:
+                    print()  # blank line between entries
+                entry_count += 1
+                plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
+                print(f"  {plex_id_str}  [{library}]  {title}  ({total} versions)")
+                prev_plex_id = plex_id
+            print(f"    {idx:>2}/{total}: {filepath}")
+
         print(f"\nTotal: {len(excess_files)} files across {entry_count} entries with {version_limit}+ versions")
         return len(excess_files), entry_count
 
