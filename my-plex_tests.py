@@ -1984,15 +1984,15 @@ class TestExcessVersions(unittest.TestCase):
         # Check for x / y format string
         self.assertRegex(body, r'f".*idx.*total', "Must format version as x / y")
 
-    def test_excess_versions_header_columns(self):
-        """Output header must have PLEX-ID, ENTRY TITLE, VERSION, LIBRARY, FILEPATH."""
+    def test_excess_versions_grouped_output(self):
+        """Output must group versions by entry with ID, library, title, and version count."""
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        for col in ['PLEX-ID', 'ENTRY TITLE', 'VERSION', 'LIBRARY', 'FILEPATH']:
-            self.assertIn(col, body, f"Header must include {col}")
+        self.assertIn("prev_plex_id", body, "Must track previous plex_id for grouping")
+        self.assertIn("versions)", body, "Must show version count per entry")
 
     def test_excess_versions_one_line_per_file(self):
         """Must iterate over files_dict to produce one output line per file."""
