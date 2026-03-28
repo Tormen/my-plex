@@ -3,13 +3,223 @@
 # Coding guidelines, architecture docs, and test policies: see README.md
 # errCode range: 1001..1070
 
+# ---------------------------------------------------------------------------
+# Venv bootstrap: ensure we run inside a venv with plexapi+readchar installed.
+# If not, create the venv, install deps, and re-exec ourselves in it.
+# ---------------------------------------------------------------------------
+import os
+import subprocess
+import sys
+
+VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
+VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
+VENV_DEPS = ["plexapi", "readchar"]
+
+
+def _venv_has_deps():
+    """Check if venv exists and has required packages."""
+    if not os.path.isfile(VENV_PYTHON):
+        return False
+    site_packages = os.path.join(VENV_DIR, "lib")
+    if not os.path.isdir(site_packages):
+        return False
+    # Check for plexapi AND readchar in site-packages
+    found = set()
+    for d in os.listdir(site_packages):
+        pkg_dir = os.path.join(site_packages, d, "site-packages")
+        if os.path.isdir(pkg_dir):
+            for dep in VENV_DEPS:
+                if os.path.isdir(os.path.join(pkg_dir, dep)):
+                    found.add(dep)
+    return found == set(VENV_DEPS)
+
+
+def _bootstrap_venv():
+    """Create venv, install deps, and re-exec."""
+    print(f"\n >>> Creating python virtualenv '{VENV_DIR}'...\n", file=sys.stderr)
+
+    rc = subprocess.call([sys.executable, "-m", "venv", VENV_DIR])
+    if rc != 0:
+        print(f"\n  ERROR: Failed to create venv at {VENV_DIR}\n", file=sys.stderr)
+        sys.exit(1)
+
+    pip = os.path.join(VENV_DIR, "bin", "pip")
+    rc = subprocess.call([pip, "install"] + VENV_DEPS)
+    if rc != 0:
+        print(f"\n  ERROR: Failed to install dependencies: {', '.join(VENV_DEPS)}\n", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n >>> DONE creating python virtualenv '{VENV_DIR}'.", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+
+    # Re-exec with venv python, preserving all arguments
+    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+
+
+# If we're not already running inside our venv, bootstrap it
+if os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
+    if not _venv_has_deps():
+        _bootstrap_venv()
+    # Venv exists and has deps — re-exec inside it
+    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+
+
+# ---------------------------------------------------------------------------
+# Zsh completions: install/update on every run (fast no-op if unchanged)
+# ---------------------------------------------------------------------------
+def _install_zsh_completions():
+    """Write zsh completion file and patch .zshrc fpath if needed."""
+    completion_dir = os.path.expanduser("~/.zsh/completions")
+    completion_file = os.path.join(completion_dir, "_my-plex")
+
+    completion_content = r'''#compdef my-plex
+
+_my-plex() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local has_duplicates=0
+    local has_list=0
+    local has_update_cache=0
+    local has_broken=0
+    local has_resolve=0
+    local has_problems=0
+    for word in $words; do
+        if [[ "$word" == "--list-duplicates" ]]; then
+            has_duplicates=1
+            has_list=1
+        elif [[ "$word" == "--duplicates" ]]; then
+            has_duplicates=1
+            has_list=1
+        elif [[ "$word" == "--broken" ]]; then
+            has_broken=1
+            has_list=1
+        elif [[ "$word" == "--resolve" ]]; then
+            has_resolve=1
+            has_duplicates=1
+            has_list=1
+        elif [[ "$word" == "--list" ]]; then
+            has_list=1
+        elif [[ "$word" == "--update-cache" ]] || [[ "$word" == "--rebuild-cache" ]] || [[ "$word" == "-U" ]]; then
+            has_update_cache=1
+        fi
+    done
+
+    local -a args_spec
+    args_spec=(
+        '--info[Show system information (cache, server, libraries)]'
+        '--verify-cache[Verify cache consistency with Plex server]'
+        '(-U --update-cache --rebuild-cache)'{-U,--update-cache,--rebuild-cache}'[Update/rebuild cache from server]'
+        '(-O --offline)'{-O,--offline}'[Work with cached information only (offline mode)]'
+        '--plex-url[Plex server URL]:url:'
+        '--plex-token[Plex authentication token]:token:'
+        '--plex-xml-url[Plex XML URL from View XML]:xml-url:'
+        '--list[List all media items]'
+        '--list-libraries[List all Plex libraries]'
+        '--list-duplicates[List only duplicate media items]'
+        '--broken[Show only potentially truncated/broken files]'
+        '--excess-versions[List entries with too many file versions]:limit:'
+        '--problems[Run all problem detection checks]'
+        '--scan[Trigger Plex library scan + metadata refresh + cache update]'
+        '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
+        '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
+        '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
+        '--list-labels[List all labels and item counts]'
+        '--list-label[List media with specific label]:label:'
+        '--add-label[Add label to media]:label and id:'
+        '--remove-label[Remove label from media]:label and id:'
+        '(--no-audio-language --no-language)'{--no-audio-language,--no-language}'[List media with missing audio language info]'
+        '--en[List media with English audio]'
+        '--de[List media with German audio]'
+        '--fr[List media with French audio]'
+        '--watched[List watched media items]'
+        '--unwatched[List unwatched media items]'
+        '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
+        '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
+        '--test[Run regression tests]'
+        '(- -V -VV --verbose --very-verbose)'{-V,--verbose}'[Verbose output]'
+        '(- -V -VV --verbose --very-verbose)'{-VV,--very-verbose}'[Very verbose output]'
+        '(- -D -DD --debug --deep-debug)'{-D,--debug}'[Debug mode]'
+        '(- -D -DD --debug --deep-debug)'{-DD,--deep-debug}'[Deep debug mode]'
+        '(- -h --help)'{-h,--help}'[Show help message]'
+    )
+
+    if [[ $has_update_cache -eq 1 ]]; then
+        args_spec+=('--force[Force complete cache rebuild from scratch]')
+    fi
+
+    if [[ $has_list -eq 1 ]] && [[ $has_duplicates -eq 0 ]]; then
+        args_spec+=('--duplicates[Filter --list to show only duplicates]')
+    fi
+
+    if [[ $has_list -eq 1 ]]; then
+        args_spec+=('--type[Filter by media type]:type:(movie show)')
+    fi
+
+    _arguments -s : '*::arg:_default' $args_spec
+}
+
+_my-plex "$@"
+'''
+
+    os.makedirs(completion_dir, exist_ok=True)
+
+    # Only write if content changed
+    try:
+        with open(completion_file, 'r') as f:
+            if f.read() == completion_content:
+                return  # unchanged, nothing to do
+    except FileNotFoundError:
+        pass
+
+    with open(completion_file, 'w') as f:
+        f.write(completion_content)
+
+    # Patch .zshrc fpath if needed
+    zshrc = os.path.expanduser("~/.zshrc")
+    if os.path.islink(zshrc):
+        zshrc_real = os.path.realpath(zshrc)
+    elif os.path.isfile(zshrc):
+        zshrc_real = zshrc
+    else:
+        return  # no .zshrc to patch
+
+    try:
+        with open(zshrc_real, 'r') as f:
+            zshrc_content = f.read()
+    except Exception:
+        return
+
+    if '.zsh/completions' in zshrc_content:
+        return  # already configured
+
+    if 'source.*oh-my-zsh.sh' in zshrc_content or 'oh-my-zsh.sh' in zshrc_content:
+        # Insert before oh-my-zsh source line
+        import re as _re_boot
+        zshrc_content = _re_boot.sub(
+            r'(source.*oh-my-zsh\.sh)',
+            f'# my-plex zsh completions\nfpath=({completion_dir} $fpath)\n\\1',
+            zshrc_content, count=1)
+        with open(zshrc_real, 'w') as f:
+            f.write(zshrc_content)
+    else:
+        with open(zshrc_real, 'a') as f:
+            f.write(f"\n# my-plex zsh completions\nfpath=({completion_dir} $fpath)\nautoload -Uz compinit && compinit\n")
+
+
+_install_zsh_completions()
+
+# ---------------------------------------------------------------------------
+# From here on we are guaranteed to run inside the venv with all deps
+# ---------------------------------------------------------------------------
+
 from abc import ABC, abstractmethod
 import argparse
 import fcntl
 import functools
 import inspect
 import json
-import os
+# os, subprocess, sys already imported above
 import pickle
 import platform
 import random
@@ -18,8 +228,6 @@ import shlex
 import shutil
 import signal
 import socket
-import subprocess
-import sys
 import time
 
 # Force unbuffered output for all print statements (important when redirecting to file)
