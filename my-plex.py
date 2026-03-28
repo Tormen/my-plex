@@ -20659,12 +20659,14 @@ def show_item_info(identifier, table_only=False):
         for key, obj in found_items:
             library = obj.get('library', '')
             title   = obj.get('title', '')
+            year    = obj.get('year', '')
+            title_year = f"{title} ({year})" if year else title
             if has_multi:
                 files = obj.get('files', {})
                 versions = f"  {len(files)}v: {', '.join(files.keys())}" if len(files) > 1 else ''
-                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title:<{col_title}}{versions}")
+                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title_year:<{col_title + 7}}{versions}")
             else:
-                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title}")
+                print(f"  {library:<{col_lib}}  {key:<{col_key}}  {title_year}")
         return
 
     # Single result: show detailed info
