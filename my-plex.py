@@ -121,7 +121,9 @@ _my-plex() {
         '--excess-versions[List entries with too many file versions]:limit:'
         '--problems[Run all problem detection checks (add -V for details)]'
         '--reencode[List media files with unreasonably high bitrate (reencode candidates)]'
-        '--mark[Force on-disk labeling (use with --reencode when AUTO_MARK_ON_DISK=False)]'
+        '--mark[Detect high-bitrate candidates and write on-disk labels (use with --reencode; respects --try)]'
+        '--detect[Dry-run of --mark: show what would be labeled without renaming (use with --reencode)]'
+        '--force[With --reencode --mark: also remove labels from items below threshold]'
         '--scan[Trigger Plex library scan + metadata refresh + cache update]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
         '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
@@ -13521,8 +13523,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(rows)
 
     @staticmethod
-    def _mark_reencode_candidates_on_disk(obj_keys, library_name, labeltext, remove_existing):
-        """Write on-disk label [labeltext] to directories/files for reencode candidates.
+    def _mark_reencode_candidates_on_disk(obj_keys, library_name, labeltext, remove_existing,
+                                          dry_run=False, force=False):
+        """Label or remove on-disk label for reencode candidates.
 
         Placement rules (same as detection rollup):
           - Movie          → label on movie directory
@@ -13530,51 +13533,60 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
           - Season (all eps flagged)   → label on season directory
           - Individual episodes        → label on episode file(s) + sibling files
 
-        Files are renamed via SSH using my_plex_file_operation('RENAME').
-        After renaming, obj['ondisk_labels'] in cache is updated and a Plex scan is triggered.
+        dry_run: print what would happen but do not rename anything.
+        force:   also REMOVE the label from items that are BELOW threshold.
+        Prints WARNINGS for items that are labeled but below threshold.
+        Always prints a SUMMARY at the end.
         """
-        from collections import defaultdict
-
         start = ONDISK_LABEL_START_MARKER
         end   = ONDISK_LABEL_END_MARKER
-        label_suffix = f" {start}{labeltext}{end}"
+        label_marker = f"{start}{labeltext}{end}"
+        pfx = "[DRY-RUN] " if dry_run else ""
+
+        _label_pattern = re.escape(start) + r'(?:(?!' + re.escape(start) + r'|' + re.escape(end) + r').)+' + re.escape(end)
+
+        def _strip_label(name):
+            """Remove the specific labeltext marker from name."""
+            return re.sub(re.escape(label_marker), '', name).strip()
 
         def _add_label_to_name(name):
-            """Add [labeltext] to name if not already present. Optionally strip other labels."""
+            """Add [labeltext] to name if not already present."""
             base = name
             if remove_existing:
-                # Strip all existing [label] markers
-                pattern = re.escape(start) + r'[^\]\[]+' + re.escape(end)
-                base = re.sub(pattern, '', base).strip()
-            label_marker = f"{start}{labeltext}{end}"
+                base = re.sub(_label_pattern, '', base).strip()
             if label_marker in base:
-                return base  # already has this label
+                return base
             return base.rstrip() + f" {label_marker}"
 
-        def _rename_path(path, remote_host):
-            """Rename a file or directory by adding the label. Returns new path or None on failure."""
+        def _do_rename(path, new_name, remote_host):
+            """Execute or simulate a rename. Returns (success, new_path)."""
             parent = os.path.dirname(path)
             old_name = os.path.basename(path)
-            new_name = _add_label_to_name(old_name)
             if new_name == old_name:
-                return path  # no change needed
+                return True, path
+            if dry_run:
+                print(f"  {pfx}Would rename: {old_name}")
+                print(f"              → {new_name}")
+                return True, os.path.join(parent, new_name)
             success, new_path = my_plex_file_operation('RENAME', path, remote_host, new_filename=new_name)
             if success:
                 print(f"  Renamed: {old_name}\n        → {new_name}")
-                return os.path.join(parent, new_name)
-            return None
+                return True, os.path.join(parent, new_name)
+            print(f"  WARNING: rename failed: {old_name}")
+            return False, path
 
-        remote_host = determine_remote_host(None)[0] if hasattr(determine_remote_host, '__call__') else None
-        try:
-            remote_host = determine_remote_host(None)[0]
-        except Exception:
-            remote_host = None
+        remote_host = None
+        if not dry_run:
+            try:
+                remote_host = determine_remote_host(None)[0]
+            except Exception:
+                remote_host = None
 
-        # Re-run detection to get the same rollup data
+        # --- Build above/below threshold sets from cache ---
         threshold = REENCODE_THRESHOLD_MBPS
-        flagged_movies = []
-        flagged_ep_by_show = {}
-        show_meta = {}
+        flagged_movies   = []  # (key, obj, fp)  — above threshold
+        flagged_ep_by_show = {}  # show_key → {s_str → {e_str → fp}}
+        show_meta = {}  # show_key → (series_title, lib)
 
         for key in set(obj_keys):
             obj = PLEX_Media.OBJ_BY_ID.get(key)
@@ -13589,46 +13601,112 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if duration_ms < 60_000:
                 continue
             files_dict = obj.get('files', {})
-            is_flagged = False
-            for version, file_info in files_dict.items():
-                filesize = file_info.get('filesize') or 0
-                if not filesize:
-                    continue
-                if (filesize * 8) / (duration_ms / 1000) / 1_000_000 >= threshold:
-                    is_flagged = True
-                    break
-            if not is_flagged:
-                continue
-
-            if obj_type in ('Movie', 'Movie*'):
-                fp = list(files_dict.values())[0].get('filepath', '') if files_dict else ''
-                flagged_movies.append((key, obj, fp))
-            else:
-                show_key = obj.get('show_key', '')
-                if not show_key:
-                    continue
-                s_str = obj.get('S_str', 'S?')
-                e_str = obj.get('E_str', 'E?')
-                fp = list(files_dict.values())[0].get('filepath', '') if files_dict else ''
-                if show_key not in flagged_ep_by_show:
-                    flagged_ep_by_show[show_key] = {}
+            is_above = any(
+                (fi.get('filesize') or 0) > 0 and
+                (fi['filesize'] * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
+                for fi in files_dict.values()
+            )
+            fp = next((fi.get('filepath', '') for fi in files_dict.values() if fi.get('filepath')), '')
+            if is_above:
+                if obj_type in ('Movie', 'Movie*'):
+                    flagged_movies.append((key, obj, fp))
+                else:
+                    show_key = obj.get('show_key', '')
+                    if not show_key:
+                        continue
+                    s_str = obj.get('S_str', 'S?')
+                    e_str = obj.get('E_str', 'E?')
+                    flagged_ep_by_show.setdefault(show_key, {})
+                    flagged_ep_by_show[show_key].setdefault(s_str, {})[e_str] = fp
                     show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
-                if s_str not in flagged_ep_by_show[show_key]:
-                    flagged_ep_by_show[show_key][s_str] = {}
-                flagged_ep_by_show[show_key][s_str][e_str] = fp
 
-        renamed_paths = {}  # old_path → new_path, for cache update
+        # --- Find labeled-but-below-threshold items (warnings for --mark; core action for --force) ---
+        labeled_keys = set(PLEX_Media.OBJ_BY_ONDISK_LABEL.get(labeltext, []))
+        if library_name:
+            labeled_keys = {k for k in labeled_keys
+                            if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('library') == library_name}
+        above_keys = set(k for k, _, _ in flagged_movies) | set(
+            key for show in flagged_ep_by_show.values()
+            for s in show.values() for key in [
+                next((k for k in labeled_keys
+                      if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('show_key') == sk
+                      and (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('S_str') == ss
+                      and (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('E_str') == es), None)
+                for sk, show in flagged_ep_by_show.items()
+                for ss, s_eps in show.items()
+                for es in s_eps
+            ] if key
+        )
+        # Simpler: keys in labeled_keys that are NOT above threshold
+        flagged_obj_keys = set()
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj: continue
+            obj_type = obj.get('type', '')
+            if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'): continue
+            if library_name and obj.get('library') != library_name: continue
+            duration_ms = obj.get('duration') or 0
+            if duration_ms < 60_000: continue
+            files_dict = obj.get('files', {})
+            is_above = any(
+                (fi.get('filesize') or 0) > 0 and
+                (fi['filesize'] * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
+                for fi in files_dict.values()
+            )
+            if is_above:
+                flagged_obj_keys.add(key)
+        mislabeled_keys = labeled_keys - flagged_obj_keys  # labeled but below threshold
 
-        # --- Movies: rename movie directory ---
+        renamed_count = 0
+        remove_count  = 0
+        skip_count    = 0
+        fail_count    = 0
+
+        # --- Warn / remove mislabeled items ---
+        if mislabeled_keys:
+            print(f"\n  {'[DRY-RUN] ' if dry_run else ''}WARNING: {len(mislabeled_keys)} item(s) have [{labeltext}] but are BELOW threshold ({threshold} Mbps):")
+            for k in sorted(mislabeled_keys):
+                obj = PLEX_Media.OBJ_BY_ID.get(k, {})
+                obj_type = obj.get('type', '')
+                lib = obj.get('library', '?')
+                title = obj.get('title', k)
+                files_dict = obj.get('files', {})
+                fp = next((fi.get('filepath', '') for fi in files_dict.values() if fi.get('filepath')), '')
+                duration_ms = obj.get('duration') or 1
+                mbps = max(
+                    ((fi.get('filesize') or 0) * 8) / (duration_ms / 1000) / 1_000_000
+                    for fi in files_dict.values()
+                ) if files_dict else 0.0
+                print(f"    WARNING [{lib}]  {title}  ({mbps:.1f} Mbps — below {threshold} Mbps threshold)")
+                if force:
+                    # Remove label from the path where it lives
+                    path = fp
+                    # For movies, remove from dir; episodes same (label may be on dir)
+                    for candidate in ([os.path.dirname(fp), fp] if fp else []):
+                        cname = os.path.basename(candidate)
+                        if label_marker in cname:
+                            new_name = _strip_label(cname)
+                            ok, _ = _do_rename(candidate, new_name, remote_host)
+                            if ok:
+                                remove_count += 1
+                            else:
+                                fail_count += 1
+                            break
+
+        # --- Add labels: Movies ---
         for key, obj, fp in flagged_movies:
             if not fp:
+                skip_count += 1
                 continue
             movie_dir = os.path.dirname(fp)
-            new_dir = _rename_path(movie_dir, remote_host)
-            if new_dir and new_dir != movie_dir:
-                renamed_paths[movie_dir] = new_dir
+            new_name = _add_label_to_name(os.path.basename(movie_dir))
+            ok, new_dir = _do_rename(movie_dir, new_name, remote_host)
+            if ok and new_dir != movie_dir:
+                renamed_count += 1
+            elif not ok:
+                fail_count += 1
 
-        # --- Episodes: rollup then rename ---
+        # --- Add labels: Episodes with rollup ---
         for show_key, flagged_seasons in flagged_ep_by_show.items():
             all_seasons_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
             all_season_keys = [s for s in all_seasons_data if s != 'S00']
@@ -13639,70 +13717,100 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     season_rollup[s_str] = 'none'
                     continue
                 flagged_e = set(flagged_seasons[s_str].keys())
-                total_e = set(ep_dict_total.keys())
+                total_e   = set(ep_dict_total.keys())
                 season_rollup[s_str] = 'full' if flagged_e >= total_e else 'partial'
 
             show_full = (bool(all_season_keys) and
                          all(season_rollup.get(s, 'none') == 'full' for s in all_season_keys))
 
-            # Get a sample filepath to derive dirs
-            sample_fp = next(
-                (fp for s in flagged_seasons.values() for fp in s.values() if fp),
-                None
-            )
+            sample_fp = next((fp for s in flagged_seasons.values() for fp in s.values() if fp), None)
             if not sample_fp:
+                skip_count += 1
                 continue
-
-            season_dir  = os.path.dirname(sample_fp)
-            series_dir  = os.path.dirname(season_dir)
+            season_dir = os.path.dirname(sample_fp)
+            series_dir = os.path.dirname(season_dir)
 
             if show_full:
-                new_dir = _rename_path(series_dir, remote_host)
-                if new_dir and new_dir != series_dir:
-                    renamed_paths[series_dir] = new_dir
+                new_name = _add_label_to_name(os.path.basename(series_dir))
+                ok, new_dir = _do_rename(series_dir, new_name, remote_host)
+                if ok and new_dir != series_dir:
+                    renamed_count += 1
+                elif not ok:
+                    fail_count += 1
             else:
                 for s_str in flagged_seasons:
                     rollup = season_rollup.get(s_str, 'partial')
-                    # Get a sample fp from this season
                     season_fp = next(iter(flagged_seasons[s_str].values()), None)
                     if not season_fp:
+                        skip_count += 1
                         continue
                     s_season_dir = os.path.dirname(season_fp)
                     if rollup == 'full':
-                        new_dir = _rename_path(s_season_dir, remote_host)
-                        if new_dir and new_dir != s_season_dir:
-                            renamed_paths[s_season_dir] = new_dir
+                        new_name = _add_label_to_name(os.path.basename(s_season_dir))
+                        ok, new_dir = _do_rename(s_season_dir, new_name, remote_host)
+                        if ok and new_dir != s_season_dir:
+                            renamed_count += 1
+                        elif not ok:
+                            fail_count += 1
                     else:
-                        # Individual episodes
                         for e_str, fp in flagged_seasons[s_str].items():
                             if not fp:
+                                skip_count += 1
                                 continue
-                            new_fp = _rename_path(fp, remote_host)
-                            if new_fp and new_fp != fp:
-                                renamed_paths[fp] = new_fp
-                                # Rename sibling files (per rename_siblings memory)
+                            new_name = _add_label_to_name(os.path.basename(fp))
+                            ok, new_fp = _do_rename(fp, new_name, remote_host)
+                            if ok and new_fp != fp:
+                                renamed_count += 1
+                                # Rename sibling files (.srt, .nfo, etc.)
                                 base_no_ext = os.path.splitext(fp)[0]
                                 new_base_no_ext = os.path.splitext(new_fp)[0]
                                 parent = os.path.dirname(fp)
-                                # List dir and rename siblings
-                                ok, listing = my_plex_file_operation('LIST_DIR', parent, remote_host, maxdepth=1)
-                                if ok and listing:
+                                ok2, listing = my_plex_file_operation('LIST_DIR', parent, remote_host, maxdepth=1)
+                                if ok2 and listing:
                                     for sibling in listing:
                                         if sibling != fp and sibling.startswith(base_no_ext + '.'):
                                             ext = sibling[len(base_no_ext):]
-                                            new_sibling = new_base_no_ext + ext
-                                            sib_name = os.path.basename(new_sibling)
-                                            _rename_path(sibling, remote_host)
+                                            sib_new = os.path.basename(new_base_no_ext + ext)
+                                            _do_rename(sibling, sib_new, remote_host)
+                            elif not ok:
+                                fail_count += 1
 
-        if not renamed_paths:
-            print("  Nothing renamed — all candidates already labeled or no filepaths available.")
-            return
+        # --- SUMMARY ---
+        total_candidates = len(flagged_movies) + sum(
+            len(eps) for show in flagged_ep_by_show.values()
+            for s in show.values() for eps in [s]
+        )
+        print()
+        print("=" * 76)
+        print(f"{pfx}REENCODE MARK SUMMARY")
+        print("=" * 76)
+        print(f"  Threshold:           {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr")
+        print(f"  Candidates (above):  {total_candidates}")
+        if dry_run:
+            print(f"  Would label:         {renamed_count}")
+        else:
+            print(f"  Labeled:             {renamed_count}")
+        if mislabeled_keys:
+            if force:
+                action = "Removed (--force)" if not dry_run else "Would remove (--force)"
+                print(f"  {action}: {remove_count}  (were labeled but below threshold)")
+            else:
+                print(f"  WARNING below threshold: {len(mislabeled_keys)}  (use --force to remove labels)")
+        if skip_count:
+            print(f"  Skipped (no path):   {skip_count}")
+        if fail_count:
+            print(f"  Rename failures:     {fail_count}")
+        if dry_run:
+            print()
+            print(f"  (Dry run — no files were renamed. Remove --try to apply.)")
+        print("=" * 76)
 
-        print(f"\n  {len(renamed_paths)} path(s) renamed. Refreshing on-disk labels in cache...")
-        refresh_ondisk_labels_from_cache()
-        update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
-                               'ondisk_labels_index': PLEX_Media.OBJ_BY_ONDISK_LABEL})
-        print(f"  Cache updated. Run --scan to update Plex library paths.")
+        if not dry_run and renamed_count > 0:
+            print(f"\n  Refreshing on-disk labels in cache...")
+            refresh_ondisk_labels_from_cache()
+            update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
+                                   'ondisk_labels_index': PLEX_Media.OBJ_BY_ONDISK_LABEL})
+            print(f"  Cache updated. Run --scan to update Plex library paths.")
 
     @staticmethod
     def _find_duplicates(obj_keys, library_name):
@@ -15969,7 +16077,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             print()
             print("Usage: my-plex --reencode [LIBRARY]")
-            print("       my-plex --reencode [LIBRARY] --mark")
+            print("       my-plex --reencode [LIBRARY] --detect")
+            print("       my-plex --reencode [LIBRARY] --mark [--try] [--force]")
             print()
             print("Lists media items that are already labeled for re-encoding on disk.")
             print("Labels are embedded in filenames or directory names as bracketed text,")
@@ -15988,15 +16097,25 @@ def main_print_help(args, remaining_args, main_parser):
             print("  All eps in a season   → shown as one Season row")
             print("  All seasons in a show → shown as one Series row")
             print()
-            print("DETECTION & MARKING (--mark):")
-            print(f"  Scans media for files with avg bitrate ≥ REENCODE_THRESHOLD_MBPS")
-            print(f"  (currently {REENCODE_THRESHOLD_MBPS} Mbps) and writes the on-disk label to")
-            print( "  the appropriate directory or file via SSH rename.")
-            print( "  Episodes roll up: all flagged in a season → label on season dir;")
-            print( "  all seasons flagged → label on series dir.")
+            print("MODES:")
             print()
-            print("  When AUTO_MARK_ON_DISK = False (in PROBLEMS2DISK config), --mark")
-            print("  must be passed explicitly. When True, --problems also marks automatically.")
+            print("  --reencode           List items already labeled on disk (from cache).")
+            print()
+            print("  --reencode --detect  Dry-run: show what WOULD be labeled without renaming.")
+            print("                       Also warns about items labeled but below threshold.")
+            print()
+            print("  --reencode --mark    Detect and write labels via SSH rename.")
+            print("                       Respects --try / --dry-run for safe preview.")
+            print("                       Warns about labeled items below threshold.")
+            print("                       Always prints a SUMMARY.")
+            print()
+            print("  --reencode --mark --force")
+            print("                       Also REMOVES labels from items below threshold.")
+            print()
+            print("  --reencode --mark --try   Same as --detect (dry-run).")
+            print()
+            print("  When AUTO_MARK_ON_DISK = True (default in PROBLEMS2DISK config),")
+            print("  --problems also runs detection and marks automatically.")
             print()
             print("CONFIG (in my-plex.conf):")
             print(f"  REENCODE_THRESHOLD = {{'mbps': {REENCODE_THRESHOLD_MBPS}}}        # Megabits/second")
@@ -22134,28 +22253,30 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_episode_numbering_issues(library_name)
         return
 
-    # Handle --reencode [LIBRARY]: list on-disk labeled items; --mark runs detection + labeling
+    # Handle --reencode [LIBRARY]: list on-disk labeled items; --mark/--detect run detection
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
         library_name = None if reencode_val is True else reencode_val
-        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope = f" in '{library_name}'" if library_name else ""
-        reencode_cfg = PROBLEMS2DISK.get('reencode', {})
-        force_mark   = safe_getattr(cmd_args, 'mark', False)
-
-        labeltext      = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
+        media_type   = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys     = collect_library_keys(library_name=library_name, media_type=media_type)
+        scope        = f" in '{library_name}'" if library_name else ""
+        reencode_cfg    = PROBLEMS2DISK.get('reencode', {})
+        labeltext       = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
         remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
+        force_mark  = safe_getattr(cmd_args, 'mark', False)
+        detect_only = safe_getattr(cmd_args, 'detect', False)
+        dry_run     = detect_only or safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        force       = safe_getattr(cmd_args, 'force', False) or safe_getattr(args, 'force', False)
 
-        if force_mark:
-            # --reencode --mark: detect high-bitrate candidates and write on-disk labels
+        if force_mark or detect_only:
+            # --mark or --detect: run detection, then label (or simulate)
             print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
-            candidate_count = PLEX_Media._list_reencode_candidates(obj_keys, library_name)
-            if candidate_count:
-                print(f"\n  Marking {candidate_count} file(s) with on-disk label [{labeltext}]...")
-                PLEX_Media._mark_reencode_candidates_on_disk(
-                    obj_keys, library_name, labeltext, remove_existing
-                )
+            PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+            print(f"\n--- {'[DRY-RUN] ' if dry_run else ''}Labeling with [{labeltext}]{scope} ---")
+            PLEX_Media._mark_reencode_candidates_on_disk(
+                obj_keys, library_name, labeltext, remove_existing,
+                dry_run=dry_run, force=force
+            )
             return
 
         # Default: list items that already have the reencode on-disk label (from cache)
@@ -22538,6 +22659,8 @@ def main():
     main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -22589,7 +22712,9 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List items already labeled with the reencode on-disk label. Use --mark to detect high-bitrate candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps) and write on-disk labels.")
-    GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Force writing on-disk labels even when AUTO_MARK_ON_DISK=False (use with --reencode).")
+    GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
+    GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help="Dry-run of --mark: show what would be labeled without renaming anything (use with --reencode).")
+    GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -22953,6 +23078,12 @@ def main():
                 remaining_args.append('--reencode')
             else:
                 remaining_args.insert(0, '--reencode')
+
+    # Re-inject --detect and --mark into remaining_args (both are simple bool flags)
+    if safe_getattr(args, 'detect', False):
+        remaining_args.append('--detect')
+    if safe_getattr(args, 'mark', False):
+        remaining_args.append('--mark')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
