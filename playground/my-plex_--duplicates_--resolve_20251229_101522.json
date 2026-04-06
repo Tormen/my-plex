@@ -1,0 +1,314 @@
+{
+  "session": {
+    "started": "2025-12-29 10:15:22",
+    "command": "/LINKS/src/,py/prj/my-plex/my-plex.py --list-duplicates --resolve",
+    "timestamp": "20251229_101522",
+    "log_format_version": "1.0",
+    "ended": "2025-12-29 10:15:28",
+    "total_operations": 1
+  },
+  "operations": [
+    {
+      "operation_number": 1,
+      "timestamp": "2025-12-29 10:15:23",
+      "choice": "4",
+      "choice_description": "Trash file [2]",
+      "files": {
+        "file2": {
+          "path": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky/les.choses.simples.2023.french.web.h264-silky.mkv",
+          "movie_directory": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky",
+          "library": ",unsorted",
+          "plex_id": 90695,
+          "cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky/les.choses.simples.2023.french.web.h264-silky.mkv",
+            "files": {
+              "94.82min 720x406 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.hdrip.x264-t911/les.choses.simples.2023.french.hdrip.x264-t911.mp4",
+                "filesize": 902160499
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 90695,
+            "title": "A Great Friend",
+            "originalTitle": "Les Choses simples",
+            "year": 2023,
+            "library": ",unsorted",
+            "item_id": 90695,
+            "media_id": 142369,
+            "part_id": 151693,
+            "version": "94.03min 720x404 (h264 eac3)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-29 02:06:01",
+            "addedAt": "2024-08-15 19:06:56",
+            "lastViewedAt": "2024-07-13 23:51:25",
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Vincent's car breaks down on a mountain road, leading him to a transformative encounter with Pierre.",
+            "duration": 5641952,
+            "video_codec": "h264",
+            "audio_codec": "eac3",
+            "resolution": "sd",
+            "resolution_full": "720x404",
+            "filesize": 1215658280,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Gr\u00e9gory Gadebois",
+              "Lambert Wilson",
+              "Marie Gillain",
+              "Betty Pierucci Berthoud",
+              "Magali Bonat",
+              "Antoine Gouy",
+              "Amandine Longeac",
+              "D\u00e9borah Lamy",
+              "Pascal Gimenez",
+              "Pasquale D'Inca",
+              "F\u00e9lix Fournier"
+            ],
+            "countries": [
+              "France"
+            ],
+            "directors": [
+              "\u00c9ric Besnard"
+            ],
+            "writers": [
+              "\u00c9ric Besnard"
+            ],
+            "genres": [
+              "Drama",
+              "Comedy",
+              "Romance"
+            ],
+            "contentRating": null,
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Cine Nomine",
+            "versions": [
+              "94.82min 720x406 (h264 aac)",
+              "94.03min 720x404 (h264 eac3)"
+            ]
+          },
+          "is_multi_version": true
+        }
+      },
+      "actions": [
+        {
+          "action": "trash",
+          "target": "file_2",
+          "original_path": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky",
+          "trash_path": "/Volumes/2/.Trashes/1001/20251229_101525_les.choses.simples.2023.french.web.h264-silky",
+          "deleted_cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky/les.choses.simples.2023.french.web.h264-silky.mkv",
+            "files": {
+              "94.82min 720x406 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.hdrip.x264-t911/les.choses.simples.2023.french.hdrip.x264-t911.mp4",
+                "filesize": 902160499
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 90695,
+            "title": "A Great Friend",
+            "originalTitle": "Les Choses simples",
+            "year": 2023,
+            "library": ",unsorted",
+            "item_id": 90695,
+            "media_id": 142369,
+            "part_id": 151693,
+            "version": "94.03min 720x404 (h264 eac3)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-29 02:06:01",
+            "addedAt": "2024-08-15 19:06:56",
+            "lastViewedAt": "2024-07-13 23:51:25",
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Vincent's car breaks down on a mountain road, leading him to a transformative encounter with Pierre.",
+            "duration": 5641952,
+            "video_codec": "h264",
+            "audio_codec": "eac3",
+            "resolution": "sd",
+            "resolution_full": "720x404",
+            "filesize": 1215658280,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Gr\u00e9gory Gadebois",
+              "Lambert Wilson",
+              "Marie Gillain",
+              "Betty Pierucci Berthoud",
+              "Magali Bonat",
+              "Antoine Gouy",
+              "Amandine Longeac",
+              "D\u00e9borah Lamy",
+              "Pascal Gimenez",
+              "Pasquale D'Inca",
+              "F\u00e9lix Fournier"
+            ],
+            "countries": [
+              "France"
+            ],
+            "directors": [
+              "\u00c9ric Besnard"
+            ],
+            "writers": [
+              "\u00c9ric Besnard"
+            ],
+            "genres": [
+              "Drama",
+              "Comedy",
+              "Romance"
+            ],
+            "contentRating": null,
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Cine Nomine",
+            "versions": [
+              "94.82min 720x406 (h264 aac)",
+              "94.03min 720x404 (h264 eac3)"
+            ]
+          },
+          "deleted_cache_key": "Movie_ID:90695",
+          "status": "success"
+        }
+      ],
+      "result": "success",
+      "undo_instructions": [
+        {
+          "step": 1,
+          "action": "restore_from_trash",
+          "description": "Move /Volumes/2/.Trashes/1001/20251229_101525_les.choses.simples.2023.french.web.h264-silky back to /Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky (remote via SSH)",
+          "trash_path": "/Volumes/2/.Trashes/1001/20251229_101525_les.choses.simples.2023.french.web.h264-silky",
+          "original_path": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky"
+        },
+        {
+          "step": 2,
+          "action": "plex_library_scan",
+          "description": "Scan Plex library ',unsorted' to detect the restored file",
+          "library_name": ",unsorted",
+          "restored_file_path": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky"
+        },
+        {
+          "step": 3,
+          "action": "restore_cache_entry",
+          "description": "Update cache with restored file (new Plex ID will be assigned)",
+          "cache_key": "Movie_ID:90695",
+          "cache_entry": {
+            "file": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky/les.choses.simples.2023.french.web.h264-silky.mkv",
+            "files": {
+              "94.82min 720x406 (h264 aac)": {
+                "filepath": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.hdrip.x264-t911/les.choses.simples.2023.french.hdrip.x264-t911.mp4",
+                "filesize": 902160499
+              }
+            },
+            "type": "Movie",
+            "type_str": "Movie*",
+            "id": 90695,
+            "title": "A Great Friend",
+            "originalTitle": "Les Choses simples",
+            "year": 2023,
+            "library": ",unsorted",
+            "item_id": 90695,
+            "media_id": 142369,
+            "part_id": 151693,
+            "version": "94.03min 720x404 (h264 eac3)",
+            "media_nr": "2/2",
+            "media_idx": 1,
+            "media_cnt": 2,
+            "part_nr": "1/1",
+            "part_idx": 0,
+            "part_cnt": 1,
+            "updatedAt": "2025-12-29 02:06:01",
+            "addedAt": "2024-08-15 19:06:56",
+            "lastViewedAt": "2024-07-13 23:51:25",
+            "viewCount": 0,
+            "userRating": null,
+            "criticsRating": null,
+            "audienceRating": 6.5,
+            "summary": "Vincent's car breaks down on a mountain road, leading him to a transformative encounter with Pierre.",
+            "duration": 5641952,
+            "video_codec": "h264",
+            "audio_codec": "eac3",
+            "resolution": "sd",
+            "resolution_full": "720x404",
+            "filesize": 1215658280,
+            "collections": [],
+            "labels": [],
+            "audio_languages": [],
+            "subtitle_languages": [],
+            "actors": [
+              "Gr\u00e9gory Gadebois",
+              "Lambert Wilson",
+              "Marie Gillain",
+              "Betty Pierucci Berthoud",
+              "Magali Bonat",
+              "Antoine Gouy",
+              "Amandine Longeac",
+              "D\u00e9borah Lamy",
+              "Pascal Gimenez",
+              "Pasquale D'Inca",
+              "F\u00e9lix Fournier"
+            ],
+            "countries": [
+              "France"
+            ],
+            "directors": [
+              "\u00c9ric Besnard"
+            ],
+            "writers": [
+              "\u00c9ric Besnard"
+            ],
+            "genres": [
+              "Drama",
+              "Comedy",
+              "Romance"
+            ],
+            "contentRating": null,
+            "season": null,
+            "S_str": null,
+            "S_idx": null,
+            "episode": null,
+            "E_str": null,
+            "E_idx": null,
+            "S0XE0X": null,
+            "studio": "Cine Nomine",
+            "versions": [
+              "94.82min 720x406 (h264 aac)",
+              "94.03min 720x404 (h264 eac3)"
+            ]
+          },
+          "library_name": ",unsorted",
+          "restored_file_path": "/Volumes/2/watch.v/,unsorted/les.choses.simples.2023.french.web.h264-silky"
+        }
+      ]
+    }
+  ]
+}
