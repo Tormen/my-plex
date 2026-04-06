@@ -93,7 +93,9 @@ _my-plex-filter-token() {
         'label\:filter by Plex label'
         'size\:filter by file size (e.g. >1gb)'
         'duration\:filter by duration (e.g. >2h)'
-        'rating\:filter by user rating (e.g. >8)'
+        'stars\:filter by personal Plex star rating (e.g. >3.5, scale 0–5)'
+        'rating\:filter by external audience score (e.g. >7; IMDB/TMDB/RT Audience)'
+        'critics\:filter by RT Tomatometer (e.g. >80; Rotten Tomatoes libraries only)'
         'added\:filter by year added (e.g. >2024)'
         'bitrate\:filter by bitrate (e.g. >2mbps)'
     )
@@ -1048,7 +1050,9 @@ SCOPE SELECTORS  (optional — prefix any command to narrow its target)
     genre:action                by genre (substring)
     size>1gb                    by file size
     duration>2h                 by duration (min / h / s)
-    rating>8                    by user rating
+    stars>3.5                   by personal Plex star rating (0–5, half-star)
+    rating>7                    by external audience score (IMDB/TMDB/RT Audience)
+    critics>80                  by RT Tomatometer (Rotten Tomatoes libraries only)
     added>2024                  by year added to Plex
     label:reencode              by Plex / on-disk label
 
@@ -13541,7 +13545,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
           Genre:      'genre:action'
           Size:       'size>1gb'  'size>500mb'  (filesize in bytes)
           Duration:   'duration>2h'  'duration>120min'  'duration>7200s'
-          Rating:     'rating>8'  'rating>=7.5'  (userRating)
+          Stars:      'stars>3.5'  'stars>=4'  (your Plex star rating, 0–5 with half-star)
+          Rating:     'rating>7'  'rating>=8'  (external: IMDB/TMDB audience score)
+          Critics:    'critics>80'  (Rotten Tomatoes Tomatometer only; empty for IMDB/TMDB)
           Added:      'added>2024'  (year comparison on addedAt unix timestamp)
 
         Returns (display_label, fn) or None if not parseable.
@@ -13587,7 +13593,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|added)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -13683,7 +13689,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _c(dur, _t)
             return label, _dur_fn
 
-        # --- Rating ---
+        # --- Stars (Plex personal user rating, 0–5 with half-star, stored 0–10 internally) ---
+        if field == 'stars':
+            try:
+                r_val = float(val)
+            except ValueError:
+                return None
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"stars {op} {r_val}"
+            # Plex stores userRating as 0–10; UI shows 0–5 stars → multiply input by 2
+            internal = r_val * 2.0
+            def _stars_fn(obj, fi, _r=internal, _c=cmp):
+                rating = obj.get('userRating') or 0
+                return bool(rating) and _c(float(rating), _r)
+            return label, _stars_fn
+
+        # --- Rating (external / audience rating: IMDB score, RT Audience %, TMDB vote avg) ---
         if field == 'rating':
             try:
                 r_val = float(val)
@@ -13692,9 +13713,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"rating {op} {r_val}"
             def _rating_fn(obj, fi, _r=r_val, _c=cmp):
-                rating = obj.get('userRating') or obj.get('audienceRating') or 0
+                rating = obj.get('audienceRating') or 0
                 return bool(rating) and _c(float(rating), _r)
             return label, _rating_fn
+
+        # --- Critics (Rotten Tomatoes Tomatometer only; empty for IMDB/TMDB libraries) ---
+        if field == 'critics':
+            try:
+                r_val = float(val)
+            except ValueError:
+                return None
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"critics {op} {r_val}"
+            def _critics_fn(obj, fi, _r=r_val, _c=cmp):
+                rating = obj.get('criticsRating') or 0
+                return bool(rating) and _c(float(rating), _r)
+            return label, _critics_fn
 
         # --- Added (year comparison on addedAt unix timestamp) ---
         if field == 'added':
@@ -16252,9 +16286,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex genre:action       action genre  (substring)")
             print("  my-plex size'>1gb'         file larger than 1 GB  (mb / gb)")
             print("  my-plex duration'>2h'      longer than 2 hours    (min / h / s)")
-            print("  my-plex rating'>8'         user rating above 8")
+            print("  my-plex stars'>3.5'        personal Plex rating above 3.5 stars  (0–5, half-star)")
+            print("  my-plex rating'>7'         external audience score above 7        (IMDB / TMDB / RT Audience)")
+            print("  my-plex critics'>80'       RT Tomatometer above 80               (Rotten Tomatoes only)")
             print("  my-plex added'>2024'       added to Plex after 2024")
             print("  my-plex label:reencode     has Plex / on-disk label")
+            print()
+            print("  NOTE — rating sources per library:")
+            print("    Plex Movie agent  →  IMDB score + RT Audience % + RT Tomatometer (critics)")
+            print("    TMDB agent        →  TMDB vote average (rating only; no critics)")
+            print("    TVDB / IMDB agent →  IMDB score (rating only; no critics)")
+            print("    Use --libraries to see RATINGS column for each library.")
             print()
             print("COMBINING TOKENS  (all conditions are AND):")
             print()
@@ -16312,7 +16354,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Genre:      'genre:action'  (substring match)")
             print("  Size:       'size>1gb'  'size>500mb'  (file size on disk)")
             print("  Duration:   'duration>2h'  'duration>120min'  'duration>7200s'")
-            print("  Rating:     'rating>8'  'rating>=7.5'  (userRating)")
+            print("  Stars:      'stars>3.5'  'stars>=4'  (personal Plex rating, 0–5 half-star)")
+            print("  Rating:     'rating>7'  'rating>=8'  (external audience: IMDB/TMDB/RT Audience)")
+            print("  Critics:    'critics>80'  (RT Tomatometer — Rotten Tomatoes libraries only)")
             print("  Added:      'added>2024'  (year added to Plex)")
             print()
             print("  Multiple conditions: separate with AND:")
@@ -22570,7 +22614,20 @@ def execute_global_commands(args, cmd_args):
         agents = lib_stats.get('agent', {})
         languages = lib_stats.get('language', {})
         items_count = lib_stats.get('itemsCount', {})
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODE-DATA-SOURCE")
+        AGENT_RATINGS = {
+            # agent_id → (rating_source_label, supports_critics)
+            'tv.plex.agents.movie':            ('IMDB / Rotten Tomatoes*', True),
+            'tv.plex.agents.series':           ('TMDB',                    False),
+            'com.plexapp.agents.imdb':         ('IMDB',                    False),
+            'com.plexapp.agents.themoviedb':   ('TMDB',                    False),
+            'com.plexapp.agents.thetvdb':      ('-',                       False),
+            'tv.plex.agents.music':            ('-',                       False),
+            'com.plexapp.agents.plexmusic':    ('-',                       False),
+            'tv.plex.agents.none':             ('-',                       False),
+            'com.plexapp.agents.none':         ('-',                       False),
+            'com.plexapp.agents.localmedia':   ('-',                       False),
+        }
+        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tRATINGS\tEPISODE-DATA-SOURCE")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
@@ -22609,7 +22666,12 @@ def execute_global_commands(args, cmd_args):
                     missing_src = 'tmdb (no API key!)'
             else:
                 missing_src = '-'
-            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}")
+            rating_src, has_critics = AGENT_RATINGS.get(agent_id, ('-', False))
+            if has_critics:
+                rating_col = f"{rating_src}  (rating=audience, critics=RT)"
+            else:
+                rating_col = f"{rating_src}  (rating=audience)" if rating_src != '-' else '-'
+            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{rating_col}\t{missing_src}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
@@ -23073,7 +23135,7 @@ def main():
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|added)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
