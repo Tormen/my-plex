@@ -9908,7 +9908,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     # help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library",
     #library_parser = subparsers.add_parser('library',      help="Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>. For more info: --help library", add_help=False, usage=f"{US} [--library] <library_name> [<LIBRARY_COMMAND> [..]]", description="Without any <LIBRARY_COMMAND> this does the same as with <LIBRARY_COMMAND> '--list'.")
     argparser._optionals.title = '// if PLEX_OBJECT is a library_name: Available <LIBRARY_COMMAND>s' # argparse.SUPPRESS
-    argparser.add_argument('--list', '--media', action='store_true',  help="List all media entries in a specified library. Use with --watched/--unwatched to filter by watch status, --audio/--en/--de/--fr to filter by audio language, --no-audio-language to find items with missing language info, --type <movie|show> to filter by type, or --duplicates to show only duplicates.")
+    argparser.add_argument('--list', '--media', '--filter', nargs='?', const=True, default=None,
+                           help="List all media entries in a specified library. Optionally pass a filter expression. "
+                                "Use with --watched/--unwatched, --audio/--en/--de/--fr, --type, or --duplicates.")
     argparser.add_argument('--collections', '--collection', action='store_true', help="List collections in a specified library. Can be used standalone or with --list.")
     argparser.add_argument('--type',                         help=argparse.SUPPRESS) #="Allows to optionally specify <movie> or <show> for the --list command")
     argparser.add_argument('--duplicates', action='store_true', help=argparse.SUPPRESS) # Filter for --list to show only duplicates (auto-enables --list)
@@ -11294,10 +11296,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if collections_only:
                                         PLEX_Media.list_collections(obj)
 
-        # Handle --list or --duplicates or --watched or --unwatched or --audio or --no-audio-language
-        if obj_args.list or duplicates_only or watched_only or unwatched_only or audio_filter or no_audio_language:
-                                        media_type = safe_getattr(obj_args, 'type', None)
-                                        resolve_mode = safe_getattr(obj_args, 'resolve', False)
+        # Handle --list/--filter or --duplicates or watched/audio filters
+        list_val     = safe_getattr(obj_args, 'list', None)
+        filter_expr  = list_val if isinstance(list_val, str) else None
+        media_type   = safe_getattr(obj_args, 'type', None)
+        resolve_mode = safe_getattr(obj_args, 'resolve', False)
+        if filter_expr:
+            PLEX_Media._list_filtered(filter_expr, library_name=obj, media_type=media_type,
+                watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
+        elif list_val is not None or duplicates_only or watched_only or unwatched_only or audio_filter or no_audio_language:
                                         PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language)
         # Handle --missing: show missing episodes for all shows in this library
         if safe_getattr(obj_args, 'missing', False):
@@ -13423,60 +13430,244 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_file_count
 
     @staticmethod
-    def _parse_filter_expr(expr):
-        """Parse a filter expression like '< 1Mbps', '> 400MB/hr', 'bitrate <= 2'.
-        Returns (op, threshold_mbps) or None if not parseable.
-        Supported units: Mbps (default), MB/hr / MB/h / MB/hour / mb_per_hour.
+    def _parse_filter_sub_expr(sub_expr):
+        """Parse a single filter sub-expression into a (field_label, fn(obj)->bool) pair.
+
+        Supported sub-expressions:
+          Bitrate:    '< 1'  '> 2Mbps'  '>= 400MB/hr'  'bitrate<1.5'
+          Resolution: 'resolution:1080p'  'resolution:4k'  'resolution:720'
+          Codec:      'codec:h265'  'codec:hevc'  'codec:h264'
+          Year:       'year:2020'  'year>2015'  'year<2000'
+          Label:      'label:reencode'
+          Genre:      'genre:action'
+          Size:       'size>1gb'  'size>500mb'  (filesize in bytes)
+          Duration:   'duration>2h'  'duration>120min'  'duration>7200s'
+          Rating:     'rating>8'  'rating>=7.5'  (userRating)
+          Added:      'added>2024'  (year comparison on addedAt unix timestamp)
+
+        Returns (display_label, fn) or None if not parseable.
+        fn(obj) -> bool where obj is a cache dict (Movie or Episode level).
+        fn takes an optional file_info dict as second arg for file-level fields.
         """
-        expr = expr.strip()
-        m = re.match(
-            r'^(?:(?P<field>bitrate|mb_per_hour|mbph)\s*)?'
-            r'(?P<op>[<>]=?|[!=]=)\s*'
-            r'(?P<value>[\d.]+)\s*'
-            r'(?P<unit>mbps|mb/h(?:our|r)?|mb_per_hour)?$',
-            expr, re.IGNORECASE
-        )
-        if not m:
-            return None
-        field = (m.group('field') or '').lower()
-        op    = m.group('op')
-        value = float(m.group('value'))
-        unit  = (m.group('unit') or '').lower()
-        is_mbph = field in ('mb_per_hour', 'mbph') or ('mb' in unit and 'h' in unit)
-        threshold_mbps = value / _MB_PER_HOUR_PER_MBPS if is_mbph else value
-        return op, threshold_mbps
-
-    @staticmethod
-    def _list_filtered(expr, library_name=None, media_type=None):
-        """List media items matching a filter expression (e.g. '< 1Mbps', '> 400MB/hr').
-        library_name: restrict to one library (None = all).
-        media_type:   restrict to 'Movie' or 'Show' (None = all).
-        """
-        parsed = PLEX_Media._parse_filter_expr(expr)
-        if not parsed:
-            err(1100, f"Cannot parse filter expression: '{expr}'\n"
-                      f"  Supported forms:  '< 1'  '> 2Mbps'  '>= 400MB/hr'  'bitrate < 1.5'\n"
-                      f"  Units: Mbps (default), MB/hr / MB/h / mb_per_hour")
-            return
-
-        op, threshold_mbps = parsed
-        threshold_mbph = threshold_mbps * _MB_PER_HOUR_PER_MBPS
-
-        _ops = {
+        _OPS = {
             '<': lambda a, b: a < b,
             '<=': lambda a, b: a <= b,
             '>': lambda a, b: a > b,
             '>=': lambda a, b: a >= b,
-            '=': lambda a, b: abs(a - b) < 0.001,
-            '!=': lambda a, b: abs(a - b) >= 0.001,
-            '==': lambda a, b: abs(a - b) < 0.001,
+            '=': lambda a, b: abs(float(a) - float(b)) < 0.001 if isinstance(a, float) or isinstance(b, float) else a == b,
+            '!=': lambda a, b: a != b,
         }
-        cmp_fn = _ops.get(op)
-        if not cmp_fn:
-            err(1101, f"Unknown operator '{op}' in filter expression: '{expr}'")
-            return
 
-        rows = []  # (bitrate_mbps, key, obj_type, lib, title, filepath)
+        sub = sub_expr.strip()
+
+        # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
+        _bitrate_re = re.match(
+            r'^(?:(?:bitrate|mb_per_hour|mbph)\s*)?'
+            r'(?P<op>[<>]=?|[!=]=)\s*'
+            r'(?P<value>[\d.]+)\s*'
+            r'(?P<unit>mbps|mb/h(?:our|r)?|mb_per_hour)?$',
+            sub, re.IGNORECASE
+        )
+        if _bitrate_re:
+            op    = _bitrate_re.group('op')
+            value = float(_bitrate_re.group('value'))
+            unit  = (_bitrate_re.group('unit') or '').lower()
+            is_mbph = 'mb' in unit and 'h' in unit
+            threshold = value / _MB_PER_HOUR_PER_MBPS if is_mbph else value
+            cmp = _OPS.get(op, lambda a, b: False)
+            unit_display = f"MB/hr" if is_mbph else "Mbps"
+            label = f"bitrate {op} {value}{unit_display}"
+            def _bitrate_fn(obj, fi, _t=threshold, _c=cmp):
+                dur = obj.get('duration') or 0
+                if dur < 60_000: return False
+                fs = fi.get('filesize') or 0
+                if not fs: return False
+                br = (fs * 8) / (dur / 1000) / 1_000_000
+                return _c(br, _t)
+            return label, _bitrate_fn
+
+        # --- Field:value or field OP value patterns ---
+        _field_re = re.match(
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|added)'
+            r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
+            sub, re.IGNORECASE
+        )
+        if not _field_re:
+            return None
+
+        field = _field_re.group('field').lower()
+        raw_op = _field_re.group('op')
+        val   = _field_re.group('val').strip().strip("'\"")
+        op    = '=' if raw_op in (':', '=', '==') else raw_op
+
+        # --- Resolution ---
+        if field == 'resolution':
+            # Normalize: 4k→2160, uhd→2160
+            alias = {'4k': '2160', 'uhd': '2160', 'fhd': '1080', 'hd': '720', 'sd': '480'}
+            needle = alias.get(val.lower(), val.lower())
+            label = f"resolution:{val}"
+            def _res_fn(obj, fi, _n=needle):
+                res = (obj.get('resolution_full') or obj.get('resolution') or '').lower()
+                return _n in res
+            return label, _res_fn
+
+        # --- Codec ---
+        if field == 'codec':
+            alias = {'hevc': 'h265', 'h.265': 'h265', 'avc': 'h264', 'h.264': 'h264'}
+            needle = alias.get(val.lower(), val.lower())
+            label = f"codec:{val}"
+            def _codec_fn(obj, fi, _n=needle):
+                vc = (obj.get('video_codec') or '').lower()
+                return _n in vc
+            return label, _codec_fn
+
+        # --- Year ---
+        if field == 'year':
+            try:
+                yr = int(val)
+            except ValueError:
+                return None
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"year {op} {yr}"
+            def _year_fn(obj, fi, _yr=yr, _c=cmp):
+                y = obj.get('year') or 0
+                return bool(y) and _c(y, _yr)
+            return label, _year_fn
+
+        # --- Label (Plex labels list) ---
+        if field == 'label':
+            needle = val.lower()
+            label_str = f"label:{val}"
+            def _label_fn(obj, fi, _n=needle):
+                return any(_n == str(l).lower() for l in (obj.get('labels') or []))
+            return label_str, _label_fn
+
+        # --- Genre ---
+        if field == 'genre':
+            needle = val.lower()
+            label_str = f"genre:{val}"
+            def _genre_fn(obj, fi, _n=needle):
+                return any(_n in str(g).lower() for g in (obj.get('genres') or []))
+            return label_str, _genre_fn
+
+        # --- Size ---
+        if field == 'size':
+            _sz_re = re.match(r'^([\d.]+)\s*(gb|mb|kb)?$', val, re.IGNORECASE)
+            if not _sz_re:
+                return None
+            sz_val = float(_sz_re.group(1))
+            sz_unit = (_sz_re.group(2) or 'b').lower()
+            multipliers = {'gb': 1024**3, 'mb': 1024**2, 'kb': 1024, 'b': 1}
+            threshold = sz_val * multipliers[sz_unit]
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"size {op} {val}"
+            def _size_fn(obj, fi, _t=threshold, _c=cmp):
+                fs = fi.get('filesize') or obj.get('filesize') or 0
+                return bool(fs) and _c(fs, _t)
+            return label, _size_fn
+
+        # --- Duration ---
+        if field == 'duration':
+            _dur_re = re.match(r'^([\d.]+)\s*(h|hr|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)?$', val, re.IGNORECASE)
+            if not _dur_re:
+                return None
+            dur_val = float(_dur_re.group(1))
+            dur_unit = (_dur_re.group(2) or 'm').lower()
+            ms_multipliers = {'h': 3_600_000, 'hr': 3_600_000, 'hour': 3_600_000, 'hours': 3_600_000,
+                              'm': 60_000, 'min': 60_000, 'mins': 60_000, 'minute': 60_000, 'minutes': 60_000,
+                              's': 1_000, 'sec': 1_000, 'secs': 1_000, 'second': 1_000, 'seconds': 1_000}
+            threshold_ms = dur_val * ms_multipliers.get(dur_unit, 60_000)
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"duration {op} {val}"
+            def _dur_fn(obj, fi, _t=threshold_ms, _c=cmp):
+                dur = obj.get('duration') or 0
+                return _c(dur, _t)
+            return label, _dur_fn
+
+        # --- Rating ---
+        if field == 'rating':
+            try:
+                r_val = float(val)
+            except ValueError:
+                return None
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"rating {op} {r_val}"
+            def _rating_fn(obj, fi, _r=r_val, _c=cmp):
+                rating = obj.get('userRating') or obj.get('audienceRating') or 0
+                return bool(rating) and _c(float(rating), _r)
+            return label, _rating_fn
+
+        # --- Added (year comparison on addedAt unix timestamp) ---
+        if field == 'added':
+            try:
+                yr = int(val)
+            except ValueError:
+                return None
+            import datetime as _dt
+            # Convert year to unix timestamp range
+            if op in ('<', '<='):
+                ts_threshold = int(_dt.datetime(yr, 1, 1).timestamp())
+            elif op in ('>', '>='):
+                ts_threshold = int(_dt.datetime(yr + (0 if op == '>=' else 1), 1, 1).timestamp()) - 1
+            else:
+                # '=' means year matches
+                ts_start = int(_dt.datetime(yr, 1, 1).timestamp())
+                ts_end   = int(_dt.datetime(yr + 1, 1, 1).timestamp()) - 1
+                label = f"added:{yr}"
+                def _added_eq_fn(obj, fi, _s=ts_start, _e=ts_end):
+                    t = obj.get('addedAt') or 0
+                    return _s <= t <= _e
+                return label, _added_eq_fn
+            cmp = _OPS.get(op, lambda a, b: False)
+            label = f"added {op} {yr}"
+            def _added_fn(obj, fi, _t=ts_threshold, _c=cmp):
+                t = obj.get('addedAt') or 0
+                return bool(t) and _c(t, _t)
+            return label, _added_fn
+
+        return None
+
+    @staticmethod
+    def _list_filtered(expr, library_name=None, media_type=None,
+                       watched_only=False, unwatched_only=False, audio_filter=None):
+        """List media items matching filter expressions joined by AND.
+
+        expr: one or more sub-expressions separated by ' AND ', e.g.:
+              'bitrate>2' or 'resolution:1080p AND codec:h265 AND year>2015'
+        library_name: restrict to one library (None = all).
+        media_type:   restrict to 'Movie' or 'Show' (None = all).
+        watched_only / unwatched_only: filter by viewCount.
+        audio_filter: 'en'/'de'/'fr' — filter by audio_languages list.
+        """
+        # Normalise media_type
+        if media_type:
+            media_type = media_type.capitalize()
+            if media_type == 'Series':
+                media_type = 'Show'
+
+        # Parse all sub-expressions
+        sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
+        filters = []  # list of (label, fn(obj, fi)->bool)
+        for sub in sub_exprs:
+            parsed = PLEX_Media._parse_filter_sub_expr(sub)
+            if not parsed:
+                err(1100, f"Cannot parse filter sub-expression: '{sub}'\n"
+                          f"  Supported: bitrate<1  resolution:1080p  codec:h265  year>2015\n"
+                          f"             label:reencode  genre:action  size>1gb  duration>2h\n"
+                          f"             rating>8  added>2024")
+                return
+            filters.append(parsed)
+
+        # Build active filter label string
+        active_labels = [lbl for lbl, _ in filters]
+        if media_type:    active_labels.insert(0, f"type={media_type.lower()}")
+        if audio_filter:  active_labels.append(f"lang={audio_filter}")
+        if watched_only:   active_labels.append("watched")
+        if unwatched_only: active_labels.append("unwatched")
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Filter: {' AND '.join(active_labels)}{scope} ---\n")
+
+        rows = []  # (sort_key, cache_key, obj_type, lib, title, extra_cols)
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             obj_type = obj.get('type', '')
             if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
@@ -13484,52 +13675,69 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if library_name and obj.get('library') != library_name:
                 continue
             if media_type:
-                mt = media_type.capitalize()
-                if mt == 'Movie' and obj_type not in ('Movie', 'Movie*'):
+                if media_type == 'Movie' and obj_type not in ('Movie', 'Movie*'):
                     continue
-                if mt == 'Show' and obj_type not in ('Episode', 'Episode*'):
+                if media_type == 'Show' and obj_type not in ('Episode', 'Episode*'):
                     continue
-            duration_ms = obj.get('duration') or 0
-            if duration_ms < 60_000:
-                continue
-            files_dict = obj.get('files', {})
-            for _, file_info in files_dict.items():
-                filesize = file_info.get('filesize') or 0
-                if not filesize:
+            # watched/unwatched filter
+            view_count = obj.get('viewCount', 0) or 0
+            if watched_only   and view_count == 0: continue
+            if unwatched_only and view_count  > 0: continue
+            # audio filter
+            if audio_filter:
+                langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
+                if audio_filter.lower() not in langs:
                     continue
-                bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
-                if not cmp_fn(bitrate_mbps, threshold_mbps):
-                    continue
-                lib   = obj.get('library', '?')
-                title = obj.get('title', '?')
-                if obj_type in ('Episode', 'Episode*'):
-                    series = obj.get('series', '')
-                    s_str  = obj.get('S_str', '')
-                    e_str  = obj.get('E_str', '')
-                    title  = f"{series}  {s_str}{e_str}  {title}" if series else title
-                year = obj.get('year', 0)
-                if year and obj_type in ('Movie', 'Movie*'):
-                    title = f"{title} ({year})"
-                fp = file_info.get('filepath', '')
-                rows.append((bitrate_mbps, key, obj_type.rstrip('*'), lib, title, fp))
 
-        scope = f" in '{library_name}'" if library_name else ""
-        unit_str = f"{threshold_mbps:.2f} Mbps ({int(threshold_mbph)} MB/hr)"
-        print(f"\n--- Filter: bitrate {op} {unit_str}{scope} ---\n")
+            # Apply per-file filters (bitrate, size) — match ANY file version
+            files_dict = obj.get('files', {})
+            if not files_dict:
+                # For objects without files (Show, Season), use a dummy fi
+                file_matches = [{}]
+            else:
+                file_matches = list(files_dict.values())
+
+            matched_fi = None
+            for fi in file_matches:
+                if all(fn(obj, fi) for _, fn in filters):
+                    matched_fi = fi
+                    break
+            if matched_fi is None:
+                continue
+
+            lib   = obj.get('library', '?')
+            title = obj.get('title', '?')
+            if obj_type in ('Episode', 'Episode*'):
+                series = obj.get('series', '')
+                s_str  = obj.get('S_str', '')
+                e_str  = obj.get('E_str', '')
+                title  = f"{series}  {s_str}{e_str}  {title}" if series else title
+            year = obj.get('year', 0)
+            if year and obj_type in ('Movie', 'Movie*'):
+                title = f"{title} ({year})"
+
+            # Compute bitrate for sort/display if bitrate filter present
+            dur_ms   = obj.get('duration') or 0
+            fs_bytes = matched_fi.get('filesize') or obj.get('filesize') or 0
+            bitrate  = (fs_bytes * 8) / (dur_ms / 1000) / 1_000_000 if dur_ms > 0 and fs_bytes > 0 else 0.0
+
+            rows.append((bitrate, key, obj_type.rstrip('*'), lib, title))
 
         if not rows:
-            print(f"  No items match: bitrate {op} {threshold_mbps:.2f} Mbps")
+            print(f"  No items match the filter.")
             return
 
-        rows.sort(key=lambda r: r[0], reverse=(op in ('>', '>=')))
+        rows.sort(key=lambda r: r[0], reverse=True)
 
         print(f"  {'KEY':<22}  {'TYPE':<7}  {'LIBRARY':<16}  {'BITRATE':>9}  {'MB/HR':>7}  TITLE")
         print("  " + "-" * 96)
-        for bitrate_mbps, key, otype, lib, title, fp in rows:
-            mbph = int(bitrate_mbps * _MB_PER_HOUR_PER_MBPS)
-            print(f"  {key:<22}  {otype:<7}  {lib:<16}  {bitrate_mbps:>8.2f}  {mbph:>7}  {title}")
+        for bitrate, key, otype, lib, title in rows:
+            mbph = int(bitrate * _MB_PER_HOUR_PER_MBPS)
+            br_str = f"{bitrate:8.2f}" if bitrate > 0 else f"{'N/A':>8}"
+            mh_str = f"{mbph:7}" if bitrate > 0 else f"{'N/A':>7}"
+            print(f"  {key:<22}  {otype:<7}  {lib:<16}  {br_str}  {mh_str}  {title}")
 
-        print(f"\n  Total: {len(rows)} item(s) matching bitrate {op} {threshold_mbps:.2f} Mbps")
+        print(f"\n  Total: {len(rows)} item(s)")
 
     @staticmethod
     def _list_ondisk_labeled(labeltext, library_name=None):
@@ -15930,12 +16138,32 @@ def main_print_help(args, remaining_args, main_parser):
             print("Without an expression, lists all items in scope (library or all).")
             print("With an expression, filters items by bitrate.")
             print()
-            print("FILTER EXPRESSIONS (bitrate):")
-            print("  '< 1'           Items below 1 Mbps  (unit defaults to Mbps)")
-            print("  '> 400MB/hr'    Items above 400 MB/hr")
-            print("  '>= 2Mbps'      Items at or above 2 Mbps")
-            print("  'bitrate < 1.5' Explicit field name")
-            print("  Units: Mbps (default) | MB/hr | MB/h | mb_per_hour")
+            print("FILTER EXPRESSIONS:")
+            print()
+            print("  Bitrate:    '< 1'  '> 2Mbps'  '>= 400MB/hr'  'bitrate<1.5'")
+            print("              Units: Mbps (default) | MB/hr | MB/h")
+            print("  Resolution: 'resolution:1080p'  'resolution:4k'  'resolution:720'")
+            print("  Codec:      'codec:h265'  'codec:hevc'  'codec:h264'")
+            print("  Year:       'year:2020'  'year>2015'  'year<2000'")
+            print("  Label:      'label:reencode'  (Plex label, exact match)")
+            print("  Genre:      'genre:action'  (substring match)")
+            print("  Size:       'size>1gb'  'size>500mb'  (file size on disk)")
+            print("  Duration:   'duration>2h'  'duration>120min'  'duration>7200s'")
+            print("  Rating:     'rating>8'  'rating>=7.5'  (userRating)")
+            print("  Added:      'added>2024'  (year added to Plex)")
+            print()
+            print("  Multiple conditions: separate with AND:")
+            print("  'resolution:1080p AND codec:h265'")
+            print("  'year>2015 AND genre:action'")
+            print()
+            print("KEY:VALUE SHORTHAND TOKENS (no --list needed):")
+            print("  type:movie        → --type movie")
+            print("  type:series       → --type series")
+            print("  lang:de           → --de  (en/de/fr supported)")
+            print("  watched:no        → --unwatched")
+            print("  watched:yes       → --watched")
+            print("  resolution:1080p  → filter expression")
+            print("  codec:h265        → filter expression")
             print("  Operators: < > <= >= = !=")
             print()
             print("SCOPE:")
@@ -15956,16 +16184,24 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex '< 1Mbps'                    # All items below 1 Mbps")
-            print("  my-plex '> 400MB/hr'                 # All items above 400 MB/hr")
-            print("  my-plex --list '< 1Mbps'             # Same")
-            print("  my-plex --filter '< 1Mbps'           # Same")
-            print("  my-plex --list '< 1' --type movie    # Movies only, below 1 Mbps")
-            print("  my-plex series.en --list '> 2'       # One library, above 2 Mbps")
+            print("  my-plex '< 1Mbps'                              # All items below 1 Mbps")
+            print("  my-plex '> 400MB/hr'                           # All items above 400 MB/hr")
+            print("  my-plex --list '< 1' type:movie                # Movies only, below 1 Mbps")
+            print("  my-plex series.en --list '> 2'                 # One library, above 2 Mbps")
+            print("  my-plex --list 'resolution:1080p AND codec:h265'  # 1080p H.265 items")
+            print("  my-plex --list 'year>2015 AND genre:action'    # Action items after 2015")
+            print("  my-plex --list 'label:reencode'                # Items with reencode label")
+            print("  my-plex --list 'size>1gb'                      # Items larger than 1 GB")
+            print("  my-plex --list 'duration>2h'                   # Items longer than 2 hours")
+            print("  my-plex --list 'added>2024'                    # Items added after 2024")
             print()
-            print("  my-plex --list                       # List all libraries")
-            print("  my-plex ,unsorted --list             # List all items in ,unsorted")
-            print("  my-plex ,unsorted --list --type movie  # Only movies in ,unsorted")
+            print("  # key:value shorthand — no --list needed:")
+            print("  my-plex type:movie                             # All movies")
+            print("  my-plex ,unsorted type:movie lang:de watched:no bitrate'>2mbps'")
+            print()
+            print("  my-plex --list                                 # List all libraries")
+            print("  my-plex ,unsorted --list                       # List all items in ,unsorted")
+            print("  my-plex ,unsorted --list --type movie          # Only movies in ,unsorted")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -22450,7 +22686,11 @@ def execute_global_commands(args, cmd_args):
         # If --list/--filter was given a filter expression, route to _list_filtered
         filter_expr = cmd_args.list if isinstance(cmd_args.list, str) else None
         if filter_expr:
-            PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type)
+            watched_only   = safe_getattr(args, 'watched', False)
+            unwatched_only = safe_getattr(args, 'unwatched', False)
+            audio_filter   = safe_getattr(args, 'audio', None)
+            PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type,
+                watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
             return
 
         if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}, excess_versions={excess_versions}")
@@ -22657,6 +22897,66 @@ def main():
                 # Rewrite: remove --help from current position, replace with --help <topic>
                 sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != '--help'] + ['--help', _topic]
                 if DBG: print(f" ~~~ Normalized --help: {sys.argv}", file=sys.stderr)
+
+    # Normalize key:value filter tokens → translate to existing flags or collect filter expressions.
+    # Handles: type:movie  lang:de  watched:no  resolution:1080p  codec:h265  year>2015  etc.
+    # Category A tokens translate to existing flags (--type, --de, --watched/--unwatched).
+    # Category B tokens (bitrate, resolution, codec, year, label, genre, size, duration, rating, added)
+    # are collected and injected as --list 'expr1 AND expr2 AND ...'
+    _CAT_A_TOKEN_RE = re.compile(
+        r'^(?P<key>type|lang|language|watched)'
+        r':(?P<val>.+)$',
+        re.IGNORECASE
+    )
+    _CAT_B_TOKEN_RE = re.compile(
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|added)'
+        r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
+        re.IGNORECASE
+    )
+    _new_argv = [sys.argv[0]]
+    _inject_flags = []   # flags to append after the current argv sweep
+    _filter_exprs = []   # category B expressions collected
+    _i = 1
+    while _i < len(sys.argv):
+        arg = sys.argv[_i]
+        _ma = _CAT_A_TOKEN_RE.match(arg)
+        _mb = _CAT_B_TOKEN_RE.match(arg)
+        if _ma and not arg.startswith('-'):
+            key = _ma.group('key').lower()
+            val = _ma.group('val')
+            if key == 'type':
+                _inject_flags += ['--type', val]
+            elif key in ('lang', 'language'):
+                lang_map = {'en': '--en', 'english': '--en', 'de': '--de', 'german': '--de',
+                            'fr': '--fr', 'french': '--fr'}
+                flag = lang_map.get(val.lower())
+                if flag:
+                    _inject_flags.append(flag)
+                else:
+                    _inject_flags += ['--audio', val]
+            elif key == 'watched':
+                if val.lower() in ('yes', 'true', '1', 'y'):
+                    _inject_flags.append('--watched')
+                else:
+                    _inject_flags.append('--unwatched')
+            if DBG: print(f" ~~~ Filter token '{arg}' → {_inject_flags[-2:] if len(_inject_flags)>=2 else _inject_flags[-1:]}", file=sys.stderr)
+        elif _mb and not arg.startswith('-'):
+            field = _mb.group('field').lower()
+            op    = _mb.group('op')
+            val   = _mb.group('val')
+            # Normalise ':' to '=' for equality fields; keep </>/<=/>= as-is
+            op_norm = '=' if op in (':', '==') else op
+            _filter_exprs.append(f"{field}{op_norm}{val}")
+            if DBG: print(f" ~~~ Filter token '{arg}' → expr '{field}{op_norm}{val}'", file=sys.stderr)
+        else:
+            _new_argv.append(arg)
+        _i += 1
+    if _inject_flags or _filter_exprs:
+        sys.argv = _new_argv + _inject_flags
+        if _filter_exprs:
+            combined = ' AND '.join(_filter_exprs)
+            sys.argv += ['--list', combined]
+        if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
     # Normalize --resolve to --list --duplicates --resolve for canonical form
