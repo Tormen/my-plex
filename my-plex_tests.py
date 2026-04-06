@@ -2209,13 +2209,53 @@ class TestReencode(unittest.TestCase):
         self.assertIn("case 'reencode':", src)
 
     def test_reencode_help_page_covers_mark(self):
-        """--help reencode page must document --mark."""
+        """--help reencode page must document --mark, --detect, --force."""
         src = self._read_script()
         import re
         match = re.search(r"case 'reencode':(.*?)sys\.exit\(0\)", src, re.DOTALL)
         self.assertIsNotNone(match, "Must find reencode help page")
         body = match.group(1)
         self.assertIn("--mark", body)
+        self.assertIn("--detect", body)
+        self.assertIn("--force", body)
+
+    def test_detect_registered_in_global_cmd_parser(self):
+        """--detect must be registered in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("'--detect'", src)
+
+    def test_force_registered_in_global_cmd_parser(self):
+        """--force must be registered in GLOBAL_CMD_PARSER for reencode use."""
+        src = self._read_script()
+        self.assertIn("'--force'", src)
+
+    def test_mark_respects_dry_run(self):
+        """_mark_reencode_candidates_on_disk must accept dry_run parameter."""
+        src = self._read_script()
+        self.assertIn("def _mark_reencode_candidates_on_disk(", src)
+        self.assertIn("dry_run=False", src)
+
+    def test_mark_supports_force(self):
+        """_mark_reencode_candidates_on_disk must accept force parameter."""
+        src = self._read_script()
+        self.assertIn("force=False", src)
+
+    def test_mark_prints_summary(self):
+        """_mark_reencode_candidates_on_disk must print REENCODE MARK SUMMARY."""
+        src = self._read_script()
+        self.assertIn("REENCODE MARK SUMMARY", src)
+
+    def test_mark_warns_mislabeled(self):
+        """_mark_reencode_candidates_on_disk must warn about labeled-but-below-threshold items."""
+        src = self._read_script()
+        self.assertIn("mislabeled_keys", src)
+        self.assertIn("BELOW threshold", src)
+
+    def test_detect_reinject_in_remaining_args(self):
+        """--detect must be re-injected into remaining_args."""
+        src = self._read_script()
+        self.assertIn("Re-inject --detect", src) if "Re-inject --detect" in src else \
+            self.assertIn("safe_getattr(args, 'detect', False)", src)
 
     def test_option_help_synonym_in_argv_normalization(self):
         """--reencode must be in _OPTION_TO_HELP_TOPIC for --option --help synonym."""
