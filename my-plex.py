@@ -119,7 +119,8 @@ _my-plex() {
         '--list-duplicates[List only duplicate media items]'
         '--broken[Show only potentially truncated/broken files]'
         '--excess-versions[List entries with too many file versions]:limit:'
-        '--problems[Run all problem detection checks]'
+        '--problems[Run all problem detection checks (add -V for details)]'
+        '--reencode[List media files with unreasonably high bitrate (reencode candidates)]'
         '--scan[Trigger Plex library scan + metadata refresh + cache update]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
         '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
@@ -215,9 +216,11 @@ _install_zsh_completions()
 
 from abc import ABC, abstractmethod
 import argparse
+import contextlib
 import fcntl
 import functools
 import inspect
+import io
 import json
 # os, subprocess, sys already imported above
 import pickle
@@ -376,6 +379,9 @@ CONFIG_DEFAULTS = {
 
     # Broken File Detection Configuration
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
+
+    # Reencode Candidate Detection Configuration
+    'REENCODE_BITRATE_THRESHOLD_MBPS': 20.0,  # Flag files with avg bitrate above this (Mbps). 20 Mbps ≈ BD rip quality; anything higher is likely a remux or over-encoded.
 
     # Duplicate Detection Configuration
     # List of library groups across which duplicates should be IGNORED.
@@ -560,6 +566,19 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Default: 0.5% - catches meaningful truncation while avoiding false positives
 # Analysis: 80.72% of files are within ±0.1% (normal encoding variance)
 # TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
+
+###############################################################################
+# Reencode Candidate Detection Configuration
+###############################################################################
+
+# Average bitrate threshold for flagging files as reencode candidates (Mbps)
+# Files above this bitrate are unnecessarily large for their duration and can
+# likely be reencoded (H.265 / AV1) to save significant disk space without
+# perceptible quality loss.  Typical values:
+#   10 Mbps  — normal 1080p H.264 encode  (not flagged at default threshold)
+#   20 Mbps  — high-bitrate 1080p / light BD rip  (default threshold)
+#   40 Mbps  — BD remux / near-lossless encode
+# REENCODE_BITRATE_THRESHOLD_MBPS = {CONFIG_DEFAULTS['REENCODE_BITRATE_THRESHOLD_MBPS']}
 
 ###############################################################################
 # Duplicate Detection Configuration
@@ -801,6 +820,9 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
+
+# Reencode candidate detection threshold (Mbps)
+REENCODE_BITRATE_THRESHOLD_MBPS = CONFIG_DEFAULTS.get('REENCODE_BITRATE_THRESHOLD_MBPS', 20.0)
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
@@ -13091,6 +13113,148 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(issues)
 
     @staticmethod
+    def _list_reencode_candidates(obj_keys, library_name):
+        """List media files whose avg bitrate exceeds REENCODE_BITRATE_THRESHOLD_MBPS.
+        For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
+        Returns total count of flagged files."""
+        threshold = REENCODE_BITRATE_THRESHOLD_MBPS
+
+        flagged_movies = []
+        # {show_key: {s_str: {e_str: [(bitrate, filesize, dur_ms, plex_id, ep_title, filepath, version)]}}}
+        flagged_ep_by_show = {}
+        show_meta = {}  # {show_key: (series_title, library)}
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type', '')
+            if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            duration_ms = obj.get('duration') or 0
+            if duration_ms < 60_000:  # skip clips < 1 min
+                continue
+            files_dict = obj.get('files', {})
+            for version, file_info in files_dict.items():
+                filesize = file_info.get('filesize') or 0
+                if not filesize:
+                    continue
+                bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
+                if bitrate_mbps < threshold:
+                    continue
+                filepath = file_info.get('filepath', '')
+                lib = obj.get('library', '?')
+                plex_id = obj.get('id', '?')
+                if obj_type in ('Movie', 'Movie*'):
+                    title = obj.get('title', '?')
+                    year = obj.get('year', 0)
+                    flagged_movies.append((bitrate_mbps, filesize, duration_ms, lib, title, year, plex_id, filepath, version))
+                else:
+                    show_key = obj.get('show_key', '')
+                    if not show_key:
+                        continue
+                    s_str = obj.get('S_str', 'S?')
+                    e_str = obj.get('E_str', 'E?')
+                    ep_title = obj.get('title', '')
+                    if show_key not in flagged_ep_by_show:
+                        flagged_ep_by_show[show_key] = {}
+                        series_title = obj.get('series', show_key)
+                        show_meta[show_key] = (series_title, lib)
+                    if s_str not in flagged_ep_by_show[show_key]:
+                        flagged_ep_by_show[show_key][s_str] = {}
+                    if e_str not in flagged_ep_by_show[show_key][s_str]:
+                        flagged_ep_by_show[show_key][s_str][e_str] = []
+                    flagged_ep_by_show[show_key][s_str][e_str].append(
+                        (bitrate_mbps, filesize, duration_ms, plex_id, ep_title, filepath, version)
+                    )
+
+        total_file_count = len(flagged_movies) + sum(
+            len(eps) for show in flagged_ep_by_show.values()
+            for season in show.values()
+            for eps in season.values()
+        )
+
+        if not total_file_count:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No reencode candidates{scope} found (threshold: {threshold} Mbps).")
+            return 0
+
+        # --- MOVIES ---
+        if flagged_movies:
+            flagged_movies.sort(key=lambda x: (-x[0], x[3].lower(), x[4].lower()))
+            print(f"\n  MOVIES  ({len(flagged_movies)} file(s) above {threshold} Mbps)")
+            print(f"\n  {'BITRATE':>10}  {'DURATION':>9}  {'SIZE':>8}  {'LIBRARY':<16}  TITLE")
+            print("  " + "-" * 80)
+            for bitrate_mbps, filesize, duration_ms, lib, title, year, plex_id, filepath, version in flagged_movies:
+                dur_min = duration_ms / 60_000
+                size_str = format_filesize(filesize)
+                title_year = f"{title} ({year})" if year else title
+                print(f"  {bitrate_mbps:>9.1f}  {dur_min:>7.1f}min  {size_str:>8}  [{lib:<14}]  {title_year}")
+                print(f"    {filepath}")
+
+        # --- SERIES: rollup logic ---
+        if flagged_ep_by_show:
+            total_ep_files = sum(
+                len(eps)
+                for show in flagged_ep_by_show.values()
+                for season in show.values()
+                for eps in season.values()
+            )
+            print(f"\n  SERIES  ({total_ep_files} episode file(s) across {len(flagged_ep_by_show)} show(s) above {threshold} Mbps)")
+
+            for show_key in sorted(flagged_ep_by_show, key=lambda k: (show_meta[k][1].lower(), show_meta[k][0].lower())):
+                series_title, lib = show_meta[show_key]
+                flagged_seasons = flagged_ep_by_show[show_key]
+
+                # Total episodes in each season (from index)
+                all_seasons_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+                all_season_keys = [s for s in all_seasons_data if s != 'S00']  # exclude specials for rollup
+
+                # Determine rollup per season
+                season_rollup = {}  # s_str → 'full' | 'partial'
+                for s_str, ep_dict_total in all_seasons_data.items():
+                    if s_str not in flagged_seasons:
+                        season_rollup[s_str] = 'none'
+                        continue
+                    flagged_e_strs = set(flagged_seasons[s_str].keys())
+                    total_e_strs = set(ep_dict_total.keys())
+                    season_rollup[s_str] = 'full' if flagged_e_strs >= total_e_strs else 'partial'
+
+                # Show is fully flagged if every non-special season is 'full'
+                show_full = (bool(all_season_keys) and
+                             all(season_rollup.get(s, 'none') == 'full' for s in all_season_keys))
+
+                if show_full:
+                    total_eps = sum(len(eps) for s in flagged_seasons.values() for eps in s.values())
+                    avg_br = sum(
+                        item[0] for s in flagged_seasons.values()
+                        for eps in s.values() for item in eps
+                    ) / total_eps
+                    print(f"\n  [{lib}]  {series_title}  *** ALL {len(all_season_keys)} seasons flagged ({total_eps} eps, avg {avg_br:.1f} Mbps) ***")
+                    print(f"    →  my-plex '{series_title}' --reencode")
+                else:
+                    print(f"\n  [{lib}]  {series_title}")
+                    for s_str in sorted(flagged_seasons.keys()):
+                        ep_dict = flagged_seasons[s_str]
+                        total_in_season = len(all_seasons_data.get(s_str, {}))
+                        rollup = season_rollup.get(s_str, 'partial')
+                        if rollup == 'full':
+                            avg_br = sum(item[0] for eps in ep_dict.values() for item in eps) / len(ep_dict)
+                            print(f"    {s_str}  *** all {len(ep_dict)} episodes flagged (avg {avg_br:.1f} Mbps) ***")
+                        else:
+                            ep_lines = []
+                            for e_str in sorted(ep_dict.keys()):
+                                items = ep_dict[e_str]
+                                avg_br = sum(i[0] for i in items) / len(items)
+                                ep_lines.append(f"{e_str} {avg_br:.1f}Mbps")
+                            print(f"    {s_str}  {', '.join(ep_lines)}  ({len(ep_dict)}/{total_in_season} eps)")
+
+        print(f"\n  Total: {total_file_count} file(s) above {threshold} Mbps")
+        return total_file_count
+
+    @staticmethod
     def _find_duplicates(obj_keys, library_name):
         key_to_group = {}
         items_with_duplicates = {}
@@ -14726,7 +14890,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -15144,6 +15308,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex --problems [--tsv]")
             print()
             print("Runs all problem detection checks and prints a summary at the end.")
+            print("By default only counts are shown — add -V / --verbose for full details.")
             print("Use --tsv (or --scrape) to show only episode data / scraping issues.")
             print("Currently equivalent to running:")
             print()
@@ -15171,6 +15336,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("                          Detect shows where Plex and scraped episode numbering")
             print("                          disagree (e.g. Plex E101 vs Scraped E01)")
             print()
+            print(f"  8. --reencode           Detect media files with avg bitrate above")
+            print(f"                          REENCODE_BITRATE_THRESHOLD_MBPS (default: {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps).")
+            print(f"                          Episodes roll up to season / series level when all flagged.")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -15184,7 +15353,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --problems              # Run all checks")
+            print("  my-plex --problems              # Run all checks (summary only)")
+            print("  my-plex --problems -V           # Run all checks with full details")
             print("  my-plex --problems --tsv        # Only episode data + numbering issues")
             print("  my-plex --excess-versions 2     # Show entries with 2+ versions")
             print("  my-plex --excess-versions 3     # Show entries with 3+ versions")
@@ -15193,6 +15363,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --unsorted              # Show unsorted shows only")
             print("  my-plex --potential-mismatch    # Show potential mismatches only")
             print("  my-plex --episode-numbering-issues  # Show numbering issues only")
+            print("  my-plex --reencode              # Show reencode candidates only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -21325,41 +21496,57 @@ def execute_global_commands(args, cmd_args):
         unmatched_count = 0
         unsorted_count = 0
         mismatch_count = 0
+        reencode_count = 0
+
+        def _run_check(func, *args, **kwargs):
+            """Run a check function, suppressing detail output unless -V/--verbose."""
+            if VRB:
+                return func(*args, **kwargs)
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink):
+                return func(*args, **kwargs)
 
         if not tsv_only:
             # 1. Broken files
             print("\n--- Broken / Truncated Files ---")
-            broken_count = PLEX_Media._list_broken_files(obj_keys, None) or 0
+            broken_count = _run_check(PLEX_Media._list_broken_files, obj_keys, None) or 0
 
             # 2. Excess versions
             print("\n--- Excess Versions (3+) ---")
-            result = PLEX_Media._list_excess_versions(obj_keys, None, 3)
+            result = _run_check(PLEX_Media._list_excess_versions, obj_keys, None, 3)
             excess_file_count, excess_entry_count = result if result else (0, 0)
 
         # 3. Episode data issues
         print("\n--- Episode Data (TSV) Issues ---")
-        tsv_problem_count = _list_tsv_problems(library_name=problems_library)
+        tsv_problem_count = _run_check(_list_tsv_problems, library_name=problems_library)
 
         if not tsv_only:
             # 4. Unmatched items
             print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
-            unmatched_count = PLEX_Media._list_unmatched(obj_keys, None)
+            unmatched_count = _run_check(PLEX_Media._list_unmatched, obj_keys, None)
 
             # 5. Unsorted shows
             print("\n--- Unsorted Shows (episodes without season directories) ---")
-            unsorted_count = PLEX_Media._list_unsorted(library_name=problems_library)
+            unsorted_count = _run_check(PLEX_Media._list_unsorted, library_name=problems_library)
 
             # 6. Potential mismatches
             print("\n--- Potential Mismatches (Plex title vs directory name) ---")
-            mismatch_count = PLEX_Media._list_potential_mismatches(obj_keys, None)
+            mismatch_count = _run_check(PLEX_Media._list_potential_mismatches, obj_keys, None)
 
         # 7. Episode numbering issues
         print("\n--- Episode Numbering Issues (Plex vs Scraped) ---")
-        numbering_count = PLEX_Media._list_episode_numbering_issues(library_name=problems_library)
+        numbering_count = _run_check(PLEX_Media._list_episode_numbering_issues, library_name=problems_library)
+
+        if not tsv_only:
+            # 8. Reencode candidates
+            print("\n--- Reencode Candidates (high bitrate) ---")
+            reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
         # Summary
         lib_arg = f" {problems_library}" if problems_library else ""
         print("\n" + "=" * 76)
+        if not VRB:
+            print("  (Use -V / --verbose to show details above.)")
         print("SUMMARY")
         print("=" * 76)
         if not tsv_only:
@@ -21378,7 +21565,10 @@ def execute_global_commands(args, cmd_args):
             print(f"  Potential mismatches:     {mismatch_count}{hint}")
         hint = f"   →  my-plex{lib_arg} --episode-numbering-issues" if numbering_count else ""
         print(f"  Numbering issues:         {numbering_count}{hint}")
-        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count
+        if not tsv_only:
+            hint = f"   →  my-plex{lib_arg} --reencode" if reencode_count else ""
+            print(f"  Reencode candidates:      {reencode_count}{hint}")
+        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count + reencode_count
         if total_problems == 0:
             print("\n  No problems found.")
         else:
@@ -21429,6 +21619,17 @@ def execute_global_commands(args, cmd_args):
         scope = f" in '{library_name}'" if library_name else ""
         print(f"\n--- Episode Numbering Issues{scope} (Plex vs Scraped) ---")
         PLEX_Media._list_episode_numbering_issues(library_name)
+        return
+
+    # Handle --reencode [LIBRARY]: list media files with unreasonably high bitrate
+    reencode_val = safe_getattr(cmd_args, 'reencode', None)
+    if reencode_val is not None:
+        library_name = None if reencode_val is True else reencode_val
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
+        scope = f" in '{library_name}'" if library_name else ""
+        print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) ---")
+        PLEX_Media._list_reencode_candidates(obj_keys, library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -21783,6 +21984,7 @@ def main():
     main_parser.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -21827,12 +22029,13 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues). Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues + --reencode). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List media files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS (default: {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps). Shows episode → season → series rollup. Optional: library name to filter.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
@@ -22184,6 +22387,18 @@ def main():
                 remaining_args.append('--episode-numbering-issues')
             else:
                 remaining_args.insert(0, '--episode-numbering-issues')
+
+    # Re-inject --reencode into remaining_args
+    # Same pattern as --unmatched: supports --reencode [LIBRARY], <PLEXOBJ> --reencode, bare
+    if safe_getattr(args, 'reencode', None) is not None:
+        if args.reencode is not True:
+            remaining_args.insert(0, '--reencode')
+            remaining_args.insert(1, args.reencode)
+        else:
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--reencode')
+            else:
+                remaining_args.insert(0, '--reencode')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):

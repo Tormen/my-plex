@@ -2040,22 +2040,22 @@ class TestProblems(unittest.TestCase):
         self.assertIn("'--problems'", content)
 
     def test_problems_runs_broken(self):
-        """--problems must call _list_broken_files."""
+        """--problems must call _list_broken_files (via _run_check wrapper)."""
         content = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
         self.assertIsNotNone(match, "Must find --problems handler block")
         body = match.group(1)
-        self.assertIn("_list_broken_files(", body)
+        self.assertIn("_list_broken_files", body)
 
     def test_problems_runs_excess_versions(self):
-        """--problems must call _list_excess_versions with limit 3."""
+        """--problems must call _list_excess_versions with limit 3 (via _run_check wrapper)."""
         content = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("_list_excess_versions(", body)
+        self.assertIn("_list_excess_versions", body)
         self.assertIn(", 3)", body, "Must use limit 3 for excess versions")
 
     def test_problems_prints_summary(self):
@@ -2098,6 +2098,110 @@ class TestProblems(unittest.TestCase):
         body = match.group(1)
         self.assertIn("return 0, 0", body, "Must return (0, 0) when no excess versions")
         self.assertIn("return len(excess_files), entry_count", body, "Must return (file_count, entry_count)")
+
+
+class TestReencode(unittest.TestCase):
+    """Tests for --reencode: high-bitrate file detection with episode/season/show rollup."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_reencode_method_exists(self):
+        """_list_reencode_candidates must exist as a static method."""
+        src = self._read_script()
+        self.assertIn("def _list_reencode_candidates(", src)
+
+    def test_reencode_uses_bitrate_threshold(self):
+        """_list_reencode_candidates must use REENCODE_BITRATE_THRESHOLD_MBPS."""
+        src = self._read_script()
+        self.assertIn("REENCODE_BITRATE_THRESHOLD_MBPS", src)
+
+    def test_reencode_config_default_exists(self):
+        """REENCODE_BITRATE_THRESHOLD_MBPS must be in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'REENCODE_BITRATE_THRESHOLD_MBPS'", src)
+
+    def test_reencode_in_argparser(self):
+        """--reencode must be registered in both main_parser and GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("'--reencode'", src)
+
+    def test_reencode_in_has_standalone_cmd(self):
+        """--reencode must be in has_standalone_cmd check."""
+        src = self._read_script()
+        self.assertIn("safe_getattr(args, 'reencode', None) is not None", src)
+
+    def test_reencode_in_zsh_completions(self):
+        """--reencode must be in zsh completion spec."""
+        src = self._read_script()
+        self.assertIn("'--reencode[", src)
+
+    def test_reencode_reinject_exists(self):
+        """--reencode must be re-injected into remaining_args (like --episode-numbering-issues)."""
+        src = self._read_script()
+        self.assertIn("Re-inject --reencode", src)
+
+    def test_reencode_in_problems(self):
+        """--problems must call _list_reencode_candidates."""
+        src = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must find --problems handler block")
+        body = match.group(1)
+        self.assertIn("_list_reencode_candidates(", body)
+
+    def test_reencode_in_problems_summary(self):
+        """--problems summary must include reencode count."""
+        src = self._read_script()
+        import re
+        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", src, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("reencode_count", body)
+        self.assertIn("--reencode", body)
+
+    def test_problems_verbose_suppresses_details(self):
+        """--problems without -V must suppress detail output (redirect_stdout)."""
+        src = self._read_script()
+        self.assertIn("_run_check(", src, "Must use _run_check() helper for output suppression")
+        self.assertIn("redirect_stdout", src, "Must use contextlib.redirect_stdout")
+
+    def test_problems_verbose_note(self):
+        """--problems without -V must print a note about -V for details."""
+        src = self._read_script()
+        self.assertIn("Use -V / --verbose to show details", src)
+
+    def test_reencode_rollup_season(self):
+        """_list_reencode_candidates must check season-level rollup."""
+        src = self._read_script()
+        self.assertIn("season_rollup", src)
+        self.assertIn("'full'", src)
+
+    def test_reencode_rollup_show(self):
+        """_list_reencode_candidates must check show-level rollup."""
+        src = self._read_script()
+        self.assertIn("show_full", src)
+        self.assertIn("ALL", src)
+
+    def test_reencode_returns_count(self):
+        """_list_reencode_candidates must return total file count."""
+        src = self._read_script()
+        import re
+        match = re.search(r'def _list_reencode_candidates\(.*?\n(.*?)(?=\n    @staticmethod)', src, re.DOTALL)
+        self.assertIsNotNone(match, "Must find _list_reencode_candidates body")
+        body = match.group(1)
+        self.assertIn("return 0", body, "Must return 0 when no candidates")
+        self.assertIn("return total_file_count", body, "Must return total count")
+
+    def test_reencode_in_problems_help(self):
+        """--help problems must mention --reencode."""
+        src = self._read_script()
+        import re
+        match = re.search(r"case 'problems':\n(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn("--reencode", body)
 
 
 class TestExcessVersionsMainParser(unittest.TestCase):
@@ -3974,7 +4078,7 @@ class TestEpisodesErr(unittest.TestCase):
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
         self.assertIsNotNone(match, "Must find --problems handler block")
         body = match.group(1)
-        self.assertIn('_list_tsv_problems(', body, "Must call _list_tsv_problems")
+        self.assertIn('_list_tsv_problems', body, "Must call _list_tsv_problems")
         self.assertIn('Episode Data', body, "Must have Episode Data section header")
 
     def test_problems_summary_includes_tsv_count(self):
@@ -4085,7 +4189,7 @@ class TestUnmatched(unittest.TestCase):
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn('_list_unmatched(', body, "Must call _list_unmatched in --problems")
+        self.assertIn('_list_unmatched', body, "Must call _list_unmatched in --problems")
         self.assertIn('Unmatched', body, "Must have Unmatched section header")
 
     def test_help_unmatched_exists(self):
@@ -4166,7 +4270,7 @@ class TestUnsorted(unittest.TestCase):
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --unmatched)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn('_list_unsorted(', body, "Must call _list_unsorted in --problems")
+        self.assertIn('_list_unsorted', body, "Must call _list_unsorted in --problems")
         self.assertIn('Unsorted', body, "Must have Unsorted section header")
 
     def test_problems_summary_includes_unsorted(self):
@@ -5721,7 +5825,7 @@ _UNITTEST_SCOPES = {
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
-    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems,
+    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
                    TestShowInfoSeasonTable, TestPotentialMismatch,
