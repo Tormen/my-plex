@@ -12788,10 +12788,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             audio_filter = lang_map.get(audio_filter.lower(), audio_filter.lower())
         if media_type is not None:
             media_type = media_type.capitalize()
-            if media_type == "Series":
+            if media_type in ("Series", "Show"):
                 media_type = "Show"
         if media_type is not None and media_type not in ["Show", "Movie"]:
-            err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
+            err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: movie, series (or show).")
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
         if library_name is None and not media_type and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
@@ -15945,7 +15945,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex 'TITLE' 'EXPR'           # matching title")
             print()
             print("OPTIONS:")
-            print("  --type <movie|show|episode|season|collection>  Filter by media type")
+            print("  --type <movie|series|show>  Filter by media type (series and show are synonyms)")
             print("  --duplicates              Show only duplicates")
             print("  --broken                  Show only broken files")
             print("  --watched                 Show only watched items (requires library)")
@@ -22827,7 +22827,7 @@ def main():
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     # and 'devil' from being parsed as CMD_OR_PLEXOBJECT when using --info devil
     main_parser.add_argument('--type', metavar='TYPE', type=str.lower,
-        choices=['movie', 'show', 'episode', 'season', 'collection'],
+        choices=['movie', 'series', 'show'],
         help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
     main_parser.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
 
@@ -22913,7 +22913,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', type=str.lower,
-        choices=['movie', 'show', 'episode', 'season', 'collection'],
+        choices=['movie', 'series', 'show'],
         help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--unwatched', action='store_true', help="List unwatched media items. Requires a library name.")
