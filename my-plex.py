@@ -22968,8 +22968,9 @@ def main():
         # Echo translations to the user so they can see how input was interpreted
         translated_flags = ' '.join(_inject_flags) + (f" --list '{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
         print(f" >>> Interpreted: {translated_flags}")
-        for orig, dest in _translations:
-            print(f"    > {orig}  →  {dest}")
+        if VRB:
+            for orig, dest in _translations:
+                print(f"    > {orig}  →  {dest}")
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
     # Normalize --resolve to --list --duplicates --resolve for canonical form
