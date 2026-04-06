@@ -12794,7 +12794,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             err(1043, f"UNSUPPORTED media_type '{media_type}'. Valid types: show, movie.")
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
             err(1042, f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
-        if library_name is None and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
+        if library_name is None and not media_type and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
             PLEX_Library.print()
             return audio_filter, media_type, False  # False = should not continue
         if library_name is None:
