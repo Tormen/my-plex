@@ -13423,6 +13423,115 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_file_count
 
     @staticmethod
+    def _parse_filter_expr(expr):
+        """Parse a filter expression like '< 1Mbps', '> 400MB/hr', 'bitrate <= 2'.
+        Returns (op, threshold_mbps) or None if not parseable.
+        Supported units: Mbps (default), MB/hr / MB/h / MB/hour / mb_per_hour.
+        """
+        expr = expr.strip()
+        m = re.match(
+            r'^(?:(?P<field>bitrate|mb_per_hour|mbph)\s*)?'
+            r'(?P<op>[<>]=?|[!=]=)\s*'
+            r'(?P<value>[\d.]+)\s*'
+            r'(?P<unit>mbps|mb/h(?:our|r)?|mb_per_hour)?$',
+            expr, re.IGNORECASE
+        )
+        if not m:
+            return None
+        field = (m.group('field') or '').lower()
+        op    = m.group('op')
+        value = float(m.group('value'))
+        unit  = (m.group('unit') or '').lower()
+        is_mbph = field in ('mb_per_hour', 'mbph') or ('mb' in unit and 'h' in unit)
+        threshold_mbps = value / _MB_PER_HOUR_PER_MBPS if is_mbph else value
+        return op, threshold_mbps
+
+    @staticmethod
+    def _list_filtered(expr, library_name=None, media_type=None):
+        """List media items matching a filter expression (e.g. '< 1Mbps', '> 400MB/hr').
+        library_name: restrict to one library (None = all).
+        media_type:   restrict to 'Movie' or 'Show' (None = all).
+        """
+        parsed = PLEX_Media._parse_filter_expr(expr)
+        if not parsed:
+            err(1100, f"Cannot parse filter expression: '{expr}'\n"
+                      f"  Supported forms:  '< 1'  '> 2Mbps'  '>= 400MB/hr'  'bitrate < 1.5'\n"
+                      f"  Units: Mbps (default), MB/hr / MB/h / mb_per_hour")
+            return
+
+        op, threshold_mbps = parsed
+        threshold_mbph = threshold_mbps * _MB_PER_HOUR_PER_MBPS
+
+        _ops = {
+            '<': lambda a, b: a < b,
+            '<=': lambda a, b: a <= b,
+            '>': lambda a, b: a > b,
+            '>=': lambda a, b: a >= b,
+            '=': lambda a, b: abs(a - b) < 0.001,
+            '!=': lambda a, b: abs(a - b) >= 0.001,
+            '==': lambda a, b: abs(a - b) < 0.001,
+        }
+        cmp_fn = _ops.get(op)
+        if not cmp_fn:
+            err(1101, f"Unknown operator '{op}' in filter expression: '{expr}'")
+            return
+
+        rows = []  # (bitrate_mbps, key, obj_type, lib, title, filepath)
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            obj_type = obj.get('type', '')
+            if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            if media_type:
+                mt = media_type.capitalize()
+                if mt == 'Movie' and obj_type not in ('Movie', 'Movie*'):
+                    continue
+                if mt == 'Show' and obj_type not in ('Episode', 'Episode*'):
+                    continue
+            duration_ms = obj.get('duration') or 0
+            if duration_ms < 60_000:
+                continue
+            files_dict = obj.get('files', {})
+            for _, file_info in files_dict.items():
+                filesize = file_info.get('filesize') or 0
+                if not filesize:
+                    continue
+                bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
+                if not cmp_fn(bitrate_mbps, threshold_mbps):
+                    continue
+                lib   = obj.get('library', '?')
+                title = obj.get('title', '?')
+                if obj_type in ('Episode', 'Episode*'):
+                    series = obj.get('series', '')
+                    s_str  = obj.get('S_str', '')
+                    e_str  = obj.get('E_str', '')
+                    title  = f"{series}  {s_str}{e_str}  {title}" if series else title
+                year = obj.get('year', 0)
+                if year and obj_type in ('Movie', 'Movie*'):
+                    title = f"{title} ({year})"
+                fp = file_info.get('filepath', '')
+                rows.append((bitrate_mbps, key, obj_type.rstrip('*'), lib, title, fp))
+
+        scope = f" in '{library_name}'" if library_name else ""
+        unit_str = f"{threshold_mbps:.2f} Mbps ({int(threshold_mbph)} MB/hr)"
+        print(f"\n--- Filter: bitrate {op} {unit_str}{scope} ---\n")
+
+        if not rows:
+            print(f"  No items match: bitrate {op} {threshold_mbps:.2f} Mbps")
+            return
+
+        rows.sort(key=lambda r: r[0], reverse=(op in ('>', '>=')))
+
+        print(f"  {'KEY':<22}  {'TYPE':<7}  {'LIBRARY':<16}  {'BITRATE':>9}  {'MB/HR':>7}  TITLE")
+        print("  " + "-" * 96)
+        for bitrate_mbps, key, otype, lib, title, fp in rows:
+            mbph = int(bitrate_mbps * _MB_PER_HOUR_PER_MBPS)
+            print(f"  {key:<22}  {otype:<7}  {lib:<16}  {bitrate_mbps:>8.2f}  {mbph:>7}  {title}")
+
+        print(f"\n  Total: {len(rows)} item(s) matching bitrate {op} {threshold_mbps:.2f} Mbps")
+
+    @staticmethod
     def _list_ondisk_labeled(labeltext, library_name=None):
         """List cached objects that have labeltext in their ondisk_labels, with rollup.
 
@@ -15809,16 +15918,34 @@ def main_print_help(args, remaining_args, main_parser):
         case 'list':
             print()
             print("=" * 76)
-            print("LIST HELP")
+            print("LIST / FILTER HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex [<library_name>] --list [OPTIONS]")
+            print("Usage: my-plex [<scope>] --list [EXPR] [OPTIONS]")
+            print("       my-plex [<scope>] --filter [EXPR] [OPTIONS]   ← same as --list")
+            print("       my-plex 'EXPR'                                 ← auto-detects --list")
             print()
-            print("Lists media items. Without a library name, lists all libraries.")
-            print("With a library name, lists all items in that library.")
+            print("--list and --filter are synonyms.")
+            print()
+            print("Without an expression, lists all items in scope (library or all).")
+            print("With an expression, filters items by bitrate.")
+            print()
+            print("FILTER EXPRESSIONS (bitrate):")
+            print("  '< 1'           Items below 1 Mbps  (unit defaults to Mbps)")
+            print("  '> 400MB/hr'    Items above 400 MB/hr")
+            print("  '>= 2Mbps'      Items at or above 2 Mbps")
+            print("  'bitrate < 1.5' Explicit field name")
+            print("  Units: Mbps (default) | MB/hr | MB/h | mb_per_hour")
+            print("  Operators: < > <= >= = !=")
+            print()
+            print("SCOPE:")
+            print("  my-plex 'EXPR'                  # all libraries")
+            print("  my-plex KEY-1234 'EXPR'          # single Plex object")
+            print("  my-plex series.en 'EXPR'         # one library")
+            print("  my-plex 'TITLE' 'EXPR'           # matching title")
             print()
             print("OPTIONS:")
-            print("  --type <movie|show>       Filter by media type")
+            print("  --type <movie|show|episode|season|collection>  Filter by media type")
             print("  --duplicates              Show only duplicates")
             print("  --broken                  Show only broken files")
             print("  --watched                 Show only watched items (requires library)")
@@ -15827,14 +15954,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --no-audio-language       Show items with missing audio language")
             print("  --resolve                 Interactive resolution (with --duplicates or --no-audio-language)")
             print()
-            print("FORMAT OPTIONS:")
-            print("  --format <fmt>            Custom output format using {VARIABLE} placeholders")
-            print("  Default format: tsv_labeled (tab-separated with labels)")
-            print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --list                     # List all libraries")
-            print("  my-plex ,unsorted --list            # List all items in ,unsorted")
+            print("  my-plex '< 1Mbps'                    # All items below 1 Mbps")
+            print("  my-plex '> 400MB/hr'                 # All items above 400 MB/hr")
+            print("  my-plex --list '< 1Mbps'             # Same")
+            print("  my-plex --filter '< 1Mbps'           # Same")
+            print("  my-plex --list '< 1' --type movie    # Movies only, below 1 Mbps")
+            print("  my-plex series.en --list '> 2'       # One library, above 2 Mbps")
+            print()
+            print("  my-plex --list                       # List all libraries")
+            print("  my-plex ,unsorted --list             # List all items in ,unsorted")
             print("  my-plex ,unsorted --list --type movie  # Only movies in ,unsorted")
             print()
             print("=" * 76)
@@ -22305,17 +22435,23 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_ondisk_labeled(labeltext, library_name)
         return
 
-    # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
+    # Handle --list/--filter, --duplicates, --broken, or --excess-versions (all automatically enable --list)
     # Skip when --broken is used with --update-cache (rescan mode, not display mode)
     excess_versions = safe_getattr(cmd_args, 'excess_versions', None)
-    if cmd_args.list or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN) or excess_versions:
-        # Handle global --list command (with optional --duplicates, --broken, --resolve, and --type)
+    if cmd_args.list is not None or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN) or excess_versions:
+        # Handle global --list/--filter command (with optional --duplicates, --broken, --resolve, and --type)
         # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
         # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         duplicates_only = safe_getattr(cmd_args, 'duplicates', False)
         broken_only = safe_getattr(cmd_args, 'broken', False)
         resolve_mode = safe_getattr(cmd_args, 'resolve', False)
+
+        # If --list/--filter was given a filter expression, route to _list_filtered
+        filter_expr = cmd_args.list if isinstance(cmd_args.list, str) else None
+        if filter_expr:
+            PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type)
+            return
 
         if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}, excess_versions={excess_versions}")
 
@@ -22508,7 +22644,7 @@ def main():
         '--unsorted': 'unsorted', '--potential-mismatch': 'potential-mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
-        '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--duplicates': 'duplicates',
+        '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test',
     }
     if '--help' in sys.argv:
@@ -22526,7 +22662,7 @@ def main():
     # Normalize --resolve to --list --duplicates --resolve for canonical form
     # Normalize --watched/--unwatched/--audio to auto-inject --list when used with a library
     # This simplifies argparse by ensuring canonical form
-    has_list = '--list' in sys.argv or '--list-duplicates' in sys.argv
+    has_list = '--list' in sys.argv or '--filter' in sys.argv or '--list-duplicates' in sys.argv
     has_duplicates = '--duplicates' in sys.argv
     has_broken = '--broken' in sys.argv
     has_resolve = '--resolve' in sys.argv
@@ -22571,6 +22707,23 @@ def main():
     elif (has_watched or has_unwatched or has_audio or has_no_audio_language) and not has_list:
         if inject_before_first_match(lambda a: a == '--watched' or a == '--unwatched' or a in ('--no-audio-language', '--no-language') or is_audio_flag(a), ['--list'], " (filters)"):
             has_list = True
+
+    # Detect bare filter expression as first positional arg → inject --list
+    # e.g. my-plex '< 1Mbps'  →  my-plex --list '< 1Mbps'
+    _FILTER_EXPR_RE = re.compile(
+        r'^(?:(?:bitrate|mb_per_hour|mbph)\s*)?[<>]=?\s*[\d.]|'
+        r'^[<>]=?\s*[\d.]',
+        re.IGNORECASE
+    )
+    if not has_list:
+        for _fi, _fa in enumerate(sys.argv[1:], 1):
+            if _fa.startswith('-'):
+                continue
+            if _FILTER_EXPR_RE.match(_fa):
+                sys.argv.insert(_fi, '--list')
+                has_list = True
+                if DBG: print(f" ~~~ Injected --list before filter expr '{_fa}': {sys.argv}", file=sys.stderr)
+            break  # only check first positional arg
 
     # Early argument parsing for --config-file option
     config_parser = argparse.ArgumentParser(add_help=False)
@@ -22673,7 +22826,9 @@ def main():
     # Add --type and --info to main_parser so it knows to consume their values instead of treating them as CMD_OR_PLEXOBJECT
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     # and 'devil' from being parsed as CMD_OR_PLEXOBJECT when using --info devil
-    main_parser.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
+    main_parser.add_argument('--type', metavar='TYPE', type=str.lower,
+        choices=['movie', 'show', 'episode', 'season', 'collection'],
+        help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
     main_parser.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help=argparse.SUPPRESS)  # Hidden in main help (shown in GLOBAL_CMD_PARSER help)
 
     # Audio language and watch status filters are defined in GLOBAL_CMD_PARSER (hidden, documented in --list help)
@@ -22734,7 +22889,13 @@ def main():
     GLOBAL_CMD_PARSER._positionals.title = ''
     GLOBAL_CMD_PARSER._optionals.title = 'available <GLOBAL_COMMAND>s' # argparse.SUPPRESS
     GLOBAL_CMD_PARSER.add_argument('--list-libraries', '--libraries', action='store_true', help="List all libraries in the Plex server.")
-    GLOBAL_CMD_PARSER.add_argument('--list', action='store_true', help="List all media. Use with --duplicates to show only duplicates, --broken to show broken files, --type to filter by media type (movie/show), --resolve for interactive duplicate resolution, --watched/--unwatched to filter by watch status, --audio/--en/--de/--fr to filter by audio language, or --no-audio-language to find items with missing language info.")
+    GLOBAL_CMD_PARSER.add_argument('--list', '--filter', nargs='?', const=True, default=None,
+        help="List all media. Optionally pass a filter expression: --list '< 1Mbps' or --list '> 400MB/hr'. "
+             "--filter is a synonym for --list. "
+             "Use with --type to filter by media type (movie/show), --duplicates for duplicates only, "
+             "--broken for broken files, --resolve for interactive duplicate resolution, "
+             "--watched/--unwatched for watch status, --audio/--en/--de/--fr for audio language, "
+             "or --no-audio-language for missing language info.")
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
@@ -22751,7 +22912,9 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
-    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
+    GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', type=str.lower,
+        choices=['movie', 'show', 'episode', 'season', 'collection'],
+        help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--unwatched', action='store_true', help="List unwatched media items. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--no-audio-language', '--no-language', action='store_true', help="List media with missing audio language info. Use --resolve to fix interactively. See --help no-audio-language.", default=False)
