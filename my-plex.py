@@ -864,7 +864,7 @@ CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
 EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{} }
-EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'labels_index': {} }
+EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
 PLEX_SERVER = None # server instance will be set where needed
@@ -1312,7 +1312,7 @@ def build_media_cache_dict(include_paths=True, **extra):
 
     Args:
         include_paths: If True, include OBJ_BY_FILEPATH and OBJ_BY_LIBRARY (default: True).
-        **extra: Additional key-value pairs to include (e.g., library_stats=..., labels_index=...).
+        **extra: Additional key-value pairs to include (e.g., library_stats=..., plex_labels_index=...).
     Returns:
         dict suitable for passing to update_and_save_cache().
     """
@@ -5475,7 +5475,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             try:
                 update_and_save_cache(build_media_cache_dict(
                     library_stats=CACHE.get('library_stats', {}),
-                    labels_index=CACHE.get('labels_index', {}),
+                    plex_labels_index=CACHE.get('plex_labels_index', {}),
                     media_objs=CACHE.get('media_objs', {}),
                     library_object_counts=CACHE.get('library_object_counts', {})
                 ))
@@ -5579,7 +5579,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             update_and_save_cache(build_media_cache_dict(
                 library_stats=CACHE.get('library_stats', {}),
                 library_object_counts=CACHE.get('library_object_counts', {}),
-                labels_index=CACHE.get('labels_index', {}),
+                plex_labels_index=CACHE.get('plex_labels_index', {}),
                 media_objs=CACHE.get('media_objs', {})
             ))
             print(f"  ✓ Cache saved successfully")
@@ -11851,14 +11851,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
 
         # Build labels index for fast label-based queries
-        labels_index = PLEX_Media.build_labels_index()
+        plex_labels_index = PLEX_Media.build_labels_index()
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
 
         # Save all rebuilt/cleaned structures to cache
-        update_and_save_cache(build_media_cache_dict(labels_index=labels_index))
+        update_and_save_cache(build_media_cache_dict(plex_labels_index=plex_labels_index))
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -14698,17 +14698,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             Dictionary mapping label -> list of object IDs that have that label
         """
         global CACHE
-        labels_index = {}
+        plex_labels_index = {}
 
         for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
             labels = obj.get('labels', []) or []  # Handle None case
             for label in labels:
-                if label not in labels_index:
-                    labels_index[label] = []
-                labels_index[label].append(obj_id)
+                if label not in plex_labels_index:
+                    plex_labels_index[label] = []
+                plex_labels_index[label].append(obj_id)
 
-        if DBG: print(f"{DBGPFX}build_labels_index(): Built index with {len(labels_index)} unique labels")
-        return labels_index
+        if DBG: print(f"{DBGPFX}build_labels_index(): Built index with {len(plex_labels_index)} unique labels")
+        return plex_labels_index
 
     @staticmethod
     def retrieve_media_and_part(obj, must_exist=True):
@@ -19260,11 +19260,11 @@ def list_all_labels():
     """List all labels and the count of media items for each"""
     global CACHE
 
-    # Load labels_index from cache
+    # Load plex_labels_index from cache
     load_cache()
-    labels_index = CACHE.get('labels_index', {})
+    plex_labels_index = CACHE.get('plex_labels_index', {})
 
-    if not labels_index:
+    if not plex_labels_index:
         print("No labels found in media library.")
         return
 
@@ -19272,25 +19272,25 @@ def list_all_labels():
     print("-" * 55)
 
     # Sort labels alphabetically
-    for label in sorted(labels_index.keys()):
-        count = len(labels_index[label])
+    for label in sorted(plex_labels_index.keys()):
+        count = len(plex_labels_index[label])
         print(f"{label:<40} | {count:<10}")
 
-    print(f"\nTotal: {len(labels_index)} unique labels")
+    print(f"\nTotal: {len(plex_labels_index)} unique labels")
 
 def list_items_with_label(label):
     """List all media items that have the specified label"""
     global CACHE
 
-    # Load labels_index from cache
+    # Load plex_labels_index from cache
     load_cache()
-    labels_index = CACHE.get('labels_index', {})
+    plex_labels_index = CACHE.get('plex_labels_index', {})
 
-    if label not in labels_index:
+    if label not in plex_labels_index:
         print(f"No media items found with label '{label}'.")
         return
 
-    object_ids = labels_index[label]
+    object_ids = plex_labels_index[label]
 
     print(f"\nMedia items with label '{label}' ({len(object_ids)} items):")
     print(f"\n{'PLEX-ID':<10} | {'TYPE':<10} | {'TITLE':<60} | {'YEAR':<6} | FILEPATH")
@@ -19355,10 +19355,10 @@ def add_label_to_item(label, plex_id):
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
 
         # Rebuild and save labels index
-        labels_index = PLEX_Media.build_labels_index()
+        plex_labels_index = PLEX_Media.build_labels_index()
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
-            'labels_index': labels_index
+            'plex_labels_index': plex_labels_index
         })
     except Exception as e:
         err(1066, f"Failed to add label: {e}")
@@ -19408,10 +19408,10 @@ def remove_label_from_item(label, plex_id):
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
 
         # Rebuild and save labels index
-        labels_index = PLEX_Media.build_labels_index()
+        plex_labels_index = PLEX_Media.build_labels_index()
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
-            'labels_index': labels_index
+            'plex_labels_index': plex_labels_index
         })
     except Exception as e:
         err(1070, f"Failed to remove label: {e}")
@@ -19739,7 +19739,7 @@ def show_system_info():
         structure_sizes = []
 
         # Calculate size for each cache structure
-        for key in ['media_objs', 'library_stats', 'labels_index', 'obj_by_id',
+        for key in ['media_objs', 'library_stats', 'plex_labels_index', 'obj_by_id',
                     'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
                     'obj_by_show_scraped', 'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
             if key in CACHE:
@@ -20012,8 +20012,8 @@ def show_system_info():
         print(f"  {'TOTAL':<8}  {'':<{name_width}}  {total_items:>10,}  {total_cache_mb:>9.2f} MB  {'':<20}  {'':<20}")
 
         # Calculate overhead from non-library structures (structures not distributed to libraries)
-        # This includes: media_objs, library_stats, labels_index, library_object_counts
-        overhead_structures = ['media_objs', 'library_stats', 'labels_index', 'library_object_counts']
+        # This includes: media_objs, library_stats, plex_labels_index, library_object_counts
+        overhead_structures = ['media_objs', 'library_stats', 'plex_labels_index', 'library_object_counts']
         overhead_mb = 0
         for struct_name in overhead_structures:
             if struct_name in CACHE:
@@ -20293,8 +20293,8 @@ def _verify_data_integrity():
         print(f"Cross-references:  ⚠ {'; '.join(parts)}")
         integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
 
-    # Check 5: labels_index consistency
-    cached_labels_index = CACHE.get('labels_index', {})
+    # Check 5: plex_labels_index consistency
+    cached_labels_index = CACHE.get('plex_labels_index', {})
     rebuilt_labels_index = {}
     for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
         for label in (obj.get('labels', []) or []):
