@@ -1027,14 +1027,43 @@ PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_T
 
 # additional explanation needed as we do a partial_parse and then detect object and then parse the rest
 HELP_SUFFIX="""
-supported <OBJECT_TYPE>s:
+usage:  my-plex [SCOPE] COMMAND [OPTIONS]
 
-    library           Library-related commands. This is selected if <PLEX_OBJECT> is <library_name>.
-                      To force this OBJECT_TYPE call with: --library <library_name>. For more info: --help --library /or/ --library --help
-    media_item        Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title>, <media_filename>, or ID:<PLEX-ID>.
-                      To force this OBJECT_TYPE call with: --media <MEDIA_ITEM>. For more info: --help --media /or/ --media --help
-    playlist          Playlist-related commands. This is selected if <PLEX_OBJECT> is <playlist_name>.
-                      To force this OBJECT_TYPE call with: --playlist <PLAYLIST>. For more info: --help --playlist /or/ --playlist --help
+  Nearly all commands work globally or scoped to a narrower target.
+
+SCOPE SELECTORS  (optional — prefix any command to narrow its target)
+
+  <library_name>              One library         e.g.  movies.en  ,unsorted
+  "<title>" / <filename>      Media by title/file e.g.  "Ted Lasso"
+  KEY:123 / ID:456            Exact item          (cache key / Plex rating key)
+
+  FILTER TOKENS  (select multiple items — combine freely, all are AND):
+    type:movie / type:series    by media type
+    lang:de / lang:en / lang:fr by audio language
+    watched:no / watched:yes    by watch status
+    bitrate>2                   by avg bitrate (Mbps)
+    resolution:1080p            by resolution (4k / 1080p / 720p)
+    codec:h265                  by video codec (h264 / hevc / …)
+    year>2015                   by release year
+    genre:action                by genre (substring)
+    size>1gb                    by file size
+    duration>2h                 by duration (min / h / s)
+    rating>8                    by user rating
+    added>2024                  by year added to Plex
+    label:reencode              by Plex / on-disk label
+
+  → see --help media  for full filter reference and examples
+
+SCOPE EXAMPLES:
+  my-plex ,unsorted --problems
+  my-plex "Ted Lasso" --reencode --detect
+  my-plex type:movie lang:de watched:no bitrate'>2mbps' --list
+  my-plex movies.en --broken
+
+OBJECT TYPES  (auto-detected; can be forced):
+  library     --library <name>    --help library
+  media       --media <item>      --help media
+  playlist    --playlist <name>   --help playlist
 """
 
 ###########################################################################################
@@ -16193,6 +16222,70 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
+        case 'media' | 'media_item' | 'scope' | 'query' | 'filter':
+            print()
+            print("=" * 76)
+            print("MEDIA / FILTER / SCOPE HELP")
+            print("=" * 76)
+            print()
+            print("Usage:  my-plex [SCOPE] COMMAND [OPTIONS]")
+            print()
+            print("Nearly all commands work globally or scoped to a narrower target.")
+            print()
+            print("SELECTING A SINGLE ITEM:")
+            print()
+            print('  my-plex "Ted Lasso"        title search (substring)')
+            print("  my-plex KEY:Movie:123      exact cache key")
+            print("  my-plex ID:456             exact Plex rating key")
+            print()
+            print("SELECTING MULTIPLE ITEMS (filter tokens — combine freely, all AND):")
+            print()
+            print("  my-plex <library_name>     all items in one library")
+            print("  my-plex type:movie         all movies")
+            print("  my-plex type:series        all series")
+            print("  my-plex lang:de            German audio  (en / de / fr)")
+            print("  my-plex watched:no         unwatched     (yes / no)")
+            print("  my-plex bitrate'>2mbps'    bitrate above 2 Mbps")
+            print("  my-plex resolution:1080p   1080p items   (4k / 1080p / 720p)")
+            print("  my-plex codec:h265         H.265 encoded (h264 / hevc / av1 / …)")
+            print("  my-plex year>2015          released after 2015")
+            print("  my-plex genre:action       action genre  (substring)")
+            print("  my-plex size'>1gb'         file larger than 1 GB  (mb / gb)")
+            print("  my-plex duration'>2h'      longer than 2 hours    (min / h / s)")
+            print("  my-plex rating'>8'         user rating above 8")
+            print("  my-plex added'>2024'       added to Plex after 2024")
+            print("  my-plex label:reencode     has Plex / on-disk label")
+            print()
+            print("COMBINING TOKENS  (all conditions are AND):")
+            print()
+            print("  my-plex ,unsorted type:movie lang:de watched:no bitrate'>2mbps'")
+            print("  my-plex type:series resolution:1080p codec:h265")
+            print()
+            print("  When tokens are translated, my-plex echoes:")
+            print("   >>> Interpreted: --type movie --de --unwatched --list 'bitrate>2mbps'")
+            print("  (add -V to see per-token breakdown)")
+            print()
+            print("SCOPING COMMANDS:")
+            print()
+            print("  my-plex --problems                      all libraries")
+            print("  my-plex movies.en --problems            one library")
+            print('  my-plex "Ted Lasso" --missing           one show')
+            print("  my-plex type:movie --reencode --detect  all movies")
+            print()
+            print("  (nearly all commands accept a scope prefix)")
+            print()
+            print("TAB COMPLETIONS (zsh):")
+            print()
+            print("  type:<TAB>  →  movie series show")
+            print("  lang:<TAB>  →  en de fr english german french")
+            print("  l<TAB>      →  label: lang:")
+            print("  la<TAB>     →  label: lang:")
+            print("  watched:<TAB>  →  yes no")
+            print("  resolution:<TAB>  →  1080p 4k 720p 480p 2160p")
+            print("  codec:<TAB>  →  h265 h264 hevc avc av1 mpeg4")
+            print()
+            print("=" * 76)
+            sys.exit(0)
         case 'list':
             print()
             print("=" * 76)
@@ -22956,6 +23049,7 @@ def main():
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test',
+        '--media': 'media', '--scope': 'media', '--query': 'media',
     }
     if '--help' in sys.argv:
         _help_idx = sys.argv.index('--help')
