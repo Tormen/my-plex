@@ -2204,6 +2204,188 @@ class TestReencode(unittest.TestCase):
         self.assertIn("--reencode", body)
 
 
+class TestOndiskLabels(unittest.TestCase):
+    """Tests for on-disk label parsing, collection, indexing, and related config."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    # --- parse_ondisk_labels ---
+
+    def test_parse_ondisk_labels_basic(self):
+        """parse_ondisk_labels extracts [label] from filename."""
+        labels = parse_ondisk_labels('/some/path/myfile [reencode].mkv')
+        self.assertEqual(labels, ['reencode'])
+
+    def test_parse_ondisk_labels_multiple(self):
+        """parse_ondisk_labels extracts multiple [labels] from filename."""
+        labels = parse_ondisk_labels('movie [reencode][hdr].mkv')
+        self.assertEqual(labels, ['reencode', 'hdr'])
+
+    def test_parse_ondisk_labels_none(self):
+        """parse_ondisk_labels returns [] when no labels present."""
+        labels = parse_ondisk_labels('myfile.mkv')
+        self.assertEqual(labels, [])
+
+    def test_parse_ondisk_labels_uses_basename_only(self):
+        """parse_ondisk_labels only examines the final path component."""
+        # Label in parent dir should NOT be picked up by parse_ondisk_labels alone
+        labels = parse_ondisk_labels('/[reencode]/myfile.mkv')
+        self.assertEqual(labels, [])
+
+    def test_parse_ondisk_labels_empty_string(self):
+        """parse_ondisk_labels returns [] for empty input."""
+        self.assertEqual(parse_ondisk_labels(''), [])
+
+    def test_parse_ondisk_labels_none_input(self):
+        """parse_ondisk_labels returns [] for None input."""
+        self.assertEqual(parse_ondisk_labels(None), [])
+
+    # --- collect_ondisk_labels_for_obj ---
+
+    def test_collect_ondisk_labels_movie_filename(self):
+        """collect_ondisk_labels_for_obj picks up label in movie filename."""
+        obj = {
+            'type': 'Movie',
+            'files': {'v1': {'filepath': '/movies/My Movie (2020)/My Movie (2020) [reencode].mkv'}},
+        }
+        labels = collect_ondisk_labels_for_obj(obj)
+        self.assertIn('reencode', labels)
+
+    def test_collect_ondisk_labels_movie_dir(self):
+        """collect_ondisk_labels_for_obj picks up label in movie directory name."""
+        obj = {
+            'type': 'Movie',
+            'files': {'v1': {'filepath': '/movies/My Movie (2020) [reencode]/My Movie (2020).mkv'}},
+        }
+        labels = collect_ondisk_labels_for_obj(obj)
+        self.assertIn('reencode', labels)
+
+    def test_collect_ondisk_labels_episode_series_dir(self):
+        """collect_ondisk_labels_for_obj picks up label in series directory (grandparent) for episodes."""
+        obj = {
+            'type': 'Episode',
+            'files': {'v1': {'filepath': '/series/My Show [reencode]/Season 01/S01E01.mkv'}},
+        }
+        labels = collect_ondisk_labels_for_obj(obj)
+        self.assertIn('reencode', labels)
+
+    def test_collect_ondisk_labels_deduplicates(self):
+        """collect_ondisk_labels_for_obj deduplicates labels across path components."""
+        obj = {
+            'type': 'Movie',
+            'files': {'v1': {'filepath': '/movies/My Movie [reencode]/My Movie [reencode].mkv'}},
+        }
+        labels = collect_ondisk_labels_for_obj(obj)
+        self.assertEqual(labels.count('reencode'), 1)
+
+    def test_collect_ondisk_labels_no_files(self):
+        """collect_ondisk_labels_for_obj returns [] when obj has no files."""
+        obj = {'type': 'Movie', 'files': {}}
+        self.assertEqual(collect_ondisk_labels_for_obj(obj), [])
+
+    # --- build_ondisk_labels_index ---
+
+    def test_build_ondisk_labels_index_basic(self):
+        """build_ondisk_labels_index returns label→keys mapping."""
+        original = dict(PLEX_Media.OBJ_BY_ID)
+        try:
+            PLEX_Media.OBJ_BY_ID.clear()
+            PLEX_Media.OBJ_BY_ID['Movie:99'] = {
+                'type': 'Movie', 'ondisk_labels': ['reencode'],
+                'files': {},
+            }
+            idx = build_ondisk_labels_index()
+            self.assertIn('reencode', idx)
+            self.assertIn('Movie:99', idx['reencode'])
+        finally:
+            PLEX_Media.OBJ_BY_ID.clear()
+            PLEX_Media.OBJ_BY_ID.update(original)
+
+    def test_build_ondisk_labels_index_empty(self):
+        """build_ondisk_labels_index returns {} when no ondisk_labels in cache."""
+        original = dict(PLEX_Media.OBJ_BY_ID)
+        try:
+            PLEX_Media.OBJ_BY_ID.clear()
+            PLEX_Media.OBJ_BY_ID['Movie:1'] = {'type': 'Movie', 'ondisk_labels': [], 'files': {}}
+            idx = build_ondisk_labels_index()
+            self.assertEqual(idx, {})
+        finally:
+            PLEX_Media.OBJ_BY_ID.clear()
+            PLEX_Media.OBJ_BY_ID.update(original)
+
+    # --- Config / script structure ---
+
+    def test_ondisk_label_markers_in_config_defaults(self):
+        """ONDISK_LABEL_START_MARKER and ONDISK_LABEL_END_MARKER must be in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'ONDISK_LABEL_START_MARKER'", src)
+        self.assertIn("'ONDISK_LABEL_END_MARKER'", src)
+
+    def test_problems2disk_in_config_defaults(self):
+        """PROBLEMS2DISK must be in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'PROBLEMS2DISK'", src)
+
+    def test_ondisk_labels_index_in_empty_cache(self):
+        """EMPTY_CACHE must include ondisk_labels_index key."""
+        src = self._read_script()
+        self.assertIn("'ondisk_labels_index'", src)
+
+    def test_ondisk_labels_populated_during_update_cache(self):
+        """--update-cache must call collect_ondisk_labels_for_obj and build_ondisk_labels_index."""
+        src = self._read_script()
+        self.assertIn("collect_ondisk_labels_for_obj(obj)", src)
+        self.assertIn("build_ondisk_labels_index()", src)
+
+    def test_list_ondisk_labeled_method_exists(self):
+        """_list_ondisk_labeled must exist as a static method."""
+        src = self._read_script()
+        self.assertIn("def _list_ondisk_labeled(", src)
+
+    def test_mark_reencode_candidates_method_exists(self):
+        """_mark_reencode_candidates_on_disk must exist as a static method."""
+        src = self._read_script()
+        self.assertIn("def _mark_reencode_candidates_on_disk(", src)
+
+    def test_reencode_list_flag_uses_list_ondisk_labeled(self):
+        """--reencode --list must call _list_ondisk_labeled."""
+        src = self._read_script()
+        import re
+        # Find the reencode standalone handler block
+        match = re.search(r"reencode_val = safe_getattr\(cmd_args.*?return\s*\n.*?candidate_count", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must find reencode handler block")
+        body = match.group(0)
+        self.assertIn("_list_ondisk_labeled(", body)
+
+    def test_auto_mark_on_disk_config_key(self):
+        """PROBLEMS2DISK reencode entry must have AUTO_MARK_ON_DISK key."""
+        src = self._read_script()
+        self.assertIn("'AUTO_MARK_ON_DISK'", src)
+
+    def test_reencode_mark_flag_registered(self):
+        """--mark must be registered in GLOBAL_CMD_PARSER."""
+        src = self._read_script()
+        self.assertIn("'--mark'", src)
+
+    def test_reencode_mark_in_zsh_completions(self):
+        """--mark must be in zsh completion spec."""
+        src = self._read_script()
+        self.assertIn("'--mark[", src)
+
+    def test_ondisk_labels_in_print_obj_by_id(self):
+        """print_OBJ_BY_ID must handle ONDISK_LABELS list type without error."""
+        src = self._read_script()
+        self.assertIn("'ONDISK_LABELS'", src)
+
+    def test_refresh_ondisk_labels_exists(self):
+        """refresh_ondisk_labels_from_cache must exist and update OBJ_BY_ONDISK_LABEL."""
+        src = self._read_script()
+        self.assertIn("def refresh_ondisk_labels_from_cache(", src)
+        self.assertIn("OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()", src)
+
+
 class TestExcessVersionsMainParser(unittest.TestCase):
     """--excess-versions LIMIT must be consumed by main_parser to prevent LIMIT being eaten as CMD_OR_PLEXOBJECT."""
 
@@ -5825,7 +6007,7 @@ _UNITTEST_SCOPES = {
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
-    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode,
+    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
                    TestShowInfoSeasonTable, TestPotentialMismatch,
