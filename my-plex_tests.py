@@ -2203,6 +2203,26 @@ class TestReencode(unittest.TestCase):
         body = match.group(1)
         self.assertIn("--reencode", body)
 
+    def test_reencode_help_page_exists(self):
+        """--help reencode must have a dedicated help page (case 'reencode':)."""
+        src = self._read_script()
+        self.assertIn("case 'reencode':", src)
+
+    def test_reencode_help_page_covers_mark(self):
+        """--help reencode page must document --mark."""
+        src = self._read_script()
+        import re
+        match = re.search(r"case 'reencode':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must find reencode help page")
+        body = match.group(1)
+        self.assertIn("--mark", body)
+
+    def test_option_help_synonym_in_argv_normalization(self):
+        """--reencode must be in _OPTION_TO_HELP_TOPIC for --option --help synonym."""
+        src = self._read_script()
+        self.assertIn("_OPTION_TO_HELP_TOPIC", src)
+        self.assertIn("'--reencode': 'reencode'", src)
+
 
 class TestOndiskLabels(unittest.TestCase):
     """Tests for on-disk label parsing, collection, indexing, and related config."""

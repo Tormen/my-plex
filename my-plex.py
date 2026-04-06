@@ -15943,6 +15943,66 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'reencode':
+            print()
+            print("=" * 76)
+            print("REENCODE HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --reencode [LIBRARY]")
+            print("       my-plex --reencode [LIBRARY] --mark")
+            print()
+            print("Lists media items that are already labeled for re-encoding on disk.")
+            print("Labels are embedded in filenames or directory names as bracketed text,")
+            print(f"e.g. 'My Movie [{PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')}].mkv'")
+            print("The label text is configured via PROBLEMS2DISK['reencode']['LABELTEXT_ON_DISK'].")
+            print()
+            print("ON-DISK LABEL SOURCES:")
+            print("  Labels are read from filenames and directory names during --update-cache.")
+            print("  For Movies:   filename or movie-directory name")
+            print("  For Episodes: filename, season-directory, or series-directory name")
+            print("  All three levels roll up — if the series dir is labeled, all its")
+            print("  episodes/seasons are shown as a single Series row.")
+            print()
+            print("ROLLUP DISPLAY:")
+            print("  Individual episodes   → shown per episode")
+            print("  All eps in a season   → shown as one Season row")
+            print("  All seasons in a show → shown as one Series row")
+            print()
+            print("DETECTION & MARKING (--mark):")
+            print(f"  Scans media for files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS")
+            print(f"  (currently {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) and writes the on-disk label to")
+            print( "  the appropriate directory or file via SSH rename.")
+            print( "  Episodes roll up: all flagged in a season → label on season dir;")
+            print( "  all seasons flagged → label on series dir.")
+            print()
+            print("  When AUTO_MARK_ON_DISK = False (in PROBLEMS2DISK config), --mark")
+            print("  must be passed explicitly. When True, --problems also marks automatically.")
+            print()
+            print("CONFIG (in my-plex.conf):")
+            print("  REENCODE_BITRATE_THRESHOLD_MBPS = 20.0   # detection threshold")
+            print("  ONDISK_LABEL_START_MARKER = '['          # bracket style")
+            print("  ONDISK_LABEL_END_MARKER   = ']'")
+            print("  PROBLEMS2DISK = {")
+            print("      'reencode': {")
+            print("          'AUTO_MARK_ON_DISK':      True,  # mark on --problems too")
+            print("          'LABELTEXT_ON_DISK':      'reencode',")
+            print("          'REMOVE_EXISTING_LABELS': False,")
+            print("      },")
+            print("  }")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --reencode                  # List all labeled items")
+            print("  my-plex --reencode movies.fr        # List labeled items in one library")
+            print("  my-plex --reencode --mark           # Detect high-bitrate + write labels")
+            print("  my-plex --reencode movies.fr --mark # Detect + label in one library only")
+            print("  my-plex --problems                  # Includes reencode detection in report")
+            print("  my-plex --update-cache              # Refresh on-disk label cache")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'missing':
             print()
             print("=" * 76)
@@ -22276,6 +22336,28 @@ def main():
     # Debug: print sys.argv to see what arguments were actually passed
     if DBG or DEEPDBG:
         print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
+
+    # Normalize: --<option> --help  →  --help <option>
+    # Allows `my-plex --reencode --help` as a synonym for `my-plex --help reencode`.
+    _OPTION_TO_HELP_TOPIC = {
+        '--reencode': 'reencode', '--problems': 'problems', '--broken': 'broken',
+        '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
+        '--unsorted': 'unsorted', '--potential-mismatch': 'potential-mismatch',
+        '--episode-numbering-issues': 'episode-numbering-issues',
+        '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
+        '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--duplicates': 'duplicates',
+        '--info': 'info', '--test': 'test',
+    }
+    if '--help' in sys.argv:
+        _help_idx = sys.argv.index('--help')
+        # --help is the last arg or next arg is also a flag → look left for the option
+        if _help_idx > 0 and (_help_idx == len(sys.argv) - 1 or sys.argv[_help_idx + 1].startswith('-')):
+            _prev = sys.argv[_help_idx - 1]
+            _topic = _OPTION_TO_HELP_TOPIC.get(_prev)
+            if _topic:
+                # Rewrite: remove --help from current position, replace with --help <topic>
+                sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != '--help'] + ['--help', _topic]
+                if DBG: print(f" ~~~ Normalized --help: {sys.argv}", file=sys.stderr)
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
     # Normalize --resolve to --list --duplicates --resolve for canonical form
