@@ -1028,6 +1028,50 @@ PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_T
 }
 
 # additional explanation needed as we do a partial_parse and then detect object and then parse the rest
+HELP_COMPACT="""
+OPTIONS:
+  -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)
+  -O, --offline            Work from cache only; no Plex connection
+  -U, --update-cache       Update / rebuild cache from Plex server
+      --verify-cache       Verify cache consistency with server
+  -V, --verbose            Verbose output  (-VV for extra verbose)
+  -D, --debug              Debug output    (-DD for deep debug)
+      --try, --dry-run     Dry-run: show what would change, write nothing
+  -Y / -N                  Auto-yes / auto-no to all prompts
+      --help [WHAT]        This help; --help COMMAND for full docs + examples
+
+COMMANDS:
+  --list-libraries         List all Plex libraries with stats
+  --list [EXPR]            List / filter media  (EXPR: bitrate<2, type:movie, …)
+  --duplicates             List duplicate items
+  --broken                 List broken / truncated files
+  --problems               All problem checks in one pass
+  --unmatched [LIB]        Items not matched by Plex (local:// guid)
+  --unsorted [LIB]         Series with episodes not in season subdirs
+  --potential-mismatch [LIB]   Title / dirname mismatch candidates
+  --episode-numbering-issues   Plex vs scraped episode numbering mismatches
+  --missing [SHOW]         Missing episodes — scraped data vs Plex cache
+  --reencode [LIB]         Items flagged for re-encode (on-disk label)
+    --detect               List reencode candidates above threshold (read-only)
+    --mark [--try]         Write (or dry-run) on-disk reencode labels
+  --collections [LIB]      List collections in a library
+  --list-labels            List all Plex labels + item counts
+  --list-label LABEL       Items with a specific label
+  --add-label LABEL ID     Add a label to a media item
+  --remove-label LABEL ID  Remove a label from a media item
+  --watched / --unwatched  List watched / unwatched items
+  --no-audio-language      Items with missing audio language metadata
+  --sort-new               Sort unsorted recordings into season directories
+  --plex2disk [TARGET]     Sync Plex metadata → disk markers
+  --disk2plex [TARGET]     Sync disk markers → Plex metadata
+  --plex-disk-sync [TARGET]    Bidirectional sync (disk2plex then plex2disk)
+  --scan [LIB]             Trigger Plex filesystem scan + update cache
+  --info [ID]              System info, or detailed info for an item / title
+  --test [SCOPE]           Run unit tests
+
+  --help COMMAND           Full documentation with examples for any command
+"""
+
 HELP_SUFFIX="""
 usage:  my-plex [SCOPE] COMMAND [OPTIONS]
 
@@ -15913,38 +15957,8 @@ def main_print_help(args, remaining_args, main_parser):
 
     if len(sys.argv)==1 or args.help == 'default' or (args.help is None and len(remaining_args) == 0 and not has_standalone_cmd):
         if DBG: print( f"{DBGPFX}main_print_help(): standard help output..." )
-        verbose_help = args.offline  # --help --offline or --offline --help shows verbose help
-
-        # For standard help: temporarily hide verbose-only options
-        verbose_only_args = ['--plex-xml-url', '--plex-url', '--plex-token',
-                             '--audio', '--en', '--de', '--fr',
-                             '--watched', '--unwatched',
-                             '-Y', '-N', '-D', '-DD', '-VV', '-f']
-        saved_help = {}
-        if not verbose_help:
-            for action in main_parser._actions:
-                for opt in verbose_only_args:
-                    if opt in action.option_strings:
-                        saved_help[opt] = action.help
-                        action.help = argparse.SUPPRESS
-                        break
-
-        main_parser.print_help()
-        print()
-        GLOBAL_CMD_PARSER.usage = argparse.SUPPRESS;
-        GLOBAL_CMD_PARSER.description = argparse.SUPPRESS;
-        GLOBAL_CMD_PARSER.print_help()
         print(HELP_SUFFIX)
-
-        if not verbose_help:
-            print("For verbose help with all options --XXX: my-plex --help --XXX /or/ --XXX --help")
-            # Restore suppressed help texts
-            for action in main_parser._actions:
-                for opt in verbose_only_args:
-                    if opt in action.option_strings and opt in saved_help:
-                        action.help = saved_help[opt]
-                        break
-
+        print(HELP_COMPACT)
         sys.exit(0)
 
     if args.help is None: return

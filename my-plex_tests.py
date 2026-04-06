@@ -2790,7 +2790,8 @@ class TestEndToEnd(unittest.TestCase):
         """my-plex --help must show main help."""
         result = self._run_cmd('--help')
         self.assertEqual(result.returncode, 0, f"--help failed: {result.stderr}")
-        self.assertIn("OBJECT_TYPE", result.stdout)
+        self.assertIn("SCOPE SELECTORS", result.stdout)
+        self.assertIn("--help COMMAND", result.stdout)
 
     def test_help_global(self):
         """my-plex --help global must show global command help."""
