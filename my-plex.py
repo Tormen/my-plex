@@ -74,9 +74,78 @@ def _install_zsh_completions():
 
     completion_content = r'''#compdef my-plex
 
+# Filter token completions for key:value shorthand tokens
+# e.g.  type:<TAB>  →  movie series
+#        ty<TAB>    →  type:
+_my-plex-filter-token() {
+    local cur="$1"
+
+    # Complete bare token names (ty → type:, la → lang: watched:, ...)
+    local -a token_keys
+    token_keys=(
+        'type\:filter by media type (movie/series)'
+        'lang\:filter by audio language (en/de/fr)'
+        'watched\:filter by watch status (yes/no)'
+        'resolution\:filter by resolution (1080p/4k/720p)'
+        'codec\:filter by video codec (h265/h264)'
+        'year\:filter by release year'
+        'genre\:filter by genre (action/drama/…)'
+        'label\:filter by Plex label'
+        'size\:filter by file size (e.g. >1gb)'
+        'duration\:filter by duration (e.g. >2h)'
+        'rating\:filter by user rating (e.g. >8)'
+        'added\:filter by year added (e.g. >2024)'
+        'bitrate\:filter by bitrate (e.g. >2mbps)'
+    )
+
+    case "$cur" in
+        type:*)
+            local vals; vals=(movie series show)
+            local prefix="${cur%%:*}:"
+            compadd -P "$prefix" -- movie series show
+            ;;
+        lang:*|language:*)
+            local prefix="${cur%%:*}:"
+            compadd -P "$prefix" -- en de fr english german french
+            ;;
+        watched:*)
+            local prefix="${cur%%:*}:"
+            compadd -P "$prefix" -- yes no
+            ;;
+        resolution:*)
+            local prefix="${cur%%:*}:"
+            compadd -P "$prefix" -- 1080p 4k 720p 480p 2160p
+            ;;
+        codec:*)
+            local prefix="${cur%%:*}:"
+            compadd -P "$prefix" -- h265 h264 hevc avc av1 mpeg4
+            ;;
+        *)
+            # Complete token key names
+            _describe 'filter token' token_keys
+            ;;
+    esac
+}
+
 _my-plex() {
     local curcontext="$curcontext" state line
     typeset -A opt_args
+
+    local cur="${words[$CURRENT]}"
+
+    # Handle key:value filter tokens for the current word
+    if [[ "$cur" != -* ]]; then
+        case "$cur" in
+            type:*|lang:*|language:*|watched:*|resolution:*|codec:*)
+                _my-plex-filter-token "$cur"
+                return
+                ;;
+            ty*|la*|wa*|re*|co*|ye*|ge*|si*|du*|ra*|ad*|bi*)
+                # Could be a filter token prefix — offer token completions alongside other options
+                _my-plex-filter-token "$cur"
+                ;;
+        esac
+    fi
 
     local has_duplicates=0
     local has_list=0
@@ -115,6 +184,7 @@ _my-plex() {
         '--plex-token[Plex authentication token]:token:'
         '--plex-xml-url[Plex XML URL from View XML]:xml-url:'
         '--list[List all media items]'
+        '--filter[Synonym for --list; accepts filter expressions]'
         '--list-libraries[List all Plex libraries]'
         '--list-duplicates[List only duplicate media items]'
         '--broken[Show only potentially truncated/broken files]'
@@ -157,7 +227,7 @@ _my-plex() {
     fi
 
     if [[ $has_list -eq 1 ]]; then
-        args_spec+=('--type[Filter by media type]:type:(movie show)')
+        args_spec+=('--type[Filter by media type]:type:(movie series show)')
     fi
 
     _arguments -s : '*::arg:_default' $args_spec
