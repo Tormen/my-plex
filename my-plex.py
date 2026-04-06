@@ -21358,18 +21358,26 @@ def execute_global_commands(args, cmd_args):
         numbering_count = PLEX_Media._list_episode_numbering_issues(library_name=problems_library)
 
         # Summary
+        lib_arg = f" {problems_library}" if problems_library else ""
         print("\n" + "=" * 76)
         print("SUMMARY")
         print("=" * 76)
         if not tsv_only:
-            print(f"  Broken/truncated files:   {broken_count}")
-            print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files)")
-        print(f"  Episode data issues:      {tsv_problem_count}")
+            hint = f"   →  my-plex{lib_arg} --broken" if broken_count else ""
+            print(f"  Broken/truncated files:   {broken_count}{hint}")
+            hint = f"   →  my-plex{lib_arg} --excess-versions 3" if excess_entry_count else ""
+            print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files){hint}")
+        hint = f"   →  my-plex{lib_arg} --problems --tsv" if tsv_problem_count else ""
+        print(f"  Episode data issues:      {tsv_problem_count}{hint}")
         if not tsv_only:
-            print(f"  Unmatched items:          {unmatched_count}")
-            print(f"  Unsorted shows:           {unsorted_count}")
-            print(f"  Potential mismatches:     {mismatch_count}")
-        print(f"  Numbering issues:        {numbering_count}")
+            hint = f"   →  my-plex{lib_arg} --unmatched" if unmatched_count else ""
+            print(f"  Unmatched items:          {unmatched_count}{hint}")
+            hint = f"   →  my-plex{lib_arg} --unsorted" if unsorted_count else ""
+            print(f"  Unsorted shows:           {unsorted_count}{hint}")
+            hint = f"   →  my-plex{lib_arg} --potential-mismatch" if mismatch_count else ""
+            print(f"  Potential mismatches:     {mismatch_count}{hint}")
+        hint = f"   →  my-plex{lib_arg} --episode-numbering-issues" if numbering_count else ""
+        print(f"  Numbering issues:         {numbering_count}{hint}")
         total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count
         if total_problems == 0:
             print("\n  No problems found.")

@@ -2859,11 +2859,9 @@ class TestScan(unittest.TestCase):
 
     def test_scan_in_zsh_completions(self):
         """--scan must be in zsh completion script."""
-        wrapper_path = os.path.join(os.path.dirname(MAIN_SCRIPT), 'my-plex')
-        with open(wrapper_path, 'r') as f:
-            wrapper = f.read()
-        self.assertIn("'--scan[", wrapper,
-            "--scan not found in zsh completion script")
+        src = self._read_script()
+        self.assertIn("'--scan[", src,
+            "--scan not found in zsh completion script in my-plex.py")
 
     def test_scan_libraries_global_exists(self):
         """SCAN_LIBRARIES global variable must be declared."""
