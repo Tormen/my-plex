@@ -12018,7 +12018,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
         PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
         ondisk_labels_idx_size = len(PLEX_Media.OBJ_BY_ONDISK_LABEL)
-        if ondisk_labels_idx_size:
+        if ondisk_labels_idx_size and FORCE_CACHE_UPDATE:
             print(f"  On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
 
         # Update progress for cache rebuild
