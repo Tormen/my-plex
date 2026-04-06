@@ -13402,36 +13402,104 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def _list_ondisk_labeled(labeltext, library_name=None):
-        """List cached objects that have labeltext in their ondisk_labels.
+        """List cached objects that have labeltext in their ondisk_labels, with rollup.
+
+        Episode → season → series rollup:
+          All episodes in a season labeled  → show as one Season row
+          All seasons in a show labeled     → show as one Series row
+        Movies are listed individually.
         Uses OBJ_BY_ONDISK_LABEL index (populated by --update-cache).
-        Returns count of matching objects."""
-        keys = PLEX_Media.OBJ_BY_ONDISK_LABEL.get(labeltext, [])
+        Returns count of display rows printed."""
+        keys = set(PLEX_Media.OBJ_BY_ONDISK_LABEL.get(labeltext, []))
         if library_name:
-            keys = [k for k in keys if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('library') == library_name]
+            keys = {k for k in keys if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('library') == library_name}
 
         if not keys:
             scope = f" in '{library_name}'" if library_name else ""
             print(f"  No items with on-disk label '{labeltext}'{scope} found in cache.")
-            print(f"  Run --update-cache to refresh, or --reencode to detect and mark candidates.")
+            print(f"  Run --update-cache to refresh, or --reencode --mark to detect and mark candidates.")
             return 0
 
         start = ONDISK_LABEL_START_MARKER
         end   = ONDISK_LABEL_END_MARKER
+
+        # Separate movies from episodes
+        movie_keys = []
+        episode_keys = []
+        for k in keys:
+            obj = PLEX_Media.OBJ_BY_ID.get(k, {})
+            t = obj.get('type', '')
+            if t in ('Movie', 'Movie*'):
+                movie_keys.append(k)
+            elif t in ('Episode', 'Episode*'):
+                episode_keys.append(k)
+
+        # --- Episode rollup: group by show_key → season → episodes ---
+        # Count all episodes per show and per season from cache
+        show_ep_totals = {}   # show_key → total episode count in cache
+        season_ep_totals = {} # (show_key, S_str) → total episode count in cache
+        for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            if library_name and show_obj.get('library') != library_name:
+                continue
+            total = 0
+            for S_str, episodes in seasons.items():
+                count = sum(len(v) for v in episodes.values())
+                season_ep_totals[(show_key, S_str)] = count
+                total += count
+            show_ep_totals[show_key] = total
+
+        # Group labeled episode keys by show_key → S_str
+        labeled_by_show = {}  # show_key → {S_str → [ep_keys]}
+        for k in episode_keys:
+            obj = PLEX_Media.OBJ_BY_ID.get(k, {})
+            show_key = obj.get('show_key', '')
+            S_str    = obj.get('S_str', '')
+            labeled_by_show.setdefault(show_key, {}).setdefault(S_str, []).append(k)
+
+        # Build display rows
+        rows = []  # list of (lib, type_label, title)
+        for show_key, seasons_labeled in labeled_by_show.items():
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            lib = show_obj.get('library', '?')
+            show_title = show_obj.get('title', show_key)
+
+            # Check show-level rollup: all seasons fully labeled?
+            all_seasons_full = all(
+                len(seasons_labeled.get(S_str, [])) >= season_ep_totals.get((show_key, S_str), 1)
+                for S_str in (PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key) or {})
+            ) and bool(PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key))
+            labeled_ep_count = sum(len(v) for v in seasons_labeled.values())
+            show_total = show_ep_totals.get(show_key, 0)
+            if all_seasons_full or (show_total > 0 and labeled_ep_count >= show_total):
+                rows.append((lib, 'Series', show_title))
+                continue
+
+            # Check season-level rollup per season
+            seasons_in_show = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key) or {}
+            for S_str, ep_keys in sorted(seasons_labeled.items()):
+                season_total = season_ep_totals.get((show_key, S_str), 0)
+                if season_total > 0 and len(ep_keys) >= season_total:
+                    rows.append((lib, 'Season', f"{show_title} {S_str}"))
+                else:
+                    for k in sorted(ep_keys):
+                        obj = PLEX_Media.OBJ_BY_ID.get(k, {})
+                        e_str = obj.get('E_str', '')
+                        ep_title = obj.get('title', '')
+                        rows.append((lib, 'Episode', f"{show_title} {S_str}{e_str} {ep_title}"))
+
+        for k in sorted(movie_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(k, {})
+            lib = obj.get('library', '?')
+            rows.append((lib, 'Movie', obj.get('title', k)))
+
+        rows.sort(key=lambda r: (r[0], r[1], r[2]))
         print(f"\n  {'TYPE':<10}  {'LIBRARY':<16}  TITLE")
         print("  " + "-" * 70)
-        for key in sorted(keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
-            obj_type = obj.get('type', '?')
-            lib = obj.get('library', '?')[:16]
-            title = obj.get('title', '?')
-            if obj_type in ('Episode', 'Episode*'):
-                series = obj.get('series', '')
-                s_str = obj.get('S_str', '')
-                e_str = obj.get('E_str', '')
-                title = f"{series} {s_str}{e_str} {title}"
-            print(f"  {obj_type:<10}  {lib:<16}  {title}")
-        print(f"\n  Total: {len(keys)} item(s) with on-disk label {start}{labeltext}{end}")
-        return len(keys)
+        for lib, type_label, title in rows:
+            print(f"  {type_label:<10}  {lib[:16]:<16}  {title}")
+        print(f"\n  Total: {len(rows)} item(s) with on-disk label {start}{labeltext}{end}")
+        return len(rows)
 
     @staticmethod
     def _mark_reencode_candidates_on_disk(obj_keys, library_name, labeltext, remove_existing):
@@ -21985,7 +22053,7 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_episode_numbering_issues(library_name)
         return
 
-    # Handle --reencode [LIBRARY]: list / mark media files with unreasonably high bitrate
+    # Handle --reencode [LIBRARY]: list on-disk labeled items; --mark runs detection + labeling
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
         library_name = None if reencode_val is True else reencode_val
@@ -21993,29 +22061,25 @@ def execute_global_commands(args, cmd_args):
         obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
         scope = f" in '{library_name}'" if library_name else ""
         reencode_cfg = PROBLEMS2DISK.get('reencode', {})
-        list_labeled = safe_getattr(cmd_args, 'list', False)
         force_mark   = safe_getattr(cmd_args, 'mark', False)
-        auto_mark    = reencode_cfg.get('AUTO_MARK_ON_DISK', True)
 
-        if list_labeled:
-            # --reencode --list: show items that already have [reencode] on disk (from cache)
-            labeltext = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
-            print(f"\n--- Items with on-disk label '{labeltext}'{scope} ---")
-            PLEX_Media._list_ondisk_labeled(labeltext, library_name)
+        labeltext      = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
+        remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
+
+        if force_mark:
+            # --reencode --mark: detect high-bitrate candidates and write on-disk labels
+            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) ---")
+            candidate_count = PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+            if candidate_count:
+                print(f"\n  Marking {candidate_count} file(s) with on-disk label [{labeltext}]...")
+                PLEX_Media._mark_reencode_candidates_on_disk(
+                    obj_keys, library_name, labeltext, remove_existing
+                )
             return
 
-        # Detect candidates
-        print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) ---")
-        candidate_count = PLEX_Media._list_reencode_candidates(obj_keys, library_name)
-
-        # Write on-disk labels if AUTO_MARK_ON_DISK or --mark
-        if candidate_count and (auto_mark or force_mark):
-            labeltext = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
-            remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
-            print(f"\n  Marking {candidate_count} file(s) with on-disk label [{labeltext}]...")
-            PLEX_Media._mark_reencode_candidates_on_disk(
-                obj_keys, library_name, labeltext, remove_existing
-            )
+        # Default: list items that already have the reencode on-disk label (from cache)
+        print(f"\n--- Items with on-disk label '{labeltext}'{scope} ---")
+        PLEX_Media._list_ondisk_labeled(labeltext, library_name)
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -22421,7 +22485,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"Detect media files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS ({REENCODE_BITRATE_THRESHOLD_MBPS} Mbps). Use --list to show already-labeled items, --mark to force on-disk labeling.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List items already labeled with the reencode on-disk label. Use --mark to detect high-bitrate candidates (≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) and write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Force writing on-disk labels even when AUTO_MARK_ON_DISK=False (use with --reencode).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
