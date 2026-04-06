@@ -121,6 +121,7 @@ _my-plex() {
         '--excess-versions[List entries with too many file versions]:limit:'
         '--problems[Run all problem detection checks (add -V for details)]'
         '--reencode[List media files with unreasonably high bitrate (reencode candidates)]'
+        '--mark[Force on-disk labeling (use with --reencode when AUTO_MARK_ON_DISK=False)]'
         '--scan[Trigger Plex library scan + metadata refresh + cache update]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
         '--resolve[Interactive duplicate resolution (auto-enables --list --duplicates)]'
@@ -383,6 +384,27 @@ CONFIG_DEFAULTS = {
     # Reencode Candidate Detection Configuration
     'REENCODE_BITRATE_THRESHOLD_MBPS': 20.0,  # Flag files with avg bitrate above this (Mbps). 20 Mbps ≈ BD rip quality; anything higher is likely a remux or over-encoded.
 
+    # On-disk label markers embedded in filenames / directory names
+    # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
+    'ONDISK_LABEL_START_MARKER': '[',   # Single character — opening bracket of on-disk label
+    'ONDISK_LABEL_END_MARKER':   ']',   # Single character — closing bracket of on-disk label
+
+    # Problems-to-disk: automatically write on-disk labels for detected problems.
+    # Each key is a problem type that supports disk labeling.
+    # Keys per entry:
+    #   AUTO_MARK_ON_DISK      (bool)  True  → --reencode writes labels automatically
+    #                                  False → only --reencode --mark writes labels
+    #   LABELTEXT_ON_DISK      (str)   Label string written into filename, e.g. "reencode"
+    #   REMOVE_EXISTING_LABELS (bool)  True → strip all existing [label] markers before writing
+    #                                  False → keep existing markers (default — respect manual tagging)
+    'PROBLEMS2DISK': {
+        'reencode': {
+            'AUTO_MARK_ON_DISK':      True,
+            'LABELTEXT_ON_DISK':      'reencode',
+            'REMOVE_EXISTING_LABELS': False,
+        },
+    },
+
     # Duplicate Detection Configuration
     # List of library groups across which duplicates should be IGNORED.
     # Each group is a list of library names. A duplicate is excluded ONLY if
@@ -579,6 +601,35 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   20 Mbps  — high-bitrate 1080p / light BD rip  (default threshold)
 #   40 Mbps  — BD remux / near-lossless encode
 # REENCODE_BITRATE_THRESHOLD_MBPS = {CONFIG_DEFAULTS['REENCODE_BITRATE_THRESHOLD_MBPS']}
+
+###############################################################################
+# On-disk Label Markers
+###############################################################################
+
+# Single-character delimiters used to embed labels in filenames and directory names.
+# Example with defaults: "Movie (2020) [reencode]" or "Series [reencode]/Season 01/"
+# Must be single characters. Change only if your filenames already use [ ] for other purposes.
+# ONDISK_LABEL_START_MARKER = '{CONFIG_DEFAULTS['ONDISK_LABEL_START_MARKER']}'
+# ONDISK_LABEL_END_MARKER   = '{CONFIG_DEFAULTS['ONDISK_LABEL_END_MARKER']}'
+
+###############################################################################
+# Problems-to-disk (PROBLEMS2DISK)
+###############################################################################
+
+# Automatically write on-disk labels for detected problems.
+# Labels are embedded in the directory/file name using ONDISK_LABEL_START/END_MARKER.
+# Label placement hierarchy for series:
+#   ALL seasons flagged  →  label on series directory
+#   ALL episodes in one season  →  label on season directory
+#   Individual episodes  →  label on episode file
+#
+# PROBLEMS2DISK = {{
+#     'reencode': {{
+#         'AUTO_MARK_ON_DISK':      True,    # True = auto-mark on --reencode; False = need --reencode --mark
+#         'LABELTEXT_ON_DISK':      'reencode',  # Text placed between markers, e.g. [reencode]
+#         'REMOVE_EXISTING_LABELS': False,   # True = strip ALL [label] markers before writing new one
+#     }},
+# }}
 
 ###############################################################################
 # Duplicate Detection Configuration
@@ -824,6 +875,13 @@ TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
 # Reencode candidate detection threshold (Mbps)
 REENCODE_BITRATE_THRESHOLD_MBPS = CONFIG_DEFAULTS.get('REENCODE_BITRATE_THRESHOLD_MBPS', 20.0)
 
+# On-disk label markers
+ONDISK_LABEL_START_MARKER = CONFIG_DEFAULTS.get('ONDISK_LABEL_START_MARKER', '[')
+ONDISK_LABEL_END_MARKER   = CONFIG_DEFAULTS.get('ONDISK_LABEL_END_MARKER', ']')
+
+# Problems-to-disk config (see CONFIG_DEFAULTS for structure)
+PROBLEMS2DISK = CONFIG_DEFAULTS.get('PROBLEMS2DISK', {})
+
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
 # Lower values = more stable but slower, Higher values = faster but may trigger Plex throttling
@@ -864,7 +922,7 @@ CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
 EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{} }
-EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {} }
+EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
 PLEX_SERVER = None # server instance will be set where needed
@@ -1323,6 +1381,7 @@ def build_media_cache_dict(include_paths=True, **extra):
         'obj_by_show_episodes':  PLEX_Media.OBJ_BY_SHOW_EPISODES,
         'obj_by_show_scraped':   PLEX_Media.OBJ_BY_SHOW_SCRAPED,
         'obj_by_collection':     PLEX_Media.OBJ_BY_COLLECTION,
+        'ondisk_labels_index':   PLEX_Media.OBJ_BY_ONDISK_LABEL,
     }
     if include_paths:
         d['obj_by_filepath'] = PLEX_Media.OBJ_BY_FILEPATH
@@ -1343,6 +1402,7 @@ def load_media_cache(source):
     PLEX_Media.OBJ_BY_COLLECTION     = source.get('obj_by_collection', {})
     PLEX_Media.OBJ_BY_FILEPATH       = source.get('obj_by_filepath', {})
     PLEX_Media.OBJ_BY_LIBRARY        = source.get('obj_by_library', {})
+    PLEX_Media.OBJ_BY_ONDISK_LABEL   = source.get('ondisk_labels_index', {})
 
     # Detect outdated cache format and instruct user to rebuild
     # New OBJ_BY_LIBRARY format: {lib: {type: [keys]}} — values are lists
@@ -1550,6 +1610,9 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        '_check_all_children_watched', '_update_cache_child_paths',
                        'transfer_disk_map_markers_dir',
                        '_plex2disk_process_scope', 'cmd_plex2disk', 'cmd_disk2plex',
+                       'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
+                       'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
+                       'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
                        'PLEX_Media')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
@@ -1996,6 +2059,78 @@ def brute_force_search(media_identifier, library_name=None):
                                     print(f"File '{filepath}' found as part, part of media, part of {get_fullID(episode)}, part of {get_fullID(season)}, part of {item.type} '{item.title}' part of library '{library_name}'")
                                     return part
     return None # == NOT found
+
+###############################################################################
+# On-disk label helpers
+###############################################################################
+
+def parse_ondisk_labels(name):
+    """Extract all on-disk labels from a filename or directory name component.
+
+    Labels are bracketed strings matching ONDISK_LABEL_START/END_MARKER, e.g. [reencode].
+    Only the last path component (basename) is examined — never the full path.
+    Returns a list of label strings (without brackets), possibly empty.
+    """
+    if not name:
+        return []
+    basename = os.path.basename(name)
+    pattern = re.escape(ONDISK_LABEL_START_MARKER) + r'([^\]\[]+)' + re.escape(ONDISK_LABEL_END_MARKER)
+    return re.findall(pattern, basename)
+
+
+def collect_ondisk_labels_for_obj(obj):
+    """Return list of on-disk labels found in filename/directory components for a cached object.
+
+    For Movies:   checks filename + movie-dir name
+    For Episodes: checks filename + season-dir name + series-dir name
+    Labels from all relevant path components are merged (deduplicated, order preserved).
+    """
+    labels = []
+    seen = set()
+
+    def _add(name):
+        for lbl in parse_ondisk_labels(name):
+            if lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
+
+    obj_type = obj.get('type', '')
+    files_dict = obj.get('files', {})
+    for file_info in files_dict.values():
+        fp = file_info.get('filepath', '')
+        if not fp:
+            continue
+        _add(os.path.basename(fp))          # filename
+        parent = os.path.dirname(fp)
+        _add(os.path.basename(parent))      # movie-dir / season-dir
+        if obj_type in ('Episode', 'Episode*'):
+            grandparent = os.path.dirname(parent)
+            _add(os.path.basename(grandparent))  # series-dir
+    return labels
+
+
+def build_ondisk_labels_index():
+    """Build reverse index: label → [cache_keys] from obj['ondisk_labels'] in OBJ_BY_ID.
+
+    Returns dict suitable for storing as CACHE['ondisk_labels_index'].
+    """
+    index = {}
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        for lbl in (obj.get('ondisk_labels') or []):
+            if lbl not in index:
+                index[lbl] = []
+            index[lbl].append(key)
+    return index
+
+
+def refresh_ondisk_labels_from_cache():
+    """Re-read ondisk_labels for every object from its cached filepaths and rebuild the index.
+    Used after on-disk renames to keep the cache consistent without a full --update-cache.
+    """
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
+    PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
+
 
 def format_filesize(size_bytes, force_unit=None):
     """Convert bytes to human-readable format (B/KB/MB/GB)
@@ -11358,6 +11493,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     OBJ_BY_SHOW_EPISODES={} # dict: key=show_obj       - value=DICT: key='S0x'  value=DICT: key='E0x'    value=DICT: key=version, value=LIST of part_ids
     OBJ_BY_SHOW     = {}    # dict: key=show_obj_key   - value=DICT: key='S0x'  value=key ?!
     OBJ_BY_SHOW_SCRAPED = {} # dict: key=show_key → scraped episode data (title, source, episodes, numbering_issues)
+    OBJ_BY_ONDISK_LABEL = {} # dict: key=label_string → list of cache_keys that have that on-disk label
 
     init_done = False
     cache_rebuild_lock = None  # Will hold the lock during cache rebuild
@@ -11850,8 +11986,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
 
-        # Build labels index for fast label-based queries
+        # Build Plex labels index for fast label-based queries
         plex_labels_index = PLEX_Media.build_labels_index()
+
+        # Collect on-disk labels from filenames/directory names for every cached object
+        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Reading on-disk labels from filenames...")
+        for key, obj in PLEX_Media.OBJ_BY_ID.items():
+            obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
+        PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
+        ondisk_labels_idx_size = len(PLEX_Media.OBJ_BY_ONDISK_LABEL)
+        if ondisk_labels_idx_size:
+            print(f"  On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -13255,6 +13401,223 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_file_count
 
     @staticmethod
+    def _list_ondisk_labeled(labeltext, library_name=None):
+        """List cached objects that have labeltext in their ondisk_labels.
+        Uses OBJ_BY_ONDISK_LABEL index (populated by --update-cache).
+        Returns count of matching objects."""
+        keys = PLEX_Media.OBJ_BY_ONDISK_LABEL.get(labeltext, [])
+        if library_name:
+            keys = [k for k in keys if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('library') == library_name]
+
+        if not keys:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No items with on-disk label '{labeltext}'{scope} found in cache.")
+            print(f"  Run --update-cache to refresh, or --reencode to detect and mark candidates.")
+            return 0
+
+        start = ONDISK_LABEL_START_MARKER
+        end   = ONDISK_LABEL_END_MARKER
+        print(f"\n  {'TYPE':<10}  {'LIBRARY':<16}  TITLE")
+        print("  " + "-" * 70)
+        for key in sorted(keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+            obj_type = obj.get('type', '?')
+            lib = obj.get('library', '?')[:16]
+            title = obj.get('title', '?')
+            if obj_type in ('Episode', 'Episode*'):
+                series = obj.get('series', '')
+                s_str = obj.get('S_str', '')
+                e_str = obj.get('E_str', '')
+                title = f"{series} {s_str}{e_str} {title}"
+            print(f"  {obj_type:<10}  {lib:<16}  {title}")
+        print(f"\n  Total: {len(keys)} item(s) with on-disk label {start}{labeltext}{end}")
+        return len(keys)
+
+    @staticmethod
+    def _mark_reencode_candidates_on_disk(obj_keys, library_name, labeltext, remove_existing):
+        """Write on-disk label [labeltext] to directories/files for reencode candidates.
+
+        Placement rules (same as detection rollup):
+          - Movie          → label on movie directory
+          - Show (all seasons flagged) → label on series directory
+          - Season (all eps flagged)   → label on season directory
+          - Individual episodes        → label on episode file(s) + sibling files
+
+        Files are renamed via SSH using my_plex_file_operation('RENAME').
+        After renaming, obj['ondisk_labels'] in cache is updated and a Plex scan is triggered.
+        """
+        from collections import defaultdict
+
+        start = ONDISK_LABEL_START_MARKER
+        end   = ONDISK_LABEL_END_MARKER
+        label_suffix = f" {start}{labeltext}{end}"
+
+        def _add_label_to_name(name):
+            """Add [labeltext] to name if not already present. Optionally strip other labels."""
+            base = name
+            if remove_existing:
+                # Strip all existing [label] markers
+                pattern = re.escape(start) + r'[^\]\[]+' + re.escape(end)
+                base = re.sub(pattern, '', base).strip()
+            label_marker = f"{start}{labeltext}{end}"
+            if label_marker in base:
+                return base  # already has this label
+            return base.rstrip() + f" {label_marker}"
+
+        def _rename_path(path, remote_host):
+            """Rename a file or directory by adding the label. Returns new path or None on failure."""
+            parent = os.path.dirname(path)
+            old_name = os.path.basename(path)
+            new_name = _add_label_to_name(old_name)
+            if new_name == old_name:
+                return path  # no change needed
+            success, new_path = my_plex_file_operation('RENAME', path, remote_host, new_filename=new_name)
+            if success:
+                print(f"  Renamed: {old_name}\n        → {new_name}")
+                return os.path.join(parent, new_name)
+            return None
+
+        remote_host = determine_remote_host(None)[0] if hasattr(determine_remote_host, '__call__') else None
+        try:
+            remote_host = determine_remote_host(None)[0]
+        except Exception:
+            remote_host = None
+
+        # Re-run detection to get the same rollup data
+        threshold = REENCODE_BITRATE_THRESHOLD_MBPS
+        flagged_movies = []
+        flagged_ep_by_show = {}
+        show_meta = {}
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type', '')
+            if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            duration_ms = obj.get('duration') or 0
+            if duration_ms < 60_000:
+                continue
+            files_dict = obj.get('files', {})
+            is_flagged = False
+            for version, file_info in files_dict.items():
+                filesize = file_info.get('filesize') or 0
+                if not filesize:
+                    continue
+                if (filesize * 8) / (duration_ms / 1000) / 1_000_000 >= threshold:
+                    is_flagged = True
+                    break
+            if not is_flagged:
+                continue
+
+            if obj_type in ('Movie', 'Movie*'):
+                fp = list(files_dict.values())[0].get('filepath', '') if files_dict else ''
+                flagged_movies.append((key, obj, fp))
+            else:
+                show_key = obj.get('show_key', '')
+                if not show_key:
+                    continue
+                s_str = obj.get('S_str', 'S?')
+                e_str = obj.get('E_str', 'E?')
+                fp = list(files_dict.values())[0].get('filepath', '') if files_dict else ''
+                if show_key not in flagged_ep_by_show:
+                    flagged_ep_by_show[show_key] = {}
+                    show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
+                if s_str not in flagged_ep_by_show[show_key]:
+                    flagged_ep_by_show[show_key][s_str] = {}
+                flagged_ep_by_show[show_key][s_str][e_str] = fp
+
+        renamed_paths = {}  # old_path → new_path, for cache update
+
+        # --- Movies: rename movie directory ---
+        for key, obj, fp in flagged_movies:
+            if not fp:
+                continue
+            movie_dir = os.path.dirname(fp)
+            new_dir = _rename_path(movie_dir, remote_host)
+            if new_dir and new_dir != movie_dir:
+                renamed_paths[movie_dir] = new_dir
+
+        # --- Episodes: rollup then rename ---
+        for show_key, flagged_seasons in flagged_ep_by_show.items():
+            all_seasons_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+            all_season_keys = [s for s in all_seasons_data if s != 'S00']
+
+            season_rollup = {}
+            for s_str, ep_dict_total in all_seasons_data.items():
+                if s_str not in flagged_seasons:
+                    season_rollup[s_str] = 'none'
+                    continue
+                flagged_e = set(flagged_seasons[s_str].keys())
+                total_e = set(ep_dict_total.keys())
+                season_rollup[s_str] = 'full' if flagged_e >= total_e else 'partial'
+
+            show_full = (bool(all_season_keys) and
+                         all(season_rollup.get(s, 'none') == 'full' for s in all_season_keys))
+
+            # Get a sample filepath to derive dirs
+            sample_fp = next(
+                (fp for s in flagged_seasons.values() for fp in s.values() if fp),
+                None
+            )
+            if not sample_fp:
+                continue
+
+            season_dir  = os.path.dirname(sample_fp)
+            series_dir  = os.path.dirname(season_dir)
+
+            if show_full:
+                new_dir = _rename_path(series_dir, remote_host)
+                if new_dir and new_dir != series_dir:
+                    renamed_paths[series_dir] = new_dir
+            else:
+                for s_str in flagged_seasons:
+                    rollup = season_rollup.get(s_str, 'partial')
+                    # Get a sample fp from this season
+                    season_fp = next(iter(flagged_seasons[s_str].values()), None)
+                    if not season_fp:
+                        continue
+                    s_season_dir = os.path.dirname(season_fp)
+                    if rollup == 'full':
+                        new_dir = _rename_path(s_season_dir, remote_host)
+                        if new_dir and new_dir != s_season_dir:
+                            renamed_paths[s_season_dir] = new_dir
+                    else:
+                        # Individual episodes
+                        for e_str, fp in flagged_seasons[s_str].items():
+                            if not fp:
+                                continue
+                            new_fp = _rename_path(fp, remote_host)
+                            if new_fp and new_fp != fp:
+                                renamed_paths[fp] = new_fp
+                                # Rename sibling files (per rename_siblings memory)
+                                base_no_ext = os.path.splitext(fp)[0]
+                                new_base_no_ext = os.path.splitext(new_fp)[0]
+                                parent = os.path.dirname(fp)
+                                # List dir and rename siblings
+                                ok, listing = my_plex_file_operation('LIST_DIR', parent, remote_host, maxdepth=1)
+                                if ok and listing:
+                                    for sibling in listing:
+                                        if sibling != fp and sibling.startswith(base_no_ext + '.'):
+                                            ext = sibling[len(base_no_ext):]
+                                            new_sibling = new_base_no_ext + ext
+                                            sib_name = os.path.basename(new_sibling)
+                                            _rename_path(sibling, remote_host)
+
+        if not renamed_paths:
+            print("  Nothing renamed — all candidates already labeled or no filepaths available.")
+            return
+
+        print(f"\n  {len(renamed_paths)} path(s) renamed. Refreshing on-disk labels in cache...")
+        refresh_ondisk_labels_from_cache()
+        update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
+                               'ondisk_labels_index': PLEX_Media.OBJ_BY_ONDISK_LABEL})
+        print(f"  Cache updated. Run --scan to update Plex library paths.")
+
+    @staticmethod
     def _find_duplicates(obj_keys, library_name):
         key_to_group = {}
         items_with_duplicates = {}
@@ -14274,6 +14637,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'VERSIONS':            label = 'VERSION:' if labeled else ''
                     case 'MEMBER_IDS':          label = 'MEMBER:' if labeled else ''
                     case 'MEMBERS':             label = 'MEMBER:' if labeled else ''
+                    case 'ONDISK_LABELS':       label = 'ONDISK-LABEL:' if labeled else ''
                     case _:                     err(1058, f"Unknown list type (k={k})")
                 v = (label if len(v)>0 else'') + (','+label).join(str(x) for x in v)
             else:
@@ -19739,7 +20103,7 @@ def show_system_info():
         structure_sizes = []
 
         # Calculate size for each cache structure
-        for key in ['media_objs', 'library_stats', 'plex_labels_index', 'obj_by_id',
+        for key in ['media_objs', 'library_stats', 'plex_labels_index', 'ondisk_labels_index', 'obj_by_id',
                     'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
                     'obj_by_show_scraped', 'library_object_counts', 'obj_by_filepath', 'obj_by_library']:
             if key in CACHE:
@@ -20013,7 +20377,7 @@ def show_system_info():
 
         # Calculate overhead from non-library structures (structures not distributed to libraries)
         # This includes: media_objs, library_stats, plex_labels_index, library_object_counts
-        overhead_structures = ['media_objs', 'library_stats', 'plex_labels_index', 'library_object_counts']
+        overhead_structures = ['media_objs', 'library_stats', 'plex_labels_index', 'ondisk_labels_index', 'library_object_counts']
         overhead_mb = 0
         for struct_name in overhead_structures:
             if struct_name in CACHE:
@@ -21621,15 +21985,37 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_episode_numbering_issues(library_name)
         return
 
-    # Handle --reencode [LIBRARY]: list media files with unreasonably high bitrate
+    # Handle --reencode [LIBRARY]: list / mark media files with unreasonably high bitrate
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
         library_name = None if reencode_val is True else reencode_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
         scope = f" in '{library_name}'" if library_name else ""
+        reencode_cfg = PROBLEMS2DISK.get('reencode', {})
+        list_labeled = safe_getattr(cmd_args, 'list', False)
+        force_mark   = safe_getattr(cmd_args, 'mark', False)
+        auto_mark    = reencode_cfg.get('AUTO_MARK_ON_DISK', True)
+
+        if list_labeled:
+            # --reencode --list: show items that already have [reencode] on disk (from cache)
+            labeltext = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
+            print(f"\n--- Items with on-disk label '{labeltext}'{scope} ---")
+            PLEX_Media._list_ondisk_labeled(labeltext, library_name)
+            return
+
+        # Detect candidates
         print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) ---")
-        PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+        candidate_count = PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+
+        # Write on-disk labels if AUTO_MARK_ON_DISK or --mark
+        if candidate_count and (auto_mark or force_mark):
+            labeltext = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
+            remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
+            print(f"\n  Marking {candidate_count} file(s) with on-disk label [{labeltext}]...")
+            PLEX_Media._mark_reencode_candidates_on_disk(
+                obj_keys, library_name, labeltext, remove_existing
+            )
         return
 
     # Handle --list, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -22035,7 +22421,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List media files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS (default: {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps). Shows episode → season → series rollup. Optional: library name to filter.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"Detect media files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS ({REENCODE_BITRATE_THRESHOLD_MBPS} Mbps). Use --list to show already-labeled items, --mark to force on-disk labeling.")
+    GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Force writing on-disk labels even when AUTO_MARK_ON_DISK=False (use with --reencode).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', help=argparse.SUPPRESS)  # Hidden - documented in --list
