@@ -2349,15 +2349,24 @@ class TestOndiskLabels(unittest.TestCase):
         src = self._read_script()
         self.assertIn("def _mark_reencode_candidates_on_disk(", src)
 
-    def test_reencode_list_flag_uses_list_ondisk_labeled(self):
-        """--reencode --list must call _list_ondisk_labeled."""
-        src = self._read_script()
+    def _reencode_handler_body(self, src):
+        """Extract the full --reencode handler block from src."""
         import re
-        # Find the reencode standalone handler block
-        match = re.search(r"reencode_val = safe_getattr\(cmd_args.*?return\s*\n.*?candidate_count", src, re.DOTALL)
+        match = re.search(r"# Handle --reencode.*?# Handle --list", src, re.DOTALL)
         self.assertIsNotNone(match, "Must find reencode handler block")
-        body = match.group(0)
+        return match.group(0)
+
+    def test_reencode_default_lists_labeled(self):
+        """--reencode (default, no sub-flag) must call _list_ondisk_labeled."""
+        src = self._read_script()
+        body = self._reencode_handler_body(src)
         self.assertIn("_list_ondisk_labeled(", body)
+
+    def test_reencode_mark_detects_candidates(self):
+        """--reencode --mark must call _list_reencode_candidates for detection."""
+        src = self._read_script()
+        body = self._reencode_handler_body(src)
+        self.assertIn("_list_reencode_candidates(", body)
 
     def test_auto_mark_on_disk_config_key(self):
         """PROBLEMS2DISK reencode entry must have AUTO_MARK_ON_DISK key."""
