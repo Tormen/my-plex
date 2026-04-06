@@ -22916,6 +22916,7 @@ def main():
     _new_argv = [sys.argv[0]]
     _inject_flags = []   # flags to append after the current argv sweep
     _filter_exprs = []   # category B expressions collected
+    _translations = []   # (original_token, translated_to) for user echo
     _i = 1
     while _i < len(sys.argv):
         arg = sys.argv[_i]
@@ -22926,19 +22927,24 @@ def main():
             val = _ma.group('val')
             if key == 'type':
                 _inject_flags += ['--type', val]
+                _translations.append((arg, f"--type {val}"))
             elif key in ('lang', 'language'):
                 lang_map = {'en': '--en', 'english': '--en', 'de': '--de', 'german': '--de',
                             'fr': '--fr', 'french': '--fr'}
                 flag = lang_map.get(val.lower())
                 if flag:
                     _inject_flags.append(flag)
+                    _translations.append((arg, flag))
                 else:
                     _inject_flags += ['--audio', val]
+                    _translations.append((arg, f"--audio {val}"))
             elif key == 'watched':
                 if val.lower() in ('yes', 'true', '1', 'y'):
                     _inject_flags.append('--watched')
+                    _translations.append((arg, '--watched'))
                 else:
                     _inject_flags.append('--unwatched')
+                    _translations.append((arg, '--unwatched'))
             if DBG: print(f" ~~~ Filter token '{arg}' → {_inject_flags[-2:] if len(_inject_flags)>=2 else _inject_flags[-1:]}", file=sys.stderr)
         elif _mb and not arg.startswith('-'):
             field = _mb.group('field').lower()
@@ -22946,8 +22952,10 @@ def main():
             val   = _mb.group('val')
             # Normalise ':' to '=' for equality fields; keep </>/<=/>= as-is
             op_norm = '=' if op in (':', '==') else op
-            _filter_exprs.append(f"{field}{op_norm}{val}")
-            if DBG: print(f" ~~~ Filter token '{arg}' → expr '{field}{op_norm}{val}'", file=sys.stderr)
+            expr = f"{field}{op_norm}{val}"
+            _filter_exprs.append(expr)
+            _translations.append((arg, f"--list filter: {expr}"))
+            if DBG: print(f" ~~~ Filter token '{arg}' → expr '{expr}'", file=sys.stderr)
         else:
             _new_argv.append(arg)
         _i += 1
@@ -22957,6 +22965,11 @@ def main():
             combined = ' AND '.join(_filter_exprs)
             sys.argv += ['--list', combined]
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
+        # Echo translations to the user so they can see how input was interpreted
+        translated_flags = ' '.join(_inject_flags) + (f" --list '{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
+        print(f" >>> Interpreted: {translated_flags}")
+        for orig, dest in _translations:
+            print(f"    > {orig}  →  {dest}")
 
     # Normalize arguments: inject --list before --duplicates or --broken if --list not present
     # Normalize --resolve to --list --duplicates --resolve for canonical form
