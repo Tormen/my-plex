@@ -2113,14 +2113,14 @@ class TestReencode(unittest.TestCase):
         self.assertIn("def _list_reencode_candidates(", src)
 
     def test_reencode_uses_bitrate_threshold(self):
-        """_list_reencode_candidates must use REENCODE_BITRATE_THRESHOLD_MBPS."""
+        """_list_reencode_candidates must use REENCODE_THRESHOLD_MBPS."""
         src = self._read_script()
-        self.assertIn("REENCODE_BITRATE_THRESHOLD_MBPS", src)
+        self.assertIn("REENCODE_THRESHOLD_MBPS", src)
 
     def test_reencode_config_default_exists(self):
-        """REENCODE_BITRATE_THRESHOLD_MBPS must be in CONFIG_DEFAULTS."""
+        """REENCODE_THRESHOLD dict must be in CONFIG_DEFAULTS."""
         src = self._read_script()
-        self.assertIn("'REENCODE_BITRATE_THRESHOLD_MBPS'", src)
+        self.assertIn("'REENCODE_THRESHOLD'", src)
 
     def test_reencode_in_argparser(self):
         """--reencode must be registered in both main_parser and GLOBAL_CMD_PARSER."""
