@@ -385,11 +385,11 @@ CONFIG_DEFAULTS = {
 
     # Reencode Candidate Detection Configuration
     # Reencode threshold — specify as a dict with ONE of the two keys:
-    #   {'mbps': 20.0}         — threshold in Megabits/second
-    #   {'mb_per_hour': 9000}  — threshold in MB per hour of playtime
+    #   {'mbps': 2.0}         — threshold in Megabits/second
+    #   {'mb_per_hour': 900}   — threshold in MB per hour of playtime
     # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
-    # 20 Mbps ≈ BD rip quality; anything higher is likely a remux or over-encoded.
-    'REENCODE_THRESHOLD': {'mbps': 20.0},
+    # 2 Mbps is a reasonable threshold for flagging over-encoded files.
+    'REENCODE_THRESHOLD': {'mbps': 2.0},
 
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
@@ -602,12 +602,13 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # Average bitrate threshold for flagging files as reencode candidates.
 # Specify as a dict with ONE or BOTH keys (if both, lower value wins):
-#   {{'mbps': 20.0}}         — threshold in Megabits/second
-#   {{'mb_per_hour': 9000}}  — threshold in MB per hour of playtime
+#   {{'mbps': 2.0}}         — threshold in Megabits/second
+#   {{'mb_per_hour': 900}}   — threshold in MB per hour of playtime
 # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
 # Typical values:
-#   {{'mbps': 10}}  /  {{'mb_per_hour':  4500}}  — normal 1080p H.264  (below default)
-#   {{'mbps': 20}}  /  {{'mb_per_hour':  9000}}  — high-bitrate 1080p / light BD rip  (default)
+#   {{'mbps':  2}}  /  {{'mb_per_hour':   900}}  — default; catches most over-encoded files
+#   {{'mbps': 10}}  /  {{'mb_per_hour':  4500}}  — normal 1080p H.264
+#   {{'mbps': 20}}  /  {{'mb_per_hour':  9000}}  — high-bitrate 1080p / light BD rip
 #   {{'mbps': 40}}  /  {{'mb_per_hour': 18000}}  — BD remux / near-lossless encode
 #
 # REENCODE_THRESHOLD = {{'mbps': {CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps']}}}
@@ -886,11 +887,11 @@ TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
 _MB_PER_HOUR_PER_MBPS = 450.0  # 1 Mbps × 3600 s/hr ÷ 8 = 450 MB/hr
-_reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 20.0})
+_reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 2.0})
 _candidates = []
 if 'mbps'         in _reencode_threshold: _candidates.append(float(_reencode_threshold['mbps']))
 if 'mb_per_hour'  in _reencode_threshold: _candidates.append(float(_reencode_threshold['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
-REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 20.0  # if both given, use lower (stricter)
+REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 2.0  # if both given, use lower (stricter)
 
 # On-disk label markers
 ONDISK_LABEL_START_MARKER = CONFIG_DEFAULTS.get('ONDISK_LABEL_START_MARKER', '[')
@@ -16101,18 +16102,20 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  --reencode           List items already labeled on disk (from cache).")
             print()
-            print("  --reencode --detect  Dry-run: show what WOULD be labeled without renaming.")
-            print("                       Also warns about items labeled but below threshold.")
+            print("  --reencode --detect  List reencode candidates (above threshold).")
+            print("                       Read-only — does not write anything.")
             print()
-            print("  --reencode --mark    Detect and write labels via SSH rename.")
-            print("                       Respects --try / --dry-run for safe preview.")
+            print("  --reencode --mark    Detect candidates and write on-disk labels via SSH rename.")
             print("                       Warns about labeled items below threshold.")
             print("                       Always prints a SUMMARY.")
             print()
+            print("  --reencode --mark --try")
+            print("                       Dry-run of --mark: show what WOULD be labeled/renamed,")
+            print("                       without writing anything. Same output as --mark but")
+            print("                       prefixed with [DRY-RUN].")
+            print()
             print("  --reencode --mark --force")
             print("                       Also REMOVES labels from items below threshold.")
-            print()
-            print("  --reencode --mark --try   Same as --detect (dry-run).")
             print()
             print("  When AUTO_MARK_ON_DISK = True (default in PROBLEMS2DISK config),")
             print("  --problems also runs detection and marks automatically.")
@@ -16140,11 +16143,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --reencode                        # List items labeled on disk")
             print("  my-plex --reencode movies.fr              # Limit to one library")
             print()
-            print("  my-plex --reencode --detect               # Dry-run: what would be labeled?")
-            print("  my-plex --reencode movies.fr --detect     # Dry-run for one library")
+            print("  my-plex --reencode --detect               # List candidates above threshold")
+            print("  my-plex --reencode movies.fr --detect     # Candidates in one library")
             print()
             print("  my-plex --reencode --mark                 # Detect + write labels")
-            print("  my-plex --reencode --mark --try           # Same but dry-run (no writes)")
+            print("  my-plex --reencode --mark --try           # Dry-run: preview labels/renames")
             print("  my-plex --reencode movies.fr --mark       # Detect + label one library")
             print("  my-plex --reencode --mark --force         # Also remove labels below threshold")
             print("  my-plex --reencode --mark --force --try   # Preview --force without writes")
@@ -22277,11 +22280,17 @@ def execute_global_commands(args, cmd_args):
         remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
         force_mark  = safe_getattr(cmd_args, 'mark', False)
         detect_only = safe_getattr(cmd_args, 'detect', False)
-        dry_run     = detect_only or safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        dry_run     = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force       = safe_getattr(cmd_args, 'force', False) or safe_getattr(args, 'force', False)
 
-        if force_mark or detect_only:
-            # --mark or --detect: run detection, then label (or simulate)
+        if detect_only:
+            # --detect: list reencode candidates only (no labeling)
+            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
+            PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+            return
+
+        if force_mark:
+            # --mark [--dry]: run detection then label (or simulate with --dry/--try)
             print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
             PLEX_Media._list_reencode_candidates(obj_keys, library_name)
             print(f"\n--- {'[DRY-RUN] ' if dry_run else ''}Labeling with [{labeltext}]{scope} ---")
@@ -22617,6 +22626,19 @@ def main():
             print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+
+    # Re-derive values that are computed from config keys (not set directly by name in globals).
+    # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
+    # so they must be recomputed here after the config file values have been applied.
+    global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
+    _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.0})
+    _c = []
+    if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
+    if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
+    REENCODE_THRESHOLD_MBPS    = min(_c) if _c else 2.0
+    ONDISK_LABEL_START_MARKER  = globals().get('ONDISK_LABEL_START_MARKER', '[')
+    ONDISK_LABEL_END_MARKER    = globals().get('ONDISK_LABEL_END_MARKER',   ']')
+    PROBLEMS2DISK              = globals().get('PROBLEMS2DISK', {})
 
     # =====================================================================
     # CLI DESIGN AXIOMS
