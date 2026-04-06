@@ -382,11 +382,16 @@ CONFIG_DEFAULTS = {
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
 
     # Reencode Candidate Detection Configuration
-    'REENCODE_BITRATE_THRESHOLD_MBPS': 20.0,  # Flag files with avg bitrate above this (Mbps). 20 Mbps ≈ BD rip quality; anything higher is likely a remux or over-encoded.
+    # Reencode threshold — specify as a dict with ONE of the two keys:
+    #   {'mbps': 20.0}         — threshold in Megabits/second
+    #   {'mb_per_hour': 9000}  — threshold in MB per hour of playtime
+    # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
+    # 20 Mbps ≈ BD rip quality; anything higher is likely a remux or over-encoded.
+    'REENCODE_THRESHOLD': {'mbps': 20.0},
 
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
-    'ONDISK_LABEL_START_MARKER': '[',   # Single character — opening bracket of on-disk label
+    'ONDISK_LABEL_START_MARKER': '[',   # Any string — opening delimiter of on-disk label (e.g. '[', '{{', '<')
     'ONDISK_LABEL_END_MARKER':   ']',   # Single character — closing bracket of on-disk label
 
     # Problems-to-disk: automatically write on-disk labels for detected problems.
@@ -593,14 +598,18 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Reencode Candidate Detection Configuration
 ###############################################################################
 
-# Average bitrate threshold for flagging files as reencode candidates (Mbps)
-# Files above this bitrate are unnecessarily large for their duration and can
-# likely be reencoded (H.265 / AV1) to save significant disk space without
-# perceptible quality loss.  Typical values:
-#   10 Mbps  — normal 1080p H.264 encode  (not flagged at default threshold)
-#   20 Mbps  — high-bitrate 1080p / light BD rip  (default threshold)
-#   40 Mbps  — BD remux / near-lossless encode
-# REENCODE_BITRATE_THRESHOLD_MBPS = {CONFIG_DEFAULTS['REENCODE_BITRATE_THRESHOLD_MBPS']}
+# Average bitrate threshold for flagging files as reencode candidates.
+# Specify as a dict with ONE or BOTH keys (if both, lower value wins):
+#   {{'mbps': 20.0}}         — threshold in Megabits/second
+#   {{'mb_per_hour': 9000}}  — threshold in MB per hour of playtime
+# Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
+# Typical values:
+#   {{'mbps': 10}}  /  {{'mb_per_hour':  4500}}  — normal 1080p H.264  (below default)
+#   {{'mbps': 20}}  /  {{'mb_per_hour':  9000}}  — high-bitrate 1080p / light BD rip  (default)
+#   {{'mbps': 40}}  /  {{'mb_per_hour': 18000}}  — BD remux / near-lossless encode
+#
+# REENCODE_THRESHOLD = {{'mbps': {CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps']}}}
+# REENCODE_THRESHOLD = {{'mb_per_hour': {int(CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps'] * 450)}}}
 
 ###############################################################################
 # On-disk Label Markers
@@ -872,8 +881,14 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
 
-# Reencode candidate detection threshold (Mbps)
-REENCODE_BITRATE_THRESHOLD_MBPS = CONFIG_DEFAULTS.get('REENCODE_BITRATE_THRESHOLD_MBPS', 20.0)
+# Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
+# {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
+_MB_PER_HOUR_PER_MBPS = 450.0  # 1 Mbps × 3600 s/hr ÷ 8 = 450 MB/hr
+_reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 20.0})
+_candidates = []
+if 'mbps'         in _reencode_threshold: _candidates.append(float(_reencode_threshold['mbps']))
+if 'mb_per_hour'  in _reencode_threshold: _candidates.append(float(_reencode_threshold['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
+REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 20.0  # if both given, use lower (stricter)
 
 # On-disk label markers
 ONDISK_LABEL_START_MARKER = CONFIG_DEFAULTS.get('ONDISK_LABEL_START_MARKER', '[')
@@ -2074,7 +2089,11 @@ def parse_ondisk_labels(name):
     if not name:
         return []
     basename = os.path.basename(name)
-    pattern = re.escape(ONDISK_LABEL_START_MARKER) + r'([^\]\[]+)' + re.escape(ONDISK_LABEL_END_MARKER)
+    # Inner pattern: any chars that don't contain the start or end marker.
+    # re.escape handles multi-char markers; negative lookahead avoids greedy overreach.
+    _s = re.escape(ONDISK_LABEL_START_MARKER)
+    _e = re.escape(ONDISK_LABEL_END_MARKER)
+    pattern = _s + r'((?:(?!' + _s + r'|' + _e + r').)+)' + _e
     return re.findall(pattern, basename)
 
 
@@ -13260,10 +13279,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def _list_reencode_candidates(obj_keys, library_name):
-        """List media files whose avg bitrate exceeds REENCODE_BITRATE_THRESHOLD_MBPS.
+        """List media files whose avg bitrate exceeds REENCODE_THRESHOLD_MBPS.
         For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
         Returns total count of flagged files."""
-        threshold = REENCODE_BITRATE_THRESHOLD_MBPS
+        threshold = REENCODE_THRESHOLD_MBPS
 
         flagged_movies = []
         # {show_key: {s_str: {e_str: [(bitrate, filesize, dur_ms, plex_id, ep_title, filepath, version)]}}}
@@ -13552,7 +13571,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             remote_host = None
 
         # Re-run detection to get the same rollup data
-        threshold = REENCODE_BITRATE_THRESHOLD_MBPS
+        threshold = REENCODE_THRESHOLD_MBPS
         flagged_movies = []
         flagged_ep_by_show = {}
         show_meta = {}
@@ -15768,8 +15787,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("                          Detect shows where Plex and scraped episode numbering")
             print("                          disagree (e.g. Plex E101 vs Scraped E01)")
             print()
-            print(f"  8. --reencode           Detect media files with avg bitrate above")
-            print(f"                          REENCODE_BITRATE_THRESHOLD_MBPS (default: {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps).")
+            print(f"  8. --reencode           Detect media files with avg bitrate above threshold")
+            print(f"                          (currently {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr — set via REENCODE_THRESHOLD).")
             print(f"                          Episodes roll up to season / series level when all flagged.")
             print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
@@ -15970,8 +15989,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  All seasons in a show → shown as one Series row")
             print()
             print("DETECTION & MARKING (--mark):")
-            print(f"  Scans media for files with avg bitrate ≥ REENCODE_BITRATE_THRESHOLD_MBPS")
-            print(f"  (currently {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) and writes the on-disk label to")
+            print(f"  Scans media for files with avg bitrate ≥ REENCODE_THRESHOLD_MBPS")
+            print(f"  (currently {REENCODE_THRESHOLD_MBPS} Mbps) and writes the on-disk label to")
             print( "  the appropriate directory or file via SSH rename.")
             print( "  Episodes roll up: all flagged in a season → label on season dir;")
             print( "  all seasons flagged → label on series dir.")
@@ -15980,9 +15999,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("  must be passed explicitly. When True, --problems also marks automatically.")
             print()
             print("CONFIG (in my-plex.conf):")
-            print("  REENCODE_BITRATE_THRESHOLD_MBPS = 20.0   # detection threshold")
-            print("  ONDISK_LABEL_START_MARKER = '['          # bracket style")
-            print("  ONDISK_LABEL_END_MARKER   = ']'")
+            print(f"  REENCODE_THRESHOLD = {{'mbps': {REENCODE_THRESHOLD_MBPS}}}        # Megabits/second")
+            print(f"  REENCODE_THRESHOLD = {{'mb_per_hour': {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)}}}   # MB per hour of playtime")
+            print( "  # Both keys: lower value wins. Conversion: 1 Mbps = 450 MB/hr")
+            print( "  ONDISK_LABEL_START_MARKER = '['          # bracket style")
+            print( "  ONDISK_LABEL_END_MARKER   = ']'")
             print("  PROBLEMS2DISK = {")
             print("      'reencode': {")
             print("          'AUTO_MARK_ON_DISK':      True,  # mark on --problems too")
@@ -22128,7 +22149,7 @@ def execute_global_commands(args, cmd_args):
 
         if force_mark:
             # --reencode --mark: detect high-bitrate candidates and write on-disk labels
-            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) ---")
+            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
             candidate_count = PLEX_Media._list_reencode_candidates(obj_keys, library_name)
             if candidate_count:
                 print(f"\n  Marking {candidate_count} file(s) with on-disk label [{labeltext}]...")
@@ -22567,7 +22588,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List items already labeled with the reencode on-disk label. Use --mark to detect high-bitrate candidates (≥ {REENCODE_BITRATE_THRESHOLD_MBPS} Mbps) and write on-disk labels.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List items already labeled with the reencode on-disk label. Use --mark to detect high-bitrate candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps) and write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Force writing on-disk labels even when AUTO_MARK_ON_DISK=False (use with --reencode).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
