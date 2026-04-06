@@ -4,7 +4,7 @@ Still under heavy development, but already somewhat usable.
 
 The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
-**21,000+ lines of Python** | **568 tests** | **Offline-capable** | **60x faster than Plex API**
+**23,000+ lines of Python** | **630 tests** | **Offline-capable** | **60x faster than Plex API**
 
 ## Features
 
@@ -16,6 +16,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Broken file detection** — finds truncated/corrupt media by comparing container vs Plex duration
 - **Potential mismatch detection** (`--potential-mismatch`) — finds items where Plex title doesn't match directory name
 - **Excess version detection** — finds entries with too many file versions
+- **Re-encode detection** (`--reencode`) — finds high-bitrate media (size/length ratio) and labels files on disk with `[reencode]` markers; rolls up episodes → season → series
+- **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
 - **Problem scanner** — runs all checks in one pass (`--problems`)
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 
