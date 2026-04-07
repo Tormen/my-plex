@@ -13928,25 +13928,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             filepath  = matched_fi.get('filepath', '')
 
             rows.append({
-                'key':        key,
-                'type':       obj_type.rstrip('*'),
-                'lib':        lib,
-                'bitrate':    bitrate,
-                'filepath':   filepath,
-                'resolution': obj.get('resolution_full') or obj.get('resolution', ''),
-                'codec':      obj.get('video_codec', ''),
-                'year':       obj.get('year', 0),
-                'filesize':   fs_bytes,
-                'duration':   dur_ms,
-                'stars':      obj.get('userRating') or 0,
-                'rating':     obj.get('audienceRating') or 0,
-                'critics':    obj.get('criticsRating') or 0,
-                'added':      obj.get('addedAt') or 0,
-                'langs':      ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
-                'genres':     ', '.join(str(g) for g in (obj.get('genres') or [])),
-                'labels':     ', '.join(str(l) for l in (obj.get('labels') or [])),
+                'key':          key,
+                'type':         obj_type.rstrip('*'),
+                'lib':          lib,
+                'bitrate':      bitrate,
+                'filepath':     filepath,
+                'resolution':   obj.get('resolution', ''),         # short: '1080p'
+                'resolution_full': obj.get('resolution_full', ''), # full: '60min 1920x1080 (h264 aac) 2GB'
+                'video_codec':  obj.get('video_codec', ''),
+                'audio_codec':  obj.get('audio_codec', ''),
+                'year':         obj.get('year', 0),
+                'filesize':     fs_bytes,
+                'duration':     dur_ms,
+                'stars':        obj.get('userRating') or 0,        # 0–10 stored; display as 0–5
+                'rating':       obj.get('audienceRating') or 0,    # external audience score
+                'critics':      obj.get('criticsRating') or 0,     # RT Tomatometer only
+                'added':        obj.get('addedAt') or 0,
+                'audio_langs':  ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
+                'sub_langs':    ', '.join(str(l) for l in (obj.get('subtitle_languages') or [])),
+                'genres':       ', '.join(str(g) for g in (obj.get('genres') or [])),
+                'labels':       ', '.join(str(l) for l in (obj.get('labels') or [])),
                 'last_watched': obj.get('lastViewedAt') or 0,
-                'view_count': obj.get('viewCount', 0) or 0,
+                'view_count':   obj.get('viewCount', 0) or 0,
             })
 
         if not rows:
@@ -14000,35 +14003,57 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             gb = b / 1024**3
             return f"{gb:.1f}GB" if gb >= 1 else f"{b/1024**2:.0f}MB"
 
-        # Build columns: always KEY first, FILEPATH last; extra cols in between
+        # Build columns: always KEY first, FILEPATH last; extra cols in between.
+        # For each filter, show ALL related Plex fields — not just the one filtered on.
         extra_cols = []  # list of (header, width, value_fn)
-        if has_watched:  # watched:yes only — shows when it was watched
-            extra_cols.append(('LAST WATCHED', 12, lambda r: _fmt_ts(r['last_watched'])))
+
+        # watched: viewCount (the completion counter) + lastViewedAt (any play activity)
+        if has_watched or has_unwatched:
+            extra_cols.append(('WATCH#',      6,  lambda r: str(r['view_count']) if r['view_count'] else '-'))
+            extra_cols.append(('LAST-PLAYED', 11, lambda r: _fmt_ts(r['last_watched'])))
+
+        # bitrate: already two columns (Mbps + MB/hr, both derived from filesize+duration)
         if has_bitrate:
-            extra_cols.append(('BITRATE',  8, lambda r: f"{r['bitrate']:.2f}" if r['bitrate'] else 'N/A'))
-            extra_cols.append(('MB/HR',    6, lambda r: str(int(r['bitrate'] * _MB_PER_HOUR_PER_MBPS)) if r['bitrate'] else 'N/A'))
+            extra_cols.append(('BITRATE', 8, lambda r: f"{r['bitrate']:.2f}" if r['bitrate'] else 'N/A'))
+            extra_cols.append(('MB/HR',   6, lambda r: str(int(r['bitrate'] * _MB_PER_HOUR_PER_MBPS)) if r['bitrate'] else 'N/A'))
+
+        # resolution: short form (1080p) + full form (WxH codec acodec size)
         if has_resolution:
-            extra_cols.append(('RESOLUTION', 10, lambda r: r['resolution'] or '-'))
+            extra_cols.append(('RES',          6,  lambda r: r['resolution'] or '-'))
+            extra_cols.append(('RESOLUTION',   32, lambda r: r['resolution_full'] or '-'))
+
+        # codec: video + audio codec (both stored in cache)
         if has_codec:
-            extra_cols.append(('CODEC', 6, lambda r: r['codec'] or '-'))
+            extra_cols.append(('VCODEC', 6, lambda r: r['video_codec'] or '-'))
+            extra_cols.append(('ACODEC', 6, lambda r: r['audio_codec'] or '-'))
+
         if has_year:
             extra_cols.append(('YEAR', 4, lambda r: str(r['year']) if r['year'] else '-'))
         if has_size:
             extra_cols.append(('SIZE', 7, lambda r: _fmt_size(r['filesize'])))
         if has_duration:
             extra_cols.append(('DURATION', 8, lambda r: _fmt_dur(r['duration'])))
+
+        # stars: personal Plex rating — stored 0–10, shown 0–5; show both
         if has_stars:
             extra_cols.append(('STARS', 5, lambda r: f"{r['stars']/2:.1f}" if r['stars'] else '-'))
-        if has_rating:
-            extra_cols.append(('RATING', 6, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
-        if has_critics:
-            extra_cols.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+            extra_cols.append(('RAW',   4, lambda r: str(int(r['stars'])) if r['stars'] else '-'))
+
+        # rating + critics: audience + RT Tomatometer — always show both when either is filtered
+        if has_rating or has_critics:
+            extra_cols.append(('AUDIENCE', 8, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
+            extra_cols.append(('CRITICS',  7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+
         if has_added:
             extra_cols.append(('ADDED', 10, lambda r: _fmt_ts(r['added'])))
+
+        # lang: audio languages + subtitle languages (both stored in cache)
         if has_lang:
-            extra_cols.append(('LANG', 8, lambda r: r['langs'] or '-'))
+            extra_cols.append(('AUDIO', 8,  lambda r: r['audio_langs'] or '-'))
+            extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
+
         if has_genre:
-            extra_cols.append(('GENRE', 16, lambda r: r['genres'][:15] if r['genres'] else '-'))
+            extra_cols.append(('GENRE',  16, lambda r: r['genres'][:15] if r['genres'] else '-'))
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
 
