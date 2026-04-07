@@ -22904,22 +22904,22 @@ def execute_global_commands(args, cmd_args):
                     desc = f'(lang={lib_lang})'
                 elif agent_id in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
                     if TMDB_API_KEY:
-                        src, desc = 'tmdb', '(episode guide & ratings)'
+                        src, desc = 'tmdb', f'(non-german, lang={lib_lang})'
                     elif TVDB_API_KEY:
-                        src, desc = 'tvdb', '(episode guide, fallback)'
+                        src, desc = 'tvdb', f'(non-german, lang={lib_lang}, fallback)'
                     else:
                         src, desc = 'tmdb', '(NO API KEY CONFIGURED)'
                 elif agent_id == 'com.plexapp.agents.thetvdb':
                     if TVDB_API_KEY:
-                        src, desc = 'tvdb', '(episode guide & ratings)'
+                        src, desc = 'tvdb', f'(non-german, lang={lib_lang})'
                     elif TMDB_API_KEY:
-                        src, desc = 'tmdb', '(episode guide, fallback)'
+                        src, desc = 'tmdb', f'(non-german, lang={lib_lang}, fallback)'
                     else:
                         src, desc = 'tvdb', '(NO API KEY CONFIGURED)'
                 elif TVDB_API_KEY:
-                    src, desc = 'tvdb', '(episode guide, fallback)'
+                    src, desc = 'tvdb', f'(non-german, lang={lib_lang}, fallback)'
                 elif TMDB_API_KEY:
-                    src, desc = 'tmdb', '(episode guide, fallback)'
+                    src, desc = 'tmdb', f'(non-german, lang={lib_lang}, fallback)'
                 else:
                     src, desc = '-', '(NO API KEY CONFIGURED)'
                 missing_src = f'{src} {desc}' if VRB else src
