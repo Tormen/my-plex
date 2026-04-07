@@ -13637,7 +13637,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -13774,6 +13774,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return bool(rating) and _c(float(rating), _r)
             return label, _critics_fn
 
+        # --- Watched (watched=yes / watched=no / watched:no) ---
+        if field == 'watched':
+            yes = val.lower() in ('yes', 'true', '1', 'y')
+            label = "watched" if yes else "unwatched"
+            def _watched_fn(obj, fi, _yes=yes):
+                count = obj.get('viewCount', 0) or 0
+                return count > 0 if _yes else count == 0
+            return label, _watched_fn
+
+        # --- Lang (audio language: lang:de / lang:en / lang:fr) ---
+        if field in ('lang', 'language'):
+            lang_map = {'en': 'en', 'english': 'en', 'eng': 'en',
+                        'de': 'de', 'german': 'de', 'deu': 'de', 'ger': 'de',
+                        'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'}
+            needle = lang_map.get(val.lower(), val.lower())
+            label_str = f"lang:{needle}"
+            def _lang_fn(obj, fi, _n=needle):
+                langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
+                return _n in langs
+            return label_str, _lang_fn
+
         # --- Added (year comparison on addedAt unix timestamp) ---
         if field == 'added':
             try:
@@ -13816,6 +13837,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         watched_only / unwatched_only: filter by viewCount.
         audio_filter: 'en'/'de'/'fr' — filter by audio_languages list.
         """
+        import datetime as _dt_mod
+
         # Normalise media_type
         if media_type:
             media_type = media_type.capitalize()
@@ -13831,9 +13854,29 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 err(1100, f"Cannot parse filter sub-expression: '{sub}'\n"
                           f"  Supported: bitrate<1  resolution:1080p  codec:h265  year>2015\n"
                           f"             label:reencode  genre:action  size>1gb  duration>2h\n"
-                          f"             rating>8  added>2024")
+                          f"             watched:no  lang:de  rating>8  added>2024")
                 return
             filters.append(parsed)
+
+        # Determine which fields are active (for smart column selection)
+        # Map label prefixes returned by _parse_filter_sub_expr to canonical field names
+        _LABEL_TO_FIELD = {
+            'bitrate': 'bitrate', 'resolution': 'resolution', 'codec': 'codec',
+            'year': 'year', 'label': 'label', 'genre': 'genre', 'size': 'size',
+            'duration': 'duration', 'stars': 'stars', 'rating': 'rating',
+            'critics': 'critics', 'added': 'added',
+            'watched': 'watched', 'unwatched': 'unwatched',
+            'lang': 'lang', 'language': 'lang',
+        }
+        _active_fields = set()
+        for lbl, _ in filters:
+            tok = lbl.split()[0].split(':')[0].lower()
+            field_name = _LABEL_TO_FIELD.get(tok, tok)
+            _active_fields.add(field_name)
+        if media_type:    _active_fields.add('type')
+        if audio_filter:  _active_fields.add('lang')
+        if watched_only:  _active_fields.add('watched')
+        if unwatched_only: _active_fields.add('unwatched')
 
         # Build active filter label string
         active_labels = [lbl for lbl, _ in filters]
@@ -13842,9 +13885,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if watched_only:   active_labels.append("watched")
         if unwatched_only: active_labels.append("unwatched")
         scope = f" in '{library_name}'" if library_name else ""
-        print(f"\n--- Filter: {' AND '.join(active_labels)}{scope} ---\n")
+        print(f" >>> Filter: {' AND '.join(active_labels)}{scope}")
 
-        rows = []  # (sort_key, cache_key, obj_type, lib, title, extra_cols)
+        rows = []
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             obj_type = obj.get('type', '')
             if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
@@ -13856,11 +13899,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     continue
                 if media_type == 'Show' and obj_type not in ('Episode', 'Episode*'):
                     continue
-            # watched/unwatched filter
+            # watched/unwatched filter (legacy params — now also handled via sub-expr)
             view_count = obj.get('viewCount', 0) or 0
             if watched_only   and view_count == 0: continue
             if unwatched_only and view_count  > 0: continue
-            # audio filter
+            # audio filter (legacy param)
             if audio_filter:
                 langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
                 if audio_filter.lower() not in langs:
@@ -13868,11 +13911,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Apply per-file filters (bitrate, size) — match ANY file version
             files_dict = obj.get('files', {})
-            if not files_dict:
-                # For objects without files (Show, Season), use a dummy fi
-                file_matches = [{}]
-            else:
-                file_matches = list(files_dict.values())
+            file_matches = list(files_dict.values()) if files_dict else [{}]
 
             matched_fi = None
             for fi in file_matches:
@@ -13882,39 +13921,136 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if matched_fi is None:
                 continue
 
-            lib   = obj.get('library', '?')
-            title = obj.get('title', '?')
-            if obj_type in ('Episode', 'Episode*'):
-                series = obj.get('series', '')
-                s_str  = obj.get('S_str', '')
-                e_str  = obj.get('E_str', '')
-                title  = f"{series}  {s_str}{e_str}  {title}" if series else title
-            year = obj.get('year', 0)
-            if year and obj_type in ('Movie', 'Movie*'):
-                title = f"{title} ({year})"
+            lib       = obj.get('library', '?')
+            dur_ms    = obj.get('duration') or 0
+            fs_bytes  = matched_fi.get('filesize') or obj.get('filesize') or 0
+            bitrate   = (fs_bytes * 8) / (dur_ms / 1000) / 1_000_000 if dur_ms > 0 and fs_bytes > 0 else 0.0
+            filepath  = matched_fi.get('filepath', '')
 
-            # Compute bitrate for sort/display if bitrate filter present
-            dur_ms   = obj.get('duration') or 0
-            fs_bytes = matched_fi.get('filesize') or obj.get('filesize') or 0
-            bitrate  = (fs_bytes * 8) / (dur_ms / 1000) / 1_000_000 if dur_ms > 0 and fs_bytes > 0 else 0.0
-
-            rows.append((bitrate, key, obj_type.rstrip('*'), lib, title))
+            rows.append({
+                'key':        key,
+                'type':       obj_type.rstrip('*'),
+                'lib':        lib,
+                'bitrate':    bitrate,
+                'filepath':   filepath,
+                'resolution': obj.get('resolution_full') or obj.get('resolution', ''),
+                'codec':      obj.get('video_codec', ''),
+                'year':       obj.get('year', 0),
+                'filesize':   fs_bytes,
+                'duration':   dur_ms,
+                'stars':      obj.get('userRating') or 0,
+                'rating':     obj.get('audienceRating') or 0,
+                'critics':    obj.get('criticsRating') or 0,
+                'added':      obj.get('addedAt') or 0,
+                'langs':      ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
+                'genres':     ', '.join(str(g) for g in (obj.get('genres') or [])),
+                'labels':     ', '.join(str(l) for l in (obj.get('labels') or [])),
+                'last_watched': obj.get('lastViewedAt') or 0,
+                'view_count': obj.get('viewCount', 0) or 0,
+            })
 
         if not rows:
-            print(f"  No items match the filter.")
+            print(f"    > No items match the filter.")
             return
 
-        rows.sort(key=lambda r: r[0], reverse=True)
+        # --- Smart column selection ---
+        # Sort: bitrate desc if bitrate filter, else last_watched desc if watched, else filepath
+        has_bitrate  = 'bitrate'  in _active_fields
+        has_watched  = 'watched'  in _active_fields or 'unwatched' in _active_fields
+        has_lang     = 'lang'     in _active_fields
+        has_size     = 'size'     in _active_fields
+        has_duration = 'duration' in _active_fields
+        has_year     = 'year'     in _active_fields
+        has_resolution = 'resolution' in _active_fields
+        has_codec    = 'codec'    in _active_fields
+        has_stars    = 'stars'    in _active_fields
+        has_rating   = 'rating'   in _active_fields
+        has_critics  = 'critics'  in _active_fields
+        has_added    = 'added'    in _active_fields
+        has_genre    = 'genre'    in _active_fields
+        has_label    = 'label'    in _active_fields
 
-        print(f"  {'KEY':<22}  {'TYPE':<7}  {'LIBRARY':<16}  {'BITRATE':>9}  {'MB/HR':>7}  TITLE")
-        print("  " + "-" * 96)
-        for bitrate, key, otype, lib, title in rows:
-            mbph = int(bitrate * _MB_PER_HOUR_PER_MBPS)
-            br_str = f"{bitrate:8.2f}" if bitrate > 0 else f"{'N/A':>8}"
-            mh_str = f"{mbph:7}" if bitrate > 0 else f"{'N/A':>7}"
-            print(f"  {key:<22}  {otype:<7}  {lib:<16}  {br_str}  {mh_str}  {title}")
+        if has_bitrate:
+            rows.sort(key=lambda r: r['bitrate'], reverse=True)
+        elif has_watched:
+            rows.sort(key=lambda r: r['last_watched'], reverse=True)
+        elif has_year:
+            rows.sort(key=lambda r: r['year'], reverse=True)
+        elif has_added:
+            rows.sort(key=lambda r: r['added'], reverse=True)
+        elif has_rating:
+            rows.sort(key=lambda r: r['rating'], reverse=True)
+        elif has_stars:
+            rows.sort(key=lambda r: r['stars'], reverse=True)
+        else:
+            rows.sort(key=lambda r: r['filepath'])
 
-        print(f"\n  Total: {len(rows)} item(s)")
+        def _fmt_ts(ts):
+            if not ts: return '-'
+            try: return _dt_mod.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+            except: return '-'
+        def _fmt_dur(ms):
+            if not ms: return '-'
+            h, rem = divmod(int(ms) // 1000, 3600)
+            m = rem // 60
+            return f"{h}h{m:02d}m" if h else f"{m}m"
+        def _fmt_size(b):
+            if not b: return '-'
+            gb = b / 1024**3
+            return f"{gb:.1f}GB" if gb >= 1 else f"{b/1024**2:.0f}MB"
+
+        # Build columns: always KEY first, FILEPATH last; extra cols in between
+        extra_cols = []  # list of (header, width, value_fn)
+        if has_watched:
+            extra_cols.append(('LAST WATCHED', 12, lambda r: _fmt_ts(r['last_watched'])))
+        if has_bitrate:
+            extra_cols.append(('BITRATE',  8, lambda r: f"{r['bitrate']:.2f}" if r['bitrate'] else 'N/A'))
+            extra_cols.append(('MB/HR',    6, lambda r: str(int(r['bitrate'] * _MB_PER_HOUR_PER_MBPS)) if r['bitrate'] else 'N/A'))
+        if has_resolution:
+            extra_cols.append(('RESOLUTION', 10, lambda r: r['resolution'] or '-'))
+        if has_codec:
+            extra_cols.append(('CODEC', 6, lambda r: r['codec'] or '-'))
+        if has_year:
+            extra_cols.append(('YEAR', 4, lambda r: str(r['year']) if r['year'] else '-'))
+        if has_size:
+            extra_cols.append(('SIZE', 7, lambda r: _fmt_size(r['filesize'])))
+        if has_duration:
+            extra_cols.append(('DURATION', 8, lambda r: _fmt_dur(r['duration'])))
+        if has_stars:
+            extra_cols.append(('STARS', 5, lambda r: f"{r['stars']/2:.1f}" if r['stars'] else '-'))
+        if has_rating:
+            extra_cols.append(('RATING', 6, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
+        if has_critics:
+            extra_cols.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+        if has_added:
+            extra_cols.append(('ADDED', 10, lambda r: _fmt_ts(r['added'])))
+        if has_lang:
+            extra_cols.append(('LANG', 8, lambda r: r['langs'] or '-'))
+        if has_genre:
+            extra_cols.append(('GENRE', 16, lambda r: r['genres'][:15] if r['genres'] else '-'))
+        if has_label:
+            extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
+
+        # Print header
+        hdr  = f"  {'KEY':<22}"
+        sep  = "  " + "-" * 22
+        for hname, hwidth, _ in extra_cols:
+            hdr += f"  {hname:<{hwidth}}"
+            sep += "  " + "-" * hwidth
+        hdr += "  FILEPATH"
+        sep += "  " + "-" * 40
+        print(hdr)
+        print(sep)
+
+        for r in rows:
+            line = f"  {r['key']:<22}"
+            for _, hwidth, vfn in extra_cols:
+                val = vfn(r)
+                line += f"  {str(val):<{hwidth}}"
+            line += f"  {r['filepath']}"
+            print(line)
+
+        print(f"\n    > {len(rows)} item(s)")
 
     @staticmethod
     def _list_ondisk_labeled(labeltext, library_name=None):
@@ -23144,12 +23280,12 @@ def main():
     # Category B tokens (bitrate, resolution, codec, year, label, genre, size, duration, rating, added)
     # are collected and injected as --list 'expr1 AND expr2 AND ...'
     _CAT_A_TOKEN_RE = re.compile(
-        r'^(?P<key>type|lang|language|watched)'
+        r'^(?P<key>type)'
         r':(?P<val>.+)$',
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
@@ -23168,23 +23304,6 @@ def main():
             if key == 'type':
                 _inject_flags += ['--type', val]
                 _translations.append((arg, f"--type {val}"))
-            elif key in ('lang', 'language'):
-                lang_map = {'en': '--en', 'english': '--en', 'de': '--de', 'german': '--de',
-                            'fr': '--fr', 'french': '--fr'}
-                flag = lang_map.get(val.lower())
-                if flag:
-                    _inject_flags.append(flag)
-                    _translations.append((arg, flag))
-                else:
-                    _inject_flags += ['--audio', val]
-                    _translations.append((arg, f"--audio {val}"))
-            elif key == 'watched':
-                if val.lower() in ('yes', 'true', '1', 'y'):
-                    _inject_flags.append('--watched')
-                    _translations.append((arg, '--watched'))
-                else:
-                    _inject_flags.append('--unwatched')
-                    _translations.append((arg, '--unwatched'))
             if DBG: print(f" ~~~ Filter token '{arg}' → {_inject_flags[-2:] if len(_inject_flags)>=2 else _inject_flags[-1:]}", file=sys.stderr)
         elif _mb and not arg.startswith('-'):
             field = _mb.group('field').lower()
@@ -23203,10 +23322,10 @@ def main():
         sys.argv = _new_argv + _inject_flags
         if _filter_exprs:
             combined = ' AND '.join(_filter_exprs)
-            sys.argv += ['--list', combined]
+            sys.argv += [f'--list={combined}']  # use = form to avoid positional arg ambiguity
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
         # Echo translations to the user so they can see how input was interpreted
-        translated_flags = ' '.join(_inject_flags) + (f" --list '{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
+        translated_flags = ' '.join(_inject_flags) + (f" --list='{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
         print(f" >>> Interpreted: {translated_flags}")
         if VRB:
             for orig, dest in _translations:
