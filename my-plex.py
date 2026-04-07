@@ -24051,10 +24051,14 @@ def main():
     sys.exit(0)
 
 if __name__ == '__main__':
-    # Reset SIGPIPE to OS default so piping to head/grep/etc. terminates us silently
+    # Reset SIGPIPE to OS default so piping to head/grep/etc. terminates us silently.
     # (without this, Python converts SIGPIPE → BrokenPipeError and prints "Exception ignored")
+    # In -D / --debug mode: keep Python's default SIGPIPE handling so BrokenPipeError
+    # surfaces with full traceback — useful for diagnosing pipe-related issues.
     import signal as _signal
-    _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
+    _debug_mode = any(a in ('-D', '--debug', '-DD', '--deep-debug') for a in sys.argv)
+    if not _debug_mode:
+        _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
 
     if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
         # Inject episode TSV functions into test module (defined after test import)
