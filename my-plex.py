@@ -1,5 +1,61 @@
 #!/usr/bin/env python3
 
+# =============================================================================
+# MY-PLEX GLOSSARY
+# Terms used in my-plex that differ from or extend Plex's own naming.
+# =============================================================================
+#
+# KEY          A my-plex cache key uniquely identifying one Plex object.
+#              Format: "<Type>:<plex_rating_key>"  e.g.  Movie:12345
+#              Plex calls this the "rating key" or "ratingKey" internally;
+#              my-plex prefixes it with the type for human readability.
+#              Displayed as the first column in all tabular output.
+#
+# SERIES       A TV show / series.  Plex internally calls this "Show" and
+#              uses metadata_type=2.  my-plex uses "series" everywhere in
+#              user-facing text; "show" is accepted as a synonym.
+#
+# RATING       The external audience score for a media item.
+#              Plex calls this "audienceRating".  Sources vary by library agent:
+#                  tv.plex.agents.movie  → IMDB score  (+ RT Tomatometer if available)
+#                  tv.plex.agents.series → TMDB vote average
+#                  com.plexapp.agents.*  → depends on agent
+#              my-plex always calls this "rating" (never "audienceRating").
+#
+# CRITICS      The Rotten Tomatoes Tomatometer score.
+#              Plex calls this "criticsRating".  Only populated for libraries
+#              using tv.plex.agents.movie.  Empty for IMDB/TMDB agents.
+#              my-plex calls this "critics" (filter: critics>80).
+#
+# STARS        The user's personal Plex star rating (0–5, half-star steps).
+#              Plex stores this as "userRating" on a 0–10 scale internally;
+#              my-plex exposes it as 0–5 stars (filter: stars>3.5).
+#
+# LIBRARY      A Plex library section (e.g. "movies.en", ",unsorted").
+#              Identified by its title string.  my-plex uses the library name
+#              as a scope prefix: my-plex movies.en --problems
+#
+# SCOPE        An optional prefix to any command that narrows its target:
+#              a library name, a title/filename, a KEY, or filter tokens.
+#              e.g.  my-plex ,unsorted --broken
+#                    my-plex "Ted Lasso" --missing
+#                    my-plex type:series lang:de --list
+#
+# FILTER TOKEN A key:value or key>value expression used as a SCOPE to select
+#              a subset of media items without specifying a library:
+#                  type:movie      watched:no      lang:de
+#                  bitrate>2       resolution:1080p codec:h265
+#                  rating>7        critics>80       stars>3.5
+#                  year>2015       added>2024       size>1gb
+#              Tokens are combined with AND (implicit).  See --help media.
+#
+# ON-DISK LABEL   A label embedded in a filename or sidecar file on disk,
+#              as opposed to a Plex label stored only in the Plex database.
+#              Example: a file named "Movie [reencode].mkv" carries the
+#              on-disk label "reencode".  Used by --reencode --mark.
+#
+# =============================================================================
+
 # Coding guidelines, architecture docs, and test policies: see README.md
 # errCode range: 1001..1070
 
