@@ -22920,10 +22920,14 @@ def execute_global_commands(args, cmd_args):
             else:
                 missing_src = '-'
             rating_src, has_critics = AGENT_RATINGS.get(agent_id, ('-', False))
-            if has_critics:
-                rating_col = f"{rating_src}  (rating=audience, critics=RT)"
+            if rating_src == '-':
+                rating_col = '-'
+            elif has_critics:
+                rating_col = f"{rating_src} + RT"
             else:
-                rating_col = f"{rating_src}  (rating=audience)" if rating_src != '-' else '-'
+                rating_col = rating_src
+            if l_type != 'Show':
+                missing_src = 'n/a (not a series library)'
             print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{rating_col}\t{missing_src}")
 
     # Handle --list-labels command
