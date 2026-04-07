@@ -22880,7 +22880,8 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.none':         ('-',                       False),
             'com.plexapp.agents.localmedia':   ('-',                       False),
         }
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODE-DATA-SOURCE\tRATINGS")
+        _eps_col = 'EPISODE-META-DATA-SOURCE' if VRB else 'EPISODE-DATA-SOURCE'
+        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t{_eps_col}\tRATINGS")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
