@@ -11448,10 +11448,14 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         filter_expr  = list_val if isinstance(list_val, str) else None
         media_type   = safe_getattr(obj_args, 'type', None)
         resolve_mode = safe_getattr(obj_args, 'resolve', False)
-        if filter_expr:
+        list_requested = list_val is not None or watched_only or unwatched_only or audio_filter
+        # Special cases that need the full PLEX_Media.list() engine (duplicates, resolve, no-audio-language)
+        needs_full_list = duplicates_only or resolve_mode or no_audio_language
+        if list_requested and not needs_full_list:
+            # All simple listing (with or without filter expr) → clean KEY|cols|FILEPATH format
             PLEX_Media._list_filtered(filter_expr, library_name=obj, media_type=media_type,
                 watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
-        elif list_val is not None or duplicates_only or watched_only or unwatched_only or audio_filter or no_audio_language:
+        elif needs_full_list or duplicates_only:
                                         PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language)
         # Handle --missing: show missing episodes for all shows in this library
         if safe_getattr(obj_args, 'missing', False):
@@ -13826,12 +13830,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return None
 
     @staticmethod
-    def _list_filtered(expr, library_name=None, media_type=None,
+    def _list_filtered(expr=None, library_name=None, media_type=None,
                        watched_only=False, unwatched_only=False, audio_filter=None):
         """List media items matching filter expressions joined by AND.
 
         expr: one or more sub-expressions separated by ' AND ', e.g.:
               'bitrate>2' or 'resolution:1080p AND codec:h265 AND year>2015'
+              None or '' means no expression filter — list all (subject to other params).
         library_name: restrict to one library (None = all).
         media_type:   restrict to 'Movie' or 'Show' (None = all).
         watched_only / unwatched_only: filter by viewCount.
@@ -13845,8 +13850,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if media_type == 'Series':
                 media_type = 'Show'
 
-        # Parse all sub-expressions
-        sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
+        # Parse all sub-expressions (expr may be None/'' = no filter)
+        sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr or '', flags=re.IGNORECASE) if s.strip()]
         filters = []  # list of (label, fn(obj, fi)->bool)
         for sub in sub_exprs:
             parsed = PLEX_Media._parse_filter_sub_expr(sub)
@@ -23086,24 +23091,22 @@ def execute_global_commands(args, cmd_args):
         broken_only = safe_getattr(cmd_args, 'broken', False)
         resolve_mode = safe_getattr(cmd_args, 'resolve', False)
 
-        # If --list/--filter was given a filter expression, route to _list_filtered
-        filter_expr = cmd_args.list if isinstance(cmd_args.list, str) else None
-        if filter_expr:
-            watched_only   = safe_getattr(args, 'watched', False)
-            unwatched_only = safe_getattr(args, 'unwatched', False)
-            audio_filter   = safe_getattr(args, 'audio', None)
+        filter_expr    = cmd_args.list if isinstance(cmd_args.list, str) else None
+        watched_only   = safe_getattr(args, 'watched', False)
+        unwatched_only = safe_getattr(args, 'unwatched', False)
+        audio_filter   = safe_getattr(args, 'audio', None)
+        no_audio_language = safe_getattr(args, 'no_audio_language', False)
+
+        # Special cases that need the full PLEX_Media.list() engine
+        needs_full_list = duplicates_only or broken_only or resolve_mode or no_audio_language or excess_versions
+        if needs_full_list:
+            if DBG: print(f"{DBGPFX}execute_global_commands(): full list mode: duplicates={duplicates_only} broken={broken_only} resolve={resolve_mode} no_audio_lang={no_audio_language} excess={excess_versions}")
+            PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions)
+        else:
+            # All simple listing (with or without filter expr) → clean KEY|cols|FILEPATH format
             PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type,
                 watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
             return
-
-        if DBG: print(f"{DBGPFX}execute_global_commands(): --list called with media_type={media_type}, duplicates_only={duplicates_only}, broken_only={broken_only}, resolve_mode={resolve_mode}, excess_versions={excess_versions}")
-
-        # Call PLEX_Media.list() with library_name=None to search all libraries
-        watched_only = safe_getattr(args, 'watched', False)
-        unwatched_only = safe_getattr(args, 'unwatched', False)
-        audio_filter = safe_getattr(args, 'audio', None)
-        no_audio_language = safe_getattr(args, 'no_audio_language', False)
-        PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions)
 
 ###########################################################################################
 #### DO IT
