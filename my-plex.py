@@ -22891,6 +22891,8 @@ def execute_global_commands(args, cmd_args):
                 lang = 'none'
             items = items_count.get(lib_name, '-')
             # Determine --missing episode source for Show libraries
+            # All values padded to _EPS_W chars so RATINGS column aligns across rows
+            _EPS_W = 34
             if l_type == 'Show':
                 lib_lang = languages.get(lib_name, '')
                 if MISSING_EPISODES_SOURCE and lib_name in MISSING_EPISODES_SOURCE:
@@ -22899,26 +22901,27 @@ def execute_global_commands(args, cmd_args):
                     missing_src = f'fernsehserien.de (lang={lib_lang})'
                 elif agent_id in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
                     if TMDB_API_KEY:
-                        missing_src = 'tmdb'
+                        missing_src = 'tmdb (episode guide & ratings)'
                     elif TVDB_API_KEY:
-                        missing_src = 'tvdb (fallback)'
+                        missing_src = 'tvdb (episode guide, fallback)'
                     else:
-                        missing_src = 'tmdb (NO API KEY CONFIGURED)'
+                        missing_src = 'tmdb (NO API KEY CONFIGURED)  '
                 elif agent_id == 'com.plexapp.agents.thetvdb':
                     if TVDB_API_KEY:
-                        missing_src = 'tvdb'
+                        missing_src = 'tvdb (episode guide & ratings)'
                     elif TMDB_API_KEY:
-                        missing_src = 'tmdb (fallback)'
+                        missing_src = 'tmdb (episode guide, fallback)'
                     else:
-                        missing_src = 'tvdb (NO API KEY CONFIGURED)'
+                        missing_src = 'tvdb (NO API KEY CONFIGURED)  '
                 elif TVDB_API_KEY:
-                    missing_src = 'tvdb (fallback)'
+                    missing_src = 'tvdb (episode guide, fallback)'
                 elif TMDB_API_KEY:
-                    missing_src = 'tmdb (fallback)'
+                    missing_src = 'tmdb (episode guide, fallback)'
                 else:
-                    missing_src = 'NO API KEY CONFIGURED'
+                    missing_src = 'NO API KEY CONFIGURED         '
             else:
-                missing_src = 'n/a (not a series library)'
+                missing_src = 'n/a (not a series library)    '
+            missing_src = missing_src.ljust(_EPS_W)
             rating_src, has_critics = AGENT_RATINGS.get(agent_id, ('-', False))
             if rating_src == '-':
                 rating_col = '-'
