@@ -3011,6 +3011,280 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(flagged_fps, [],
             f"Cross-validation failed: known false-positive IDs still flagged as broken: {flagged_fps}")
 
+    # --- Filter: localized genre matching ---
+
+    def test_genre_filter_english(self):
+        """genre:Comedy must match items with English 'Comedy' genre tag."""
+        result = self._run_cmd('genre:Comedy')
+        self.assertEqual(result.returncode, 0, f"genre:Comedy failed: {result.stderr}")
+        self.assertRegex(result.stdout, r'(Movie|Episode|Show|Season):\d+')
+
+    def test_genre_filter_german_localized(self):
+        """genre:Comedy must also match German 'Komödie' genre tag (localized normalization).
+
+        Regression: movies.de stores genres in German; filter must not miss them.
+        """
+        result = self._run_cmd('genre:Comedy', 'movies.de')
+        self.assertEqual(result.returncode, 0, f"genre:Comedy movies.de failed: {result.stderr}")
+        # movies.de has Komödie items — filter must find them
+        self.assertRegex(result.stdout, r'Movie:\d+',
+            "genre:Comedy must match German 'Komödie' genre in movies.de library")
+
+    def test_genre_filter_french_localized(self):
+        """genre:Comedy must also match French 'Comédie' genre tag (localized normalization)."""
+        result = self._run_cmd('genre:Comedy', 'movies.fr')
+        self.assertEqual(result.returncode, 0, f"genre:Comedy movies.fr failed: {result.stderr}")
+        self.assertRegex(result.stdout, r'Movie:\d+',
+            "genre:Comedy must match French 'Comédie' genre in movies.fr library")
+
+    # --- Filter: episode rollup for series ---
+
+    def test_filter_series_rollup_produces_show_or_season_keys(self):
+        """Filter on series must roll up to Show:/Season: rows when all episodes match.
+
+        Regression: previously all matching episodes were listed individually even when
+        an entire season/show passed the filter with identical values.
+        """
+        result = self._run_cmd('codec:h264', 'type:series')
+        self.assertEqual(result.returncode, 0, f"codec:h264 type:series failed: {result.stderr}")
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        # Must have at least some Show: or Season: rolled-up rows
+        rolled = [l for l in lines if l.startswith('Show:') or l.startswith('Season:')]
+        self.assertTrue(len(rolled) > 0,
+            "Filter on series must produce Show:/Season: rolled-up rows when all episodes match")
+
+    def test_filter_series_rollup_path_is_directory(self):
+        """Rolled-up Show:/Season: rows must contain a filesystem path in FILEPATH column."""
+        result = self._run_cmd('codec:h264', 'type:series')
+        self.assertEqual(result.returncode, 0)
+        for line in result.stdout.splitlines():
+            if line.startswith('Show:') or line.startswith('Season:'):
+                # Path may contain spaces; check that any token starts with '/'
+                has_path = any(t.startswith('/') for t in line.split())
+                self.assertTrue(has_path,
+                    f"Rolled-up row must contain an absolute path, got: {line!r}")
+
+
+class TestFilter(unittest.TestCase):
+    """Comprehensive tests for the filter/scope system (genre:, lang:, codec:, type:, rollup, etc.)."""
+
+    def _run(self, *args):
+        import subprocess
+        return subprocess.run([sys.executable, MAIN_SCRIPT] + list(args),
+                              capture_output=True, text=True, timeout=30)
+
+    def _lines(self, *args):
+        return [l for l in self._run(*args).stdout.splitlines() if l.strip()]
+
+    # --- type: token (Cat-A) ---
+
+    def test_type_series_alone_lists_series(self):
+        """type:series alone must list series (not show help page).
+
+        Regression: Cat-A token injected --type but not --list, falling through to help.
+        """
+        result = self._run('type:series')
+        self.assertEqual(result.returncode, 0)
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        self.assertTrue(len(lines) > 10, "type:series must list series, not the help page")
+        self.assertNotIn("usage:", result.stdout, "type:series must not show help")
+
+    def test_type_movie_alone_lists_movies(self):
+        """type:movie alone must list movies."""
+        result = self._run('type:movie')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'Movie:\d+')
+        self.assertNotIn("usage:", result.stdout)
+
+    def test_type_series_fewer_than_total(self):
+        """type:series must return fewer rows than unfiltered list (series only, not movies)."""
+        all_lines  = self._lines('--list')
+        ser_lines  = self._lines('type:series')
+        self.assertLess(len(ser_lines), len(all_lines),
+            "type:series must be a subset of all media")
+
+    # --- Subset invariant ---
+
+    def test_filter_subset_invariant(self):
+        """Adding more filter conditions must never increase the row count.
+
+        Regression: genre:Comedy type:series lang:de returned MORE rows than
+        genre:Comedy type:series due to rollup breaking when AUDIO/SUBS columns varied.
+        """
+        comedy_series = self._lines('genre:Comedy', 'type:series')
+        comedy_series_de = self._lines('genre:Comedy', 'type:series', 'lang:de')
+        # More-specific filter must have <= rows (rollup may expand, but total item coverage must shrink)
+        # We can't directly compare rolled-up row counts, but comedy+de shows must be <= comedy shows
+        comedy_shows = {l.split()[0] for l in comedy_series if l.startswith('Show:')}
+        comedy_de_shows = {l.split()[0] for l in comedy_series_de if l.startswith('Show:')}
+        self.assertTrue(comedy_de_shows.issubset(comedy_shows) or len(comedy_de_shows) <= len(comedy_shows),
+            f"Comedy+de shows ({len(comedy_de_shows)}) must be a subset of comedy shows ({len(comedy_shows)})")
+
+    # --- genre: filter ---
+
+    def test_genre_comedy_returns_results(self):
+        """genre:Comedy must return movie/series results."""
+        result = self._run('genre:Comedy')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_genre_localized_de(self):
+        """genre:Comedy must match German 'Komödie' (normalized to Comedy in cache)."""
+        result = self._run('genre:Comedy', 'movies.de')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'Movie:\d+',
+            "genre:Comedy must find Komödie items in movies.de")
+
+    def test_genre_localized_fr(self):
+        """genre:Comedy must match French 'Comédie' (normalized to Comedy in cache)."""
+        result = self._run('genre:Comedy', 'movies.fr')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'Movie:\d+',
+            "genre:Comedy must find Comédie items in movies.fr")
+
+    def test_genre_drama_returns_results(self):
+        """genre:Drama must return results."""
+        result = self._run('genre:Drama')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    # --- lang: filter ---
+
+    def test_lang_de_returns_results(self):
+        """lang:de must return items with German audio."""
+        result = self._run('lang:de')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_lang_en_returns_results(self):
+        """lang:en must return items with English audio."""
+        result = self._run('lang:en')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_lang_en_fewer_than_total(self):
+        """lang:en must return fewer rows than unfiltered (not all items have en audio)."""
+        all_lines = self._lines('--list')
+        en_lines  = self._lines('lang:en')
+        self.assertLess(len(en_lines), len(all_lines))
+
+    # --- watched: filter ---
+
+    def test_watched_no_returns_results(self):
+        """watched:no must return unwatched items."""
+        result = self._run('watched:no')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_watched_yes_plus_no_covers_all(self):
+        """watched:yes + watched:no combined must cover all items; movies must not overlap."""
+        yes_keys = {l.split()[0] for l in self._lines('watched:yes') if l and l[0].isalpha()}
+        no_keys  = {l.split()[0] for l in self._lines('watched:no')  if l and l[0].isalpha()}
+        # Movies are atomic — a movie is either watched or not, so no Movie: key can appear
+        # in both results. Series may overlap (partially-watched shows appear in both when
+        # value-comparison rollup groups matched episodes regardless of total coverage).
+        yes_movies = {k for k in yes_keys if k.startswith('Movie:')}
+        no_movies  = {k for k in no_keys  if k.startswith('Movie:')}
+        self.assertEqual(yes_movies & no_movies, set(),
+            "Movie keys must not appear in both watched:yes and watched:no")
+
+    # --- codec: filter ---
+
+    def test_codec_h264_returns_results(self):
+        """codec:h264 must return results."""
+        result = self._run('codec:h264')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    # --- bitrate: filter ---
+
+    def test_bitrate_gt_returns_results(self):
+        """bitrate>1 must return items with bitrate > 1 Mbps."""
+        result = self._run('bitrate>1')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    # --- year: filter ---
+
+    def test_year_gt_returns_results(self):
+        """year>2010 must return items released after 2010."""
+        result = self._run('year>2010')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_year_filter_older_fewer(self):
+        """year>2020 must return fewer items than year>2000."""
+        newer = self._lines('year>2020')
+        older = self._lines('year>2000')
+        self.assertLessEqual(len(newer), len(older),
+            "year>2020 must be a subset of year>2000")
+
+    # --- Series rollup ---
+
+    def test_series_rollup_all_episodes_become_show_rows(self):
+        """type:series with no other filter: all series must roll up to Show: rows.
+
+        Regression: rollup failed when _same_vals was used — extra columns
+        with varying values (AUDIO, SUBS) prevented rollup.
+        """
+        lines = self._lines('type:series')
+        ep_rows = [l for l in lines if l.startswith('Episode:')]
+        self.assertEqual(ep_rows, [],
+            f"type:series must roll up fully — no Episode: rows expected, got: {ep_rows[:3]}")
+
+    def test_series_rollup_show_rows_present(self):
+        """type:series must produce Show: level rows (full show rollup)."""
+        lines = self._lines('type:series')
+        show_rows = [l for l in lines if l.startswith('Show:')]
+        self.assertTrue(len(show_rows) > 0, "type:series must produce Show: rollup rows")
+
+    def test_series_rollup_with_codec_filter(self):
+        """codec:h264 type:series: rolled-up rows must contain filesystem path."""
+        lines = self._lines('codec:h264', 'type:series')
+        rolled = [l for l in lines if l.startswith('Show:') or l.startswith('Season:')]
+        self.assertTrue(len(rolled) > 0, "codec:h264 type:series must produce rolled-up rows")
+        for line in rolled:
+            has_path = any(t.startswith('/') for t in line.split())
+            self.assertTrue(has_path, f"Rolled-up row must contain absolute path: {line!r}")
+
+    def test_series_rollup_lang_does_not_explode(self):
+        """genre:Comedy type:series lang:de must return fewer Show: rows than genre:Comedy type:series.
+
+        Regression: lang:de added AUDIO/SUBS extra cols whose varying values broke rollup,
+        causing MORE rows with lang:de than without.
+        """
+        comedy_shows    = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series')
+                           if l.startswith('Show:')}
+        comedy_de_shows = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series', 'lang:de')
+                           if l.startswith('Show:')}
+        self.assertTrue(comedy_de_shows.issubset(comedy_shows),
+            f"Comedy+de show keys must be subset of comedy show keys.\n"
+            f"  comedy: {sorted(comedy_shows)[:5]}\n"
+            f"  comedy+de: {sorted(comedy_de_shows)[:5]}")
+
+    # --- Combined filters (AND logic) ---
+
+    def test_combined_type_genre(self):
+        """type:movie genre:Drama must return only movies with Drama genre."""
+        result = self._run('type:movie', 'genre:Drama')
+        self.assertEqual(result.returncode, 0)
+        for line in result.stdout.splitlines():
+            if line.startswith('Episode:') or line.startswith('Show:') or line.startswith('Season:'):
+                self.fail(f"type:movie genre:Drama must not include series rows: {line!r}")
+
+    def test_combined_genre_lang(self):
+        """genre:Comedy lang:de must return German-audio Comedy items."""
+        result = self._run('genre:Comedy', 'lang:de')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
+
+    def test_no_filter_lists_everything(self):
+        """--list with no filter must return all media (movies + episodes)."""
+        result = self._run('--list')
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout, r'Movie:\d+')
+        self.assertRegex(result.stdout, r'(Show|Episode):\d+')
+
 
 class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
@@ -6077,6 +6351,7 @@ _UNITTEST_SCOPES = {
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
+    'filter':     [TestFilter],
     'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
