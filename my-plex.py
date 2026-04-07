@@ -136,51 +136,62 @@ def _install_zsh_completions():
 _my-plex-filter-token() {
     local cur="$1"
 
-    # Complete bare token names (ty → type:, la → lang: watched:, ...)
+    # Complete bare token names (ty → type:, la → lang:/label:, ...)
+    # _describe format: 'completion-value:description shown in menu'
     local -a token_keys
     token_keys=(
-        'type\:filter by media type (movie/series)'
-        'lang\:filter by audio language (en/de/fr)'
-        'watched\:filter by watch status (yes/no)'
-        'resolution\:filter by resolution (1080p/4k/720p)'
-        'codec\:filter by video codec (h265/h264)'
-        'year\:filter by release year'
-        'genre\:filter by genre (action/drama/…)'
-        'label\:filter by Plex label'
-        'size\:filter by file size (e.g. >1gb)'
-        'duration\:filter by duration (e.g. >2h)'
-        'stars\:filter by personal Plex star rating (e.g. >3.5, scale 0–5)'
-        'rating\:filter by external audience score (e.g. >7; IMDB/TMDB/RT Audience)'
-        'critics\:filter by RT Tomatometer (e.g. >80; Rotten Tomatoes libraries only)'
-        'added\:filter by year added (e.g. >2024)'
-        'bitrate\:filter by bitrate (e.g. >2mbps)'
+        'type:filter by media type (movie/series)'
+        'lang:filter by audio language (en/de/fr)'
+        'watched:filter by watch status (yes/no)'
+        'resolution:filter by resolution (1080p/4k/720p)'
+        'codec:filter by video codec (h265/h264)'
+        'year:filter by release year'
+        'genre:filter by genre (action/drama/…)'
+        'label:filter by Plex label'
+        'size:filter by file size (e.g. >1gb)'
+        'duration:filter by duration (e.g. >2h)'
+        'stars:filter by personal star rating (e.g. >3.5, scale 0-5)'
+        'rating:filter by audience score (e.g. >7)'
+        'critics:filter by RT Tomatometer (e.g. >80)'
+        'added:filter by year added (e.g. >2024)'
+        'bitrate:filter by bitrate (e.g. >2mbps)'
     )
 
     case "$cur" in
         type:*)
-            local vals; vals=(movie series show)
-            local prefix="${cur%%:*}:"
-            compadd -P "$prefix" -- movie series show
+            compadd -S '' -P 'type:' -- movie series show
             ;;
         lang:*|language:*)
-            local prefix="${cur%%:*}:"
-            compadd -P "$prefix" -- en de fr english german french
+            compadd -S '' -P "${cur%%:*}:" -- en de fr english german french
             ;;
         watched:*)
-            local prefix="${cur%%:*}:"
-            compadd -P "$prefix" -- yes no
+            compadd -S '' -P 'watched:' -- yes no
             ;;
         resolution:*)
-            local prefix="${cur%%:*}:"
-            compadd -P "$prefix" -- 1080p 4k 720p 480p 2160p
+            compadd -S '' -P 'resolution:' -- 1080p 4k 720p 480p 2160p
             ;;
         codec:*)
-            local prefix="${cur%%:*}:"
-            compadd -P "$prefix" -- h265 h264 hevc avc av1 mpeg4
+            compadd -S '' -P 'codec:' -- h265 h264 hevc avc av1 mpeg4
+            ;;
+        genre:*)
+            # Fetch genres from cache via my-plex --complete-genres
+            local -a genres
+            genres=( ${(f)"$(my-plex --complete genres 2>/dev/null)"} )
+            if [[ ${#genres} -gt 0 ]]; then
+                compadd -S '' -P 'genre:' -- $genres
+            fi
+            ;;
+        label:*)
+            # Fetch labels from cache via my-plex --complete-labels
+            local -a labels
+            labels=( ${(f)"$(my-plex --complete labels 2>/dev/null)"} )
+            if [[ ${#labels} -gt 0 ]]; then
+                compadd -S '' -P 'label:' -- $labels
+            fi
             ;;
         *)
-            # Complete token key names
-            _describe 'filter token' token_keys
+            # Complete token key names — suffix ':' added automatically, no space after
+            _describe -t filter-tokens 'filter token' token_keys -S ''
             ;;
     esac
 }
@@ -194,7 +205,7 @@ _my-plex() {
     # Handle key:value filter tokens for the current word
     if [[ "$cur" != -* ]]; then
         case "$cur" in
-            type:*|lang:*|language:*|watched:*|resolution:*|codec:*)
+            type:*|lang:*|language:*|watched:*|resolution:*|codec:*|genre:*|label:*)
                 _my-plex-filter-token "$cur"
                 return
                 ;;
@@ -1089,6 +1100,7 @@ OPTIONS:
   -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)
   -O, --offline            Work from cache only; no Plex connection
   -U, --update-cache       Update / rebuild cache from Plex server
+      --force-tsv          Re-scrape all episode TSV files (use with --update-cache)
       --verify-cache       Verify cache consistency with server
   -V, --verbose            Verbose output  (-VV for extra verbose)
   -D, --debug              Debug output    (-DD for deep debug)
@@ -1127,6 +1139,48 @@ COMMANDS:
 
   --help COMMAND           Full documentation with examples for any command
 """
+
+# Canonical English genre names — genres are stored normalized in cache
+# Maps lowercase localized/variant names → canonical English proper-case string
+_GENRE_NORM = {
+    'comedy': 'Comedy', 'komödie': 'Comedy', 'komedie': 'Comedy',
+    'comédie': 'Comedy', 'comedie': 'Comedy',
+    'drama': 'Drama', 'drame': 'Drama',
+    'action': 'Action',
+    'adventure': 'Adventure', 'abenteuer': 'Adventure', 'aventure': 'Adventure',
+    'animation': 'Animation',
+    'horror': 'Horror', 'horreur': 'Horror',
+    'thriller': 'Thriller',
+    'romance': 'Romance', 'liebesfilm': 'Romance', 'romantik': 'Romance',
+    'documentary': 'Documentary', 'dokumentarfilm': 'Documentary', 'documentaire': 'Documentary',
+    'crime': 'Crime', 'krimi': 'Crime',
+    'mystery': 'Mystery', 'mystère': 'Mystery', 'mystere': 'Mystery',
+    'family': 'Family', 'familie': 'Family', 'familial': 'Family',
+    'history': 'History', 'historie': 'History', 'histoire': 'History',
+    'biography': 'Biography', 'biographie': 'Biography',
+    'science fiction': 'Science Fiction', 'sci-fi': 'Science Fiction',
+    'science-fiction': 'Science Fiction',
+    'fantasy': 'Fantasy', 'fantastique': 'Fantasy',
+    'music': 'Music', 'musik': 'Music', 'musique': 'Music', 'musical': 'Music',
+    'sport': 'Sport', 'sports': 'Sport',
+    'war': 'War', 'krieg': 'War', 'guerre': 'War',
+    'western': 'Western',
+    'suspense': 'Suspense',
+    'tv movie': 'TV Movie', 'tv-film': 'TV Movie', 'téléfilm': 'TV Movie',
+    'children': 'Children', 'kinder': 'Children',
+    'short': 'Short',
+    'kids': 'Kids',
+    'news': 'News',
+}
+
+def _normalize_genre(g):
+    """Return canonical English genre name; fall back to original if no mapping."""
+    return _GENRE_NORM.get(str(g).lower(), str(g))
+
+def _normalize_genres(genres):
+    """Normalize a list of genre tags to canonical English proper-case names."""
+    return [_normalize_genre(g) for g in (genres or [])]
+
 
 HELP_SUFFIX="""
 usage:  my-plex [SCOPE] COMMAND [OPTIONS]
@@ -3496,7 +3550,7 @@ def fetch_movies_from_database(library_section_id):
                 'countries': tags.get('countries', []),
                 'directors': tags.get('directors', []),
                 'writers': tags.get('writers', []),
-                'genres': tags.get('genres', []),
+                'genres': _normalize_genres(tags.get('genres', [])),
                 'contentRating': content_rating or None,
                 'external_ids': tags.get('external_ids', {}),
                 'guid': guid or '',
@@ -7663,7 +7717,7 @@ def add_movie_info(val, obj, obj_type, key, version, filepath, lib_title=None):
             val['countries']     = plex_retry_operation(lambda: [c.tag for c in obj.countries], context=f"{key} '{title}' countries", library=lib_title) # only Movie + Show have country attribute
             val['directors']     = plex_retry_operation(lambda: [d.tag for d in obj.directors], context=f"{key} '{title}' directors", library=lib_title)
             val['writers']       = plex_retry_operation(lambda: [w.tag for w in obj.writers], context=f"{key} '{title}' writers", library=lib_title)
-            val['genres']        = plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title)
+            val['genres']        = _normalize_genres(plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title))
             val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{title}' contentRating", library=lib_title)
             val['studio']        = plex_retry_operation(lambda: obj.studio, context=f"{key} '{title}' studio", library=lib_title)
             if key not in PLEX_Media.OBJ_BY_MOVIE: PLEX_Media.OBJ_BY_MOVIE[key] = {}
@@ -7703,7 +7757,7 @@ def add_show_info(val, obj, obj_type, key, item, season, episode, version, lib_t
             episode = None # to avoid that we add stuff about it to 'val'
         case "Show":
             val['actors']        = plex_retry_operation(lambda: [a.tag for a in obj.actors], context=f"{key} '{title}' actors", library=lib_title) # Movie, Show, Episode, but NOT Season
-            val['genres']        = plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title)
+            val['genres']        = _normalize_genres(plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title))
             val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{title}' contentRating", library=lib_title)
             val['studio']        = plex_retry_operation(lambda: obj.studio, context=f"{key} '{title}' studio", library=lib_title)
             if key != show_key: err(1038, f"key='{key}', show_key='{show_key}'")
@@ -9168,7 +9222,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'video_codec': '', 'audio_codec': '', 'resolution': '', 'resolution_full': '',
             'filesize': None, 'audio_languages': [], 'subtitle_languages': [],
             'collections': show_info.get('collections', []), 'labels': [],
-            'actors': show_info.get('actors', []), 'genres': show_info.get('genres', []),
+            'actors': show_info.get('actors', []), 'genres': _normalize_genres(show_info.get('genres', [])),
             'directors': show_info.get('directors', []), 'writers': show_info.get('writers', []),
             'countries': show_info.get('countries', []),
             'contentRating': show_info.get('contentRating', ''), 'studio': '',
@@ -13697,7 +13751,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -13753,7 +13807,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Genre ---
         if field == 'genre':
-            needle = val.lower()
+            # Genres are stored normalized (English) in cache — simple case-insensitive substring match
+            needle = _normalize_genre(val).lower()
             label_str = f"genre:{val}"
             def _genre_fn(obj, fi, _n=needle):
                 return any(_n in str(g).lower() for g in (obj.get('genres') or []))
@@ -13855,6 +13910,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _n in langs
             return label_str, _lang_fn
 
+        # --- Subs (subtitle language: subs:de / sub:en) ---
+        if field in ('subs', 'sub', 'subtitle', 'subtitles'):
+            lang_map = {'en': 'en', 'english': 'en', 'eng': 'en',
+                        'de': 'de', 'german': 'de', 'deu': 'de', 'ger': 'de',
+                        'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'}
+            needle = lang_map.get(val.lower(), val.lower())
+            label_str = f"subs:{needle}"
+            def _subs_fn(obj, fi, _n=needle):
+                langs = [str(l).lower() for l in (obj.get('subtitle_languages') or [])]
+                return _n in langs
+            return label_str, _subs_fn
+
         # --- Added (year comparison on addedAt unix timestamp) ---
         if field == 'added':
             try:
@@ -13928,6 +13995,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'critics': 'critics', 'added': 'added',
             'watched': 'watched', 'unwatched': 'unwatched',
             'lang': 'lang', 'language': 'lang',
+            'subs': 'subs', 'sub': 'subs', 'subtitle': 'subs', 'subtitles': 'subs',
         }
         _active_fields = set()
         for lbl, _ in filters:
@@ -14024,6 +14092,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_watched    = 'watched'   in _active_fields    # watched:yes only
         has_unwatched  = 'unwatched' in _active_fields    # watched:no only — no LAST WATCHED col
         has_lang       = 'lang'      in _active_fields
+        has_subs       = 'subs'      in _active_fields
         has_size     = 'size'     in _active_fields
         has_duration = 'duration' in _active_fields
         has_year     = 'year'     in _active_fields
@@ -14125,12 +14194,115 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # lang: audio languages + subtitle languages (both stored in cache)
         if has_lang:
             extra_cols.append(('AUDIO', 8,  lambda r: r['audio_langs'] or '-'))
+            if not has_subs:  # avoid duplicate SUBS col if subs: filter also active
+                extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
+        # subs: subtitle languages only
+        if has_subs:
             extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
 
         if has_genre:
             extra_cols.append(('GENRE',  16, lambda r: r['genres'][:15] if r['genres'] else '-'))
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
+
+        # --- Series rollup: compact episode output by season → show ---
+        # Rule (user-specified): compare display column values (strings).
+        #   Phase 1 — Season rollup: if all matched episodes of a season share the
+        #             same display column values → emit one Season: row.
+        #   Phase 2 — Show rollup: if all Season: rows for a show share the same
+        #             display column values AND cover all seasons of the show
+        #             (seasons with zero matches are OK if all their episodes lack
+        #             audio-language metadata — detection gap, not genuine mismatch)
+        #             → emit one Show: row.
+
+        def _row_sig(r):
+            """Tuple of display column values for a row — used for equality check."""
+            return tuple(vfn(r) for _, _, vfn in extra_cols)
+
+        # Build reverse mapping episode_key → (show_key, S_str)
+        _ep_to_show_s = {}
+        for _sk, _seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+            for _s, _eps in _seasons.items():
+                for _e, _vs in _eps.items():
+                    for _ver, _ks in _vs.items():
+                        for _ek in _ks:
+                            _ep_to_show_s[_ek] = (_sk, _s)
+
+        _movie_rows = [r for r in rows if r['type'] == 'Movie']
+        _ep_rows    = [r for r in rows if r['type'] != 'Movie']
+
+        if _ep_rows:
+            from collections import defaultdict as _dd
+
+            # Group episode rows by (show_key, S_str)
+            _season_grps = _dd(list)
+            _no_show = []
+            for r in _ep_rows:
+                m = _ep_to_show_s.get(r['key'])
+                if m:
+                    _season_grps[m].append(r)
+                else:
+                    _no_show.append(r)
+
+            # Phase 1: season rollup — same display values → Season: row
+            _show_rows = _dd(list)  # show_key → [season or individual episode rows]
+
+            for (_sk, _s), _grp in _season_grps.items():
+                _sigs = {_row_sig(r) for r in _grp}
+                if len(_sigs) <= 1:  # all matched episodes share the same display values
+                    _skey     = (PLEX_Media.OBJ_BY_SHOW.get(_sk) or {}).get(_s)
+                    import os as _os
+                    from collections import Counter as _Counter
+                    _ep_dirs  = [_os.path.dirname(r['filepath']) for r in _grp if r['filepath']]
+                    _season_dir = _Counter(_ep_dirs).most_common(1)[0][0] if _ep_dirs else ''
+                    _sr           = dict(_grp[0])
+                    _sr['key']    = _skey or f"{_sk}/{_s}"
+                    _sr['filepath'] = _season_dir
+                    _sr['_rtype'] = 'season'
+                    _sr['_sk']    = _sk
+                    _sr['_s']     = _s
+                    _sr['_dir']   = _season_dir
+                    _show_rows[_sk].append(_sr)
+                else:
+                    for r in _grp:
+                        r['_rtype'] = 'ep'
+                    _show_rows[_sk].extend(_grp)
+
+            # Phase 2: show rollup — all Season: rows same values + all seasons covered
+            _final_ep = []
+            for _sk, _s_rows in _show_rows.items():
+                _all_season = all(r.get('_rtype') == 'season' for r in _s_rows)
+                if _all_season and len({_row_sig(r) for r in _s_rows}) <= 1:
+                    _all_seasons_in_show = set((PLEX_Media.OBJ_BY_SHOW.get(_sk) or {}).keys())
+                    _covered   = {r['_s'] for r in _s_rows}
+                    _uncovered = _all_seasons_in_show - _covered
+                    # Uncovered seasons (zero matches) are OK ONLY for lang: filters,
+                    # where episodes lacking audio_languages metadata are a Plex detection
+                    # gap — not a genuine exclusion from the filter.
+                    # For other filters (watched:, genre:, …) an uncovered season means
+                    # the show genuinely has seasons that don't match, so no rollup.
+                    _uncovered_ok = has_lang and all(
+                        all(not PLEX_Media.OBJ_BY_ID.get(_ek, {}).get('audio_languages')
+                            for _e2, _vs2 in PLEX_Media.OBJ_BY_SHOW_EPISODES.get(_sk, {}).get(_s2, {}).items()
+                            for _ver2, _ks2 in _vs2.items()
+                            for _ek in _ks2)
+                        for _s2 in _uncovered
+                    )
+                    if _covered and (_covered == _all_seasons_in_show or _uncovered_ok):
+                        import os as _os
+                        from collections import Counter as _Counter
+                        _s_dirs  = [r.get('_dir', '') for r in _s_rows if r.get('_dir')]
+                        _show_dir = _Counter([_os.path.dirname(d) for d in _s_dirs]).most_common(1)[0][0] if _s_dirs else ''
+                        _wr = dict(_s_rows[0])
+                        _wr['key']      = _sk
+                        _wr['filepath'] = _show_dir
+                        _wr.pop('_rtype', None); _wr.pop('_sk', None); _wr.pop('_s', None); _wr.pop('_dir', None)
+                        _final_ep.append(_wr)
+                        continue
+                _final_ep.extend(_s_rows)
+
+            _final_ep.extend(_no_show)
+            rows = _movie_rows + _final_ep
 
         # Print header
         hdr  = f"{'KEY':<22}"
@@ -23395,7 +23567,7 @@ def main():
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
@@ -23433,6 +23605,14 @@ def main():
         if _filter_exprs:
             combined = ' AND '.join(_filter_exprs)
             sys.argv += [f'--list={combined}']  # use = form to avoid positional arg ambiguity
+        elif _inject_flags:
+            # Cat-A tokens only (e.g. type:series) — inject --list if no command present
+            _CMDS = {'--list','--filter','--list-duplicates','--problems','--broken',
+                     '--duplicates','--reencode','--rename','--missing','--sort-new',
+                     '--info','--scan','--collections','--list-labels','--list-label',
+                     '--no-audio-language','--no-language','--watched','--unwatched'}
+            if not any(a in _CMDS for a in sys.argv):
+                sys.argv += ['--list']
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
         # Echo translations to the user so they can see how input was interpreted (-VV only)
         if VERYVRB:
@@ -23575,6 +23755,33 @@ def main():
     ONDISK_LABEL_START_MARKER  = globals().get('ONDISK_LABEL_START_MARKER', '[')
     ONDISK_LABEL_END_MARKER    = globals().get('ONDISK_LABEL_END_MARKER',   ']')
     PROBLEMS2DISK              = globals().get('PROBLEMS2DISK', {})
+
+    # --complete genres / --complete labels: fast cache query for zsh tab-completion.
+    # Must run after config so CACHE_FILE is resolved. Prints one value per line, exits.
+    if '--complete' in sys.argv:
+        _ci = sys.argv.index('--complete')
+        _complete_what = sys.argv[_ci + 1].lower() if _ci + 1 < len(sys.argv) else ''
+        global CACHE_FILE
+        CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+        load_cache()
+        PLEX_Media.load_cache()
+        if _complete_what in ('genres', 'genre'):
+            seen = set()
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                for g in (obj.get('genres') or []):
+                    gs = str(g).strip()
+                    if gs and gs.lower() not in seen:
+                        seen.add(gs.lower())
+                        print(gs)
+        elif _complete_what in ('labels', 'label'):
+            seen = set()
+            for obj in PLEX_Media.OBJ_BY_ID.values():
+                for lbl in (obj.get('labels') or []):
+                    ls = str(lbl).strip()
+                    if ls and ls.lower() not in seen:
+                        seen.add(ls.lower())
+                        print(ls)
+        sys.exit(0)
 
     # =====================================================================
     # CLI DESIGN AXIOMS
