@@ -14045,10 +14045,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('STARS', 5, lambda r: f"{r['stars']/2:.1f}" if r['stars'] else '-'))
             extra_cols.append(('RAW',   4, lambda r: str(int(r['stars'])) if r['stars'] else '-'))
 
-        # rating + critics: audience + RT Tomatometer — always show both when either is filtered
+        # rating + critics: check whether any matched library uses RT (supports criticsRating)
+        # Agents that provide critics (Rotten Tomatoes): tv.plex.agents.movie only
+        _CRITICS_AGENTS = {'tv.plex.agents.movie'}
         if has_rating or has_critics:
-            extra_cols.append(('AUDIENCE', 8, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
-            extra_cols.append(('CRITICS',  7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+            _lib_agents = CACHE.get('library_stats', {}).get('agent', {})
+            # Determine which libraries are in the result set
+            _result_libs = {r['lib'] for r in rows}
+            # If scoped to one library, check that library; otherwise check all result libs
+            _check_libs = {library_name} if library_name else _result_libs
+            _any_critics = any(_lib_agents.get(lib, '') in _CRITICS_AGENTS for lib in _check_libs)
+            if _any_critics:
+                # Library has RT critics ratings — show both RATING and CRITICS columns
+                extra_cols.append(('RATING',  7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
+                extra_cols.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+            else:
+                # No RT agent — audience score only, labelled RATING
+                extra_cols.append(('RATING', 7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
 
         if has_added:
             extra_cols.append(('ADDED', 10, lambda r: _fmt_ts(r['added'])))
