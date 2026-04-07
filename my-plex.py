@@ -13885,7 +13885,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if watched_only:   active_labels.append("watched")
         if unwatched_only: active_labels.append("unwatched")
         scope = f" in '{library_name}'" if library_name else ""
-        print(f" >>> Filter: {' AND '.join(active_labels)}{scope}")
+        if VRB: print(f" >>> Filter: {' AND '.join(active_labels)}{scope}")
 
         rows = []
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
@@ -13954,10 +13954,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return
 
         # --- Smart column selection ---
-        # Sort: bitrate desc if bitrate filter, else last_watched desc if watched, else filepath
-        has_bitrate  = 'bitrate'  in _active_fields
-        has_watched  = 'watched'  in _active_fields or 'unwatched' in _active_fields
-        has_lang     = 'lang'     in _active_fields
+        # Sort: bitrate desc if bitrate filter, else last_watched desc if watched:yes, else filepath
+        has_bitrate    = 'bitrate'   in _active_fields
+        has_watched    = 'watched'   in _active_fields    # watched:yes only
+        has_unwatched  = 'unwatched' in _active_fields    # watched:no only — no LAST WATCHED col
+        has_lang       = 'lang'      in _active_fields
         has_size     = 'size'     in _active_fields
         has_duration = 'duration' in _active_fields
         has_year     = 'year'     in _active_fields
@@ -13973,7 +13974,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_bitrate:
             rows.sort(key=lambda r: r['bitrate'], reverse=True)
         elif has_watched:
-            rows.sort(key=lambda r: r['last_watched'], reverse=True)
+            rows.sort(key=lambda r: r['last_watched'], reverse=True)  # most recently watched first
         elif has_year:
             rows.sort(key=lambda r: r['year'], reverse=True)
         elif has_added:
@@ -14001,7 +14002,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Build columns: always KEY first, FILEPATH last; extra cols in between
         extra_cols = []  # list of (header, width, value_fn)
-        if has_watched:
+        if has_watched:  # watched:yes only — shows when it was watched
             extra_cols.append(('LAST WATCHED', 12, lambda r: _fmt_ts(r['last_watched'])))
         if has_bitrate:
             extra_cols.append(('BITRATE',  8, lambda r: f"{r['bitrate']:.2f}" if r['bitrate'] else 'N/A'))
@@ -14032,25 +14033,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
 
         # Print header
-        hdr  = f"  {'KEY':<22}"
-        sep  = "  " + "-" * 22
+        hdr  = f"{'KEY':<22}"
+        sep  = "-" * 22
         for hname, hwidth, _ in extra_cols:
             hdr += f"  {hname:<{hwidth}}"
             sep += "  " + "-" * hwidth
         hdr += "  FILEPATH"
         sep += "  " + "-" * 40
-        print(hdr)
-        print(sep)
-
-        for r in rows:
-            line = f"  {r['key']:<22}"
-            for _, hwidth, vfn in extra_cols:
-                val = vfn(r)
-                line += f"  {str(val):<{hwidth}}"
-            line += f"  {r['filepath']}"
-            print(line)
-
-        print(f"\n    > {len(rows)} item(s)")
+        try:
+            if VRB:
+                print(hdr)
+                print(sep)
+            for r in rows:
+                line = f"{r['key']:<22}"
+                for _, hwidth, vfn in extra_cols:
+                    val = vfn(r)
+                    line += f"  {str(val):<{hwidth}}"
+                line += f"  {r['filepath']}"
+                print(line)
+            if VRB: print(f"\n >>> {len(rows)} item(s)")
+        except BrokenPipeError:
+            pass
 
     @staticmethod
     def _list_ondisk_labeled(labeltext, library_name=None):
@@ -23324,10 +23327,10 @@ def main():
             combined = ' AND '.join(_filter_exprs)
             sys.argv += [f'--list={combined}']  # use = form to avoid positional arg ambiguity
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
-        # Echo translations to the user so they can see how input was interpreted
-        translated_flags = ' '.join(_inject_flags) + (f" --list='{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
-        print(f" >>> Interpreted: {translated_flags}")
-        if VRB:
+        # Echo translations to the user so they can see how input was interpreted (-VV only)
+        if VERYVRB:
+            translated_flags = ' '.join(_inject_flags) + (f" --list='{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
+            print(f" >>> Interpreted: {translated_flags}")
             for orig, dest in _translations:
                 print(f"    > {orig}  →  {dest}")
 
