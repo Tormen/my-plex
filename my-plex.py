@@ -13890,7 +13890,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if watched_only:   active_labels.append("watched")
         if unwatched_only: active_labels.append("unwatched")
         scope = f" in '{library_name}'" if library_name else ""
-        if VRB: print(f" >>> Filter: {' AND '.join(active_labels)}{scope}")
+        # Metadata goes to stderr — keeps stdout clean for piping/head/grep
+        if VRB: print(f" >>> Filter: {' AND '.join(active_labels)}{scope}", file=sys.stderr)
 
         rows = []
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
@@ -14081,7 +14082,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     line += f"  {str(val):<{hwidth}}"
                 line += f"  {r['filepath']}"
                 print(line)
-            if VRB: print(f"\n >>> {len(rows)} item(s)")
+            if VRB: print(f"\n >>> {len(rows)} item(s)", file=sys.stderr)
         except BrokenPipeError:
             pass
 
