@@ -2882,11 +2882,11 @@ class TestEndToEnd(unittest.TestCase):
         self.assertTrue(len(result.stdout) > 0, "Must produce output")
 
     def test_list_no_library(self):
-        """my-plex --list without library must show library names with supported status."""
+        """my-plex --list without library must list all media as KEY  FILEPATH rows."""
         result = self._run_cmd('--list')
         self.assertEqual(result.returncode, 0, f"--list failed: {result.stderr}")
-        # Output is tab-separated: library_name\tsupported/UNSUPPORTED
-        self.assertIn("\tsupported", result.stdout)
+        # Output is KEY<spaces>FILEPATH rows (e.g. 'Movie:123   /path/to/file')
+        self.assertRegex(result.stdout, r'(Movie|Episode):\d+')
 
     def test_duplicates(self):
         """my-plex --duplicates must list duplicate media."""
