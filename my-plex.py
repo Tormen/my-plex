@@ -22880,7 +22880,7 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.none':         ('-',                       False),
             'com.plexapp.agents.localmedia':   ('-',                       False),
         }
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tRATINGS\tEPISODE-DATA-SOURCE")
+        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\tEPISODE-DATA-SOURCE\tRATINGS")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
@@ -22899,26 +22899,26 @@ def execute_global_commands(args, cmd_args):
                     missing_src = f'fernsehserien.de (lang={lib_lang})'
                 elif agent_id in ('tv.plex.agents.series', 'tv.plex.agents.movie', 'com.plexapp.agents.themoviedb'):
                     if TMDB_API_KEY:
-                        missing_src = 'tmdb (matches plex agent, API key configured)'
+                        missing_src = 'tmdb'
                     elif TVDB_API_KEY:
-                        missing_src = 'tvdb (fallback, no TMDB key)'
+                        missing_src = 'tvdb (fallback)'
                     else:
-                        missing_src = 'tmdb (no API key!)'
+                        missing_src = 'tmdb (NO API KEY CONFIGURED)'
                 elif agent_id == 'com.plexapp.agents.thetvdb':
                     if TVDB_API_KEY:
-                        missing_src = 'tvdb (matches plex agent, API key configured)'
+                        missing_src = 'tvdb'
                     elif TMDB_API_KEY:
-                        missing_src = 'tmdb (fallback, no TVDB key)'
+                        missing_src = 'tmdb (fallback)'
                     else:
-                        missing_src = 'tvdb (no API key!)'
+                        missing_src = 'tvdb (NO API KEY CONFIGURED)'
                 elif TVDB_API_KEY:
                     missing_src = 'tvdb (fallback)'
                 elif TMDB_API_KEY:
                     missing_src = 'tmdb (fallback)'
                 else:
-                    missing_src = 'tmdb (no API key!)'
+                    missing_src = 'NO API KEY CONFIGURED'
             else:
-                missing_src = '-'
+                missing_src = 'n/a (not a series library)'
             rating_src, has_critics = AGENT_RATINGS.get(agent_id, ('-', False))
             if rating_src == '-':
                 rating_col = '-'
@@ -22926,9 +22926,7 @@ def execute_global_commands(args, cmd_args):
                 rating_col = f"{rating_src} + RT"
             else:
                 rating_col = rating_src
-            if l_type != 'Show':
-                missing_src = 'n/a (not a series library)'
-            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{rating_col}\t{missing_src}")
+            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}\t{rating_col}")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
