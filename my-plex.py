@@ -24051,16 +24051,17 @@ def main():
     sys.exit(0)
 
 if __name__ == '__main__':
-    try:
-        if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
-            # Inject episode TSV functions into test module (defined after test import)
-            _inject_episode_funcs_into_test_mod()
-            # Load test classes into this module's namespace for unittest discovery
-            for _cls in _UNITTEST_CLASSES:
-                globals()[_cls.__name__] = _cls
-            unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
-        else:
-            main()
-    except BrokenPipeError:
-        # Happens when piping to head/grep/etc. — suppress the "Exception ignored" noise.
-        import os; os.closerange(3, 256); sys.exit(0)
+    # Reset SIGPIPE to OS default so piping to head/grep/etc. terminates us silently
+    # (without this, Python converts SIGPIPE → BrokenPipeError and prints "Exception ignored")
+    import signal as _signal
+    _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
+        # Inject episode TSV functions into test module (defined after test import)
+        _inject_episode_funcs_into_test_mod()
+        # Load test classes into this module's namespace for unittest discovery
+        for _cls in _UNITTEST_CLASSES:
+            globals()[_cls.__name__] = _cls
+        unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
+    else:
+        main()
