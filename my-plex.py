@@ -515,7 +515,7 @@ CONFIG_DEFAULTS = {
     # Performance Configuration
     'MAX_PARALLEL_WORKERS': 4,
     'RATE_LIMIT_DELAY_RANGE': (0.1, 0.7),
-    'LIBRARY_START_DELAY': 1.0,
+    'LIBRARY_START_DELAY': 0.0,
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
     'SSH_RETRY_DELAYS': [0.5, 2, 10],
 
@@ -1052,9 +1052,9 @@ MAX_PARALLEL_WORKERS = CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']  # Conservative d
 RATE_LIMIT_DELAY_RANGE = CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']  # Conservative: 100ms-1000ms random delay per item
 
 # Delay between starting each library worker (in seconds)
-# Prevents all workers from hitting Plex server simultaneously
-# Recommended: 0.5s for balanced, 0.0s to disable, 1.0s for very conservative
-LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']  # 500ms stagger between library starts
+# Only needed in legacy API mode to avoid hammering the Plex API simultaneously.
+# DB mode has no such constraint — default is 0.
+LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']
 
 # Retry configuration for Plex API operations (exponential backoff)
 # List of wait times (in seconds) between retry attempts
