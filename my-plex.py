@@ -18851,7 +18851,7 @@ def resolve_show_for_episodes(show_ref):
                 return key, obj
         print(f'  Ambiguous show reference "{show_ref}", matches:')
         for key, obj in shows:
-            print(f'    {key}: "{obj.get("title", "?")}"')
+            print(f'    {key:<14} "{obj.get("title", "?")}"')
         err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
 
     err(1087, f"Show not found: '{show_ref}'\n"
