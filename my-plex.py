@@ -9358,7 +9358,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     titles_total = 0
     numbering_issues_total = 0
 
-    print(f"  Ensuring episodes.tsv for {total_shows} shows in '{library_name}'...")
+    if VRB: print(f"  Ensuring episodes.tsv for {total_shows} shows in '{library_name}'...")
 
     for show_idx, (sh_id, show_data) in enumerate(shows_data.items(), 1):
         show_key = f"Show:{sh_id}"
@@ -9607,10 +9607,12 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     if titles_total > 0:
         parts.append(f"{titles_total} titles filled")
     w_prefix = _get_worker_prefix()
+    from datetime import datetime as _dt
+    _ts = _dt.now().strftime('%Y-%m-%d_%H%M.%S')
     if w_prefix:
-        print(f"{w_prefix} episodes.tsv: {', '.join(parts)}")
+        print(f"{_ts} {w_prefix}  episodes.tsv: {', '.join(parts)}")
     else:
-        print(f"  episodes.tsv ({library_name}): {', '.join(parts)}")
+        print(f"{_ts}   episodes.tsv ({library_name}): {', '.join(parts)}")
 
     # Accumulate for cache-updates.json and summary (details printed in final summary)
     _TSV_FAILED_SHOWS.extend(failed_shows)
@@ -11030,8 +11032,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             CACHE['library_stats'] = current_library_stats
 
         if FORCE_CACHE_UPDATE and max_workers > 1:
-            print(f"Processing {total_libraries} libraries in parallel with {max_workers} workers...")
-            print(f"{'='*76}")
+            print(f" >>> Processing {total_libraries} libraries in parallel with {max_workers} workers...")
             # Thread-safe counter for library index
             library_counter = threading.Lock()
             library_idx_dict = {'current': 0}
@@ -11333,9 +11334,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     # This is safe here because we've already saved the checkpoint
                     os._exit(0)
 
-            # Print separator after parallel processing completes
-            if FORCE_CACHE_UPDATE:
-                print(f"{'='*76}")
+            pass  # no separator after parallel processing
         else:
             # Incremental update mode (not full rebuild)
             # Check if any libraries need updating and prompt user
@@ -12301,7 +12300,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
         ondisk_labels_idx_size = len(PLEX_Media.OBJ_BY_ONDISK_LABEL)
         if ondisk_labels_idx_size and FORCE_CACHE_UPDATE:
-            print(f"  On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
+            print(f" >>> On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
 
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -12368,9 +12367,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # --- SUMMARY OF CHANGES (only when there are actual changes) ---
             if has_changes:
-                print(f"\n{'='*76}")
-                print(f"SUMMARY OF CHANGES")
-                print(f"{'='*76}")
+                print(f" >>> SUMMARY OF CHANGES")
 
             # Library changes table (if any)
             if total_added > 0 or total_removed > 0 or total_updated > 0:
@@ -12453,27 +12450,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 max_status_width = max(len(s) for _, _, s, _ in all_libs) if all_libs else 11
                 max_status_width = max(max_status_width, len('Status'))
 
-                print(f"{'LibraryType':<12} | {'LibraryName':<20} | {'Status':<{max_status_width}} | {'Updated'}")
-                print(f"{'-'*12}-+-{'-'*20}-+-{'-'*max_status_width}-+-{'-'*19}")
+                print(f"  >> {'LibraryType':<12} | {'LibraryName':<20} | {'Status':<{max_status_width}} | {'Updated'}")
+                print(f"  >> {'-'*12}-+-{'-'*20}-+-{'-'*max_status_width}-+-{'-'*19}")
 
                 for lib_type, lib_name, lib_status, timestamp in all_libs:
                     ts_str = str(timestamp) if timestamp != 'N/A' else 'N/A'
-                    print(f"{lib_type:<12} | {lib_name:<20} | {lib_status:<{max_status_width}} | {ts_str}")
-                print()
+                    print(f"   > {lib_type:<12} | {lib_name:<20} | {lib_status:<{max_status_width}} | {ts_str}")
             if has_changes:
                 # Metadata collection summary
                 if metadata_probed > 0:
                     metadata_missing = metadata_total - metadata_probed
                     if metadata_interrupted:
-                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted by user)")
+                        print(f"  >> ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, interrupted by user)")
                     elif metadata_missing > 0:
-                        print(f"  ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, {metadata_missing} got no response from ffmpeg)")
+                        print(f"  >> ✓ Metadata collected: {metadata_success} files ({metadata_probed}/{metadata_total} processed, {metadata_missing} got no response from ffmpeg)")
                     else:
-                        print(f"  ✓ Metadata collected: {metadata_success}/{metadata_total} files")
+                        print(f"  >> ✓ Metadata collected: {metadata_success}/{metadata_total} files")
                     if metadata_broken > 0:
-                        print(f"  ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
+                        print(f"  >> ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
                 if total_broken > 0:
-                    print(f"  ⚠ {total_broken} broken files total (use --broken to list)")
+                    print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
 
                 # TSV summary (episode data scraping across all show libraries)
                 if _TSV_STATS['cached'] > 0 or _TSV_STATS['scraped'] > 0:
@@ -12490,9 +12486,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         tsv_parts.append(f"{_TSV_STATS['numbering_issues']} episode numbering issues (Plex vs Scraped)")
                     if _TSV_STATS['titles_filled']:
                         tsv_parts.append(f"{_TSV_STATS['titles_filled']} missing episode titles filled from TSV")
-                    print(f"  ✓ Episode data: {tsv_parts[0]}")
+                    print(f"  >> ✓ Episode data: {tsv_parts[0]}")
                     for part in tsv_parts[1:]:
-                        print(f"    {part}")
+                        print(f"   > {part}")
 
                     # Print failure details (grouped by type, with counts)
                     if _TSV_FAILED_SHOWS:
@@ -12515,9 +12511,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         }
                         for etype, shows in by_type.items():
                             label = _ERROR_TYPE_LABELS.get(etype, etype)
-                            print(f"      {label}: {len(shows)}")
+                            print(f"   > {label}: {len(shows)}")
                             for title, lib in sorted(shows):
-                                print(f"        {title:40s} {lib}")
+                                print(f"     {title:40s} {lib}")
 
                     # Hints about related commands
                     hints = []
@@ -12526,7 +12522,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if _TSV_STATS['numbering_issues']:
                         hints.append('--episode-numbering-issues for numbering details')
                     if hints:
-                        print(f"    Use {', '.join(hints)}.")
+                        print(f"   > Use {', '.join(hints)}.")
 
             # --- Always write JSON update log ---
             _write_cache_update_log(
@@ -12551,14 +12547,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if total_removed > 0: parts.append(f"-{total_removed} removed")
                 if total_updated > 0: parts.append(f"~{total_updated} updated")
                 meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
-                print(f"\n{action} {completion_status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
-                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
+                print(f" >>> {action} {completion_status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
             elif metadata_probed > 0:
-                print(f"\n{action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
-                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
+                print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
             else:
-                print(f"\n{action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
-                print(f"Details: {CACHE_UPDATES_FILE}", flush=True)
+                print(f" >>> {action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
+            print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print TSV failures (always, even when no library changes)
             if not has_changes and _TSV_FAILED_SHOWS:
@@ -12578,12 +12572,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     'no_external_ids':    '--unmatched',
                     'suspicious_title':   '--potential-mismatch',
                 }
-                print(f"\n  ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
+                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
                 for etype, shows in by_type.items():
                     label = _ERROR_TYPE_LABELS.get(etype, etype)
-                    print(f"      {label}: {len(shows)}")
+                    print(f"   > {label}: {len(shows)}")
                     for title, lib in sorted(shows):
-                        print(f"        {title:40s} {lib}")
+                        print(f"     {title:40s} {lib}")
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
