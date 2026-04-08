@@ -12608,6 +12608,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         for title, lib in sorted(shows):
                             print(f"     {title:40s} {lib}")
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
+            print(f"   > Use --problems to see all of above problems.")
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
