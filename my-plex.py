@@ -12571,9 +12571,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
 
             # >> problem counts — identical format to --problems summary
+            if _problems_cache:
+                _total_p = (
+                    _problems_cache.get('broken', 0) +
+                    _problems_cache.get('excess_versions', {}).get('entries', 0) +
+                    _problems_cache.get('tsv', 0) +
+                    _problems_cache.get('unmatched', 0) +
+                    _problems_cache.get('unsorted', 0) +
+                    _problems_cache.get('potential_mismatch', 0) +
+                    _problems_cache.get('numbering_issues', 0) +
+                    _problems_cache.get('reencode', 0)
+                )
+                vrb_hint = "" if VRB else " (use -V to show details)"
+                print(f" >>> PROBLEM DETECTION: {_total_p} problem(s) found{vrb_hint}")
             _print_problem_warnings(_problems_cache)
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
-            print(f"   > Use --problems to see all of above problems.")
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
