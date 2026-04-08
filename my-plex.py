@@ -12488,33 +12488,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     for part in tsv_parts[1:]:
                         print(f"   > {part}")
 
-            # --- Always-shown warnings and guidance ---
-            _ERROR_TYPE_LABELS = {
-                'no_external_ids':    'No external IDs (fix in Plex: rematch)',
-                'suspicious_title':   'Suspicious title',
-                'misidentified_show': 'Single episode in series',
-                'no_id_for_source':   'No ID for source',
-                'source_not_found':   'Source not found',
-                'scrape_failed':      'Scrape failed',
-            }
-            if _TSV_FAILED_SHOWS:
-                from collections import defaultdict
-                by_type = defaultdict(list)
-                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
-                    by_type[error_type].append((title, lib))
-                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
-                for etype, shows in by_type.items():
-                    label = _ERROR_TYPE_LABELS.get(etype, etype)
-                    print(f"   > {label}: {len(shows)}")
-                    for title, lib in sorted(shows):
-                        print(f"     {title:40s} {lib}")
-            if total_broken > 0:
-                print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
-            if _TSV_STATS['numbering_issues']:
-                print(f"  >> ⚠ {_TSV_STATS['numbering_issues']} episode numbering issues (use --episode-numbering-issues for details)")
-            if _TSV_FAILED_SHOWS:
-                print(f"   > Use --problems --tsv for full TSV issue list.")
-
             # --- Always write JSON update log ---
             _write_cache_update_log(
                 action=action,
@@ -12530,7 +12503,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 metadata_broken=metadata_broken,
             )
 
-            # Final one-liner
+            # >>> MILESTONE — always first
             labels_str = f", {ondisk_labels_idx_size} on-disk labels" if ondisk_labels_idx_size else ""
             if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
@@ -12543,6 +12516,31 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items{labels_str}", flush=True)
             else:
                 print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
+
+            # >> warnings and details under the milestone
+            if total_broken > 0:
+                print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
+            if _TSV_STATS['numbering_issues']:
+                print(f"  >> ⚠ {_TSV_STATS['numbering_issues']} episode numbering issues (use --episode-numbering-issues for details)")
+            _ERROR_TYPE_LABELS = {
+                'no_external_ids':    'No external IDs (fix in Plex: rematch)',
+                'suspicious_title':   'Suspicious title',
+                'misidentified_show': 'Single episode in series',
+                'no_id_for_source':   'No ID for source',
+                'source_not_found':   'Source not found',
+                'scrape_failed':      'Scrape failed',
+            }
+            if _TSV_FAILED_SHOWS:
+                from collections import defaultdict
+                by_type = defaultdict(list)
+                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
+                    by_type[error_type].append((title, lib))
+                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows (use --problems --tsv for details):")
+                for etype, shows in by_type.items():
+                    label = _ERROR_TYPE_LABELS.get(etype, etype)
+                    print(f"   > {label}: {len(shows)}")
+                    for title, lib in sorted(shows):
+                        print(f"     {title:40s} {lib}")
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
