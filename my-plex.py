@@ -11359,7 +11359,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             # If libraries need updating, prompt user
             if libraries_to_update:
                 if VRB:
-                    print(f" >> Detected outdated libraries (Plex server has newer content)")
+                    print(f"  >> Detected outdated libraries (Plex server has newer content)")
                 print(f"\nCache update available for {len(libraries_to_update)} librar{'y' if len(libraries_to_update) == 1 else 'ies'}:")
                 for title, _, old_ts, new_ts in libraries_to_update:
                     print(f"  - {title}")
@@ -18329,7 +18329,7 @@ def _scrape_tvdb(show_title, metadata, existing_episodes, external_ids=None):
         new_metadata['latest_season'] = str(max_s)
 
     w_prefix = _get_worker_prefix()
-    print(f" {w_prefix}>> TVDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+    print(f"  {w_prefix}>> TVDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, all_episodes
 
@@ -18469,7 +18469,7 @@ def _scrape_tmdb(show_title, metadata, existing_episodes, external_ids=None):
         new_metadata['latest_season'] = str(max_s)
 
     w_prefix = _get_worker_prefix()
-    print(f" {w_prefix}>> TMDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
+    print(f"  {w_prefix}>> TMDB: {len(all_episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, all_episodes
 
@@ -18780,7 +18780,7 @@ def _scrape_fernsehserien_de(show_title, metadata, existing_episodes, year=None)
         new_metadata['latest_season'] = str(max_s)
 
     w_prefix = _get_worker_prefix()
-    print(f" {w_prefix}>> fernsehserien.de: {len(episodes)} episodes in {max_s} seasons for '{show_title}'")
+    print(f"  {w_prefix}>> fernsehserien.de: {len(episodes)} episodes in {max_s} seasons for '{show_title}'")
 
     return new_metadata, episodes
 
@@ -18955,10 +18955,10 @@ def cmd_missing(show_ref, source_override=None):
     source = _determine_episode_source(show_dict, source_override)
     external_ids = show_dict.get('external_ids', {})
 
-    print(f">>> MISSING EPISODES: {show_title}")
-    print(f" >> Show:      {show_key} — {show_title}")
-    print(f" >> Directory: {show_dir_server}")
-    print(f" >> Source:    {source}" + (f" (tvdb:{external_ids.get('tvdb', '?')}, tmdb:{external_ids.get('tmdb', '?')})" if source in ('tvdb', 'tmdb') else ''))
+    print(f" >>> MISSING EPISODES: {show_title}")
+    print(f"  >> Show:      {show_key} — {show_title}")
+    print(f"  >> Directory: {show_dir_server}")
+    print(f"  >> Source:    {source}" + (f" (tvdb:{external_ids.get('tvdb', '?')}, tmdb:{external_ids.get('tmdb', '?')})" if source in ('tvdb', 'tmdb') else ''))
 
     # Load or update episodes.tsv
     tsv_path = get_episodes_tsv_path(show_dir)
@@ -18967,28 +18967,28 @@ def cmd_missing(show_ref, source_override=None):
     if existing_meta is not None:
         old_source = existing_meta.get('source', '')
         if old_source and old_source != source:
-            print(f" >> Re-scraping: source changed ({old_source} → {source})...")
+            print(f"  >> Re-scraping: source changed ({old_source} → {source})...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
         elif is_episodes_tsv_stale(tsv_path):
-            print(f" >> Updating episodes.tsv (stale)...")
+            print(f"  >> Updating episodes.tsv (stale)...")
             metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, external_ids=external_ids)
         else:
             metadata, all_episodes = read_episodes_tsv(tsv_path)
     else:
-        print(f" >> No episodes.tsv found — scraping {source}...")
+        print(f"  >> No episodes.tsv found — scraping {source}...")
         metadata, all_episodes = scrape_episodes(show_title, show_dir, source=source, force=True, external_ids=external_ids)
 
     if not all_episodes:
-        print(f" >> No episode data available for '{show_title}'.")
+        print(f"  >> No episode data available for '{show_title}'.")
         if source == 'tvdb':
-            print(f" >> Check TVDB_API_KEY in ~/.my-plex.conf and TVDB ID: {external_ids.get('tvdb', 'not found')}")
+            print(f"  >> Check TVDB_API_KEY in ~/.my-plex.conf and TVDB ID: {external_ids.get('tvdb', 'not found')}")
         elif source == 'tmdb':
-            print(f" >> Check TMDB_API_KEY in ~/.my-plex.conf and TMDB ID: {external_ids.get('tmdb', 'not found')}")
+            print(f"  >> Check TMDB_API_KEY in ~/.my-plex.conf and TMDB ID: {external_ids.get('tmdb', 'not found')}")
         else:
-            print(f" >> Create {tsv_path} or ensure the show exists on {source}.")
+            print(f"  >> Create {tsv_path} or ensure the show exists on {source}.")
         return
 
-    print(f" >> TSV:       {len(all_episodes)} episodes (source: {metadata.get('source', '?')})")
+    print(f"  >> TSV:       {len(all_episodes)} episodes (source: {metadata.get('source', '?')})")
 
     # Get cached episodes from OBJ_BY_SHOW_EPISODES
     cached_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
@@ -19018,7 +19018,7 @@ def cmd_missing(show_ref, source_override=None):
                 e_num = e_num % 100
             have_set.add((s_num, e_num))
 
-    print(f" >> Cache:     {len(have_set)} episodes on disk")
+    print(f"  >> Cache:     {len(have_set)} episodes on disk")
 
     # Build set of (season, episode) from TSV
     tsv_set = {}  # (season, episode) -> {'date': ..., 'title': ...}
@@ -19082,21 +19082,21 @@ def cmd_missing(show_ref, source_override=None):
         extras_lines.append(f"  {s_str}{e_str}    {title.strip()}")
 
     if not missing_lines:
-        print(f" >> No missing episodes! All {len(tsv_set)} TSV episodes are on disk.")
+        print(f"  >> No missing episodes! All {len(tsv_set)} TSV episodes are on disk.")
         if extras_lines:
-            print(f" >> Extra on disk, not in TSV: {len(extras_lines)}")
+            print(f"  >> Extra on disk, not in TSV: {len(extras_lines)}")
             for line in extras_lines:
-                print(f"  > {line.strip()}")
+                print(f"   > {line.strip()}")
         return
 
-    print(f" >> Missing: {len(missing_lines)} episode(s)")
+    print(f"  >> Missing: {len(missing_lines)} episode(s)")
     for line in missing_lines:
-        print(f"  > {line.strip()}")
+        print(f"   > {line.strip()}")
 
     if extras_lines:
-        print(f" >> Extra on disk, not in TSV: {len(extras_lines)}")
+        print(f"  >> Extra on disk, not in TSV: {len(extras_lines)}")
         for line in extras_lines:
-            print(f"  > {line.strip()}")
+            print(f"   > {line.strip()}")
 
 
 # ---------------------------------------------------------------------------
