@@ -9610,7 +9610,7 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     from datetime import datetime as _dt
     _ts = _dt.now().strftime('%Y-%m-%d_%H%M.%S')
     if w_prefix:
-        print(f"{_ts} {w_prefix}  episodes.tsv: {', '.join(parts)}")
+        print(f"{_ts} {w_prefix}{library_name}   episodes.tsv: {', '.join(parts)}")
     else:
         print(f"{_ts}   episodes.tsv ({library_name}): {', '.join(parts)}")
 
