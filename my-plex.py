@@ -13680,11 +13680,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                 if show_full:
                     total_eps = sum(len(eps) for s in flagged_seasons.values() for eps in s.values())
-                    avg_br = sum(
-                        item[0] for s in flagged_seasons.values()
-                        for eps in s.values() for item in eps
-                    ) / total_eps
-                    print(f"\n  [{lib}]  {series_title}  *** ALL {len(all_season_keys)} seasons flagged ({total_eps} eps, avg {avg_br:.1f} Mbps) ***")
+                    all_items = [item for s in flagged_seasons.values() for eps in s.values() for item in eps]
+                    avg_br = sum(i[0] for i in all_items) / total_eps
+                    avg_sz = sum(i[1] for i in all_items) / total_eps
+                    print(f"\n  [{lib}]  {series_title}  *** ALL {len(all_season_keys)} seasons flagged ({total_eps} eps, avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))}) ***")
                     print(f"    →  my-plex '{series_title}' --reencode")
                 else:
                     print(f"\n  [{lib}]  {series_title}")
@@ -13693,14 +13692,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         total_in_season = len(all_seasons_data.get(s_str, {}))
                         rollup = season_rollup.get(s_str, 'partial')
                         if rollup == 'full':
-                            avg_br = sum(item[0] for eps in ep_dict.values() for item in eps) / len(ep_dict)
-                            print(f"    {s_str}  *** all {len(ep_dict)} episodes flagged (avg {avg_br:.1f} Mbps) ***")
+                            all_items = [item for eps in ep_dict.values() for item in eps]
+                            avg_br = sum(i[0] for i in all_items) / len(all_items)
+                            avg_sz = sum(i[1] for i in all_items) / len(all_items)
+                            print(f"    {s_str}  *** all {len(ep_dict)} episodes flagged (avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))}) ***")
                         else:
                             ep_lines = []
                             for e_str in sorted(ep_dict.keys()):
                                 items = ep_dict[e_str]
                                 avg_br = sum(i[0] for i in items) / len(items)
-                                ep_lines.append(f"{e_str} {avg_br:.1f}Mbps")
+                                avg_sz = sum(i[1] for i in items) / len(items)
+                                ep_lines.append(f"{e_str} {avg_br:.1f}Mbps/{format_filesize(int(avg_sz))}")
                             print(f"    {s_str}  {', '.join(ep_lines)}  ({len(ep_dict)}/{total_in_season} eps)")
 
         print(f"\n  Total: {total_file_count} file(s) above {threshold} Mbps")
