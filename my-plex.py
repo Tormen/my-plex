@@ -14191,12 +14191,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_added:
             extra_cols.append(('ADDED', 10, lambda r: _fmt_ts(r['added'])))
 
-        # lang: audio languages + subtitle languages (both stored in cache)
+        # lang: → AUDIO column only; subs: → SUBS column only; both → AUDIO + SUBS
         if has_lang:
             extra_cols.append(('AUDIO', 8,  lambda r: r['audio_langs'] or '-'))
-            if not has_subs:  # avoid duplicate SUBS col if subs: filter also active
-                extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
-        # subs: subtitle languages only
         if has_subs:
             extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
 
