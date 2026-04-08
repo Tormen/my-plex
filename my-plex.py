@@ -23198,6 +23198,12 @@ def execute_global_commands(args, cmd_args):
 
         lib_label = f" for '{problems_library}'" if problems_library else ""
         scope_str = (" — Episode Data (TSV/Scraping)" if tsv_only else "") + lib_label
+        lib_arg = f" {problems_library}" if problems_library else ""
+        _cached_at = CACHE.get('problems', {}).get('computed_at', '')
+
+        # Opening milestone: context + timestamp
+        cached_str = f": last --update-cache: {_cached_at}" if _cached_at else ""
+        print(f" >>> PROBLEM DETECTION (based on cache){cached_str}")
 
         broken_count = 0
         excess_file_count = excess_entry_count = 0
@@ -23216,48 +23222,44 @@ def execute_global_commands(args, cmd_args):
 
         if not tsv_only:
             # 1. Broken files
-            print(f" >>> Broken / Truncated Files{lib_label}")
+            print(f"  >> Broken / Truncated Files{lib_label}")
             broken_count = _run_check(PLEX_Media._list_broken_files, obj_keys, None) or 0
 
             # 2. Excess versions
-            print(f" >>> Excess Versions (3+){lib_label}")
+            print(f"  >> Excess Versions (3+){lib_label}")
             result = _run_check(PLEX_Media._list_excess_versions, obj_keys, None, 3)
             excess_file_count, excess_entry_count = result if result else (0, 0)
 
         # 3. Episode data issues
-        print(f" >>> Episode Data (TSV) Issues{lib_label}")
+        print(f"  >> Episode Data (TSV) Issues{lib_label}")
         tsv_problem_count = _run_check(_list_tsv_problems, library_name=problems_library)
 
         if not tsv_only:
             # 4. Unmatched items
-            print(f" >>> Unmatched Items{lib_label}")
+            print(f"  >> Unmatched Items{lib_label}")
             unmatched_count = _run_check(PLEX_Media._list_unmatched, obj_keys, None)
 
             # 5. Unsorted shows
-            print(f" >>> Unsorted Shows{lib_label}")
+            print(f"  >> Unsorted Shows{lib_label}")
             unsorted_count = _run_check(PLEX_Media._list_unsorted, library_name=problems_library)
 
             # 6. Potential mismatches
-            print(f" >>> Potential Mismatches{lib_label}")
+            print(f"  >> Potential Mismatches{lib_label}")
             mismatch_count = _run_check(PLEX_Media._list_potential_mismatches, obj_keys, None)
 
         # 7. Episode numbering issues
-        print(f" >>> Episode Numbering Issues{lib_label}")
+        print(f"  >> Episode Numbering Issues{lib_label}")
         numbering_count = _run_check(PLEX_Media._list_episode_numbering_issues, library_name=problems_library)
 
         if not tsv_only:
             # 8. Reencode candidates
-            print(f" >>> Reencode Candidates{lib_label}")
+            print(f"  >> Reencode Candidates{lib_label}")
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
-        # Summary milestone — same format as --update-cache
-        lib_arg = f" {problems_library}" if problems_library else ""
-        _cached_at = CACHE.get('problems', {}).get('computed_at', '')
+        # Closing milestone with total
         total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count + reencode_count
-        cached_str = f" — last --update-cache: {_cached_at}" if _cached_at else ""
-        print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{cached_str}")
-        if not VRB:
-            print(f"  >> (use -V to show details)")
+        vrb_hint = "" if VRB else " (use -V to show details)"
+        print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
         live_problems = {
             'broken':            broken_count,
             'excess_versions':   {'entries': excess_entry_count, 'files': excess_file_count},
