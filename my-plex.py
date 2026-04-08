@@ -23209,9 +23209,7 @@ def execute_global_commands(args, cmd_args):
         obj_keys = collect_library_keys(library_name=problems_library, media_type=media_type)
 
         lib_label = f" for '{problems_library}'" if problems_library else ""
-        print("\n" + "=" * 76)
-        print("PROBLEM DETECTION" + (" — Episode Data (TSV/Scraping)" if tsv_only else "") + lib_label)
-        print("=" * 76)
+        scope_str = (" — Episode Data (TSV/Scraping)" if tsv_only else "") + lib_label
 
         broken_count = 0
         excess_file_count = excess_entry_count = 0
@@ -23230,73 +23228,69 @@ def execute_global_commands(args, cmd_args):
 
         if not tsv_only:
             # 1. Broken files
-            print("\n--- Broken / Truncated Files ---")
+            print(f" >>> Broken / Truncated Files{lib_label}")
             broken_count = _run_check(PLEX_Media._list_broken_files, obj_keys, None) or 0
 
             # 2. Excess versions
-            print("\n--- Excess Versions (3+) ---")
+            print(f" >>> Excess Versions (3+){lib_label}")
             result = _run_check(PLEX_Media._list_excess_versions, obj_keys, None, 3)
             excess_file_count, excess_entry_count = result if result else (0, 0)
 
         # 3. Episode data issues
-        print("\n--- Episode Data (TSV) Issues ---")
+        print(f" >>> Episode Data (TSV) Issues{lib_label}")
         tsv_problem_count = _run_check(_list_tsv_problems, library_name=problems_library)
 
         if not tsv_only:
             # 4. Unmatched items
-            print("\n--- Unmatched Items (not identified by any Plex metadata agent) ---")
+            print(f" >>> Unmatched Items{lib_label}")
             unmatched_count = _run_check(PLEX_Media._list_unmatched, obj_keys, None)
 
             # 5. Unsorted shows
-            print("\n--- Unsorted Shows (episodes without season directories) ---")
+            print(f" >>> Unsorted Shows{lib_label}")
             unsorted_count = _run_check(PLEX_Media._list_unsorted, library_name=problems_library)
 
             # 6. Potential mismatches
-            print("\n--- Potential Mismatches (Plex title vs directory name) ---")
+            print(f" >>> Potential Mismatches{lib_label}")
             mismatch_count = _run_check(PLEX_Media._list_potential_mismatches, obj_keys, None)
 
         # 7. Episode numbering issues
-        print("\n--- Episode Numbering Issues (Plex vs Scraped) ---")
+        print(f" >>> Episode Numbering Issues{lib_label}")
         numbering_count = _run_check(PLEX_Media._list_episode_numbering_issues, library_name=problems_library)
 
         if not tsv_only:
             # 8. Reencode candidates
-            print("\n--- Reencode Candidates (high bitrate) ---")
+            print(f" >>> Reencode Candidates{lib_label}")
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
-        # Summary
+        # Summary milestone
         lib_arg = f" {problems_library}" if problems_library else ""
         _cached_at = CACHE.get('problems', {}).get('computed_at', '')
-        print("\n" + "=" * 76)
-        if not VRB:
-            print("  (Use -V / --verbose to show details above.)")
-        print(f"SUMMARY  (computed now — last --update-cache: {_cached_at})" if _cached_at else "SUMMARY")
-        print("=" * 76)
-        if not tsv_only:
-            hint = f"   →  my-plex{lib_arg} --broken" if broken_count else ""
-            print(f"  Broken/truncated files:   {broken_count}{hint}")
-            hint = f"   →  my-plex{lib_arg} --excess-versions 3" if excess_entry_count else ""
-            print(f"  Excess version entries:   {excess_entry_count} entries ({excess_file_count} files){hint}")
-        hint = f"   →  my-plex{lib_arg} --problems --tsv" if tsv_problem_count else ""
-        print(f"  Episode data issues:      {tsv_problem_count}{hint}")
-        if not tsv_only:
-            hint = f"   →  my-plex{lib_arg} --unmatched" if unmatched_count else ""
-            print(f"  Unmatched items:          {unmatched_count}{hint}")
-            hint = f"   →  my-plex{lib_arg} --unsorted" if unsorted_count else ""
-            print(f"  Unsorted shows:           {unsorted_count}{hint}")
-            hint = f"   →  my-plex{lib_arg} --potential-mismatch" if mismatch_count else ""
-            print(f"  Potential mismatches:     {mismatch_count}{hint}")
-        hint = f"   →  my-plex{lib_arg} --episode-numbering-issues" if numbering_count else ""
-        print(f"  Numbering issues:         {numbering_count}{hint}")
-        if not tsv_only:
-            hint = f"   →  my-plex{lib_arg} --reencode" if reencode_count else ""
-            print(f"  Reencode candidates:      {reencode_count}{hint}")
         total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count + reencode_count
+        cached_str = f" — last --update-cache: {_cached_at}" if _cached_at else ""
+        print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{cached_str}")
+        if not VRB:
+            print(f"  >> (use -V to show details)")
+        if not tsv_only:
+            if broken_count:
+                print(f"  >> ⚠ {broken_count} broken/truncated files   →  my-plex{lib_arg} --broken")
+            if excess_entry_count:
+                print(f"  >> ⚠ {excess_entry_count} excess version entries ({excess_file_count} files)   →  my-plex{lib_arg} --excess-versions 3")
+        if tsv_problem_count:
+            print(f"  >> ⚠ {tsv_problem_count} episode data issues   →  my-plex{lib_arg} --problems --tsv")
+        if not tsv_only:
+            if unmatched_count:
+                print(f"  >> ⚠ {unmatched_count} unmatched items   →  my-plex{lib_arg} --unmatched")
+            if unsorted_count:
+                print(f"  >> ⚠ {unsorted_count} unsorted shows   →  my-plex{lib_arg} --unsorted")
+            if mismatch_count:
+                print(f"  >> ⚠ {mismatch_count} potential mismatches   →  my-plex{lib_arg} --potential-mismatch")
+        if numbering_count:
+            print(f"  >> ⚠ {numbering_count} episode numbering issues   →  my-plex{lib_arg} --episode-numbering-issues")
+        if not tsv_only:
+            if reencode_count:
+                print(f"  >> ⚠ {reencode_count} reencode candidates   →  my-plex{lib_arg} --reencode")
         if total_problems == 0:
-            print("\n  No problems found.")
-        else:
-            print(f"\n  Total: {total_problems} problem(s) found.")
-        print("=" * 76)
+            print(f"  >> No problems found.")
         return
 
     # --tsv/--scrape requires --problems (which already returned above)
