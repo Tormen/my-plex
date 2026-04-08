@@ -12299,7 +12299,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
         PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
         ondisk_labels_idx_size = len(PLEX_Media.OBJ_BY_ONDISK_LABEL)
-        if ondisk_labels_idx_size and FORCE_CACHE_UPDATE:
+        if ondisk_labels_idx_size and FORCE_CACHE_UPDATE and VRB:
             print(f" >>> On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
 
         # Update progress for cache rebuild
@@ -12531,18 +12531,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             )
 
             # Final one-liner
-            broken_str = f", {total_broken} broken files" if total_broken > 0 else ""
+            labels_str = f", {ondisk_labels_idx_size} on-disk labels" if ondisk_labels_idx_size else ""
             if total_added > 0 or total_removed > 0 or total_updated > 0:
                 parts = []
                 if total_added > 0: parts.append(f"+{total_added} added")
                 if total_removed > 0: parts.append(f"-{total_removed} removed")
                 if total_updated > 0: parts.append(f"~{total_updated} updated")
                 meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
-                print(f" >>> {action} {completion_status}: {', '.join(parts)}{meta_str}{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f" >>> {action} {completion_status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items{labels_str}", flush=True)
             elif metadata_probed > 0:
-                print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items{labels_str}", flush=True)
             else:
-                print(f" >>> {action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
+                print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
