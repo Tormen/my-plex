@@ -18849,7 +18849,7 @@ def resolve_show_for_episodes(show_ref):
             orig_title = obj.get('originalTitle', '').lower()
             if ref_lower == title or ref_lower == orig_title:
                 return key, obj
-        print(f"  Ambiguous show reference '{show_ref}', matches:")
+        print(f'  Ambiguous show reference "{show_ref}", matches:')
         for key, obj in shows:
             print(f"    {key}: {obj.get('title', '?')}")
         err(1086, f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
