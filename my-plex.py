@@ -12556,21 +12556,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 metadata_broken=metadata_broken,
             )
 
-            # >>> MILESTONE — always first
-            labels_str = f", {ondisk_labels_idx_size} on-disk labels" if ondisk_labels_idx_size else ""
-            if total_added > 0 or total_removed > 0 or total_updated > 0:
-                parts = []
-                if total_added > 0: parts.append(f"+{total_added} added")
-                if total_removed > 0: parts.append(f"-{total_removed} removed")
-                if total_updated > 0: parts.append(f"~{total_updated} updated")
-                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
-                print(f" >>> {action} {completion_status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items{labels_str}", flush=True)
-            elif metadata_probed > 0:
-                print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items{labels_str}", flush=True)
-            else:
-                print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
-
             # >> problem counts — identical format to --problems summary
+            labels_str = f", {ondisk_labels_idx_size} on-disk labels" if ondisk_labels_idx_size else ""
             if _problems_cache:
                 _total_p = (
                     _problems_cache.get('broken', 0) +
@@ -12585,6 +12572,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 vrb_hint = "" if VRB else " (use -V to show details)"
                 print(f" >>> PROBLEM DETECTION: {_total_p} problem(s) found{vrb_hint}")
             _print_problem_warnings(_problems_cache)
+
+            # >>> Cache update milestone just before Details
+            if total_added > 0 or total_removed > 0 or total_updated > 0:
+                parts = []
+                if total_added > 0: parts.append(f"+{total_added} added")
+                if total_removed > 0: parts.append(f"-{total_removed} removed")
+                if total_updated > 0: parts.append(f"~{total_updated} updated")
+                meta_str = f", {metadata_probed}/{metadata_total} files metadata probed" if metadata_probed > 0 else ""
+                print(f" >>> {action} {completion_status}: {', '.join(parts)}{meta_str}, {total_media_files} total PLEX items{labels_str}", flush=True)
+            elif metadata_probed > 0:
+                print(f" >>> {action} {completion_status}: no library changes, {metadata_probed}/{metadata_total} files metadata probed, {total_media_files} total PLEX items{labels_str}", flush=True)
+            else:
+                print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
