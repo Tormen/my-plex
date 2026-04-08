@@ -12510,15 +12510,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"     {title:40s} {lib}")
             if total_broken > 0:
                 print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
-            hints = []
-            if _TSV_FAILED_SHOWS:
-                hints.append('--problems --tsv for full TSV issue list')
             if _TSV_STATS['numbering_issues']:
-                hints.append('--episode-numbering-issues for numbering details')
-            if total_broken > 0:
-                hints.append('--broken to list broken files')
-            if hints:
-                print(f"   > Use {', '.join(hints)}.")
+                print(f"  >> ⚠ {_TSV_STATS['numbering_issues']} episode numbering issues (use --episode-numbering-issues for details)")
+            if _TSV_FAILED_SHOWS:
+                print(f"   > Use --problems --tsv for full TSV issue list.")
 
             # --- Always write JSON update log ---
             _write_cache_update_log(
