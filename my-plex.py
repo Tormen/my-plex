@@ -1763,8 +1763,8 @@ def update_and_save_cache(obj_dict):
                         if cached_ts > two_min_ago:
                             # Cached timestamp is recent - refresh it
                             obj_dict['library_stats']['updatedAt'][lib_name] = current_time
-                            if VRB or DEEPDBG:
-                                print(f"{VRBPFX if VRB else DBGPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                            if DEEPDBG:
+                                print(f"{DBGPFX}Updated timestamp for '{lib_name}' to current time +60s: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
                         else:
                             # Cached timestamp is old but valid - preserve it (don't overwrite with fresh Plex value)
                             obj_dict['library_stats']['updatedAt'][lib_name] = cached_ts
