@@ -2210,42 +2210,58 @@ def get_library_stats(supported=True):
     library_stats = copy.deepcopy(EMPTY_LIBRARY_STATS)
     libraries = PLEX_Library.OBJ_DICT_SUPPORTED.items() if supported else PLEX_Library.OBJ_DICT.items()
 
-    for title,library in libraries:
-        # Store ACTUAL Plex timestamp without any modification
+    libraries_list = list(libraries)
+
+    # Populate non-DB fields from library objects
+    for title, library in libraries_list:
         library_stats['updatedAt'][title] = library.updatedAt
         library_stats['plexUpdatedAt'][title] = library.updatedAt
         library_stats['agent'][title] = getattr(library, 'agent', '')
         library_stats['language'][title] = getattr(library, 'language', '')
         library_stats['locations'][title] = getattr(library, 'locations', [])
 
-        # Get item count from database
-        item_count = 0
-        try:
-            safe_title = title.replace("'", "''")
-            if library.type == 'movie':
-                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL"
-            elif library.type == 'show':
-                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL"
-            else:
-                query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.deleted_at IS NULL"
-            rows = query_plex_database(query, mode='rows')
-            item_count = int(rows[0][0]) if rows else 0
-        except Exception as e:
-            if DBG: print(f"{DBGPFX}get_library_stats(): DB count failed for '{title}': {e}")
-        # No API fallback — DB count is the source of truth
-        library_stats['itemsCount'][title] = item_count
-
-        # For show libraries, also query episode count for skip logic comparison
-        if library.type == 'show':
+    # Batch query: fetch all item counts in a single SSH round-trip (metadata_type: 1=Movie, 2=Show, 4=Episode)
+    try:
+        batch_query = """
+            SELECT ls.name, mi.metadata_type, COUNT(*)
+            FROM metadata_items mi
+            JOIN library_sections ls ON mi.library_section_id = ls.id
+            WHERE mi.deleted_at IS NULL AND mi.metadata_type IN (1, 2, 4)
+            GROUP BY ls.name, mi.metadata_type
+        """
+        batch_rows = query_plex_database(batch_query, mode='rows')
+        if batch_rows:
+            for row in batch_rows:
+                lib_name, meta_type, count = row[0], int(row[1]), int(row[2])
+                if meta_type == 1:   # Movie
+                    library_stats['itemsCount'][lib_name] = count
+                elif meta_type == 2: # Show
+                    library_stats['itemsCount'][lib_name] = count
+                elif meta_type == 4: # Episode
+                    library_stats['episodesCount'][lib_name] = count
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}get_library_stats(): batch DB count failed: {e}")
+        # Fallback: individual queries per library
+        for title, library in libraries_list:
             try:
-                ep_query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL"
-                ep_rows = query_plex_database(ep_query, mode='rows')
-                library_stats['episodesCount'][title] = int(ep_rows[0][0]) if ep_rows else 0
-            except Exception as e:
-                if DBG: print(f"{DBGPFX}get_library_stats(): DB episode count failed for '{title}': {e}")
-
-        #library_stats['totalDuration'][title] = library.totalDuration
-        #library_stats['totalStorage'][title] = library.totalStorage
+                safe_title = title.replace("'", "''")
+                if library.type == 'movie':
+                    query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL"
+                elif library.type == 'show':
+                    query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 2 AND mi.deleted_at IS NULL"
+                else:
+                    query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.deleted_at IS NULL"
+                rows = query_plex_database(query, mode='rows')
+                library_stats['itemsCount'][title] = int(rows[0][0]) if rows else 0
+            except Exception as e2:
+                if DBG: print(f"{DBGPFX}get_library_stats(): DB count failed for '{title}': {e2}")
+            if library.type == 'show':
+                try:
+                    ep_query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL"
+                    ep_rows = query_plex_database(ep_query, mode='rows')
+                    library_stats['episodesCount'][title] = int(ep_rows[0][0]) if ep_rows else 0
+                except Exception as e2:
+                    if DBG: print(f"{DBGPFX}get_library_stats(): DB episode count failed for '{title}': {e2}")
     if DBG: print(f"{DBGPFX}get_library_stats(supported:{supported}): done")
     return library_stats
 
