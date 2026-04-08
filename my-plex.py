@@ -12468,8 +12468,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"  >> ✓ Metadata collected: {metadata_success}/{metadata_total} files")
                     if metadata_broken > 0:
                         print(f"  >> ⚠ {metadata_broken} files marked as BROKEN (ffmpeg failed — visible in --broken)")
-                if total_broken > 0:
-                    print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
 
                 # TSV summary (episode data scraping across all show libraries)
                 if _TSV_STATS['cached'] > 0 or _TSV_STATS['scraped'] > 0:
@@ -12490,39 +12488,37 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     for part in tsv_parts[1:]:
                         print(f"   > {part}")
 
-                    # Print failure details (grouped by type, with counts)
-                    if _TSV_FAILED_SHOWS:
-                        from collections import defaultdict
-                        by_type = defaultdict(list)
-                        for title, error_type, message, lib in _TSV_FAILED_SHOWS:
-                            by_type[error_type].append((title, lib))
-                        _ERROR_TYPE_LABELS = {
-                            'no_external_ids':    'No external IDs (fix in Plex: rematch)',
-                            'suspicious_title':   'Suspicious title',
-                            'misidentified_show': 'Single episode in series',
-                            'no_id_for_source':   'No ID for source',
-                            'source_not_found':   'Source not found',
-                            'scrape_failed':      'Scrape failed',
-                        }
-                        # Types that have a dedicated command for full details
-                        _ERROR_TYPE_HINT = {
-                            'no_external_ids':    '--unmatched',
-                            'suspicious_title':   '--potential-mismatch',
-                        }
-                        for etype, shows in by_type.items():
-                            label = _ERROR_TYPE_LABELS.get(etype, etype)
-                            print(f"   > {label}: {len(shows)}")
-                            for title, lib in sorted(shows):
-                                print(f"     {title:40s} {lib}")
-
-                    # Hints about related commands
-                    hints = []
-                    if _TSV_FAILED_SHOWS:
-                        hints.append('--problems --tsv for full TSV issue list')
-                    if _TSV_STATS['numbering_issues']:
-                        hints.append('--episode-numbering-issues for numbering details')
-                    if hints:
-                        print(f"   > Use {', '.join(hints)}.")
+            # --- Always-shown warnings and guidance ---
+            _ERROR_TYPE_LABELS = {
+                'no_external_ids':    'No external IDs (fix in Plex: rematch)',
+                'suspicious_title':   'Suspicious title',
+                'misidentified_show': 'Single episode in series',
+                'no_id_for_source':   'No ID for source',
+                'source_not_found':   'Source not found',
+                'scrape_failed':      'Scrape failed',
+            }
+            if _TSV_FAILED_SHOWS:
+                from collections import defaultdict
+                by_type = defaultdict(list)
+                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
+                    by_type[error_type].append((title, lib))
+                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
+                for etype, shows in by_type.items():
+                    label = _ERROR_TYPE_LABELS.get(etype, etype)
+                    print(f"   > {label}: {len(shows)}")
+                    for title, lib in sorted(shows):
+                        print(f"     {title:40s} {lib}")
+            if total_broken > 0:
+                print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
+            hints = []
+            if _TSV_FAILED_SHOWS:
+                hints.append('--problems --tsv for full TSV issue list')
+            if _TSV_STATS['numbering_issues']:
+                hints.append('--episode-numbering-issues for numbering details')
+            if total_broken > 0:
+                hints.append('--broken to list broken files')
+            if hints:
+                print(f"   > Use {', '.join(hints)}.")
 
             # --- Always write JSON update log ---
             _write_cache_update_log(
@@ -12553,31 +12549,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             else:
                 print(f" >>> {action} {completion_status}: no changes{broken_str}, {total_media_files} total PLEX items", flush=True)
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
-
-            # Print TSV failures (always, even when no library changes)
-            if not has_changes and _TSV_FAILED_SHOWS:
-                from collections import defaultdict
-                by_type = defaultdict(list)
-                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
-                    by_type[error_type].append((title, lib))
-                _ERROR_TYPE_LABELS = {
-                    'no_external_ids':    'No external IDs (fix in Plex: rematch)',
-                    'suspicious_title':   'Suspicious title',
-                    'misidentified_show': 'Single episode in series',
-                    'no_id_for_source':   'No ID for source',
-                    'source_not_found':   'Source not found',
-                    'scrape_failed':      'Scrape failed',
-                }
-                _ERROR_TYPE_HINT = {
-                    'no_external_ids':    '--unmatched',
-                    'suspicious_title':   '--potential-mismatch',
-                }
-                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows:")
-                for etype, shows in by_type.items():
-                    label = _ERROR_TYPE_LABELS.get(etype, etype)
-                    print(f"   > {label}: {len(shows)}")
-                    for title, lib in sorted(shows):
-                        print(f"     {title:40s} {lib}")
 
             # Print detailed changes with -V or -VV
             if VRB and hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
