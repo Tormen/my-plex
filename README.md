@@ -13,12 +13,16 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations
 - **Duplicate detection** with intelligent classification (exact duplicates vs re-encodes vs true multi-version)
-- **Broken file detection** — finds truncated/corrupt media by comparing container vs Plex duration
-- **Potential mismatch detection** (`--potential-mismatch`) — finds items where Plex title doesn't match directory name
-- **Excess version detection** — finds entries with too many file versions
-- **Re-encode detection** (`--reencode`) — finds high-bitrate media (size/length ratio) and labels files on disk with `[reencode]` markers; rolls up episodes → season → series
+- **Problem scanner** (`--problems`) — runs all 8 checks in one pass, counts stored in cache after every `--update-cache`:
+  - **Broken files** (`--broken`) — truncated/corrupt media detected by comparing container duration vs Plex duration and ffmpeg probe
+  - **Excess versions** (`--excess-versions`) — entries with 3+ file versions (accidental duplicates, failed moves)
+  - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
+  - **Unmatched items** (`--unmatched`) — media with `local://` GUID: never matched by any Plex metadata agent, or matched but missing external IDs (TMDB/TVDB) needed for episode scraping
+  - **Unsorted shows** (`--unsorted`) — series with episodes directly in the show directory instead of season subdirectories
+  - **Potential mismatches** (`--potential-mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
+  - **Episode numbering issues** (`--episode-numbering-issues`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
+  - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
 - **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
-- **Problem scanner** — runs all checks in one pass (`--problems`)
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 
 ### Episode Management
@@ -120,8 +124,21 @@ my-plex --duplicates
 # Find broken files
 my-plex --broken
 
-# Run all problem checks
+# Run all 8 problem checks in one pass
 my-plex --problems
+
+# Show full details for each check
+my-plex --problems -V
+
+# Run individual checks
+my-plex --broken
+my-plex --excess-versions 3
+my-plex --unmatched
+my-plex --unsorted
+my-plex --potential-mismatch
+my-plex --episode-numbering-issues
+my-plex --reencode
+my-plex --problems --tsv
 
 # Missing episodes for a show
 my-plex --missing 'boston legal'
