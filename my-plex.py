@@ -12322,8 +12322,45 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
 
-        # Save all rebuilt/cleaned structures to cache
-        update_and_save_cache(build_media_cache_dict(plex_labels_index=plex_labels_index))
+        # Run all problem checks (pure cache walks, ~1s) and store counts in cache
+        # so --problems can show cached counts and --update-cache summary can report all issues
+        if FORCE_CACHE_UPDATE:
+            if PLEX_Media.cache_rebuild_lock:
+                PLEX_Media.cache_rebuild_lock.write_progress("Running problem checks...")
+            import io, contextlib
+            all_obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+            def _silent(func, *a, **kw):
+                sink = io.StringIO()
+                with contextlib.redirect_stdout(sink):
+                    return func(*a, **kw)
+            _pc_broken   = _silent(PLEX_Media._list_broken_files, all_obj_keys, None) or 0
+            _pc_excess   = _silent(PLEX_Media._list_excess_versions, all_obj_keys, None, 3) or (0, 0)
+            _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
+            _pc_unsorted = _silent(PLEX_Media._list_unsorted) or 0
+            _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
+            _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues) or 0
+            _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
+            # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
+            _pc_tsv      = len(_TSV_FAILED_SHOWS)
+            from datetime import datetime as _dtpc
+            _problems_cache = {
+                'computed_at':       _dtpc.now().isoformat(timespec='seconds'),
+                'broken':            _pc_broken,
+                'excess_versions':   {'entries': _pc_excess[1] if isinstance(_pc_excess, tuple) else 0,
+                                      'files':   _pc_excess[0] if isinstance(_pc_excess, tuple) else 0},
+                'tsv':               _pc_tsv,
+                'unmatched':         _pc_unmatched,
+                'unsorted':          _pc_unsorted,
+                'potential_mismatch':_pc_mismatch,
+                'numbering_issues':  _pc_numbering,
+                'reencode':          _pc_reencode,
+            }
+        else:
+            _problems_cache = CACHE.get('problems')
+
+        # Save all rebuilt/cleaned structures to cache (including problem counts)
+        update_and_save_cache(build_media_cache_dict(plex_labels_index=plex_labels_index,
+                                                     problems=_problems_cache))
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -12533,30 +12570,43 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             else:
                 print(f" >>> {action} {completion_status}: no changes, {total_media_files} total PLEX items{labels_str}", flush=True)
 
-            # >> warnings and details under the milestone
-            if total_broken > 0:
-                print(f"  >> ⚠ {total_broken} broken files total (use --broken to list)")
-            if _TSV_STATS['numbering_issues']:
-                print(f"  >> ⚠ {_TSV_STATS['numbering_issues']} episode numbering issues (use --episode-numbering-issues for details)")
-            _ERROR_TYPE_LABELS = {
-                'no_external_ids':    'No external IDs (fix in Plex: rematch)',
-                'suspicious_title':   'Suspicious title',
-                'misidentified_show': 'Single episode in series',
-                'no_id_for_source':   'No ID for source',
-                'source_not_found':   'Source not found',
-                'scrape_failed':      'Scrape failed',
-            }
-            if _TSV_FAILED_SHOWS:
-                from collections import defaultdict
-                by_type = defaultdict(list)
-                for title, error_type, message, lib in _TSV_FAILED_SHOWS:
-                    by_type[error_type].append((title, lib))
-                print(f"  >> ⚠ Episode data: {len(_TSV_FAILED_SHOWS)} failed shows (use --problems --tsv for details):")
-                for etype, shows in by_type.items():
-                    label = _ERROR_TYPE_LABELS.get(etype, etype)
-                    print(f"   > {label}: {len(shows)}")
-                    for title, lib in sorted(shows):
-                        print(f"     {title:40s} {lib}")
+            # >> problem counts — all computed above, always shown when non-zero
+            if _problems_cache:
+                _pc = _problems_cache
+                if _pc.get('broken', 0):
+                    print(f"  >> ⚠ {_pc['broken']} broken files (use --broken to list)")
+                if _pc.get('excess_versions', {}).get('entries', 0):
+                    e = _pc['excess_versions']
+                    print(f"  >> ⚠ {e['entries']} excess version entries ({e['files']} files) (use --excess-versions 3)")
+                if _pc.get('unmatched', 0):
+                    print(f"  >> ⚠ {_pc['unmatched']} unmatched items (use --unmatched)")
+                if _pc.get('unsorted', 0):
+                    print(f"  >> ⚠ {_pc['unsorted']} unsorted shows (use --unsorted)")
+                if _pc.get('potential_mismatch', 0):
+                    print(f"  >> ⚠ {_pc['potential_mismatch']} potential mismatches (use --potential-mismatch)")
+                if _pc.get('numbering_issues', 0):
+                    print(f"  >> ⚠ {_pc['numbering_issues']} episode numbering issues (use --episode-numbering-issues)")
+                if _pc.get('reencode', 0):
+                    print(f"  >> ⚠ {_pc['reencode']} reencode candidates (use --reencode)")
+                if _pc.get('tsv', 0):
+                    _ERROR_TYPE_LABELS = {
+                        'no_external_ids':    'No external IDs (fix in Plex: rematch)',
+                        'suspicious_title':   'Suspicious title',
+                        'misidentified_show': 'Single episode in series',
+                        'no_id_for_source':   'No ID for source',
+                        'source_not_found':   'Source not found',
+                        'scrape_failed':      'Scrape failed',
+                    }
+                    from collections import defaultdict
+                    by_type = defaultdict(list)
+                    for title, error_type, message, lib in _TSV_FAILED_SHOWS:
+                        by_type[error_type].append((title, lib))
+                    print(f"  >> ⚠ {_pc['tsv']} episode data failures (use --problems --tsv for details):")
+                    for etype, shows in by_type.items():
+                        label = _ERROR_TYPE_LABELS.get(etype, etype)
+                        print(f"   > {label}: {len(shows)}")
+                        for title, lib in sorted(shows):
+                            print(f"     {title:40s} {lib}")
             print(f"  >> Details: {CACHE_UPDATES_FILE}", flush=True)
 
             # Print detailed changes with -V or -VV
@@ -23215,10 +23265,11 @@ def execute_global_commands(args, cmd_args):
 
         # Summary
         lib_arg = f" {problems_library}" if problems_library else ""
+        _cached_at = CACHE.get('problems', {}).get('computed_at', '')
         print("\n" + "=" * 76)
         if not VRB:
             print("  (Use -V / --verbose to show details above.)")
-        print("SUMMARY")
+        print(f"SUMMARY  (computed now — last --update-cache: {_cached_at})" if _cached_at else "SUMMARY")
         print("=" * 76)
         if not tsv_only:
             hint = f"   →  my-plex{lib_arg} --broken" if broken_count else ""
