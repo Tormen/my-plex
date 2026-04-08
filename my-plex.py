@@ -1698,6 +1698,22 @@ def load_media_cache(source):
                 PLEX_Media._cache_missing_guid = True
             break  # only need to check one
 
+def _atomic_pickle_dump(path, data):
+    """Write data to path atomically: write to a temp file then rename.
+    A crash during write leaves the original untouched (no truncation)."""
+    import tempfile
+    dirpath = os.path.dirname(path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=dirpath, prefix='.cache_tmp_')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            pickle.dump(data, f)
+        os.replace(tmp, path)  # atomic on POSIX
+    except Exception:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+
+
 def update_and_save_cache(obj_dict):
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
 
@@ -1778,15 +1794,14 @@ def update_and_save_cache(obj_dict):
         if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping save (READ_ONLY_MODE=True)")
         return
 
-    # Save the current cache to file
+    # Save the current cache to file using atomic write (see _atomic_pickle_dump above).
     # During cache rebuild, we already hold the lock, so don't try to acquire it again
     if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
         # Already holding the lock during rebuild - just save without locking
         if DBG: print_obj(CACHE, "CACHE (BEFORE pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): About to save cache to '{CACHE_FILE}'\n", depth=1)
         if DBG:
             print(f"{DBGPFX}update_and_save_cache(): CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items before pickle.dump")
-        with open(CACHE_FILE, 'wb') as f:
-            pickle.dump(CACHE, f)
+        _atomic_pickle_dump(CACHE_FILE, CACHE)
         if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
 
         # Create special backup copy for --update-cache --force runs (reliable cache version)
@@ -1801,8 +1816,7 @@ def update_and_save_cache(obj_dict):
         # Normal save - acquire lock
         if DBG: print_obj(CACHE, "CACHE (BEFORE pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): About to save cache to '{CACHE_FILE}'\n", depth=1)
         with CacheLock(LOCK_FILE):
-            with open(CACHE_FILE, 'wb') as f:
-                pickle.dump(CACHE, f)
+            _atomic_pickle_dump(CACHE_FILE, CACHE)
         if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
 
 def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
