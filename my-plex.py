@@ -528,7 +528,7 @@ CONFIG_DEFAULTS = {
     #   {'mb_per_hour': 900}   — threshold in MB per hour of playtime
     # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
     # 2 Mbps is a reasonable threshold for flagging over-encoded files.
-    'REENCODE_THRESHOLD': {'mbps': 2.0},
+    'REENCODE_THRESHOLD': {'mbps': 2.5},
     'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
 
     # On-disk label markers embedded in filenames / directory names
@@ -1033,11 +1033,11 @@ REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEP
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
 _MB_PER_HOUR_PER_MBPS = 450.0  # 1 Mbps × 3600 s/hr ÷ 8 = 450 MB/hr
-_reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 2.0})
+_reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 2.5})
 _candidates = []
 if 'mbps'         in _reencode_threshold: _candidates.append(float(_reencode_threshold['mbps']))
 if 'mb_per_hour'  in _reencode_threshold: _candidates.append(float(_reencode_threshold['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
-REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 2.0  # if both given, use lower (stricter)
+REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 2.5  # if both given, use lower (stricter)
 
 # On-disk label markers
 ONDISK_LABEL_START_MARKER = CONFIG_DEFAULTS.get('ONDISK_LABEL_START_MARKER', '[')
@@ -23814,7 +23814,7 @@ def main():
     # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
     # so they must be recomputed here after the config file values have been applied.
     global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
-    _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.0})
+    _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.5})
     _c = []
     if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
     if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
