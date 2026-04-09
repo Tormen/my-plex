@@ -261,7 +261,7 @@ _my-plex() {
         '--problems[Run all problem detection checks (add -V for details)]'
         '--reencode[List media files with unreasonably high bitrate (reencode candidates)]'
         '--mark[Detect high-bitrate candidates and write on-disk labels (use with --reencode; respects --try)]'
-        '--detect[Dry-run of --mark: show what would be labeled without renaming (use with --reencode)]'
+        '--detect[Deprecated alias for --reencode (candidates are now always listed)]'
         '--force[With --reencode --mark: also remove labels from items below threshold]'
         '--scan[Trigger Plex library scan + metadata refresh + cache update]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
@@ -529,6 +529,7 @@ CONFIG_DEFAULTS = {
     # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
     # 2 Mbps is a reasonable threshold for flagging over-encoded files.
     'REENCODE_THRESHOLD': {'mbps': 2.0},
+    'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
 
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
@@ -752,6 +753,11 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # REENCODE_THRESHOLD = {{'mbps': {CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps']}}}
 # REENCODE_THRESHOLD = {{'mb_per_hour': {int(CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps'] * 450)}}}
+
+# Skip reencode detection for files whose path contains any of these strings.
+# OTR (Online TV Recorder) files are typically low-bitrate recordings — excluding them
+# avoids false positives from files that are large for other reasons (e.g. no re-encoding).
+# REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']}
 
 ###############################################################################
 # On-disk Label Markers
@@ -1022,6 +1028,7 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
+REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
@@ -1119,8 +1126,7 @@ COMMANDS:
   --potential-mismatch [LIB]   Title / dirname mismatch candidates
   --episode-numbering-issues   Plex vs scraped episode numbering mismatches
   --missing [SHOW]         Missing episodes — scraped data vs Plex cache
-  --reencode [LIB]         Items flagged for re-encode (on-disk label)
-    --detect               List reencode candidates above threshold (read-only)
+  --reencode [LIB]         List reencode candidates above threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
   --collections [LIB]      List collections in a library
   --list-labels            List all Plex labels + item counts
@@ -1214,7 +1220,7 @@ SCOPE SELECTORS  (optional — prefix any command to narrow its target)
 
 SCOPE EXAMPLES:
   my-plex ,unsorted --problems
-  my-plex "Ted Lasso" --reencode --detect
+  my-plex "Ted Lasso" --reencode
   my-plex type:movie lang:de watched:no bitrate'>2mbps' --list
   my-plex movies.en --broken
 
@@ -13179,8 +13185,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             is_broken = True
                             severity = 'severe'
                 if is_broken:
-                    filepath = file_info.get('filepath', '')
-                    broken_files.append((key, diff_pct, severity, filepath))
+                    broken_files.append((key, diff_pct, severity, file_info.get('filepath', '')))
 
         if not broken_files:
             print(f"No broken/truncated files{f' in {chr(39)}{library_name}{chr(39)}' if library_name else ''} found.")
@@ -13189,8 +13194,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         severity_order = {'severe': 0, 'moderate': 1, 'mild': 2, 'borderline': 3, 'PROBE ERR': 5, 'NOT FOUND': 6, None: 4}
         broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
-        print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.")
-        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':<10} | {'V':>2} | {'LIBRARY':<15} | FILEPATH")
+        print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.  V = number of file versions in Plex for this entry.")
+        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':>10} | {'V':>4} | {'LIBRARY':<15} | FILEPATH")
         print("-" * 155)
         for key, diff_pct, severity, filepath in broken_files:
             obj = PLEX_Media.OBJ_BY_ID.get(key, {})
@@ -13199,12 +13204,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
             severity_str = severity.upper() if severity else 'BROKEN'
             diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
-            dur_str = f"{plex_duration_min:>7.1f} min" if plex_duration_raw > 0 else "     -1    "
+            dur_str = f"{plex_duration_min:.1f} min" if plex_duration_raw > 0 else "-1"
             plex_id = obj.get('id', 'N/A')
             plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
             ver_count = len(obj.get('files', {}))
-            ver_str = f"{ver_count:>2}" if ver_count > 1 else "  "
-            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str} | {ver_str} | {library:<15} | {filepath}")
+            ver_str = f"{ver_count:>4}" if ver_count > 1 else "    "
+            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
         return len(broken_files)
@@ -13568,11 +13573,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def _list_reencode_candidates(obj_keys, library_name):
         """List media files whose avg bitrate exceeds REENCODE_THRESHOLD_MBPS.
         For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
+        Columns: KEY  DETAILS(bitrate/size/duration)  LABELED  FILEPATH
         Returns total count of flagged files."""
-        threshold = REENCODE_THRESHOLD_MBPS
+        threshold  = REENCODE_THRESHOLD_MBPS
+        labeltext  = PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')
+        lbl_marker = f"{ONDISK_LABEL_START_MARKER}{labeltext}{ONDISK_LABEL_END_MARKER}"
 
         flagged_movies = []
-        # {show_key: {s_str: {e_str: [(bitrate, filesize, dur_ms, plex_id, ep_title, filepath, version)]}}}
+        # {show_key: {s_str: {e_str: [(bitrate, filesize, dur_ms, cache_key, ep_title, filepath, version, labeled)]}}}
         flagged_ep_by_show = {}
         show_meta = {}  # {show_key: (series_title, library)}
 
@@ -13597,12 +13605,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if bitrate_mbps < threshold:
                     continue
                 filepath = file_info.get('filepath', '')
+                if REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in filepath for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS):
+                    continue
                 lib = obj.get('library', '?')
-                plex_id = obj.get('id', '?')
                 if obj_type in ('Movie', 'Movie*'):
                     title = obj.get('title', '?')
                     year = obj.get('year', 0)
-                    flagged_movies.append((bitrate_mbps, filesize, duration_ms, lib, title, year, plex_id, filepath, version))
+                    # For movies: label may be on the file OR on the movie-dir (parent)
+                    movie_dir = os.path.dirname(filepath) if filepath else ''
+                    labeled = (labeltext in parse_ondisk_labels(os.path.basename(filepath)) or
+                               labeltext in parse_ondisk_labels(os.path.basename(movie_dir)))
+                    flagged_movies.append((bitrate_mbps, filesize, duration_ms, lib, title, year, key, filepath, version, labeled))
                 else:
                     show_key = obj.get('show_key', '')
                     if not show_key:
@@ -13612,14 +13625,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     ep_title = obj.get('title', '')
                     if show_key not in flagged_ep_by_show:
                         flagged_ep_by_show[show_key] = {}
-                        series_title = obj.get('series', show_key)
-                        show_meta[show_key] = (series_title, lib)
-                    if s_str not in flagged_ep_by_show[show_key]:
-                        flagged_ep_by_show[show_key][s_str] = {}
-                    if e_str not in flagged_ep_by_show[show_key][s_str]:
-                        flagged_ep_by_show[show_key][s_str][e_str] = []
-                    flagged_ep_by_show[show_key][s_str][e_str].append(
-                        (bitrate_mbps, filesize, duration_ms, plex_id, ep_title, filepath, version)
+                        show_meta[show_key] = (obj.get('series', show_key), lib)
+                    # Store filepath for level-specific labeled checks at render time
+                    flagged_ep_by_show[show_key].setdefault(s_str, {}).setdefault(e_str, []).append(
+                        (bitrate_mbps, filesize, duration_ms, key, ep_title, filepath, version, None)
                     )
 
         total_file_count = len(flagged_movies) + sum(
@@ -13633,18 +13642,50 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  No reencode candidates{scope} found (threshold: {threshold} Mbps).")
             return 0
 
+        def _fmt_item(br, sz, dur_ms):
+            return f"{br:.1f} Mbps/{format_filesize(int(sz))}/{int(dur_ms/60000)}min"
+
+        def _fmt_avg(items, n=None):
+            n = n or len(items)
+            avg_br = sum(i[0] for i in items) / n
+            avg_sz = sum(i[1] for i in items) / n
+            return f"avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))} ({n} eps)"
+
+        def _sample_fp(seasons_dict):
+            for s_eps in seasons_dict.values():
+                for e_items in s_eps.values():
+                    if e_items:
+                        return e_items[0][5]
+            return ''
+
+        def _labeled_at_dir(dirpath):
+            """True if the label is on the directory itself (not inherited from parent/child)."""
+            return labeltext in parse_ondisk_labels(os.path.basename(dirpath)) if dirpath else False
+
+        def _labeled_at_file(filepath):
+            """True if the label is on the episode filename itself."""
+            return labeltext in parse_ondisk_labels(os.path.basename(filepath)) if filepath else False
+
+        key_w = 20
+        det_w = 30
+        lbl_w = len(lbl_marker) + 2
+        hdr   = f"  {'KEY':<{key_w}}  {'DETAILS':<{det_w}}  {'LABELED':<{lbl_w}}  FILE/PATH"
+        sep   = "  " + "-" * (key_w + det_w + lbl_w + 14)
+
+        def _row(cache_key, details, labeled, filepath, indent=0):
+            pad = ' ' * (indent * 2)
+            k   = f"{pad}{cache_key}"
+            lbl = lbl_marker if labeled else ''
+            print(f"  {k:<{key_w}}  {details:<{det_w}}  {lbl:<{lbl_w}}  {filepath}")
+
         # --- MOVIES ---
         if flagged_movies:
             flagged_movies.sort(key=lambda x: (-x[0], x[3].lower(), x[4].lower()))
             print(f"\n  MOVIES  ({len(flagged_movies)} file(s) above {threshold} Mbps)")
-            print(f"\n  {'BITRATE':>10}  {'DURATION':>9}  {'SIZE':>8}  {'LIBRARY':<16}  TITLE")
-            print("  " + "-" * 80)
-            for bitrate_mbps, filesize, duration_ms, lib, title, year, plex_id, filepath, version in flagged_movies:
-                dur_min = duration_ms / 60_000
-                size_str = format_filesize(filesize)
-                title_year = f"{title} ({year})" if year else title
-                print(f"  {bitrate_mbps:>9.1f}  {dur_min:>7.1f}min  {size_str:>8}  [{lib:<14}]  {title_year}")
-                print(f"    {filepath}")
+            print(hdr)
+            print(sep)
+            for br, sz, dur_ms, lib, title, year, cache_key, filepath, version, labeled in flagged_movies:
+                _row(cache_key, _fmt_item(br, sz, dur_ms), labeled, filepath)
 
         # --- SERIES: rollup logic ---
         if flagged_ep_by_show:
@@ -13655,55 +13696,55 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 for eps in season.values()
             )
             print(f"\n  SERIES  ({total_ep_files} episode file(s) across {len(flagged_ep_by_show)} show(s) above {threshold} Mbps)")
+            print(hdr)
+            print(sep)
 
             for show_key in sorted(flagged_ep_by_show, key=lambda k: (show_meta[k][1].lower(), show_meta[k][0].lower())):
                 series_title, lib = show_meta[show_key]
-                flagged_seasons = flagged_ep_by_show[show_key]
+                flagged_seasons   = flagged_ep_by_show[show_key]
 
-                # Total episodes in each season (from index)
                 all_seasons_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
-                all_season_keys = [s for s in all_seasons_data if s != 'S00']  # exclude specials for rollup
+                all_season_keys  = [s for s in all_seasons_data if s != 'S00']
 
-                # Determine rollup per season
-                season_rollup = {}  # s_str → 'full' | 'partial'
+                season_rollup = {}
                 for s_str, ep_dict_total in all_seasons_data.items():
                     if s_str not in flagged_seasons:
                         season_rollup[s_str] = 'none'
                         continue
-                    flagged_e_strs = set(flagged_seasons[s_str].keys())
-                    total_e_strs = set(ep_dict_total.keys())
-                    season_rollup[s_str] = 'full' if flagged_e_strs >= total_e_strs else 'partial'
+                    season_rollup[s_str] = 'full' if set(flagged_seasons[s_str]) >= set(ep_dict_total) else 'partial'
 
-                # Show is fully flagged if every non-special season is 'full'
-                show_full = (bool(all_season_keys) and
-                             all(season_rollup.get(s, 'none') == 'full' for s in all_season_keys))
+                show_full = bool(all_season_keys) and all(season_rollup.get(s, 'none') == 'full' for s in all_season_keys)
+
+                all_items_flat = [item for s in flagged_seasons.values() for eps in s.values() for item in eps]
 
                 if show_full:
-                    total_eps = sum(len(eps) for s in flagged_seasons.values() for eps in s.values())
-                    all_items = [item for s in flagged_seasons.values() for eps in s.values() for item in eps]
-                    avg_br = sum(i[0] for i in all_items) / total_eps
-                    avg_sz = sum(i[1] for i in all_items) / total_eps
-                    print(f"\n  [{lib}]  {series_title}  *** ALL {len(all_season_keys)} seasons flagged ({total_eps} eps, avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))}) ***")
-                    print(f"    →  my-plex '{series_title}' --reencode")
+                    sample_fp  = _sample_fp(flagged_seasons)
+                    series_dir = os.path.dirname(os.path.dirname(sample_fp)) if sample_fp else ''
+                    labeled    = _labeled_at_dir(series_dir)   # labeled only if series DIR has the label
+                    _row(show_key, _fmt_avg(all_items_flat), labeled, series_dir)
                 else:
-                    print(f"\n  [{lib}]  {series_title}")
+                    # Partial show: print show as group header, then seasons/episodes
+                    print(f"  {show_key:<{key_w}}  [{lib}]  {series_title}")
                     for s_str in sorted(flagged_seasons.keys()):
-                        ep_dict = flagged_seasons[s_str]
-                        total_in_season = len(all_seasons_data.get(s_str, {}))
-                        rollup = season_rollup.get(s_str, 'partial')
+                        ep_dict        = flagged_seasons[s_str]
+                        rollup         = season_rollup.get(s_str, 'partial')
+                        season_key     = (PLEX_Media.OBJ_BY_SHOW.get(show_key) or {}).get(s_str, s_str)
+                        season_items   = [item for eps in ep_dict.values() for item in eps]
                         if rollup == 'full':
-                            all_items = [item for eps in ep_dict.values() for item in eps]
-                            avg_br = sum(i[0] for i in all_items) / len(all_items)
-                            avg_sz = sum(i[1] for i in all_items) / len(all_items)
-                            print(f"    {s_str}  *** all {len(ep_dict)} episodes flagged (avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))}) ***")
+                            sample_fp  = next((i[5] for i in season_items if i[5]), '')
+                            season_dir = os.path.dirname(sample_fp) if sample_fp else ''
+                            labeled    = _labeled_at_dir(season_dir)   # labeled only if SEASON DIR has the label
+                            _row(season_key, _fmt_avg(season_items), labeled, season_dir, indent=1)
                         else:
-                            ep_lines = []
                             for e_str in sorted(ep_dict.keys()):
-                                items = ep_dict[e_str]
-                                avg_br = sum(i[0] for i in items) / len(items)
-                                avg_sz = sum(i[1] for i in items) / len(items)
-                                ep_lines.append(f"{e_str} {avg_br:.1f}Mbps/{format_filesize(int(avg_sz))}")
-                            print(f"    {s_str}  {', '.join(ep_lines)}  ({len(ep_dict)}/{total_in_season} eps)")
+                                items    = ep_dict[e_str]
+                                avg_br   = sum(i[0] for i in items) / len(items)
+                                avg_sz   = sum(i[1] for i in items) / len(items)
+                                avg_dur  = sum(i[2] for i in items) / len(items)
+                                ep_key   = items[0][3]
+                                ep_fp    = items[0][5]
+                                labeled  = _labeled_at_file(ep_fp)   # labeled only if EPISODE FILE has the label
+                                _row(ep_key, _fmt_item(avg_br, avg_sz, avg_dur), labeled, ep_fp, indent=1)
 
         print(f"\n  Total: {total_file_count} file(s) above {threshold} Mbps")
         return total_file_count
@@ -16752,7 +16793,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --problems                      all libraries")
             print("  my-plex movies.en --problems            one library")
             print('  my-plex "Ted Lasso" --missing           one show')
-            print("  my-plex type:movie --reencode --detect  all movies")
+            print("  my-plex type:movie --reencode           all movies")
             print()
             print("  (nearly all commands accept a scope prefix)")
             print()
@@ -17091,20 +17132,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             print()
             print("Usage: my-plex --reencode [LIBRARY]")
-            print("       my-plex --reencode [LIBRARY] --detect")
             print("       my-plex --reencode [LIBRARY] --mark [--try] [--force]")
             print()
-            print("Lists media items that are already labeled for re-encoding on disk.")
-            print("Labels are embedded in filenames or directory names as bracketed text,")
-            print(f"e.g. 'My Movie [{PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')}].mkv'")
-            print("The label text is configured via PROBLEMS2DISK['reencode']['LABELTEXT_ON_DISK'].")
-            print()
-            print("ON-DISK LABEL SOURCES:")
-            print("  Labels are read from filenames and directory names during --update-cache.")
-            print("  For Movies:   filename or movie-directory name")
-            print("  For Episodes: filename, season-directory, or series-directory name")
-            print("  All three levels roll up — if the series dir is labeled, all its")
-            print("  episodes/seasons are shown as a single Series row.")
+            print("Lists media items with average bitrate above the configured threshold.")
+            print("Episodes roll up to season/series level when all items in a group exceed it.")
             print()
             print("ROLLUP DISPLAY:")
             print("  Individual episodes   → shown per episode")
@@ -17113,10 +17144,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("MODES:")
             print()
-            print("  --reencode           List items already labeled on disk (from cache).")
-            print()
-            print("  --reencode --detect  List reencode candidates (above threshold).")
-            print("                       Read-only — does not write anything.")
+            print("  --reencode           List reencode candidates above threshold (read-only).")
             print()
             print("  --reencode --mark    Detect candidates and write on-disk labels via SSH rename.")
             print("                       Warns about labeled items below threshold.")
@@ -17139,6 +17167,10 @@ def main_print_help(args, remaining_args, main_parser):
             print(f"  REENCODE_THRESHOLD = {{'mb_per_hour': {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)}}}   # MB/hr (current equivalent)")
             print( "  # Conversion: 1 Mbps = 450 MB/hr")
             print()
+            print( "  # Skip reencode detection for files whose path contains any of these strings.")
+            print(f"  REENCODE_EXCLUDE_FILEPATH_CONTAINS = {REENCODE_EXCLUDE_FILEPATH_CONTAINS!r}  # (current)")
+            print( "  REENCODE_EXCLUDE_FILEPATH_CONTAINS = []  # to disable")
+            print()
             print( "  # Delimiters for on-disk labels — any string works (default: [ ])")
             print( "  ONDISK_LABEL_START_MARKER = '['")
             print( "  ONDISK_LABEL_END_MARKER   = ']'")
@@ -17153,13 +17185,10 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --reencode                        # List items labeled on disk")
+            print("  my-plex --reencode                        # List candidates above threshold")
             print("  my-plex --reencode movies.fr              # Limit to one library")
             print()
-            print("  my-plex --reencode --detect               # List candidates above threshold")
-            print("  my-plex --reencode movies.fr --detect     # Candidates in one library")
-            print()
-            print("  my-plex --reencode --mark                 # Detect + write labels")
+            print("  my-plex --reencode --mark                 # Detect + write on-disk labels")
             print("  my-plex --reencode --mark --try           # Dry-run: preview labels/renames")
             print("  my-plex --reencode movies.fr --mark       # Detect + label one library")
             print("  my-plex --reencode --mark --force         # Also remove labels below threshold")
@@ -22562,6 +22591,13 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
             for title, etype, msg, lib in _TSV_FAILED_SHOWS
         ]
 
+    # Problem detection counts (mirrors the PROBLEM DETECTION block printed to CLI)
+    problems = CACHE.get('problems', {})
+    if problems:
+        log['problems'] = {k: v for k, v in problems.items() if k != 'computed_at'}
+        if problems.get('computed_at'):
+            log['problems']['computed_at'] = problems['computed_at']
+
     try:
         import json
         # Preserve previous log file (rename with timestamp from its content)
@@ -23334,7 +23370,7 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_episode_numbering_issues(library_name)
         return
 
-    # Handle --reencode [LIBRARY]: list on-disk labeled items; --mark/--detect run detection
+    # Handle --reencode [LIBRARY]: list candidates above threshold; --mark writes on-disk labels
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
         library_name = None if reencode_val is True else reencode_val
@@ -23345,30 +23381,20 @@ def execute_global_commands(args, cmd_args):
         labeltext       = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
         remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
         force_mark  = safe_getattr(cmd_args, 'mark', False)
-        detect_only = safe_getattr(cmd_args, 'detect', False)
         dry_run     = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force       = safe_getattr(cmd_args, 'force', False) or safe_getattr(args, 'force', False)
 
-        if detect_only:
-            # --detect: list reencode candidates only (no labeling)
-            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
-            PLEX_Media._list_reencode_candidates(obj_keys, library_name)
-            return
+        # Always list candidates above threshold
+        print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
+        PLEX_Media._list_reencode_candidates(obj_keys, library_name)
 
         if force_mark:
-            # --mark [--dry]: run detection then label (or simulate with --dry/--try)
-            print(f"\n--- Reencode Candidates{scope} (avg bitrate ≥ {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr) ---")
-            PLEX_Media._list_reencode_candidates(obj_keys, library_name)
+            # --mark [--try]: also write on-disk labels
             print(f"\n--- {'[DRY-RUN] ' if dry_run else ''}Labeling with [{labeltext}]{scope} ---")
             PLEX_Media._mark_reencode_candidates_on_disk(
                 obj_keys, library_name, labeltext, remove_existing,
                 dry_run=dry_run, force=force
             )
-            return
-
-        # Default: list items that already have the reencode on-disk label (from cache)
-        print(f"\n--- Items with on-disk label '{labeltext}'{scope} ---")
-        PLEX_Media._list_ondisk_labeled(labeltext, library_name)
         return
 
     # Handle --list/--filter, --duplicates, --broken, or --excess-versions (all automatically enable --list)
@@ -23937,9 +23963,9 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List items already labeled with the reencode on-disk label. Use --mark to detect high-bitrate candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps) and write on-disk labels.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
-    GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help="Dry-run of --mark: show what would be labeled without renaming anything (use with --reencode).")
+    GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
