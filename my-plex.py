@@ -12774,7 +12774,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--unsorted', action='store_true',        help="Check if this show has episodes without season subdirs. Use --help unsorted for details.")
     argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
-    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
+    argparser.add_argument('--reencode', action='store_true',         help="List reencode candidates for this item. With --mark: write on-disk [reencode] label (force-labels at series/season/file level regardless of threshold).")
+    argparser.add_argument('--mark', action='store_true',             help="With --reencode: write on-disk [reencode] label to series/season/file directory. Respects --try for dry-run.")
+    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename and --reencode
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -12842,6 +12844,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if safe_getattr(obj_args, 'rename', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
+        if safe_getattr(obj_args, 'reencode', False):
+            dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            force_mark = safe_getattr(obj_args, 'mark', False)
+            PLEX_Media.reencode_item(obj, dry_run=dry_run, force_mark=force_mark)
 
     ############################################################
     ###### RENAME:
@@ -13063,6 +13069,170 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 result = 'renamed'
 
         return result
+
+    ############################################################
+    ###### REENCODE ITEM (force-mark a specific item):
+
+    @staticmethod
+    def reencode_item(media_identifier, dry_run=False, force_mark=False):
+        """List reencode candidates for a specific item; with force_mark=True write on-disk label
+        at the appropriate level (series dir, season dir, or episode file) regardless of threshold.
+
+        media_identifier: cache key (e.g. 'Show:102639'), title string, or ID:xxx.
+        """
+        # Prefer direct cache key lookup to avoid broad title-search side effects
+        if isinstance(media_identifier, str) and media_identifier in PLEX_Media.OBJ_BY_ID:
+            found_items = [(media_identifier, PLEX_Media.OBJ_BY_ID[media_identifier])]
+        elif isinstance(media_identifier, str):
+            found_items = resolve_cache_items(media_identifier)
+        else:
+            found_items = [media_identifier]
+        if not found_items:
+            print(f"ERROR: No items found matching '{media_identifier}'")
+            return
+
+        # Collect all episode/movie keys for this item
+        obj_keys = []
+        for item in found_items:
+            if isinstance(item, tuple):
+                key, obj = item
+            else:
+                obj = item
+                key = f"{obj['type']}:{obj['id']}"
+            obj_type = obj.get('type', '')
+            if obj_type == 'Show':
+                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
+            elif obj_type == 'Season':
+                show_key = obj.get('show_key', '')
+                s_str = obj.get('S_str', '')
+                if show_key and s_str:
+                    season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                    for e_str, versions in season_eps.items():
+                        for ver, ep_keys in versions.items():
+                            obj_keys.extend(ep_keys)
+            elif obj_type in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+                obj_keys.append(key)
+
+        if not obj_keys:
+            print(f"  No media files found for '{media_identifier}'.")
+            return
+
+        reencode_cfg    = PROBLEMS2DISK.get('reencode', {})
+        labeltext       = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
+        remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
+
+        # Always show what candidates exist above threshold
+        print(f"\n--- Reencode Candidates for '{media_identifier}' (threshold: {REENCODE_THRESHOLD_MBPS} Mbps) ---")
+        PLEX_Media._list_reencode_candidates(obj_keys, library_name=None)
+
+        if not force_mark:
+            return
+
+        # Force-mark: label at the highest applicable level (series → season → file),
+        # bypassing the bitrate threshold. We derive the series/season/file path from obj_keys.
+        pfx = "[DRY-RUN] " if dry_run else ""
+        print(f"\n--- {pfx}Force-labeling with [{labeltext}] ---")
+
+        label_marker  = f"{ONDISK_LABEL_START_MARKER}{labeltext}{ONDISK_LABEL_END_MARKER}"
+
+        def _add_label(name):
+            if label_marker in name:
+                return name
+            return name.rstrip() + f" {label_marker}"
+
+        def _do_rename(path):
+            parent   = os.path.dirname(path)
+            old_name = os.path.basename(path)
+            new_name = _add_label(old_name)
+            if new_name == old_name:
+                print(f"  Already labeled: {old_name}")
+                return True
+            if dry_run:
+                print(f"  {pfx}Would rename: {old_name}")
+                print(f"              → {new_name}")
+                return True
+            rh, _, _ = determine_remote_host(path)
+            ok, _ = my_plex_file_operation('RENAME', path, rh, new_filename=new_name)
+            if ok:
+                print(f"  Renamed: {old_name}\n        → {new_name}")
+            else:
+                print(f"  WARNING: rename failed: {old_name}")
+            return ok
+
+        # Group episode keys by show → figure out highest level to label
+        show_groups = {}  # show_key → {s_str → [fp, ...]}
+        movie_fps   = []
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type', '')
+            files_dict = obj.get('files', {})
+            fps = [fi.get('filepath', '') for fi in files_dict.values() if fi.get('filepath')]
+            if obj_type in ('Movie', 'Movie*'):
+                movie_fps.extend(fps)
+            elif obj_type in ('Episode', 'Episode*'):
+                show_key = obj.get('show_key', '')
+                s_str    = obj.get('S_str', 'S?')
+                if show_key:
+                    show_groups.setdefault(show_key, {}).setdefault(s_str, []).extend(fps)
+
+        renamed = 0
+
+        # Movies: label movie directory
+        for fp in movie_fps:
+            movie_dir = os.path.dirname(fp)
+            if _do_rename(movie_dir):
+                renamed += 1
+
+        # Series: try to label at series dir level first; fall back to season/file
+        for show_key, seasons in show_groups.items():
+            all_seasons_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+            non_special = [s for s in all_seasons_data if s != 'S00']
+            flagged_non_special = [s for s in seasons if s != 'S00']
+            show_obj  = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            show_title = show_obj.get('title', show_key)
+
+            # Sample a filepath to derive directories
+            sample_fp = next((fp for s_fps in seasons.values() for fp in s_fps if fp), None)
+            if not sample_fp:
+                print(f"  WARNING: no filepath found for {show_key}")
+                continue
+
+            season_dir = os.path.dirname(sample_fp)
+            series_dir = os.path.dirname(season_dir)
+
+            if set(flagged_non_special) >= set(non_special) and non_special:
+                # All seasons covered → label series directory
+                if _do_rename(series_dir):
+                    renamed += 1
+            else:
+                # Only some seasons → label each season directory
+                for s_str, fps in seasons.items():
+                    s_fp = next((fp for fp in fps if fp), None)
+                    if not s_fp:
+                        continue
+                    s_dir = os.path.dirname(s_fp)
+                    all_in_season = set(PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {}).keys())
+                    flagged_in_season = set(
+                        obj.get('E_str', '')
+                        for k in obj_keys
+                        if (obj := PLEX_Media.OBJ_BY_ID.get(k)) and obj.get('show_key') == show_key and obj.get('S_str') == s_str
+                    )
+                    if flagged_in_season >= all_in_season and all_in_season:
+                        # Whole season → label season directory
+                        if _do_rename(s_dir):
+                            renamed += 1
+                    else:
+                        # Individual episodes → label files
+                        for fp in fps:
+                            if _do_rename(fp):
+                                renamed += 1
+
+        print(f"\n  {'[DRY-RUN] ' if dry_run else ''}Total: {renamed} path(s) labeled with [{labeltext}]")
+        if not dry_run:
+            print(f"  Run --update-cache to refresh on-disk label index in cache.")
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -24403,7 +24573,8 @@ def main():
 
     # Re-inject --dry-run into remaining_args
     if safe_getattr(args, 'dry_run', False) and '--dry-run' not in remaining_args:
-        if safe_getattr(args, 'rename', None) is not None:
+        if safe_getattr(args, 'rename', None) is not None or (
+                safe_getattr(args, 'reencode', None) is not None and args.CMD_OR_PLEXOBJECT is not None):
             remaining_args.append('--dry-run')  # append after PLEXOBJECT (like --rename)
         else:
             remaining_args.insert(0, '--dry-run')  # global command (--sort-new)
