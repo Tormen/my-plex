@@ -2059,13 +2059,13 @@ class TestProblems(unittest.TestCase):
         self.assertIn(", 3)", body, "Must use limit 3 for excess versions")
 
     def test_problems_prints_summary(self):
-        """--problems must print a SUMMARY section."""
+        """--problems must print a closing PROBLEM DETECTION milestone."""
         content = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("SUMMARY", body)
+        self.assertIn("PROBLEM DETECTION", body)
 
     def test_problems_has_detailed_help(self):
         """--help problems must provide detailed help."""
@@ -2170,7 +2170,7 @@ class TestReencode(unittest.TestCase):
     def test_problems_verbose_note(self):
         """--problems without -V must print a note about -V for details."""
         src = self._read_script()
-        self.assertIn("Use -V / --verbose to show details", src)
+        self.assertIn("use -V to show details", src)
 
     def test_reencode_rollup_season(self):
         """_list_reencode_candidates must check season-level rollup."""
@@ -2209,14 +2209,13 @@ class TestReencode(unittest.TestCase):
         self.assertIn("case 'reencode':", src)
 
     def test_reencode_help_page_covers_mark(self):
-        """--help reencode page must document --mark, --detect, --force."""
+        """--help reencode page must document --mark and --force."""
         src = self._read_script()
         import re
         match = re.search(r"case 'reencode':(.*?)sys\.exit\(0\)", src, re.DOTALL)
         self.assertIsNotNone(match, "Must find reencode help page")
         body = match.group(1)
         self.assertIn("--mark", body)
-        self.assertIn("--detect", body)
         self.assertIn("--force", body)
 
     def test_detect_registered_in_global_cmd_parser(self):
@@ -2417,10 +2416,10 @@ class TestOndiskLabels(unittest.TestCase):
         return match.group(0)
 
     def test_reencode_default_lists_labeled(self):
-        """--reencode (default, no sub-flag) must call _list_ondisk_labeled."""
+        """--reencode (default, no sub-flag) must call _list_reencode_candidates."""
         src = self._read_script()
         body = self._reencode_handler_body(src)
-        self.assertIn("_list_ondisk_labeled(", body)
+        self.assertIn("_list_reencode_candidates(", body)
 
     def test_reencode_mark_detects_candidates(self):
         """--reencode --mark must call _list_reencode_candidates for detection."""
@@ -2927,12 +2926,12 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--excess-versions 2 failed: {result.stderr}")
 
     def test_problems(self):
-        """my-plex --problems must run all checks and show SUMMARY."""
+        """my-plex --problems must run all checks and show PROBLEM DETECTION closing line."""
         result = self._run_cmd('--problems')
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
-        self.assertIn("SUMMARY", result.stdout)
-        self.assertIn("Broken/truncated files:", result.stdout)
-        self.assertIn("Excess version entries:", result.stdout)
+        self.assertIn("PROBLEM DETECTION", result.stdout)
+        self.assertIn("broken/truncated files", result.stdout)
+        self.assertIn("excess version entries", result.stdout)
 
     def test_list_labels(self):
         """my-plex --list-labels must list labels."""
@@ -3726,8 +3725,8 @@ class TestBrokenCrossValidation(unittest.TestCase):
         # Skip if no broken files exist in cache (no table output)
         if "|" not in result.stdout:
             self.skipTest("No broken files in cache — cannot verify V column header")
-        # Header must contain V column (right-aligned, so " V" with leading space)
-        self.assertIn("|  V |", result.stdout,
+        # Header must contain V column (right-aligned, variable padding)
+        self.assertRegex(result.stdout, r'\|\s+V\s+\|',
             "--broken output must include V column in header")
 
     def test_collector_falls_back_to_end_probe(self):
@@ -4515,6 +4514,16 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertIn('EPISODES', result.stdout, "Should have EPISODES header")
         self.assertIn('S01', result.stdout, "Should show S01")
         self.assertIn('Season:', result.stdout, "Should show Season: keys")
+
+    def test_show_info_no_episode_table_without_verbose(self):
+        """my-plex 'boston legal' --info (without -V) should NOT show the episode table."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode != 0 and 'Traceback' not in result.stderr:
+            self.skipTest("'boston legal' not in cache or cache empty")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('SEASON', result.stdout, "Season table should still appear")
+        self.assertNotIn('TITLE', result.stdout, "Episode table TITLE header should NOT appear without -V")
 
     def test_show_info_verbose_has_episode_table(self):
         """my-plex 'boston legal' --info -V should show an episode table."""
