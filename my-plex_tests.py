@@ -5617,6 +5617,62 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
         section = content[idx:end]
         self.assertIn("'_format_episode_range'", section)
 
+    def test_is_multi_ep_non_leader_helper_exists(self):
+        """PLEX_Media._is_multi_ep_non_leader helper must exist and be
+        used by file-touching commands to skip sibling duplicates."""
+        content = self._read_script()
+        self.assertIn('def _is_multi_ep_non_leader(', content)
+        # Must check siblings[0] == key to identify the leader
+        idx = content.index('def _is_multi_ep_non_leader(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('multi_episode_siblings', section)
+        self.assertIn('siblings[0]', section)
+
+    def test_broken_skips_multi_ep_non_leader(self):
+        """_list_broken_files must skip non-leader siblings so each
+        multi-episode file is listed exactly once."""
+        content = self._read_script()
+        idx = content.index('def _list_broken_files(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_is_multi_ep_non_leader', section)
+
+    def test_reencode_list_skips_multi_ep_non_leader(self):
+        """_list_reencode_candidates must skip non-leader siblings."""
+        content = self._read_script()
+        idx = content.index('def _list_reencode_candidates(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_is_multi_ep_non_leader', section)
+
+    def test_reencode_mark_skips_multi_ep_non_leader(self):
+        """_mark_reencode_candidates_on_disk must skip non-leader siblings."""
+        content = self._read_script()
+        idx = content.index('def _mark_reencode_candidates_on_disk(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_is_multi_ep_non_leader', section)
+
+    def test_excess_versions_skips_multi_ep_non_leader(self):
+        """_list_excess_versions must skip non-leader siblings."""
+        content = self._read_script()
+        idx = content.index('def _list_excess_versions(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_is_multi_ep_non_leader', section)
+
+    def test_rename_skips_multi_episode_files(self):
+        """rename_episodes must skip Plex multi-episode files entirely
+        (both leader and non-leader) — the template can't safely encode
+        the sNNeXX-eYY marker."""
+        content = self._read_script()
+        idx = content.index('def rename_episodes(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('multi_episode_siblings', section)
+        self.assertIn('SKIP multi-episode file', section)
+
 
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""

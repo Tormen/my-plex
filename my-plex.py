@@ -12983,9 +12983,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         renamed_count = 0
         skipped_count = 0
         error_count = 0
+        multi_ep_skipped = 0
         for ep_key in sorted(episode_keys, key=lambda k: (PLEX_Media.OBJ_BY_ID.get(k, {}).get('S_idx', 0), PLEX_Media.OBJ_BY_ID.get(k, {}).get('E_idx', 0))):
             ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
             if not ep:
+                continue
+            # Skip Plex multi-episode files: non-leader siblings would
+            # re-rename the same physical file, and the leader's filename
+            # must keep the "sNNeXX-eYY" marker that the template doesn't
+            # know about. Rename these manually.
+            siblings = ep.get('multi_episode_siblings') or []
+            if len(siblings) >= 2:
+                if ep_key == siblings[0]:
+                    ep_range = _format_episode_range(ep)
+                    print(f"  [SKIP multi-episode file] {ep_range}  {ep.get('file', '')}")
+                    multi_ep_skipped += 1
                 continue
             result = PLEX_Media._rename_single_episode(ep, ep_key, pattern, dry_run)
             if result == 'renamed':
@@ -12999,7 +13011,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             update_and_save_cache(build_media_cache_dict())
 
         pfx = "[DRY-RUN] " if dry_run else ""
-        print(f"\n{pfx}{renamed_count} renamed, {skipped_count} already correct" + (f", {error_count} errors" if error_count else ""))
+        print(
+            f"\n{pfx}{renamed_count} renamed, {skipped_count} already correct"
+            + (f", {error_count} errors" if error_count else "")
+            + (f", {multi_ep_skipped} multi-episode files skipped" if multi_ep_skipped else "")
+        )
 
     @staticmethod
     def _collect_episode_keys_for_show(show_key):
@@ -13011,6 +13027,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 for version_str, ep_keys in versions.items():
                     keys.extend(ep_keys)
         return keys
+
+    @staticmethod
+    def _is_multi_ep_non_leader(key, obj):
+        """True if this episode is a non-leader sibling of a Plex multi-
+        episode file group (sNNeXX-eYY convention). File-touching commands
+        (reencode, broken, rename, excess-versions) must skip non-leaders
+        so each physical file is processed exactly once. The leader is
+        the lowest-E_idx sibling, stored as siblings[0] during
+        --update-cache."""
+        if not obj:
+            return False
+        siblings = obj.get('multi_episode_siblings') or []
+        return len(siblings) >= 2 and key != siblings[0]
 
     @staticmethod
     def _rename_single_episode(ep, ep_key, pattern, dry_run):
@@ -13221,6 +13250,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         for key in set(obj_keys):
             obj = PLEX_Media.OBJ_BY_ID.get(key)
             if not obj:
+                continue
+            # Skip non-leader siblings of Plex multi-episode files.
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
                 continue
             obj_type = obj.get('type', '')
             files_dict = obj.get('files', {})
@@ -13498,6 +13530,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
+            # Skip non-leader siblings of Plex multi-episode files — the
+            # leader carries the broken status for the shared physical file.
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
             plex_duration = obj.get('duration') or 0
             files_dict = obj.get('files', {})
             for file_info in files_dict.values():
@@ -13579,6 +13615,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not obj or obj.get('type') not in ['Episode', 'Movie']:
                 continue
             if library_name and obj.get('library') != library_name:
+                continue
+            # Skip non-leader siblings of Plex multi-episode files — they
+            # share the same files dict as the leader.
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
                 continue
             files_dict = obj.get('files', {})
             total = len(files_dict)
@@ -13944,6 +13984,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
                 continue
             if library_name and obj.get('library') != library_name:
+                continue
+            # Skip non-leader siblings of Plex multi-episode files — the
+            # leader evaluates the shared physical file exactly once.
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
                 continue
             duration_ms = obj.get('duration') or 0
             if duration_ms < 60_000:  # skip clips < 1 min
@@ -14911,6 +14955,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
+            # Skip non-leader siblings of Plex multi-episode files — the
+            # leader evaluates the shared physical file exactly once.
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
             duration_ms = obj.get('duration') or 0
             if duration_ms < 60_000:
                 continue
@@ -14959,6 +15007,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             obj_type = obj.get('type', '')
             if obj_type not in ('Movie', 'Movie*', 'Episode', 'Episode*'): continue
             if library_name and obj.get('library') != library_name: continue
+            if PLEX_Media._is_multi_ep_non_leader(key, obj): continue
             duration_ms = obj.get('duration') or 0
             if duration_ms < 60_000: continue
             files_dict = obj.get('files', {})
