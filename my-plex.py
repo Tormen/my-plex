@@ -23318,19 +23318,28 @@ def show_item_info(identifier, table_only=False):
                 col_norm  = max((len(e[1]) for e in all_eps), default=0) if has_normalized else 0
                 col_key   = max(len(e[2]) for e in all_eps)
                 col_title = max((len(e[3]) for e in all_eps), default=5)
-                col_plex  = max(col_plex, 7)   # "EPISODE" header (fallback width)
+                col_plex  = max(col_plex, 7)   # "EPISODE" header (fallback width) / "PLEX" header
                 col_key   = max(col_key, 3)
                 col_title = max(col_title, 5)
                 col_ep    = max(col_norm, 7) if has_normalized else col_plex
-                # Single EPISODE column (normalized id when available, else Plex's S0XE0X).
-                # FILE column is only shown with -VV.
-                hdr = f"\n  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
+                # EPISODE column shows the normalized id (scraped source) by default,
+                # falling back to Plex's S0XE0X when no scraped data is cached.
+                # The raw PLEX S0XE0X column is debug-only (-D), because it almost
+                # always matches EPISODE — discrepancies are audited by
+                # --episode-numbering-issues. FILE column is only shown with -VV.
+                hdr = "\n "
+                if DBG:
+                    hdr += f"  {'PLEX':<{col_plex}}"
+                hdr += f"  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
                 if VERYVRB:
                     hdr += "  FILE"
                 print(hdr)
                 for plex_id, norm_id, ep_key, title, ep_file in all_eps:
                     ep_col = norm_id or plex_id or '-'
-                    row = f"  {ep_col:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
+                    row = " "
+                    if DBG:
+                        row += f"  {plex_id:<{col_plex}}"
+                    row += f"  {ep_col:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
                     if VERYVRB:
                         row += f"  {ep_file}"
                     print(row)
