@@ -23314,29 +23314,26 @@ def show_item_info(identifier, table_only=False):
                             all_eps.append((plex_s0xe0x, normalized_id, ep_key, title, ep_file))
             if all_eps:
                 has_normalized = any(e[1] for e in all_eps)
-                col_plex = max(len(e[0]) for e in all_eps)
-                col_norm = max((len(e[1]) for e in all_eps), default=0) if has_normalized else 0
-                col_key = max(len(e[2]) for e in all_eps)
+                col_plex  = max(len(e[0]) for e in all_eps)
+                col_norm  = max((len(e[1]) for e in all_eps), default=0) if has_normalized else 0
+                col_key   = max(len(e[2]) for e in all_eps)
                 col_title = max((len(e[3]) for e in all_eps), default=5)
-                col_plex = max(col_plex, 4)
-                col_key = max(col_key, 3)
+                col_plex  = max(col_plex, 7)   # "EPISODE" header (fallback width)
+                col_key   = max(col_key, 3)
                 col_title = max(col_title, 5)
-                if has_normalized:
-                    col_norm = max(col_norm, 7)  # "EPISODE" header
-                    if VRB:
-                        # Verbose: show both PLEX and NORMALIZED columns
-                        print(f"\n  {'PLEX':<{col_plex}}  {'EPISODE':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
-                        for plex_id, norm_id, ep_key, title, ep_file in all_eps:
-                            print(f"  {plex_id:<{col_plex}}  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
-                    else:
-                        # Default: show normalized as EPISODE (hide PLEX column)
-                        print(f"\n  {'EPISODE':<{col_norm}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
-                        for _, norm_id, ep_key, title, ep_file in all_eps:
-                            print(f"  {norm_id or '-':<{col_norm}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
-                else:
-                    print(f"\n  {'EPISODE':<{col_plex}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}  FILE")
-                    for plex_id, _, ep_key, title, ep_file in all_eps:
-                        print(f"  {plex_id:<{col_plex}}  {ep_key:<{col_key}}  {title:<{col_title}}  {ep_file}")
+                col_ep    = max(col_norm, 7) if has_normalized else col_plex
+                # Single EPISODE column (normalized id when available, else Plex's S0XE0X).
+                # FILE column is only shown with -VV.
+                hdr = f"\n  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
+                if VERYVRB:
+                    hdr += "  FILE"
+                print(hdr)
+                for plex_id, norm_id, ep_key, title, ep_file in all_eps:
+                    ep_col = norm_id or plex_id or '-'
+                    row = f"  {ep_col:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
+                    if VERYVRB:
+                        row += f"  {ep_file}"
+                    print(row)
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
 
