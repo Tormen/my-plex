@@ -5442,6 +5442,110 @@ class TestObjByShowScraped(unittest.TestCase):
         self.assertNotIn("cached_ep['E_str'] = new_e_str", section,
             "Must not overwrite Plex E_str with scraped data")
 
+    def test_no_episode_map_in_cache(self):
+        """OBJ_BY_SHOW_SCRAPED must NOT contain an 'episode_map' sub-structure.
+        Scraped-source numbering is never displayed, so there's nothing to map.
+        Title backfill writes directly onto the episode obj; numbering
+        disagreements go into `numbering_issues`."""
+        content = self._read_script()
+        idx = content.index('def _ensure_tsv_and_normalize_episodes(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertNotIn("'episode_map'", section,
+            "OBJ_BY_SHOW_SCRAPED must no longer carry an episode_map")
+        self.assertNotIn("'season_map'", section,
+            "OBJ_BY_SHOW_SCRAPED must no longer carry a season_map")
+
+    def test_scraped_e_str_stored_on_episode_obj_when_different(self):
+        """When Plex and scraped numbering disagree, the scraped form must be
+        stored on the episode obj as `scraped_E_str` (debug/audit only)."""
+        content = self._read_script()
+        idx = content.index('def _ensure_tsv_and_normalize_episodes(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("cached_ep['scraped_E_str']", section,
+            "scraped_E_str must be stored on the episode obj when numbering differs")
+
+
+class TestS0XE0XPadding(unittest.TestCase):
+    """Padded-per-show S0XE0X display id: normalized Plex id with zero-padding
+    based on the max season/episode numbers in the show."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_pad_widths_stored_on_show_obj(self):
+        """S_pad_width and E_pad_width must be stored on the show dict."""
+        content = self._read_script()
+        # Show dict construction is in _process_shows_from_database
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("'S_pad_width': S_pad_width", section)
+        self.assertIn("'E_pad_width': E_pad_width", section)
+
+    def test_pad_widths_computed_per_show(self):
+        """S_pad_width/E_pad_width must be computed from max season/episode
+        numbers in the show BEFORE episodes are written to the cache."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("S_pad_width = max(2", section)
+        self.assertIn("E_pad_width = max(2", section)
+
+    def test_s0xe0x_rewritten_with_pad_widths(self):
+        """Episode dicts must have S0XE0X rewritten using the per-show
+        S_pad_width/E_pad_width before being stored in OBJ_BY_ID."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn(":0{S_pad_width}d", section)
+        self.assertIn(":0{E_pad_width}d", section)
+        # And this rewrite must happen near the OBJ_BY_ID assignment, not after
+        assign_idx = section.index('PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict')
+        rewrite_idx = section.index("episode_dict['S0XE0X']")
+        self.assertLess(rewrite_idx, assign_idx,
+            "S0XE0X rewrite must happen before the episode is stored")
+
+    def test_pad_width_minimum_is_two(self):
+        """Both widths must be at least 2 so small shows keep the S01E01 form."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        # max(2, …) guarantees the minimum
+        self.assertRegex(section, r"S_pad_width\s*=\s*max\(2,")
+        self.assertRegex(section, r"E_pad_width\s*=\s*max\(2,")
+
+    def test_pad_width_formula_produces_expected_values(self):
+        """Sanity-check the padding formula directly."""
+        def pad_width(n):
+            return max(2, len(str(n))) if n else 2
+        self.assertEqual(pad_width(0), 2)
+        self.assertEqual(pad_width(1), 2)
+        self.assertEqual(pad_width(15), 2)
+        self.assertEqual(pad_width(99), 2)
+        self.assertEqual(pad_width(100), 3)
+        self.assertEqual(pad_width(150), 3)
+        self.assertEqual(pad_width(999), 3)
+        self.assertEqual(pad_width(1000), 4)
+        self.assertEqual(pad_width(1234), 4)
+
+    def test_s0xe0x_format_matches_widths(self):
+        """Verify that the padding format string renders as expected."""
+        def fmt(s_idx, e_idx, s_pad, e_pad):
+            return f"S{s_idx:0{s_pad}d}E{e_idx:0{e_pad}d}"
+        # Small show (≤99 eps): same as legacy
+        self.assertEqual(fmt(7, 15, 2, 2), "S07E15")
+        # Large show (100-999 eps): 3-digit E
+        self.assertEqual(fmt(1, 15, 2, 3), "S01E015")
+        self.assertEqual(fmt(1, 150, 2, 3), "S01E150")
+        # Extreme (soap): 3-digit S and E
+        self.assertEqual(fmt(1, 1, 3, 3), "S001E001")
+
 
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
@@ -5544,17 +5648,36 @@ class TestInfoScrapedData(unittest.TestCase):
         content = self._read_script()
         self.assertIn('Numbering Issues:', content)
 
-    def test_info_shows_normalized_ids(self):
-        """--info episode table must include NORMALIZED column when available."""
+    def test_info_episode_table_has_episode_column(self):
+        """--info episode table must use a single EPISODE column (no Normalized/Plex split).
+        The EPISODE column shows the padded-per-show S0XE0X value, which is
+        Plex-sourced. Scraped-source numbering is never displayed."""
         content = self._read_script()
-        self.assertIn('NORMALIZED', content)
+        # Locate the episode-table block inside show_item_info
+        idx = content.index("Episode table (verbose only)")
+        end = content.index('elif obj_type == \'Movie\':', idx)
+        section = content[idx:end]
+        self.assertIn("'EPISODE'", section)
+        # Must NOT have separate PLEX/NORMALIZED columns anymore
+        self.assertNotIn("'PLEX'", section)
+        self.assertNotIn("'NORMALIZED'", section)
 
-    def test_info_episode_shows_scraped_episode(self):
-        """--info for episodes must show normalized and scraped episode IDs."""
+    def test_info_episode_shows_single_episode_id(self):
+        """--info for Episode objs in show_item_info must print the single
+        padded 'Episode:' line (no separate Plex/Normalized/Scraped lines)."""
         content = self._read_script()
-        self.assertIn('Episode (Plex):', content)
-        self.assertIn('Episode (Normalized):', content)
-        self.assertIn('Episode (Scraped):', content)
+        # Scope to show_item_info specifically (several other sites in the
+        # script also have `if obj_type == 'Episode':` blocks).
+        fn_idx = content.index('def show_item_info(')
+        fn_end = content.index('\ndef ', fn_idx + 1)
+        fn_section = content[fn_idx:fn_end]
+        ep_idx = fn_section.index("if obj_type == 'Episode':")
+        ep_end = fn_section.index("elif obj_type == 'Season':", ep_idx)
+        ep_block = fn_section[ep_idx:ep_end]
+        self.assertIn('"Episode:\\t{plex_s0xe0x}"', ep_block)
+        # No "Episode (Plex):" / "Episode (Normalized):" lines any more
+        self.assertNotIn('Episode (Plex):', ep_block)
+        self.assertNotIn('Episode (Normalized):', ep_block)
 
 
 class TestDiskMap(unittest.TestCase):
@@ -6446,7 +6569,7 @@ _UNITTEST_SCOPES = {
                    TestEpisodesErr, TestEpisodesErrClassification,
                    TestForceTsv, TestTsvScrapersE2E,
                    TestEpisodeNumberingIssues, TestObjByShowScraped,
-                   TestInfoScrapedData],
+                   TestS0XE0XPadding, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
