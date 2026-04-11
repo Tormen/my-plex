@@ -12793,6 +12793,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Fast path: check if obj is a full cache key (e.g. "Show:4925", "Episode:2579")
         if obj in PLEX_Media.OBJ_BY_ID:
             return True
+        # Recognize Type:digits pattern even if not yet in cache (e.g. key from another session)
+        import re
+        if re.match(r'^(Movie|Show|Season|Episode|Collection):\d+$', obj):
+            return True
         # Fast path: cache title search (exact or partial, case-insensitive) — no API needed
         search_lower = obj.lower()
         for cached_obj in PLEX_Media.OBJ_BY_ID.values():
@@ -13140,25 +13144,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return name
             return name.rstrip() + f" {label_marker}"
 
-        def _do_rename(path):
-            parent   = os.path.dirname(path)
-            old_name = os.path.basename(path)
-            new_name = _add_label(old_name)
-            if new_name == old_name:
-                print(f"  Already labeled: {old_name}")
-                return True
-            if dry_run:
-                print(f"  {pfx}Would rename: {old_name}")
-                print(f"              → {new_name}")
-                return True
-            rh, _, _ = determine_remote_host(path)
-            ok, _ = my_plex_file_operation('RENAME', path, rh, new_filename=new_name)
-            if ok:
-                print(f"  Renamed: {old_name}\n        → {new_name}")
-            else:
-                print(f"  WARNING: rename failed: {old_name}")
-            return ok
-
         # Group episode keys by show → figure out highest level to label
         show_groups = {}  # show_key → {s_str → [fp, ...]}
         movie_fps   = []
@@ -13179,11 +13164,34 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     show_groups.setdefault(show_key, {}).setdefault(s_str, []).extend(fps)
 
         renamed = 0
+        renamed_dirs = {}  # old_dir → new_dir (for updating cache filepaths)
+
+        def _do_rename_tracked(path):
+            """Rename and track old→new mapping for cache filepath updates."""
+            parent = os.path.dirname(path)
+            old_name = os.path.basename(path)
+            new_name = _add_label(old_name)
+            if new_name == old_name:
+                print(f"  Already labeled: {old_name}")
+                return True
+            if dry_run:
+                print(f"  {pfx}Would rename: {old_name}")
+                print(f"              → {new_name}")
+                renamed_dirs[path] = os.path.join(parent, new_name)
+                return True
+            # Use PLEX_DB_REMOTE_HOST for SSH writes (never assume local mount)
+            ok, _ = my_plex_file_operation('RENAME', path, PLEX_DB_REMOTE_HOST, new_filename=new_name)
+            if ok:
+                print(f"  Renamed: {old_name}\n        → {new_name}")
+                renamed_dirs[path] = os.path.join(parent, new_name)
+            else:
+                print(f"  WARNING: rename failed: {old_name}")
+            return ok
 
         # Movies: label movie directory
         for fp in movie_fps:
             movie_dir = os.path.dirname(fp)
-            if _do_rename(movie_dir):
+            if _do_rename_tracked(movie_dir):
                 renamed += 1
 
         # Series: try to label at series dir level first; fall back to season/file
@@ -13205,7 +13213,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             if set(flagged_non_special) >= set(non_special) and non_special:
                 # All seasons covered → label series directory
-                if _do_rename(series_dir):
+                if _do_rename_tracked(series_dir):
                     renamed += 1
             else:
                 # Only some seasons → label each season directory
@@ -13222,17 +13230,48 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     )
                     if flagged_in_season >= all_in_season and all_in_season:
                         # Whole season → label season directory
-                        if _do_rename(s_dir):
+                        if _do_rename_tracked(s_dir):
                             renamed += 1
                     else:
                         # Individual episodes → label files
                         for fp in fps:
-                            if _do_rename(fp):
+                            if _do_rename_tracked(fp):
                                 renamed += 1
 
         print(f"\n  {'[DRY-RUN] ' if dry_run else ''}Total: {renamed} path(s) labeled with [{labeltext}]")
-        if not dry_run:
-            print(f"  Run --update-cache to refresh on-disk label index in cache.")
+
+        # Update cache filepaths and ondisk_labels after successful rename(s)
+        if renamed_dirs and not dry_run:
+            # Update all filepaths in cache that contain renamed directory paths
+            updated_fp_count = 0
+            for key in obj_keys:
+                obj = PLEX_Media.OBJ_BY_ID.get(key)
+                if not obj:
+                    continue
+                # Update obj['file'] shortcut field
+                obj_file = obj.get('file', '')
+                if obj_file:
+                    for old_dir, new_dir in renamed_dirs.items():
+                        if obj_file.startswith(old_dir + '/') or obj_file == old_dir:
+                            obj['file'] = new_dir + obj_file[len(old_dir):]
+                            break
+                # Update files[...]['filepath'] entries
+                files_dict = obj.get('files', {})
+                for fk, fi in files_dict.items():
+                    fp = fi.get('filepath', '')
+                    if not fp:
+                        continue
+                    for old_dir, new_dir in renamed_dirs.items():
+                        if fp.startswith(old_dir + '/') or fp == old_dir:
+                            fi['filepath'] = new_dir + fp[len(old_dir):]
+                            updated_fp_count += 1
+                            break
+            print(f"  Updated {updated_fp_count} filepath(s) in cache.")
+            # Refresh ondisk_labels from updated filepaths and save
+            refresh_ondisk_labels_from_cache()
+            update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
+                                   'ondisk_labels_index': PLEX_Media.OBJ_BY_ONDISK_LABEL})
+            print(f"  Cache saved. Run --scan to update Plex library paths.")
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -23066,17 +23105,64 @@ def show_item_info(identifier, table_only=False):
         show_seasons = PLEX_Media.OBJ_BY_SHOW.get(key, {})
         show_episodes = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(key, {})
         if show_seasons:
-            print(f"\n  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}")
+            # Collect per-season stats
+            season_rows = []
             for S_str in sorted(show_seasons.keys()):
                 season_key = show_seasons[S_str]
                 ep_count = 0
+                reencode_count = 0
+                broken_count = 0
                 for e_str, versions in show_episodes.get(S_str, {}).items():
                     for version_str, ep_keys in versions.items():
-                        ep_count += len(ep_keys)
-                print(f"  {S_str:<8} {season_key:<16} {ep_count:>8}")
+                        for ep_key in ep_keys:
+                            ep_count += 1
+                            ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                            duration_ms = ep_obj.get('duration') or 0
+                            for fi in ep_obj.get('files', {}).values():
+                                filesize = fi.get('filesize') or 0
+                                # Reencode check
+                                if filesize and duration_ms >= 60_000:
+                                    bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
+                                    fp = fi.get('filepath', '')
+                                    excluded = REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in fp for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS)
+                                    if bitrate_mbps >= REENCODE_THRESHOLD_MBPS and not excluded:
+                                        reencode_count += 1
+                                # Broken check
+                                fm = fi.get('file_metadata')
+                                if fm:
+                                    if fm.get('broken'):
+                                        broken_count += 1
+                                    elif duration_ms > 0:
+                                        cd = fm.get('container_duration')
+                                        if cd:
+                                            diff_pct = ((cd - duration_ms) / duration_ms) * 100
+                                            if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                                                vd = fm.get('video_duration')
+                                                if vd and abs(cd - vd) < 2000:
+                                                    pass
+                                                elif fm.get('file_ends_cleanly'):
+                                                    pass
+                                                else:
+                                                    broken_count += 1
+                season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count))
+            has_reencode = any(r[3] for r in season_rows)
+            has_broken = any(r[4] for r in season_rows)
+            hdr = f"  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}"
+            if has_reencode:
+                hdr += f"  {'REENCODE':>8}"
+            if has_broken:
+                hdr += f"  {'BROKEN':>8}"
+            print(f"\n{hdr}")
+            for S_str, season_key, ep_count, reencode_count, broken_count in season_rows:
+                row = f"  {S_str:<8} {season_key:<16} {ep_count:>8}"
+                if has_reencode:
+                    row += f"  {reencode_count:>8}" if reencode_count else f"  {'':>8}"
+                if has_broken:
+                    row += f"  {broken_count:>8}" if broken_count else f"  {'':>8}"
+                print(row)
 
-        # Episode table with normalized IDs
-        if show_episodes:
+        # Episode table with normalized IDs (verbose only)
+        if show_episodes and VRB:
             episode_map = scraped_data.get('episode_map', {}) if scraped_data else {}
             # Collect all episodes with their info
             all_eps = []
