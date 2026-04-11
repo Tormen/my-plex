@@ -23977,9 +23977,12 @@ def main():
     for arg in sys.argv[1:]:
         if arg in ['-D', '--debug']:
             DBG = True
+            VRB = True  # debug implies verbose
         elif arg in ['-DD', '--deep-debug']:
             DEEPDBG = True
             DBG = True  # deep-debug implies debug
+            VERYVRB = True  # deep-debug implies very-verbose
+            VRB = True  # …and therefore also verbose
         elif arg in ['-V', '--verbose']:
             VRB = True
         elif arg in ['-VV', '--very-verbose']:
@@ -24406,6 +24409,11 @@ def main():
     AUTO_NO = args.no
     if VERYVRB: VRB = True
     if DEEPDBG: DBG = True
+    # Debug implies verbose: -D auto-enables -V, -DD auto-enables -VV.
+    # Users pick ONE axis at a time: -V/-VV for normal usage, -D/-DD for
+    # debugging. Anything -V would have shown must also appear under -D.
+    if DBG: VRB = True
+    if DEEPDBG: VERYVRB = True
 
     # NOTE: Plex API connection parameters removed - now using direct database access via SSH
     # Database configuration is in PLEX_DB_PATH and accessed via 'my-plex' SSH host
