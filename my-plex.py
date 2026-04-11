@@ -13852,13 +13852,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return 0
 
         def _fmt_item(br, sz, dur_ms):
-            return f"{br:.1f} Mbps/{format_filesize(int(sz))}/{int(dur_ms/60000)}min"
+            return f"{br:.1f}Mbps/{format_filesize(int(sz)).replace(' ', '')}/{int(dur_ms/60000)}min"
 
         def _fmt_avg(items, n=None):
             n = n or len(items)
             avg_br = sum(i[0] for i in items) / n
             avg_sz = sum(i[1] for i in items) / n
-            return f"avg {avg_br:.1f} Mbps/{format_filesize(int(avg_sz))} ({n} eps)"
+            return f"avg {avg_br:.1f}Mbps/{format_filesize(int(avg_sz)).replace(' ', '')} ({n} eps)"
 
         def _sample_fp(seasons_dict):
             for s_eps in seasons_dict.values():
