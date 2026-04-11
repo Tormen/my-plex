@@ -13095,8 +13095,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"ERROR: No items found matching '{media_identifier}'")
             return
 
-        # Collect all episode/movie keys for this item
-        obj_keys = []
+        # Collect all episode/movie keys for this item.
+        # Also track what level the user EXPLICITLY passed so the labeling logic
+        # can honor user intent and not silently escalate above what was asked for:
+        #   explicit Show    → may escalate to series dir if all seasons flagged
+        #   explicit Season  → always label season dir (never series)
+        #   explicit Episode → always label the episode file (never season / series)
+        obj_keys          = []
+        explicit_shows    = set()   # show_key                       (user passed Show:XXX)
+        explicit_seasons  = set()   # (show_key, s_str)              (user passed Season:XXX)
+        explicit_episodes = set()   # episode cache key              (user passed Episode:XXX)
         for item in found_items:
             if isinstance(item, tuple):
                 key, obj = item
@@ -13105,16 +13113,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 key = f"{obj['type']}:{obj['id']}"
             obj_type = obj.get('type', '')
             if obj_type == 'Show':
+                explicit_shows.add(key)
                 obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
             elif obj_type == 'Season':
                 show_key = obj.get('show_key', '')
                 s_str = obj.get('S_str', '')
                 if show_key and s_str:
+                    explicit_seasons.add((show_key, s_str))
                     season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
                     for e_str, versions in season_eps.items():
                         for ver, ep_keys in versions.items():
                             obj_keys.extend(ep_keys)
-            elif obj_type in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+            elif obj_type in ('Episode', 'Episode*'):
+                explicit_episodes.add(key)
+                obj_keys.append(key)
+            elif obj_type in ('Movie', 'Movie*'):
                 obj_keys.append(key)
 
         if not obj_keys:
@@ -13164,26 +13177,33 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     show_groups.setdefault(show_key, {}).setdefault(s_str, []).extend(fps)
 
         renamed = 0
-        renamed_dirs = {}  # old_dir → new_dir (for updating cache filepaths)
+        renamed_dirs = {}       # old_dir → new_dir (for updating cache filepaths on actual rename)
+        target_labeled_dirs = set()  # set of final labeled on-disk dir paths (includes already-labeled)
 
         def _do_rename_tracked(path):
-            """Rename and track old→new mapping for cache filepath updates."""
+            """Rename and track old→new mapping for cache filepath updates.
+            Records the target labeled dir in `target_labeled_dirs` regardless of whether
+            an actual rename happened (so the post-step cache sync can heal stale entries)."""
             parent = os.path.dirname(path)
             old_name = os.path.basename(path)
             new_name = _add_label(old_name)
+            new_path = os.path.join(parent, new_name)
             if new_name == old_name:
                 print(f"  Already labeled: {old_name}")
+                target_labeled_dirs.add(new_path)   # already on disk — still sync cache
                 return True
             if dry_run:
                 print(f"  {pfx}Would rename: {old_name}")
                 print(f"              → {new_name}")
-                renamed_dirs[path] = os.path.join(parent, new_name)
+                renamed_dirs[path] = new_path
+                target_labeled_dirs.add(new_path)
                 return True
             # Use PLEX_DB_REMOTE_HOST for SSH writes (never assume local mount)
             ok, _ = my_plex_file_operation('RENAME', path, PLEX_DB_REMOTE_HOST, new_filename=new_name)
             if ok:
                 print(f"  Renamed: {old_name}\n        → {new_name}")
-                renamed_dirs[path] = os.path.join(parent, new_name)
+                renamed_dirs[path] = new_path
+                target_labeled_dirs.add(new_path)
             else:
                 print(f"  WARNING: rename failed: {old_name}")
             return ok
@@ -13211,25 +13231,46 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             season_dir = os.path.dirname(sample_fp)
             series_dir = os.path.dirname(season_dir)
 
-            if set(flagged_non_special) >= set(non_special) and non_special:
+            # Escalation rule: only escalate to series-level labeling when the user
+            # explicitly passed a Show (or ran without a scope). If the user passed
+            # one or more Season:XXX for this show, NEVER escalate — even if that
+            # season happens to be the only non-special season.
+            has_explicit_season_input = any((show_key, s_str) in explicit_seasons for s_str in seasons)
+            can_escalate_to_series    = (not has_explicit_season_input) and set(flagged_non_special) >= set(non_special) and non_special
+
+            if can_escalate_to_series:
                 # All seasons covered → label series directory
                 if _do_rename_tracked(series_dir):
                     renamed += 1
             else:
-                # Only some seasons → label each season directory
+                # Only some seasons → label each season directory (respecting explicit input)
                 for s_str, fps in seasons.items():
                     s_fp = next((fp for fp in fps if fp), None)
                     if not s_fp:
                         continue
                     s_dir = os.path.dirname(s_fp)
                     all_in_season = set(PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {}).keys())
-                    flagged_in_season = set(
-                        obj.get('E_str', '')
-                        for k in obj_keys
+                    # Episode keys in this season that the caller actually pulled in
+                    keys_in_this_season = [
+                        k for k in obj_keys
                         if (obj := PLEX_Media.OBJ_BY_ID.get(k)) and obj.get('show_key') == show_key and obj.get('S_str') == s_str
+                    ]
+                    flagged_in_season = set(
+                        (obj.get('E_str', '') if (obj := PLEX_Media.OBJ_BY_ID.get(k)) else '')
+                        for k in keys_in_this_season
                     )
-                    if flagged_in_season >= all_in_season and all_in_season:
-                        # Whole season → label season directory
+                    # If user explicitly passed Episode(s) in this season, never escalate to season dir.
+                    has_explicit_episode_in_season = any(k in explicit_episodes for k in keys_in_this_season)
+                    # If user explicitly passed this Season, always label at season level.
+                    has_explicit_this_season       = (show_key, s_str) in explicit_seasons
+
+                    if has_explicit_episode_in_season:
+                        # Per-file labeling — user asked for specific episodes only
+                        for fp in fps:
+                            if _do_rename_tracked(fp):
+                                renamed += 1
+                    elif has_explicit_this_season or (flagged_in_season >= all_in_season and all_in_season):
+                        # Whole season (or user explicitly passed Season) → label season directory
                         if _do_rename_tracked(s_dir):
                             renamed += 1
                     else:
@@ -13240,33 +13281,78 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         print(f"\n  {'[DRY-RUN] ' if dry_run else ''}Total: {renamed} path(s) labeled with [{labeltext}]")
 
-        # Update cache filepaths and ondisk_labels after successful rename(s)
-        if renamed_dirs and not dry_run:
-            # Update all filepaths in cache that contain renamed directory paths
-            updated_fp_count = 0
-            for key in obj_keys:
-                obj = PLEX_Media.OBJ_BY_ID.get(key)
-                if not obj:
-                    continue
-                # Update obj['file'] shortcut field
+        # Cache sync after labeling.
+        # Runs whenever we have at least one target labeled dir — this covers:
+        #   (a) actual renames (renamed_dirs non-empty)
+        #   (b) "Already labeled" on disk, where the cache may still hold stale
+        #       (unlabeled) variants of the path from earlier runs / earlier bugs.
+        #
+        # For each target labeled dir we generate every "stale variant" by stripping
+        # the label_marker from each labeled component (power-set of labeled components),
+        # then sweep ALL cache objects and rewrite any obj['file'] / files[].filepath
+        # whose prefix matches a variant to the fully-labeled form.
+        if target_labeled_dirs and not dry_run:
+            from itertools import combinations as _combinations
+
+            def _compute_path_variants(labeled_path):
+                """Return every 'stale' variant of this labeled path (power-set of
+                components that contain label_marker, with the marker stripped).
+                The fully-labeled path itself is included."""
+                components = labeled_path.split(os.sep)
+                idx_with_label = [i for i, c in enumerate(components) if label_marker in c]
+                variants = set()
+                for r in range(len(idx_with_label) + 1):
+                    for subset in _combinations(idx_with_label, r):
+                        v = list(components)
+                        for i in subset:
+                            v[i] = v[i].replace(f' {label_marker}', '').replace(label_marker, '').rstrip()
+                        variants.add(os.sep.join(v))
+                return variants
+
+            # Build variant → labeled mapping. Longer (more specific) variants win when
+            # the same prefix could match multiple labeled dirs.
+            variant_to_labeled = {}
+            for labeled_dir in target_labeled_dirs:
+                for variant in _compute_path_variants(labeled_dir):
+                    # If two targets produce the same variant, prefer the longer labeled (deeper) target
+                    existing = variant_to_labeled.get(variant)
+                    if existing is None or len(labeled_dir) > len(existing):
+                        variant_to_labeled[variant] = labeled_dir
+            sorted_variants = sorted(variant_to_labeled.keys(), key=len, reverse=True)
+
+            def _apply_variant(path):
+                """If `path` starts with any known variant, return the rewritten
+                (labeled) form; otherwise return `path` unchanged."""
+                for variant in sorted_variants:
+                    labeled = variant_to_labeled[variant]
+                    if path == variant:
+                        return labeled
+                    if path.startswith(variant + os.sep):
+                        return labeled + path[len(variant):]
+                return path
+
+            updated_file_count = 0
+            updated_fp_count   = 0
+            for _k, obj in PLEX_Media.OBJ_BY_ID.items():
+                # obj['file'] shortcut
                 obj_file = obj.get('file', '')
                 if obj_file:
-                    for old_dir, new_dir in renamed_dirs.items():
-                        if obj_file.startswith(old_dir + '/') or obj_file == old_dir:
-                            obj['file'] = new_dir + obj_file[len(old_dir):]
-                            break
-                # Update files[...]['filepath'] entries
+                    new_file = _apply_variant(obj_file)
+                    if new_file != obj_file:
+                        obj['file'] = new_file
+                        updated_file_count += 1
+                # files[...]['filepath'] entries
                 files_dict = obj.get('files', {})
-                for fk, fi in files_dict.items():
+                for fi in files_dict.values():
                     fp = fi.get('filepath', '')
                     if not fp:
                         continue
-                    for old_dir, new_dir in renamed_dirs.items():
-                        if fp.startswith(old_dir + '/') or fp == old_dir:
-                            fi['filepath'] = new_dir + fp[len(old_dir):]
-                            updated_fp_count += 1
-                            break
-            print(f"  Updated {updated_fp_count} filepath(s) in cache.")
+                    new_fp = _apply_variant(fp)
+                    if new_fp != fp:
+                        fi['filepath'] = new_fp
+                        updated_fp_count += 1
+
+            print(f"  Updated cache: {updated_file_count} obj.file field(s), {updated_fp_count} filepath(s).")
             # Refresh ondisk_labels from updated filepaths and save
             refresh_ondisk_labels_from_cache()
             update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
@@ -17350,6 +17436,25 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Individual episodes   → shown per episode")
             print("  All eps in a season   → shown as one Season row")
             print("  All seasons in a show → shown as one Series row")
+            print()
+            print("LABEL LEVEL (with --mark):")
+            print("  The level at which [reencode] is written on disk honors the scope you")
+            print("  pass on the command line — labeling never escalates above what you asked:")
+            print("    my-plex Show:XXX    --reencode --mark   → may label series dir")
+            print("                                              (only if ALL non-special seasons")
+            print("                                               exceed the threshold)")
+            print("    my-plex Season:XXX  --reencode --mark   → always labels the season dir")
+            print("                                              (never escalates to series,")
+            print("                                               even if it's the only season)")
+            print("    my-plex Episode:XXX --reencode --mark   → always labels the episode file")
+            print("                                              (never escalates to season/series)")
+            print("    my-plex --reencode --mark                → threshold-driven rollup")
+            print("                                              (labels series/season/file at")
+            print("                                               the highest fully-flagged level)")
+            print()
+            print("  The cache is always synced after labeling: Season.file / Show.file and")
+            print("  every affected episode filepath are rewritten to match the on-disk state,")
+            print("  even when the target directory was already labeled from an earlier run.")
             print()
             print("MODES:")
             print()
