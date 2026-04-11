@@ -5547,6 +5547,77 @@ class TestS0XE0XPadding(unittest.TestCase):
         self.assertEqual(fmt(1, 1, 3, 3), "S001E001")
 
 
+class TestMultiEpisodeSiblings(unittest.TestCase):
+    """Plex multi-episode files (sNNeXX-eYY convention): two or more
+    episode rows point at the same on-disk file. --update-cache groups
+    them by filepath and stores a sorted sibling-key list on each
+    participating episode as obj['multi_episode_siblings']. Display code
+    collapses the group into a single "S07E15-16" row via
+    _format_episode_range()."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_update_cache_groups_by_filepath(self):
+        """--update-cache must group episodes sharing a single filepath and
+        store the sorted sibling list on each episode."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("multi_episode_siblings", section)
+        # Grouping must be by filepath (not by filename regex)
+        self.assertIn("_file_to_eps", section)
+        # Only groups of len >= 2 qualify
+        self.assertIn("if len(_sib_keys) < 2:", section)
+        # Sorted by E_idx for deterministic leader
+        self.assertIn("E_idx", section)
+
+    def test_format_episode_range_helper_exists(self):
+        """_format_episode_range must exist and read multi_episode_siblings."""
+        content = self._read_script()
+        self.assertIn('def _format_episode_range(', content)
+        idx = content.index('def _format_episode_range(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("multi_episode_siblings", section)
+        self.assertIn("E_pad_width", section)
+
+    def test_format_episode_range_passthrough_single(self):
+        """For a single-episode file (no siblings), _format_episode_range
+        must return obj['S0XE0X'] unchanged."""
+        # Call the real helper via the injected reference
+        ep = {'S0XE0X': 'S07E15'}
+        self.assertEqual(_format_episode_range(ep), 'S07E15')
+
+    def test_format_episode_range_passthrough_len_one(self):
+        """A siblings list with a single entry is not a multi-episode file."""
+        ep = {'S0XE0X': 'S07E15', 'multi_episode_siblings': ['Episode:1']}
+        self.assertEqual(_format_episode_range(ep), 'S07E15')
+
+    def test_info_episode_table_collapses_siblings(self):
+        """show_item_info's episode table must skip non-leader siblings and
+        render the leader with _format_episode_range()."""
+        content = self._read_script()
+        idx = content.index('def show_item_info(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn('multi_episode_siblings', section)
+        self.assertIn('_format_episode_range', section)
+        # There must be a guard that skips non-leader siblings
+        self.assertIn('siblings[0]', section)
+
+    def test_episode_func_names_includes_format_range(self):
+        """_format_episode_range must be injectable into tests via
+        _EPISODE_FUNC_NAMES so test cases can call it directly."""
+        content = self._read_script()
+        idx = content.index('_EPISODE_FUNC_NAMES')
+        end = content.index("'PLEX_Media')", idx)
+        section = content[idx:end]
+        self.assertIn("'_format_episode_range'", section)
+
+
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
 
@@ -6569,7 +6640,8 @@ _UNITTEST_SCOPES = {
                    TestEpisodesErr, TestEpisodesErrClassification,
                    TestForceTsv, TestTsvScrapersE2E,
                    TestEpisodeNumberingIssues, TestObjByShowScraped,
-                   TestS0XE0XPadding, TestInfoScrapedData],
+                   TestS0XE0XPadding, TestMultiEpisodeSiblings,
+                   TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,

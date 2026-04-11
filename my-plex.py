@@ -1908,6 +1908,7 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
+                       '_format_episode_range',
                        'PLEX_Media')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
@@ -2479,6 +2480,29 @@ def format_filesize(size_bytes, force_unit=None):
         return f"{size_bytes / 1024:.0f} KB"
     else:
         return f"{size_bytes} B"
+
+def _format_episode_range(ep_obj):
+    """Return the display episode id, collapsing Plex multi-episode siblings.
+
+    When an episode participates in a Plex sNNeXX-eYY multi-episode file
+    (detected during --update-cache and recorded as
+    obj['multi_episode_siblings']), collapse the sibling group into a
+    single "S07E15-16" form. Padding for the tail number is read from the
+    show's E_pad_width so the range matches the leader's padded E width.
+
+    For a regular single-episode file, returns obj['S0XE0X'] unchanged.
+    """
+    s0xe0x = ep_obj.get('S0XE0X', '')
+    siblings = ep_obj.get('multi_episode_siblings')
+    if not siblings or len(siblings) < 2:
+        return s0xe0x
+    last_ep = PLEX_Media.OBJ_BY_ID.get(siblings[-1], {})
+    last_e_idx = last_ep.get('E_idx', 0) or 0
+    show_key = ep_obj.get('show_key', '')
+    show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+    e_pad = show_obj.get('E_pad_width', 2) or 2
+    return f"{s0xe0x}-{last_e_idx:0{e_pad}d}"
+
 
 def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context=None):
     """Print detailed SSH error message with troubleshooting instructions
@@ -9236,6 +9260,33 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                     PLEX_Media.OBJ_BY_FILEPATH[season_dir] = []
                 if season_key not in PLEX_Media.OBJ_BY_FILEPATH[season_dir]:
                     PLEX_Media.OBJ_BY_FILEPATH[season_dir].append(season_key)
+
+        # Detect Plex multi-episode files (sNNeXX-eYY convention): two or
+        # more episode rows pointing at the same file on disk. Group them
+        # by filepath and store the sorted sibling cache-key list on each
+        # participating episode as obj['multi_episode_siblings']. Display
+        # code collapses these into a single "S07E15-16" row; non-update
+        # commands never parse filenames to discover this.
+        _file_to_eps = {}
+        for _s_str, _e_dict in PLEX_Media.OBJ_BY_SHOW_EPISODES[show_key].items():
+            for _e_str, _vers in _e_dict.items():
+                for _ver, _ep_keys in _vers.items():
+                    for _ep_key in _ep_keys:
+                        _ep_obj = PLEX_Media.OBJ_BY_ID.get(_ep_key)
+                        if not _ep_obj:
+                            continue
+                        _fp = _ep_obj.get('file', '')
+                        if not _fp:
+                            continue
+                        _file_to_eps.setdefault(_fp, []).append(_ep_key)
+        for _fp, _sib_keys in _file_to_eps.items():
+            if len(_sib_keys) < 2:
+                continue
+            _sib_keys.sort(key=lambda k: PLEX_Media.OBJ_BY_ID.get(k, {}).get('E_idx', 0))
+            for _ep_key in _sib_keys:
+                _ep_obj = PLEX_Media.OBJ_BY_ID.get(_ep_key)
+                if _ep_obj is not None:
+                    _ep_obj['multi_episode_siblings'] = list(_sib_keys)
 
         # Create Show object in OBJ_BY_ID (matching old API structure)
         # Derive show directory: subtract library root from episode filepath, take first dir.
@@ -23288,18 +23339,37 @@ def show_item_info(identifier, table_only=False):
                 print(row)
 
         # Episode table (verbose only). EPISODE column shows the padded-per-show
-        # S0XE0X value (Plex-sourced). FILE column is only shown with -VV.
+        # S0XE0X value (Plex-sourced), collapsed to "S07E15-16" when the
+        # episode is part of a Plex multi-episode file. FILE column is only
+        # shown with -VV.
         if show_episodes and VRB:
             all_eps = []
+            _seen_sibling_keys = set()
             for S_str in sorted(show_episodes.keys()):
                 for E_str in sorted(show_episodes[S_str].keys()):
                     for version_str, ep_keys in show_episodes[S_str][E_str].items():
                         for ep_key in ep_keys:
+                            if ep_key in _seen_sibling_keys:
+                                continue
                             ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
-                            s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
-                            title = ep.get('title', '')
+                            siblings = ep.get('multi_episode_siblings') or []
+                            if len(siblings) >= 2:
+                                # Leader is the lowest E_idx sibling. Skip
+                                # non-leaders so the group renders once.
+                                if ep_key != siblings[0]:
+                                    continue
+                                _seen_sibling_keys.update(siblings)
+                                ep_range = _format_episode_range(ep)
+                                titles = [
+                                    PLEX_Media.OBJ_BY_ID.get(k, {}).get('title', '')
+                                    for k in siblings
+                                ]
+                                title = ' / '.join(t for t in titles if t)
+                            else:
+                                ep_range = ep.get('S0XE0X', f"{S_str}{E_str}")
+                                title = ep.get('title', '')
                             ep_file = ep.get('file', '')
-                            all_eps.append((s0xe0x, ep_key, title, ep_file))
+                            all_eps.append((ep_range, ep_key, title, ep_file))
             if all_eps:
                 col_ep    = max(max(len(e[0]) for e in all_eps), 7)
                 col_key   = max(max(len(e[1]) for e in all_eps), 3)
