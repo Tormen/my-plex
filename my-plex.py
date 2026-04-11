@@ -9066,6 +9066,25 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
         lib_dict = PLEX_Media.OBJ_BY_LIBRARY[library_name]
 
+        # Compute per-show padding widths for the display-only S0XE0X string.
+        # Normalized = zero-padded Plex id: E15 for ≤99 eps, E015 for 100-999,
+        # E0015 for 1000-9999. Widths are chosen from the max season number and
+        # the max episode number ACROSS THE WHOLE SHOW so padding is consistent
+        # within a single show's output. Minimum 2 digits on both axes.
+        max_s_idx = 0
+        max_e_idx = 0
+        for _sn, _sdata in show_data['seasons'].items():
+            _sinfo = _sdata.get('season_info', {})
+            _s_idx = _sinfo.get('index', 0) or 0
+            if _s_idx > max_s_idx:
+                max_s_idx = _s_idx
+            for _ep in _sdata.get('episodes', []):
+                _e_idx = _ep.get('E_idx', 0) or 0
+                if _e_idx > max_e_idx:
+                    max_e_idx = _e_idx
+        S_pad_width = max(2, len(str(max_s_idx))) if max_s_idx else 2
+        E_pad_width = max(2, len(str(max_e_idx))) if max_e_idx else 2
+
         # Track first episode filepath per show/season for directory paths
         first_episode_filepath = None  # for show dir
 
@@ -9135,6 +9154,13 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
                             cached_fi = cached_files.get(ver)
                             if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
                                 new_fi['file_metadata'] = cached_fi['file_metadata']
+
+                # Rewrite the display-only S0XE0X string using this show's padding
+                # widths. S_str/E_str stay at 2-digit (structural keys used in
+                # OBJ_BY_SHOW_EPISODES) — only S0XE0X is normalized for display.
+                _ep_s_idx = episode_dict.get('S_idx', 0) or 0
+                _ep_e_idx = episode_dict.get('E_idx', 0) or 0
+                episode_dict['S0XE0X'] = f"S{_ep_s_idx:0{S_pad_width}d}E{_ep_e_idx:0{E_pad_width}d}"
 
                 # Populate cache — Episode in OBJ_BY_ID
                 PLEX_Media.OBJ_BY_ID[episode_key] = episode_dict
@@ -9267,6 +9293,7 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
             'series': show_info['title'], 'show_key': show_key,
             'season': None, 'S_str': None, 'S_idx': None,
             'episode': None, 'E_str': None, 'E_idx': None, 'S0XE0X': None,
+            'S_pad_width': S_pad_width, 'E_pad_width': E_pad_width,
         }
         is_new_show = show_key not in PLEX_Media.OBJ_BY_ID
         if not is_new_show and FORCE_CACHE_UPDATE and not FORCE_PLEXDATA:
@@ -9499,20 +9526,23 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                     'original_title': ep.get('original_title', ''),
                 }
 
-        # --- Compare Plex vs Scraped numbering and compute normalized IDs ---
+        # --- Backfill titles from scraped data; record Plex↔scraped numbering issues ---
+        # The scraped source (TSV) is used ONLY to (a) fill in missing Plex titles
+        # and (b) log genuine numbering disagreements into `numbering_issues` for
+        # `--episode-numbering-issues`. The scraped E-number itself is NEVER used
+        # as a display source — Plex is the single source of truth for episode ids
+        # (see feedback_default_normalized_episode_id). When Plex and the scraped
+        # source disagree on an episode's number, the scraped number is stored on
+        # the episode obj as `scraped_E_str` for debug/audit only (absent when they
+        # agree).
         title_count = 0
         numbering_issues = []
-        season_map = {}
-        episode_map = {}
 
         for s_key, season_data in show_data['seasons'].items():
             if s_key <= 0:
                 continue
             tsv_season = tsv_by_season.get(s_key, {})
             s_str = f"S{s_key:02d}"
-
-            # Season mapping: Plex and scraped both use the same season numbers
-            season_map[s_str] = {'plex': s_str, 'scraped': s_str}
 
             if not tsv_season:
                 continue
@@ -9522,21 +9552,13 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
             # Sort TSV episode numbers
             tsv_ep_nums = sorted(tsv_season.keys())
 
-            # Determine zero-padding width based on scraped episode count
-            # (scraped numbers are the "correct" ones; Plex may use absolute numbering)
-            max_ep = max(tsv_ep_nums) if tsv_ep_nums else 0
-            ep_width = 3 if max_ep >= 100 else 2
-
-            ep_map_season = {}
-
             # Match by position: plex_eps[i] ↔ tsv_ep_nums[i]
             for i, ep_dict in enumerate(plex_eps):
                 plex_e_idx = ep_dict.get('E_idx', 0)
                 plex_e_str = ep_dict.get('E_str', f"E{plex_e_idx:02d}")
 
-                # Find matching scraped episode
                 scraped_e_num = tsv_ep_nums[i] if i < len(tsv_ep_nums) else None
-                scraped_e_str = f"E{scraped_e_num:0{ep_width}d}" if scraped_e_num is not None else None
+                scraped_e_str = f"E{scraped_e_num:02d}" if scraped_e_num is not None else None
                 tsv_title = tsv_season.get(scraped_e_num, '') if scraped_e_num is not None else ''
 
                 # Fill missing episode titles from TSV (do NOT overwrite Plex E_idx/E_str)
@@ -9550,26 +9572,20 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                 if scraped_e_num is None:
                     continue  # more Plex episodes than TSV — skip extras
 
-                # Determine normalized E_str
-                normalized_e_str = None
+                if plex_e_idx != scraped_e_num:
+                    # Store the scraped form on the episode obj (for debug/audit).
+                    ep_key = f"Episode:{ep_dict['id']}"
+                    cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                    if cached_ep is not None:
+                        cached_ep['scraped_E_str'] = scraped_e_str
 
-                if plex_e_idx == scraped_e_num:
-                    # Plex and Scrape agree → normalized = scraped (with proper padding)
-                    normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"
-                elif plex_e_idx != scraped_e_num:
-                    # Plex says different number than scrape
-                    # Check: is Plex using absolute numbering?
-                    # If Plex E_idx > scraped E_num AND no Plex episodes < plex_e_idx exist
-                    # in this season, then Plex is using absolute numbering → trust scrape
+                    # Detect genuine numbering disagreements: if Plex uses absolute
+                    # numbering (higher than scraped AND no lower Plex eps in season),
+                    # that's a match-hint situation — don't flag. Otherwise Plex and
+                    # the scraped source genuinely disagree and it needs auditing.
                     plex_e_indices = sorted(ep.get('E_idx', 0) for ep in plex_eps)
                     has_lower = any(idx < plex_e_idx and idx > 0 for idx in plex_e_indices)
-
-                    if plex_e_idx > scraped_e_num and not has_lower:
-                        # Plex uses absolute numbering (e.g. E101 for S01E01) → trust scrape
-                        normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"
-                    else:
-                        # Contradiction: Plex has lower episodes AND disagrees with scrape
-                        normalized_e_str = f"E{scraped_e_num:0{ep_width}d}"  # still use scrape as default
+                    if not (plex_e_idx > scraped_e_num and not has_lower):
                         numbering_issues.append({
                             'season': s_str,
                             'episode_plex': plex_e_str,
@@ -9580,22 +9596,12 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
                             'reason': f"Plex {plex_e_str} vs Scraped {scraped_e_str}"
                         })
 
-                ep_map_season[normalized_e_str] = {
-                    'plex': plex_e_str,
-                    'scraped': scraped_e_str,
-                    'title': tsv_title,
-                }
-
-            if ep_map_season:
-                episode_map[s_str] = ep_map_season
-
-        # Store in OBJ_BY_SHOW_SCRAPED
+        # Store in OBJ_BY_SHOW_SCRAPED (no more episode_map / season_map — the
+        # scraped numbering is never displayed, so there's nothing to map).
         PLEX_Media.OBJ_BY_SHOW_SCRAPED[show_key] = {
             'title': scraped_title,
             'source': scraped_source,
             'episodes': scraped_episodes,
-            'season_map': season_map,
-            'episode_map': episode_map,
             'numbering_issues': numbering_issues,
         }
 
@@ -23137,24 +23143,16 @@ def show_item_info(identifier, table_only=False):
     obj_type = obj.get('type')
     if obj_type == 'Episode':
         print(f"Series:\t{obj.get('series', 'N/A')}")
+        # S0XE0X is the padded-per-show display id (e.g. S07E15 or S01E015).
+        # It is Plex-sourced and is the ONLY episode number shown in output.
         plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
-        print(f"Episode (Plex):\t{plex_s0xe0x}")
-        # Show normalized ID from OBJ_BY_SHOW_SCRAPED if available
-        show_key = obj.get('show_key', '')
-        scraped_data = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
-        if scraped_data:
-            s_str = obj.get('S_str', '')
-            e_str = obj.get('E_str', '')
-            ep_map = scraped_data.get('episode_map', {}).get(s_str, {})
-            for norm_e, mapping in ep_map.items():
-                if mapping.get('plex') == e_str:
-                    norm_id = f"{s_str}{norm_e}"
-                    if norm_id != plex_s0xe0x:
-                        print(f"Episode (Normalized):\t{norm_id}")
-                    scraped_e = mapping.get('scraped', '')
-                    if scraped_e and scraped_e != e_str:
-                        print(f"Episode (Scraped):\t{s_str}{scraped_e}")
-                    break
+        print(f"Episode:\t{plex_s0xe0x}")
+        # Debug-only: if Plex and the scraped source disagree on numbering, show
+        # the scraped form too so users can see the discrepancy on demand.
+        if DBG:
+            scraped_e = obj.get('scraped_E_str', '')
+            if scraped_e:
+                print(f"Episode (Scraped):\t{obj.get('S_str', '')}{scraped_e}")
     elif obj_type == 'Season':
         print(f"Series:\t{obj.get('series', 'N/A')}")
         print(f"Season:\t{obj.get('S_str', 'N/A')}")
@@ -23289,57 +23287,29 @@ def show_item_info(identifier, table_only=False):
                     row += f"  {broken_count:>8}" if broken_count else f"  {'':>8}"
                 print(row)
 
-        # Episode table with normalized IDs (verbose only)
+        # Episode table (verbose only). EPISODE column shows the padded-per-show
+        # S0XE0X value (Plex-sourced). FILE column is only shown with -VV.
         if show_episodes and VRB:
-            episode_map = scraped_data.get('episode_map', {}) if scraped_data else {}
-            # Collect all episodes with their info
             all_eps = []
             for S_str in sorted(show_episodes.keys()):
-                season_ep_map = episode_map.get(S_str, {})
                 for E_str in sorted(show_episodes[S_str].keys()):
                     for version_str, ep_keys in show_episodes[S_str][E_str].items():
                         for ep_key in ep_keys:
                             ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
-                            plex_s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
+                            s0xe0x = ep.get('S0XE0X', f"{S_str}{E_str}")
                             title = ep.get('title', '')
                             ep_file = ep.get('file', '')
-                            # Find normalized ID for this episode
-                            normalized_id = ''
-                            scraped_e = ''
-                            for norm_e, mapping in season_ep_map.items():
-                                if mapping.get('plex') == E_str:
-                                    normalized_id = f"{S_str}{norm_e}"
-                                    scraped_e = mapping.get('scraped', '')
-                                    break
-                            all_eps.append((plex_s0xe0x, normalized_id, ep_key, title, ep_file))
+                            all_eps.append((s0xe0x, ep_key, title, ep_file))
             if all_eps:
-                has_normalized = any(e[1] for e in all_eps)
-                col_plex  = max(len(e[0]) for e in all_eps)
-                col_norm  = max((len(e[1]) for e in all_eps), default=0) if has_normalized else 0
-                col_key   = max(len(e[2]) for e in all_eps)
-                col_title = max((len(e[3]) for e in all_eps), default=5)
-                col_plex  = max(col_plex, 7)   # "EPISODE" header (fallback width) / "PLEX" header
-                col_key   = max(col_key, 3)
-                col_title = max(col_title, 5)
-                col_ep    = max(col_norm, 7) if has_normalized else col_plex
-                # EPISODE column shows the normalized id (scraped source) by default,
-                # falling back to Plex's S0XE0X when no scraped data is cached.
-                # The raw PLEX S0XE0X column is debug-only (-D), because it almost
-                # always matches EPISODE — discrepancies are audited by
-                # --episode-numbering-issues. FILE column is only shown with -VV.
-                hdr = "\n "
-                if DBG:
-                    hdr += f"  {'PLEX':<{col_plex}}"
-                hdr += f"  {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
+                col_ep    = max(max(len(e[0]) for e in all_eps), 7)
+                col_key   = max(max(len(e[1]) for e in all_eps), 3)
+                col_title = max(max((len(e[2]) for e in all_eps), default=5), 5)
+                hdr = f"\n   {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
                 if VERYVRB:
                     hdr += "  FILE"
                 print(hdr)
-                for plex_id, norm_id, ep_key, title, ep_file in all_eps:
-                    ep_col = norm_id or plex_id or '-'
-                    row = " "
-                    if DBG:
-                        row += f"  {plex_id:<{col_plex}}"
-                    row += f"  {ep_col:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
+                for s0xe0x, ep_key, title, ep_file in all_eps:
+                    row = f"   {s0xe0x:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
                     if VERYVRB:
                         row += f"  {ep_file}"
                     print(row)
