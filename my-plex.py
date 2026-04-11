@@ -23156,7 +23156,8 @@ def show_item_info(identifier, table_only=False):
                     avg_br = (total_filesize * 8) / (total_duration_ms / 1000) / 1_000_000
                     avg_sz = total_filesize / file_count
                     avg_dur = total_duration_ms / file_count
-                    avg_str = f"{avg_br:.1f} Mbps / {format_filesize(int(avg_sz))} / {int(avg_dur/60000)} min"
+                    fs = format_filesize(int(avg_sz)).replace(' ', '')
+                    avg_str = f"{avg_br:.1f}Mbps/{fs}/{int(avg_dur/60000)}min"
                 else:
                     avg_str = ''
                 season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count, avg_str))
