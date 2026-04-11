@@ -17059,6 +17059,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --broken                   # List all broken files")
             print("  my-plex --broken --type movie       # Only broken movies")
             print()
+            print("MULTI-EPISODE FILES:")
+            print()
+            print("  Plex multi-episode files (sNNeXX-eYY convention, two or more episode")
+            print("  rows pointing at one file) are listed exactly once, under the leader")
+            print("  episode (lowest E number in the group). Non-leader siblings are")
+            print("  skipped so the same file isn't reported twice.")
+            print()
             print("=" * 76)
             sys.exit(0)
         case 'scan':
@@ -17617,6 +17624,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --problems                        # Includes reencode in full report")
             print("  my-plex --update-cache                    # Refresh on-disk label cache")
             print()
+            print("MULTI-EPISODE FILES:")
+            print()
+            print("  Plex multi-episode files (sNNeXX-eYY convention) appear as two or")
+            print("  more episode rows pointing at one file. --reencode evaluates each")
+            print("  file exactly once, under the leader episode (lowest E number in")
+            print("  the group). Labeling operations (--mark / --force) apply to the")
+            print("  single shared file — non-leader siblings are skipped so the file")
+            print("  isn't renamed twice.")
+            print()
             print("=" * 76)
             sys.exit(0)
 
@@ -17766,6 +17782,16 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex 'boston legal' --rename --dry-run    # Preview renames")
             print("  my-plex series.en --rename                   # Rename all in library")
             print("  my-plex ID:12345 --rename                    # Rename single episode")
+            print()
+            print("MULTI-EPISODE FILES:")
+            print()
+            print("  Plex multi-episode files (sNNeXX-eYY convention, where one file")
+            print("  contains two or more episodes) are SKIPPED by --rename. The")
+            print("  EPISODE_NAME_PATTERN template has no safe way to encode the range")
+            print("  marker, and renaming to {S0XE0X} alone would destroy it. A")
+            print("  '[SKIP multi-episode file]' line is printed for each such leader")
+            print("  and the final summary reports the skipped count. Rename these")
+            print("  files manually if needed.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -23245,8 +23271,24 @@ def show_item_info(identifier, table_only=False):
         print(f"Series:\t{obj.get('series', 'N/A')}")
         # S0XE0X is the padded-per-show display id (e.g. S07E15 or S01E015).
         # It is Plex-sourced and is the ONLY episode number shown in output.
-        plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
-        print(f"Episode:\t{plex_s0xe0x}")
+        # When the episode is part of a Plex multi-episode file (sNNeXX-eYY),
+        # show the collapsed "S07E15-16" form and list all sibling cache
+        # keys so --info works for both leader and non-leader queries.
+        siblings = obj.get('multi_episode_siblings') or []
+        if len(siblings) >= 2:
+            leader_obj = PLEX_Media.OBJ_BY_ID.get(siblings[0], obj)
+            ep_range = _format_episode_range(leader_obj)
+            print(f"Episode:\t{ep_range}")
+            print(f"Multi-episode file:\t{len(siblings)} siblings share one file")
+            for sk in siblings:
+                sib = PLEX_Media.OBJ_BY_ID.get(sk, {})
+                marker = '  (leader)' if sk == siblings[0] else ''
+                sib_s0xe0x = sib.get('S0XE0X', '')
+                sib_title = sib.get('title', '')
+                print(f"  {sk:<16}  {sib_s0xe0x:<10}  {sib_title}{marker}")
+        else:
+            plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
+            print(f"Episode:\t{plex_s0xe0x}")
         # Debug-only: if Plex and the scraped source disagree on numbering, show
         # the scraped form too so users can see the discrepancy on demand.
         if DBG:

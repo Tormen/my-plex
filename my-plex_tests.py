@@ -5673,6 +5673,53 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
         self.assertIn('multi_episode_siblings', section)
         self.assertIn('SKIP multi-episode file', section)
 
+    def test_info_episode_multi_episode_display(self):
+        """show_item_info's Episode branch must show the collapsed
+        range form and list all siblings when the episode is part of
+        a Plex multi-episode file — both leader and non-leader queries
+        get the same view."""
+        content = self._read_script()
+        idx = content.index('def show_item_info(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        # Episode branch must check siblings and call _format_episode_range
+        # using the LEADER (not the queried obj), so that --info on a
+        # non-leader sibling still shows the range.
+        ep_idx = section.index("if obj_type == 'Episode':")
+        ep_end = section.index("elif obj_type ==", ep_idx)
+        ep_section = section[ep_idx:ep_end]
+        self.assertIn('multi_episode_siblings', ep_section)
+        self.assertIn('_format_episode_range(leader_obj)', ep_section)
+        self.assertIn('Multi-episode file:', ep_section)
+
+    def test_help_broken_documents_multi_episode(self):
+        """--help broken must explain that multi-episode files are
+        listed once under the leader."""
+        content = self._read_script()
+        idx = content.index("case 'broken':")
+        end = content.index("case 'scan':", idx)
+        section = content[idx:end]
+        self.assertIn('MULTI-EPISODE FILES', section)
+        self.assertIn('leader', section)
+
+    def test_help_reencode_documents_multi_episode(self):
+        """--help reencode must explain multi-episode file behavior."""
+        content = self._read_script()
+        idx = content.index("case 'reencode':")
+        end = content.index("case 'missing':", idx)
+        section = content[idx:end]
+        self.assertIn('MULTI-EPISODE FILES', section)
+        self.assertIn('leader', section)
+
+    def test_help_rename_documents_multi_episode_skip(self):
+        """--help rename must explain that multi-episode files are skipped."""
+        content = self._read_script()
+        idx = content.index("case 'rename':")
+        end = content.index("case 'plex-disk-sync'", idx)
+        section = content[idx:end]
+        self.assertIn('MULTI-EPISODE FILES', section)
+        self.assertIn('SKIPPED', section)
+
 
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
