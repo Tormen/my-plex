@@ -23112,6 +23112,9 @@ def show_item_info(identifier, table_only=False):
                 ep_count = 0
                 reencode_count = 0
                 broken_count = 0
+                total_filesize = 0
+                total_duration_ms = 0
+                file_count = 0
                 for e_str, versions in show_episodes.get(S_str, {}).items():
                     for version_str, ep_keys in versions.items():
                         for ep_key in ep_keys:
@@ -23120,8 +23123,12 @@ def show_item_info(identifier, table_only=False):
                             duration_ms = ep_obj.get('duration') or 0
                             for fi in ep_obj.get('files', {}).values():
                                 filesize = fi.get('filesize') or 0
-                                # Reencode check
+                                # Accumulate for averages
                                 if filesize and duration_ms >= 60_000:
+                                    total_filesize += filesize
+                                    total_duration_ms += duration_ms
+                                    file_count += 1
+                                    # Reencode check
                                     bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
                                     fp = fi.get('filepath', '')
                                     excluded = REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in fp for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS)
@@ -23144,17 +23151,32 @@ def show_item_info(identifier, table_only=False):
                                                     pass
                                                 else:
                                                     broken_count += 1
-                season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count))
+                # Compute averages
+                if file_count:
+                    avg_br = (total_filesize * 8) / (total_duration_ms / 1000) / 1_000_000
+                    avg_sz = total_filesize / file_count
+                    avg_dur = total_duration_ms / file_count
+                    avg_str = f"{avg_br:.1f} Mbps/{format_filesize(int(avg_sz))}/{int(avg_dur/60000)}min"
+                else:
+                    avg_str = ''
+                season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count, avg_str))
             has_reencode = any(r[3] for r in season_rows)
             has_broken = any(r[4] for r in season_rows)
+            has_avg = any(r[5] for r in season_rows)
+            avg_w = max((len(r[5]) for r in season_rows), default=0) if has_avg else 0
+            avg_w = max(avg_w, 3)  # min width for "AVG" header
             hdr = f"  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}"
+            if has_avg:
+                hdr += f"  {'AVG':>{avg_w}}"
             if has_reencode:
                 hdr += f"  {'REENCODE':>8}"
             if has_broken:
                 hdr += f"  {'BROKEN':>8}"
             print(f"\n{hdr}")
-            for S_str, season_key, ep_count, reencode_count, broken_count in season_rows:
+            for S_str, season_key, ep_count, reencode_count, broken_count, avg_str in season_rows:
                 row = f"  {S_str:<8} {season_key:<16} {ep_count:>8}"
+                if has_avg:
+                    row += f"  {avg_str:>{avg_w}}"
                 if has_reencode:
                     row += f"  {reencode_count:>8}" if reencode_count else f"  {'':>8}"
                 if has_broken:
