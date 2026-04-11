@@ -2262,6 +2262,78 @@ class TestReencode(unittest.TestCase):
         self.assertIn("_OPTION_TO_HELP_TOPIC", src)
         self.assertIn("'--reencode': 'reencode'", src)
 
+    # --- Escalation rules: user's explicit scope must be honored ---
+
+    def _read_reencode_item_body(self):
+        """Return the body of reencode_item()."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def reencode_item\(.*?\n(.*?)(?=\n    @staticmethod|\n    ###)', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find reencode_item body")
+        return m.group(1)
+
+    def test_reencode_tracks_explicit_input_scope(self):
+        """reencode_item must track explicit Show/Season/Episode input so the labeling
+        logic can honor user intent and not silently escalate."""
+        body = self._read_reencode_item_body()
+        self.assertIn("explicit_shows",    body)
+        self.assertIn("explicit_seasons",  body)
+        self.assertIn("explicit_episodes", body)
+
+    def test_reencode_explicit_season_prevents_series_escalation(self):
+        """When user explicitly passes Season:XXX, series-level labeling must be blocked
+        — even if that season happens to be the only non-special season of the show."""
+        body = self._read_reencode_item_body()
+        self.assertIn("has_explicit_season_input", body)
+        self.assertIn("can_escalate_to_series", body)
+        # The escalation guard must use has_explicit_season_input
+        import re
+        m = re.search(r"can_escalate_to_series\s*=\s*\(not has_explicit_season_input\)", body)
+        self.assertIsNotNone(m, "can_escalate_to_series must depend on has_explicit_season_input")
+
+    def test_reencode_explicit_episode_prevents_season_escalation(self):
+        """When user explicitly passes Episode:XXX, season-level labeling must be blocked
+        — the label must land on the episode file itself."""
+        body = self._read_reencode_item_body()
+        self.assertIn("has_explicit_episode_in_season", body)
+        # Per-file branch must be reachable from the explicit-episode guard
+        self.assertIn("Per-file labeling", body)
+
+    def test_reencode_cache_sync_uses_target_labeled_dirs(self):
+        """Cache sync must be driven by target_labeled_dirs (so already-labeled-on-disk
+        paths still get synced when the cache is stale) — not just by renamed_dirs."""
+        body = self._read_reencode_item_body()
+        self.assertIn("target_labeled_dirs", body)
+        # The cache-sync block must be gated on target_labeled_dirs, not renamed_dirs
+        self.assertIn("if target_labeled_dirs and not dry_run", body)
+
+    def test_reencode_cache_sync_computes_path_variants(self):
+        """Cache sync must generate stale path variants (power-set of labeled components)
+        so that cache entries missing a parent label can still be healed."""
+        body = self._read_reencode_item_body()
+        self.assertIn("_compute_path_variants", body)
+        self.assertIn("label_marker", body)
+
+    def test_reencode_cache_sync_iterates_all_obj_by_id(self):
+        """Cache sync must iterate ALL OBJ_BY_ID (not just obj_keys) so Season/Show
+        cache objects get their `file` field updated, not just Episodes."""
+        body = self._read_reencode_item_body()
+        self.assertIn("PLEX_Media.OBJ_BY_ID.items()", body)
+        # The old bug iterated `for key in obj_keys`; make sure that's not the sweep driver.
+        import re
+        # Must NOT be the ONLY loop — the all-items loop must be present for the cache sweep
+        self.assertIn("obj.get('file', '')", body)
+        self.assertIn("fi.get('filepath'", body)
+
+    def test_reencode_already_labeled_still_records_target(self):
+        """_do_rename_tracked must record the target dir even when the path is already
+        labeled on disk, so the cache sweep can heal stale entries."""
+        body = self._read_reencode_item_body()
+        import re
+        # Find the "Already labeled" branch and verify it adds to target_labeled_dirs
+        m = re.search(r'if new_name == old_name:.*?target_labeled_dirs\.add', body, re.DOTALL)
+        self.assertIsNotNone(m, "Already-labeled branch must add to target_labeled_dirs")
+
 
 class TestOndiskLabels(unittest.TestCase):
     """Tests for on-disk label parsing, collection, indexing, and related config."""
