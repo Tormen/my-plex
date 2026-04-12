@@ -13095,6 +13095,78 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return keys
 
     @staticmethod
+    def _resolve_to_media_keys(media_identifier):
+        """Resolve a media identifier to episode/movie cache keys.
+
+        Accepts: cache key string (e.g. 'Show:123'), title string, or
+        already-resolved (key, obj) tuple / list of tuples.
+
+        Returns: (obj_keys, explicit_shows, explicit_seasons, explicit_episodes)
+          obj_keys         — list of episode/movie cache keys
+          explicit_shows   — set of show_keys the user explicitly targeted
+          explicit_seasons — set of (show_key, s_str) tuples
+          explicit_episodes— set of episode cache keys
+        """
+        # Resolve identifier to found_items list of (key, obj) tuples
+        if isinstance(media_identifier, list):
+            found_items = media_identifier
+        elif isinstance(media_identifier, tuple):
+            found_items = [media_identifier]
+        elif isinstance(media_identifier, str) and media_identifier in PLEX_Media.OBJ_BY_ID:
+            found_items = [(media_identifier, PLEX_Media.OBJ_BY_ID[media_identifier])]
+        elif isinstance(media_identifier, str):
+            found_items = resolve_cache_items(media_identifier)
+        else:
+            found_items = [media_identifier]
+
+        obj_keys          = []
+        explicit_shows    = set()
+        explicit_seasons  = set()
+        explicit_episodes = set()
+
+        for item in (found_items or []):
+            if isinstance(item, tuple):
+                key, obj = item
+            else:
+                obj = item
+                key = f"{obj['type']}:{obj['id']}"
+            obj_type = obj.get('type', '')
+
+            if obj_type == 'Show':
+                explicit_shows.add(key)
+                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
+            elif obj_type == 'Season':
+                show_key = obj.get('show_key', '')
+                s_str = obj.get('S_str', '')
+                if show_key and s_str:
+                    explicit_seasons.add((show_key, s_str))
+                    season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                    for e_str, versions in season_eps.items():
+                        for ver, ep_keys in versions.items():
+                            obj_keys.extend(ep_keys)
+            elif obj_type in ('Episode', 'Episode*'):
+                explicit_episodes.add(key)
+                obj_keys.append(key)
+            elif obj_type in ('Movie', 'Movie*'):
+                obj_keys.append(key)
+            elif obj_type == 'Collection':
+                # Resolve collection members by their Plex ID
+                for member_id in obj.get('member_ids', []):
+                    # Try Movie:<id> and Show:<id> (the two types that can be collection members)
+                    for type_prefix in ('Movie', 'Show'):
+                        member_key = f"{type_prefix}:{member_id}"
+                        member_obj = PLEX_Media.OBJ_BY_ID.get(member_key)
+                        if member_obj:
+                            if type_prefix == 'Show':
+                                explicit_shows.add(member_key)
+                                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(member_key))
+                            else:
+                                obj_keys.append(member_key)
+                            break
+
+        return obj_keys, explicit_shows, explicit_seasons, explicit_episodes
+
+    @staticmethod
     def _is_multi_ep_non_leader(key, obj):
         """True if this episode is a non-leader sibling of a Plex multi-
         episode file group (sNNeXX-eYY convention). File-touching commands
@@ -13313,51 +13385,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         media_identifier: cache key (e.g. 'Show:102639'), title string, or ID:xxx.
         """
-        # Prefer direct cache key lookup to avoid broad title-search side effects
-        if isinstance(media_identifier, str) and media_identifier in PLEX_Media.OBJ_BY_ID:
-            found_items = [(media_identifier, PLEX_Media.OBJ_BY_ID[media_identifier])]
-        elif isinstance(media_identifier, str):
-            found_items = resolve_cache_items(media_identifier)
-        else:
-            found_items = [media_identifier]
-        if not found_items:
-            print(f"ERROR: No items found matching '{media_identifier}'")
-            return
-
-        # Collect all episode/movie keys for this item.
-        # Also track what level the user EXPLICITLY passed so the labeling logic
-        # can honor user intent and not silently escalate above what was asked for:
-        #   explicit Show    → may escalate to series dir if all seasons flagged
-        #   explicit Season  → always label season dir (never series)
-        #   explicit Episode → always label the episode file (never season / series)
-        obj_keys          = []
-        explicit_shows    = set()   # show_key                       (user passed Show:XXX)
-        explicit_seasons  = set()   # (show_key, s_str)              (user passed Season:XXX)
-        explicit_episodes = set()   # episode cache key              (user passed Episode:XXX)
-        for item in found_items:
-            if isinstance(item, tuple):
-                key, obj = item
-            else:
-                obj = item
-                key = f"{obj['type']}:{obj['id']}"
-            obj_type = obj.get('type', '')
-            if obj_type == 'Show':
-                explicit_shows.add(key)
-                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
-            elif obj_type == 'Season':
-                show_key = obj.get('show_key', '')
-                s_str = obj.get('S_str', '')
-                if show_key and s_str:
-                    explicit_seasons.add((show_key, s_str))
-                    season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
-                    for e_str, versions in season_eps.items():
-                        for ver, ep_keys in versions.items():
-                            obj_keys.extend(ep_keys)
-            elif obj_type in ('Episode', 'Episode*'):
-                explicit_episodes.add(key)
-                obj_keys.append(key)
-            elif obj_type in ('Movie', 'Movie*'):
-                obj_keys.append(key)
+        obj_keys, explicit_shows, explicit_seasons, explicit_episodes = \
+            PLEX_Media._resolve_to_media_keys(media_identifier)
 
         if not obj_keys:
             print(f"  No media files found for '{media_identifier}'.")
@@ -13600,36 +13629,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         media_identifier: cache key (e.g. 'Show:102639'), title string, or ID:xxx.
         """
-        if isinstance(media_identifier, str) and media_identifier in PLEX_Media.OBJ_BY_ID:
-            found_items = [(media_identifier, PLEX_Media.OBJ_BY_ID[media_identifier])]
-        elif isinstance(media_identifier, str):
-            found_items = resolve_cache_items(media_identifier)
-        else:
-            found_items = [media_identifier]
-        if not found_items:
-            print(f"ERROR: No items found matching '{media_identifier}'")
-            return
-
-        obj_keys = []
-        for item in found_items:
-            if isinstance(item, tuple):
-                key, obj = item
-            else:
-                obj = item
-                key = f"{obj['type']}:{obj['id']}"
-            obj_type = obj.get('type', '')
-            if obj_type == 'Show':
-                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
-            elif obj_type == 'Season':
-                show_key = obj.get('show_key', '')
-                s_str = obj.get('S_str', '')
-                if show_key and s_str:
-                    season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
-                    for e_str, versions in season_eps.items():
-                        for ver, ep_keys in versions.items():
-                            obj_keys.extend(ep_keys)
-            elif obj_type in ('Episode', 'Episode*'):
-                obj_keys.append(key)
+        obj_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(media_identifier)
 
         if not obj_keys:
             print(f"  No episodes found for '{media_identifier}'.")
