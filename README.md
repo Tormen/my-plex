@@ -40,7 +40,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings into season directories
   - Series libraries: matches file dates to episode data, renames with S##E## prefix
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
-  - Scoped: `my-plex movies.fr --sort-new --dry-run` or `my-plex 'Breaking Bad' --unsorted --fix`
+  - Scoped: `my-plex movies.fr --sort-new --dry-run` or `my-plex 'Tagesschau' --unsorted --fix`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
 - **Renumber episodes** (`--renumber`) — detect and fix incorrect S0xE0x numbering in filenames
   - Scraped data (TMDB/TVDB/fernsehserien.de) is the ground truth for correct numbering
@@ -123,7 +123,7 @@ my-plex --list
 my-plex --libraries
 
 # Search for a title
-my-plex --info 'boston legal'
+my-plex --info 'Tagesschau'
 
 # Search by directory name (when Plex title doesn't match)
 my-plex --info 'die millionenshow'
@@ -154,7 +154,7 @@ my-plex --problems --tsv
 # Scope any check to a specific item
 my-plex Show:5191 --problems      # All checks for one show
 my-plex Show:5191 --broken        # Broken files for one show
-my-plex 'boston legal' --unmatched # Check a specific title
+my-plex 'Tagesschau' --unmatched # Check a specific title
 
 # Detect and fix incorrect episode numbering (preview)
 my-plex --renumber --fix --try
@@ -163,7 +163,7 @@ my-plex --renumber --fix --try
 my-plex Show:5191 --renumber --fix --try
 
 # Missing episodes for a show
-my-plex --missing 'boston legal'
+my-plex --missing 'Tagesschau'
 
 # Missing episodes for all shows in a library
 my-plex series.en --missing
@@ -171,7 +171,7 @@ my-plex series.en --missing
 # Sort new recordings (preview)
 my-plex --sort-new --dry-run                    # shortcut for --unsorted --fix
 my-plex --unsorted --fix --dry-run              # equivalent
-my-plex 'Breaking Bad' --unsorted --fix --try   # sort one show
+my-plex 'Tagesschau' --unsorted --fix --try   # sort one show
 
 # Sort movies in a specific library
 my-plex movies.fr --sort-new --dry-run
