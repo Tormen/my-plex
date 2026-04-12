@@ -4,7 +4,7 @@ Still under heavy development, but already somewhat usable.
 
 The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
-**23,000+ lines of Python** | **630 tests** | **Offline-capable** | **60x faster than Plex API**
+**25,000+ lines of Python** | **680+ tests** | **Offline-capable** | **60x faster than Plex API**
 
 ## Features
 
@@ -13,7 +13,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations
 - **Duplicate detection** with intelligent classification (exact duplicates vs re-encodes vs true multi-version)
-- **Problem scanner** (`--problems`) — runs all 8 checks in one pass, counts stored in cache after every `--update-cache`:
+- **Problem scanner** (`--problems`) — runs all 12 checks in one pass, counts stored in cache after every `--update-cache`:
   - **Broken files** (`--broken`) — truncated/corrupt media detected by comparing container duration vs Plex duration and ffmpeg probe
   - **Excess versions** (`--excess-versions`) — entries with 3+ file versions (accidental duplicates, failed moves)
   - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
@@ -22,6 +22,10 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **Potential mismatches** (`--potential-mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
   - **Episode numbering issues** (`--episode-numbering-issues`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
   - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
+  - **Renumber candidates** (`--renumber`) — episodes whose filename S0xE0x disagrees with scraped data; fix with `--renumber --fix`
+  - **Renumber: lack of data** — episodes without scraped data (can't determine correct numbering)
+  - **Renumber: season mismatch** — S-number in filename doesn't match season directory
+  - **Renumber: absolute numbering mismatch** — Plex's episode ordering disagrees with scraped data
 - **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 
@@ -38,6 +42,11 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
   - Target a specific library: `my-plex movies.fr --sort-new --dry-run`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
+- **Renumber episodes** (`--renumber`) — detect and fix incorrect S0xE0x numbering in filenames
+  - Scraped data (TMDB/TVDB/fernsehserien.de) is the ground truth for correct numbering
+  - `--renumber --fix` renames files using `RENUMBER_NAME_PATTERN` config
+  - `--renumber --fix --try` for dry-run preview
+  - Scoped: library, show, season, or single episode
 
 ### Disk Map (Metadata Markers)
 - **Bidirectional sync** between Plex metadata and filesystem markers
@@ -124,7 +133,7 @@ my-plex --duplicates
 # Find broken files
 my-plex --broken
 
-# Run all 8 problem checks in one pass
+# Run all 12 problem checks in one pass
 my-plex --problems
 
 # Show full details for each check
@@ -138,7 +147,14 @@ my-plex --unsorted
 my-plex --potential-mismatch
 my-plex --episode-numbering-issues
 my-plex --reencode
+my-plex --renumber
 my-plex --problems --tsv
+
+# Detect and fix incorrect episode numbering (preview)
+my-plex --renumber --fix --try
+
+# Fix numbering for a specific show
+my-plex Show:5191 --renumber --fix --try
 
 # Missing episodes for a show
 my-plex --missing 'boston legal'
@@ -180,6 +196,9 @@ TMDB_API_KEY = 'your-tmdb-token'  # Free: https://www.themoviedb.org/settings/ap
 # Optional: Per-library episode source override
 MISSING_EPISODES_SOURCE = {'series.de': 'fernsehserien.de', 'series.en': 'tvdb'}
 
+# Optional: Episode renumbering filename pattern (for --renumber --fix)
+RENUMBER_NAME_PATTERN = '{S0XE0X} {TITLE}'
+
 # Optional: Duplicate detection — ignore cross-library duplicates
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
 
@@ -218,13 +237,15 @@ Use `my-plex --help <topic>` for detailed help on any command.
 # List available test scopes
 my-plex --test
 
-# Run all 568 tests
+# Run all tests
 my-plex --test all
 
 # Run tests for a specific scope
 my-plex --test disk-map
 my-plex --test commands
 my-plex --test duplicates
+my-plex --test renumber
+my-plex --test rename
 
 # Or with unittest flags
 my-plex --unittest -v
