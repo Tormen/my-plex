@@ -1131,14 +1131,15 @@ COMMANDS:
 
 PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
-  --broken [SCOPE]         List broken / truncated files
+  --broken [SCOPE]         Broken / truncated files
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
-  --unsorted [SCOPE]       Series with episodes not in season subdirs
   --mismatch [SCOPE]       Potential title / dirname mismatch candidates
-  --missing [SHOW]         Missing episodes — scraped data vs Plex cache
-  --reencode [SCOPE]       List reencode candidates above threshold (read-only)
+  --reencode [SCOPE]       Reencode candidates above bitrate threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
-  --renumber [SCOPE]       List episodes with incorrect S0xE0x in filename
+  Series only:
+  --unsorted [SCOPE]       Series with episodes not in season subdirs
+  --missing [SHOW]         Missing episodes — scraped data vs Plex cache
+  --renumber [SCOPE]       Episodes with incorrect S0xE0x in filename
     --plex                 Show Plex metadata numbering issues instead
     --fix [--try]          Rename (or dry-run) files to correct numbering
 
