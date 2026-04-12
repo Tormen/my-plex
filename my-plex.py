@@ -1121,7 +1121,6 @@ OPTIONS:
   -D, --debug              Debug output    (-DD for deep debug)
   -T, --try, --dry, --dry-run     Show what would change, write nothing
   --yes / --no             Auto-yes / auto-no to all prompts (please use with care)
-  -Y / -N                  Auto-yes / auto-no to all prompts
       --help [WHAT]        This help; --help COMMAND for full docs + examples
 
 COMMANDS:
