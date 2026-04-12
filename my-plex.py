@@ -1159,7 +1159,7 @@ MEDIA MANAGEMENT:
   --scan [LIB]             Trigger Plex filesystem scan + update cache
   --test [CATEGORY]        Run unit tests
 
---help COMMAND             Full documentation with examples for any command
+-H, --help COMMAND         Full documentation with examples for any command
 """
 
 # Canonical English genre names — genres are stored normalized in cache
@@ -25651,7 +25651,7 @@ def main():
     main_parser.add_argument('-V', '--verbose', action='store_true', help=f"Turn on verbose output - defaults to '{VRB}'", default=VRB)
     main_parser.add_argument('-VV', '--very-verbose', action='store_true', help=f"Turn on very verbose output - defaults to '{VERYVRB}'", default=VERYVRB)
     main_parser.add_argument('-f', '--format', metavar="FORMATSTR", help=f"Define format of output, overwriting the default. FORMATSTR can be 'pretty', 'tsv' or format string containing variables in Python f-string format - defaults to '{FORMAT}'", default=FORMAT)
-    main_parser.add_argument('--help', nargs='?', metavar="WHAT", help="Without WHAT, print this help. --help 'global' prints help on available <GLOBAL_COMMAND>s. --help <OBJECT_TYPE> prints available commands for this OBJECT_TYPE. --help 'all' will print all available --help texts.", default=None, const="default") # default + const necessary in order to be able to detect a simple '--help' without parameter!
+    main_parser.add_argument('-H', '--help', nargs='?', metavar="WHAT", help="Without WHAT, print this help. --help 'global' prints help on available <GLOBAL_COMMAND>s. --help <OBJECT_TYPE> prints available commands for this OBJECT_TYPE. --help 'all' will print all available --help texts.", default=None, const="default") # default + const necessary in order to be able to detect a simple '--help' without parameter!
     main_parser.add_argument('CMD_OR_PLEXOBJECT', nargs='?', help="can be a <GLOBAL_COMMAND> or a <PLEX_OBJECT>. For <PLEX_OBJECT> the OBJECT_TYPE will be auto-detected. Or you can force the type of the <PLEX_OBJECT>. For possible choices see below 'available <GLOBAL_COMMAND>s' and 'supported <OBJECT_TYPE>s'.")
     #main_parser.add_argument('GLOBAL_COMMAND', nargs='?', help="Global command. For possible choices see below 'available <GLOBAL_COMMAND>s'. For more info: --help 'global'")
     #main_parser.add_argument('PLEX_OBJECT', nargs='?', help="The PLEX object you are interested in. For possible object types see below 'supported <OBJECT_TYPE>s'. The OBJECT_TYPE will be auto-detected. Or you can force the type of the PLEX_OBJECT. For more info: --help <OBJECT_TYPE>")
