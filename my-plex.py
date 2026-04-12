@@ -269,8 +269,8 @@ _my-plex() {
         '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
         '--list-labels[List all labels and item counts]'
         '--list-label[List media with specific label]:label:'
-        '--add-label[Add label to media]:label and id:'
-        '--remove-label[Remove label from media]:label and id:'
+        '--add-label[Add label to media item(s)]:label and scope:'
+        '--remove-label[Remove label from media item(s)]:label and scope:'
         '(--no-audio-language --no-language)'{--no-audio-language,--no-language}'[List media with missing audio language info]'
         '--en[List media with English audio]'
         '--de[List media with German audio]'
@@ -1146,8 +1146,8 @@ MEDIA MANAGEMENT:
   --collections [LIB]      List collections in a library
   --list-labels            List all Plex labels + item counts
   --list-label LABEL       Items with a specific label
-  --add-label LABEL ID     Add a label to a media item
-  --remove-label LABEL ID  Remove a label from a media item
+  --add-label LABEL SCOPE  Add a label to media item(s)
+  --remove-label LABEL SCOPE  Remove a label from media item(s)
   --watched / --unwatched  List watched / unwatched items
   --no-audio-language      Items with missing audio language metadata
   --sort-new               Sort unsorted recordings into season directories
@@ -18898,6 +18898,60 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'add-label' | 'add_label':
+            print()
+            print("=" * 76)
+            print("ADD LABEL (--add-label) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --add-label LABEL SCOPE [--dry-run]")
+            print()
+            print("  Add a label to one or more media items.")
+            print()
+            print("  SCOPE can be:")
+            print("    - A cache key:     my-plex --add-label reencode Movie:123")
+            print("    - A Plex ID:       my-plex --add-label reencode 12345")
+            print("    - A title:         my-plex --add-label foreign 'boston legal'")
+            print("    - A library name:  my-plex --add-label foreign series.en")
+            print()
+            print("  SAFETY:")
+            print("    When SCOPE resolves to more than 10 items, --dry-run or --yes is required.")
+            print()
+            print("  OPTIONS:")
+            print("    --dry-run / --try   Preview which items would be affected")
+            print("    --yes               Skip confirmation for large scopes")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --add-label reencode Movie:123          # Single item by cache key")
+            print("  my-plex --add-label foreign 'boston legal'       # By title")
+            print("  my-plex --add-label foreign series.en --dry-run # Preview: all items in library")
+            print("  my-plex --add-label foreign series.en --yes     # Confirm: all items in library")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'remove-label' | 'remove_label':
+            print()
+            print("=" * 76)
+            print("REMOVE LABEL (--remove-label) HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --remove-label LABEL SCOPE [--dry-run]")
+            print()
+            print("  Remove a label from one or more media items.")
+            print("  Same SCOPE and safety rules as --add-label.")
+            print()
+            print("  See: my-plex --help add-label")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --remove-label reencode Movie:123          # Single item")
+            print("  my-plex --remove-label foreign series.en --dry-run # Preview")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'delete' | 'del':
             print()
             print("=" * 76)
@@ -22400,26 +22454,133 @@ def list_items_with_label(label):
 
             print(f"{plex_id:<10} | {obj_type:<10} | {title:<60} | {year:<6} | {filepath}")
 
+def _handle_label_command(label_args, action, dry_run=False, yes=False):
+    """Handle --add-label / --remove-label with scope support.
+    label_args: list from argparse nargs='+', first element is label, rest is scope.
+    action: 'add' or 'remove'."""
+    if len(label_args) < 2:
+        err(1063, f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
+            f"  Usage: my-plex --{action}-label 'my-label' Movie:123\n"
+            f"         my-plex --{action}-label 'my-label' 'boston legal'\n"
+            f"         my-plex --{action}-label 'my-label' series.en\n"
+            f"  Use --help {action}-label for details.")
+
+    label = label_args[0]
+    scope_str = ' '.join(label_args[1:])
+
+    # Resolve scope to item keys
+    # Try as library name first
+    if scope_str in PLEX_Library.OBJ_DICT_SUPPORTED:
+        obj_keys = collect_library_keys(library_name=scope_str)
+    else:
+        # Try as media identifier (cache key, Plex ID, title)
+        try:
+            obj_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(scope_str)
+        except SystemExit:
+            obj_keys = []
+        if not obj_keys:
+            err(1064, f"'{scope_str}' not found as library, cache key, Plex ID, or title.\n"
+                f"  Use --help {action}-label for usage.")
+
+    if not obj_keys:
+        print(f"No items found for scope '{scope_str}'.")
+        return
+
+    # Safety gate: >10 items requires --yes or --dry-run
+    if len(obj_keys) > 10 and not yes and not dry_run:
+        print(f"\n  WARNING: --{action}-label '{label}' would affect {len(obj_keys)} items.")
+        print(f"  Use --dry-run to preview, or --yes to confirm.")
+        return
+
+    action_fn = add_label_to_item if action == 'add' else remove_label_from_item
+    verb = 'Adding' if action == 'add' else 'Removing'
+    print(f"\n>>> {verb} label '{label}' — {len(obj_keys)} item(s) from scope '{scope_str}'"
+          + (" [DRY RUN]" if dry_run else ""))
+
+    added = 0
+    skipped = 0
+    errors = 0
+
+    for key in obj_keys:
+        obj = PLEX_Media.OBJ_BY_ID.get(key)
+        if not obj:
+            continue
+        if dry_run:
+            existing = obj.get('labels', [])
+            if action == 'add' and label in existing:
+                print(f"  {key}: [dry-run] already has label '{label}'")
+                skipped += 1
+            elif action == 'remove' and label not in existing:
+                print(f"  {key}: [dry-run] does not have label '{label}'")
+                skipped += 1
+            else:
+                print(f"  {key}: [dry-run] would {action} label '{label}' on '{obj.get('title', '?')}'")
+                added += 1
+        else:
+            result = action_fn(label, key)
+            if result in ('added', 'removed'):
+                added += 1
+            elif result in ('exists', 'not_found'):
+                skipped += 1
+            else:
+                errors += 1
+
+    # Save cache once after all changes (not per item)
+    if not dry_run and added > 0:
+        plex_labels_index = PLEX_Media.build_labels_index()
+        update_and_save_cache({
+            'obj_by_id': PLEX_Media.OBJ_BY_ID,
+            'plex_labels_index': plex_labels_index
+        })
+
+    action_past = 'added' if action == 'add' else 'removed'
+    print(f"\nSummary: {added} {action_past}, {skipped} skipped, {errors} errors")
+
+
+def _resolve_label_target(identifier):
+    """Resolve a label target identifier to (obj, obj_key) in cache.
+    Accepts: numeric Plex ID, cache key (e.g. Movie:123), or title search string.
+    Returns: (obj_dict, obj_key) or calls err() on failure."""
+    # Try as cache key first
+    if identifier in PLEX_Media.OBJ_BY_ID:
+        return PLEX_Media.OBJ_BY_ID[identifier], identifier
+
+    # Try as numeric Plex ID
+    try:
+        plex_id = int(identifier)
+        for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+            if cached_obj.get('id') == plex_id:
+                return cached_obj, key
+        err(1064, f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+    except ValueError:
+        pass
+
+    # Try as title search
+    matches = []
+    search_lower = identifier.lower()
+    for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+        title_lower = (cached_obj.get('title', '') or '').lower()
+        orig_lower = (cached_obj.get('originalTitle', '') or '').lower()
+        if search_lower == title_lower or search_lower == orig_lower:
+            matches.append((cached_obj, key))
+        elif search_lower in title_lower or (orig_lower and search_lower in orig_lower):
+            matches.append((cached_obj, key))
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        match_strs = [f"{k} ({o.get('title', '?')})" for o, k in matches[:5]]
+        suffix = f' ... and {len(matches)-5} more' if len(matches) > 5 else ''
+        err(1064, f"Ambiguous: '{identifier}' matches {len(matches)} items. Use a cache key (e.g. Movie:123) to be precise.\n"
+            f"  Matches: {', '.join(match_strs)}{suffix}")
+    err(1064, f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
+
+
 def add_label_to_item(label, plex_id):
-    """Add a label to a media item. API required: label mutations via Plex HTTP API."""
+    """Add a label to a media item. API required: label mutations via Plex HTTP API.
+    plex_id can be: numeric Plex ID, cache key (Movie:123), or title."""
     ensure_plex_api()
 
-    try:
-        plex_id = int(plex_id)
-    except ValueError:
-        err(1063, f"Invalid PLEX-ID '{plex_id}'. Must be a number.")
-
-    # Find the item in our cache first
-    obj = None
-    obj_key = None
-    for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-        if cached_obj.get('id') == plex_id:
-            obj = cached_obj
-            obj_key = key
-            break
-
-    if not obj:
-        err(1064, f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+    obj, obj_key = _resolve_label_target(plex_id)
 
     # Fetch the actual Plex media object
     try:
@@ -22431,47 +22592,28 @@ def add_label_to_item(label, plex_id):
 
     # Check if label already exists
     if label in [l.tag for l in item.labels]:
-        print(f"Label '{label}' already exists on media item '{item.title}'.")
-        return
+        print(f"  {obj_key}: Label '{label}' already exists on '{item.title}'.")
+        return 'exists'
 
     # Add the label
     try:
         item.addLabel(label)
-        print(f"✓ Added label '{label}' to media item '{item.title}' (PLEX-ID: {plex_id}).")
+        print(f"  {obj_key}: ✓ Added label '{label}' to '{item.title}'")
 
         # Update cache
         obj['labels'].append(label)
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
-
-        # Rebuild and save labels index
-        plex_labels_index = PLEX_Media.build_labels_index()
-        update_and_save_cache({
-            'obj_by_id': PLEX_Media.OBJ_BY_ID,
-            'plex_labels_index': plex_labels_index
-        })
+        return 'added'
     except Exception as e:
-        err(1066, f"Failed to add label: {e}")
+        print(f"  {obj_key}: ERROR: Failed to add label: {e}")
+        return 'error'
 
 def remove_label_from_item(label, plex_id):
-    """Remove a label from a media item. API required: label mutations via Plex HTTP API."""
+    """Remove a label from a media item. API required: label mutations via Plex HTTP API.
+    plex_id can be: numeric Plex ID, cache key (Movie:123), or title."""
     ensure_plex_api()
 
-    try:
-        plex_id = int(plex_id)
-    except ValueError:
-        err(1067, f"Invalid PLEX-ID '{plex_id}'. Must be a number.")
-
-    # Find the item in our cache first
-    obj = None
-    obj_key = None
-    for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-        if cached_obj.get('id') == plex_id:
-            obj = cached_obj
-            obj_key = key
-            break
-
-    if not obj:
-        err(1068, f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+    obj, obj_key = _resolve_label_target(plex_id)
 
     # Fetch the actual Plex media object
     try:
@@ -22483,27 +22625,22 @@ def remove_label_from_item(label, plex_id):
 
     # Check if label exists
     if label not in [l.tag for l in item.labels]:
-        print(f"Label '{label}' does not exist on media item '{item.title}'.")
-        return
+        print(f"  {obj_key}: Label '{label}' does not exist on '{item.title}'.")
+        return 'not_found'
 
     # Remove the label
     try:
         item.removeLabel(label)
-        print(f"✓ Removed label '{label}' from media item '{item.title}' (PLEX-ID: {plex_id}).")
+        print(f"  {obj_key}: ✓ Removed label '{label}' from '{item.title}'")
 
         # Update cache
         if label in obj['labels']:
             obj['labels'].remove(label)
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
-
-        # Rebuild and save labels index
-        plex_labels_index = PLEX_Media.build_labels_index()
-        update_and_save_cache({
-            'obj_by_id': PLEX_Media.OBJ_BY_ID,
-            'plex_labels_index': plex_labels_index
-        })
+        return 'removed'
     except Exception as e:
-        err(1070, f"Failed to remove label: {e}")
+        print(f"  {obj_key}: ERROR: Failed to remove label: {e}")
+        return 'error'
 
 def get_library_differences(lib_name, lib_type, deep_episode_check=False):
     """
@@ -24675,13 +24812,15 @@ def execute_global_commands(args, cmd_args):
 
     # Handle --add-label command
     if safe_getattr(cmd_args, 'add_label', None):
-        label, plex_id = cmd_args.add_label
-        add_label_to_item(label, plex_id)
+        _handle_label_command(cmd_args.add_label, 'add',
+                              dry_run=safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False),
+                              yes=safe_getattr(args, 'yes', False))
 
     # Handle --remove-label command
     if safe_getattr(cmd_args, 'remove_label', None):
-        label, plex_id = cmd_args.remove_label
-        remove_label_from_item(label, plex_id)
+        _handle_label_command(cmd_args.remove_label, 'remove',
+                              dry_run=safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False),
+                              yes=safe_getattr(args, 'yes', False))
 
     # Handle --scan (global = scan all libraries) — actual work already done in update_cache()
     if safe_getattr(cmd_args, 'scan', False):
@@ -25144,7 +25283,8 @@ def main():
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
-        '--info': 'info', '--test': 'test',
+        '--info': 'info', '--test': 'test', '--rename': 'rename',
+        '--add-label': 'add-label', '--remove-label': 'remove-label',
         '--media': 'media', '--scope': 'media', '--query': 'media',
     }
     if '--help' in sys.argv:
@@ -25524,8 +25664,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--fr', '--french', action='store_const', const='fr', dest='audio', help="List media with French audio.")
     GLOBAL_CMD_PARSER.add_argument('--list-labels', action='store_true', help="List all labels and the number of media items for each.")
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
-    GLOBAL_CMD_PARSER.add_argument('--add-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Add a label to a media item. Example: --add-label 'my-label' 12345")
-    GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
+    GLOBAL_CMD_PARSER.add_argument('--add-label', nargs='+', metavar='ARG', help="Add a label to media item(s). Usage: --add-label LABEL SCOPE. SCOPE: Plex ID, cache key, title, or library name. Use --help add-label for details.")
+    GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs='+', metavar='ARG', help="Remove a label from media item(s). Usage: --remove-label LABEL SCOPE. SCOPE: Plex ID, cache key, title, or library name. Use --help remove-label for details.")
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
