@@ -10344,10 +10344,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
     argparser.add_argument('--rename', action='store_true', help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show libraries only. Use --help rename for details.")
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
-    argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). Use --help unsorted for details.")
+    argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
+    argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename
+    argparser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --unsorted
+    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --unsorted --fix
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
         Available filters: \
         title=<title>, year=<year>, rating=<rating>, genre=<genre>, director=<director>, \
@@ -11772,12 +11774,22 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"\n--- Unmatched Items in '{lib_name}' (not identified by any Plex metadata agent) ---")
             PLEX_Media._list_unmatched(obj_keys, lib_name)
 
+        # Handle --sort-new: shortcut for --unsorted --fix
+        if safe_getattr(obj_args, 'sort_new', False):
+            dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            print(">>> Shortcut for: --unsorted --fix")
+            cmd_sort_new(args, dry_run=dry_run, target=obj)
         # Handle --unsorted: list shows with episodes directly in show dir (no season subdirs)
-        if safe_getattr(obj_args, 'unsorted', False):
-            lib_name = obj
-            lib_obj_keys = collect_library_keys(library_name=lib_name)
-            print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
-            PLEX_Media._list_unsorted(lib_obj_keys, library_name=lib_name)
+        elif safe_getattr(obj_args, 'unsorted', False):
+            fix_mode = safe_getattr(obj_args, 'fix', False)
+            if fix_mode:
+                dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+                cmd_sort_new(args, dry_run=dry_run, target=obj)
+            else:
+                lib_name = obj
+                lib_obj_keys = collect_library_keys(library_name=lib_name)
+                print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
+                PLEX_Media._list_unsorted(lib_obj_keys, library_name=lib_name)
 
         if safe_getattr(obj_args, 'potential_mismatch', False):
             lib_name = obj
@@ -12901,7 +12913,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--set-user-rating',                       help="Set user rating for media. Example: --set-user-rating <rating>")
     argparser.add_argument('--missing', action='store_true',          help="Show missing episodes for this series. Compares scraped episode data against Plex cache. Use --help missing for details.")
     argparser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing.")
-    argparser.add_argument('--unsorted', action='store_true',        help="Check if this show has episodes without season subdirs. Use --help unsorted for details.")
+    argparser.add_argument('--unsorted', action='store_true',        help="Check if this show has episodes without season subdirs. With --fix: sort into season dirs. Use --help unsorted for details.")
+    argparser.add_argument('--sort-new', action='store_true',        help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
     argparser.add_argument('--reencode', action='store_true',         help="List reencode candidates for this item. With --mark: write on-disk [reencode] label (force-labels at series/season/file level regardless of threshold).")
     argparser.add_argument('--mark', action='store_true',             help="With --reencode: write on-disk [reencode] label to series/season/file directory. Respects --try for dry-run.")
@@ -12970,11 +12983,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if safe_getattr(obj_args, 'missing', False):
             # Resolve media object to a show — use cache, not API
             cmd_missing(obj, source_override=safe_getattr(obj_args, 'source', None))
-        if safe_getattr(obj_args, 'unsorted', False):
-            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
-            if item_keys:
-                print(f"\n--- Unsorted Check for '{obj}' ---")
-                PLEX_Media._list_unsorted(item_keys)
+        if safe_getattr(obj_args, 'sort_new', False):
+            # --sort-new on per-object = shortcut for --unsorted --fix
+            dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            print(">>> Shortcut for: --unsorted --fix")
+            cmd_sort_new(args, dry_run=dry_run, target=obj)
+        elif safe_getattr(obj_args, 'unsorted', False):
+            fix_mode = safe_getattr(obj_args, 'fix', False)
+            if fix_mode:
+                dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+                cmd_sort_new(args, dry_run=dry_run, target=obj)
+            else:
+                item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+                if item_keys:
+                    print(f"\n--- Unsorted Check for '{obj}' ---")
+                    PLEX_Media._list_unsorted(item_keys)
         if safe_getattr(obj_args, 'rename', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
@@ -18159,14 +18182,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("                          (local:// guid — Fix Match needed)")
             print()
             print("  5. --unsorted           Detect shows with episodes directly in show dir")
-            print("                          (missing season subdirectories)")
+            print("                          (missing season subdirectories). Use --fix to sort.")
             print()
             print("  6. --potential-mismatch Detect items where Plex title doesn't match directory")
             print("                          (wrong metadata match — Fix Match needed)")
             print()
-            print("  7. --episode-numbering-issues")
-            print("                          Detect shows where Plex and scraped episode numbering")
+            print("  7. --renumber --plex    Detect shows where Plex and scraped episode numbering")
             print("                          disagree (e.g. Plex E101 vs Scraped E01)")
+            print("                          (replaces --episode-numbering-issues)")
             print()
             print(f"  8. --reencode           Detect media files with avg bitrate above threshold")
             print(f"                          (currently {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr — set via REENCODE_THRESHOLD).")
@@ -18256,12 +18279,19 @@ def main_print_help(args, remaining_args, main_parser):
             print("UNSORTED SHOWS HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --unsorted")
-            print("       my-plex <library> --unsorted")
-            print("       my-plex <show> --unsorted")
+            print("Usage: my-plex --unsorted [SCOPE]              List unsorted shows")
+            print("       my-plex --unsorted --fix [--dry-run]    Sort files into season dirs")
+            print("       my-plex [SCOPE] --unsorted [--fix]      Per-object form")
             print()
             print("Lists shows where episode files are directly in the show directory")
             print("instead of being organized into season subdirectories.")
+            print()
+            print("Modes:")
+            print("  (default)   List unsorted shows (read-only).")
+            print("  --fix       Sort unsorted files into season directories.")
+            print("              Matches files to episodes by date, filename patterns,")
+            print("              or absolute numbering. Creates season dirs as needed.")
+            print("              Use --dry-run (--try) to preview without changes.")
             print()
             print("Plex expects series to be organized as:")
             print("  /library/Show Name/Season 01/S01E01 - Title.mkv")
@@ -18274,15 +18304,20 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Plex needs season directories for proper metadata matching.")
             print("  Without them, episodes may be misidentified or missing metadata.")
             print()
-            print("TO FIX: Move episodes into 'Season XX' subdirectories, then")
-            print("        run: my-plex <library> --scan")
+            print("SHORTCUT:")
+            print("  --sort-new is a shortcut for --unsorted --fix.")
+            print("  See: my-plex --help sort-new")
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --unsorted                 # All unsorted across all libraries")
-            print("  my-plex series.en --unsorted       # Unsorted in series.en only")
-            print("  my-plex 'Breaking Bad' --unsorted  # Check a specific show")
-            print("  my-plex --problems                 # Includes unsorted in full report")
+            print("  my-plex --unsorted                          # All unsorted across all libraries")
+            print("  my-plex series.en --unsorted                # Unsorted in series.en only")
+            print("  my-plex 'Breaking Bad' --unsorted           # Check a specific show")
+            print("  my-plex --unsorted --fix --dry-run          # Preview sorting for all libraries")
+            print("  my-plex series.en --unsorted --fix          # Sort in series.en only")
+            print("  my-plex 'Breaking Bad' --unsorted --fix     # Sort a specific show")
+            print("  my-plex Show:5191 --unsorted --fix --try    # Sort by cache key, preview")
+            print("  my-plex --problems                          # Includes unsorted in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -18594,9 +18629,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("SORT NEW RECORDINGS (--sort-new) HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --sort-new [--dry-run]")
+            print("  --sort-new is a shortcut for --unsorted --fix.")
+            print("  See: my-plex --help unsorted")
             print()
-            print("  Scans ALL show directories in series-type Plex libraries for unsorted")
+            print("Usage: my-plex --sort-new [--dry-run]")
+            print("       my-plex [SCOPE] --sort-new [--dry-run]")
+            print("       my-plex --unsorted --fix [--dry-run]          (equivalent)")
+            print("       my-plex [SCOPE] --unsorted --fix [--dry-run]  (equivalent)")
+            print()
+            print("  Scans show directories in series-type Plex libraries for unsorted")
             print("  video files and sorts them into season subdirectories with S##E## naming.")
             print()
             print("  For each unsorted file in the show root directory:")
@@ -18617,6 +18658,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours.")
             print("  If the source changes (e.g. due to config update), the TSV is re-scraped")
             print("  automatically.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --sort-new --dry-run              # Preview all libraries")
+            print("  my-plex series.en --sort-new              # Sort in series.en only")
+            print("  my-plex 'Breaking Bad' --sort-new         # Sort a specific show")
+            print("  my-plex --unsorted --fix --dry-run        # Equivalent to --sort-new --dry-run")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -24479,8 +24527,9 @@ def execute_global_commands(args, cmd_args):
         cmd_missing(cmd_args.missing, source_override=safe_getattr(cmd_args, 'source', None))
         sys.exit(0)
 
-    # Handle --sort-new command
+    # Handle --sort-new command (shortcut for --unsorted --fix)
     if safe_getattr(cmd_args, 'sort_new', False):
+        print(">>> Shortcut for: --unsorted --fix")
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         target = args.CMD_OR_PLEXOBJECT if args.CMD_OR_PLEXOBJECT else None
         cmd_sort_new(args, dry_run=dry_run, target=target)
@@ -24791,6 +24840,13 @@ def execute_global_commands(args, cmd_args):
     # Handle --unsorted [LIBRARY]: list shows with episodes in show dir without season subdirs
     unsorted_val = safe_getattr(cmd_args, 'unsorted', None)
     if unsorted_val is not None:
+        fix_mode = safe_getattr(cmd_args, 'fix', False)
+        if fix_mode:
+            # --unsorted --fix = sort unsorted recordings into season directories
+            dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            library_name = None if unsorted_val is True else unsorted_val
+            cmd_sort_new(args, dry_run=dry_run, target=library_name)
+            return
         library_name = None if unsorted_val is True else unsorted_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
@@ -25444,7 +25500,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
-    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
@@ -25452,7 +25508,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
     GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files. Use --plex to show Plex metadata numbering issues.")
-    GLOBAL_CMD_PARSER.add_argument('--fix', action='store_true', default=False, help="With --renumber: rename episode files to correct numbering (scraped data = ground truth). Respects --try for dry-run.")
+    GLOBAL_CMD_PARSER.add_argument('--fix', action='store_true', default=False, help="With --renumber: rename episode files to correct numbering. With --unsorted: sort files into season dirs (= --sort-new). Respects --try/--dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--plex', action='store_true', default=False, help="With --renumber: show Plex metadata numbering issues instead of filename issues (replaces --episode-numbering-issues).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
@@ -25472,7 +25528,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs=2, metavar=('LABEL', 'PLEX_ID'), help="Remove a label from a media item. Example: --remove-label 'my-label' 12345")
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
-    GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories for all series. Use with --dry-run to preview. Use --help sort-new for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). TARGET: library name or media item. Without TARGET: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='TARGET', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='TARGET', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
@@ -25850,9 +25906,13 @@ def main():
         remaining_args.append('--source')
         remaining_args.append(args.source)
 
-    # Re-inject --sort-new into remaining_args so it reaches GLOBAL_CMD_PARSER dispatch
+    # Re-inject --sort-new into remaining_args
+    # Supports: bare --sort-new (global), <PLEXOBJ> --sort-new (per-object)
     if safe_getattr(args, 'sort_new', False):
-        remaining_args.insert(0, '--sort-new')
+        if args.CMD_OR_PLEXOBJECT is not None:
+            remaining_args.append('--sort-new')
+        else:
+            remaining_args.insert(0, '--sort-new')
 
     # Re-inject --plex2disk into remaining_args
     # Supports: --plex2disk [TARGET], <TARGET> --plex2disk, bare --plex2disk
