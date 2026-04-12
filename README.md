@@ -18,7 +18,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **Excess versions** (`--excess-versions`) — entries with 3+ file versions (accidental duplicates, failed moves)
   - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
   - **Unmatched items** (`--unmatched`) — media with `local://` GUID: never matched by any Plex metadata agent, or matched but missing external IDs (TMDB/TVDB) needed for episode scraping
-  - **Unsorted shows** (`--unsorted`) — series with episodes directly in the show directory instead of season subdirectories; fix with `--unsorted --fix`
+  - **Unsorted series** (`--unsorted`) — series with episodes directly in the series directory instead of season subdirectories; fix with `--unsorted --fix`
   - **Potential mismatches** (`--mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
   - **Plex numbering issues** (`--renumber --plex`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
   - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
@@ -47,7 +47,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - `--renumber --fix` renames files using `RENUMBER_NAME_PATTERN` config
   - `--renumber --fix --try` for dry-run preview
   - `--renumber --plex` shows Plex metadata numbering issues (replaces `--episode-numbering-issues`)
-  - Scoped: library, show, season, or single episode
+  - Scoped: library, series, season, or single episode
 
 ### Disk Map (Metadata Markers)
 - **Bidirectional sync** between Plex metadata and filesystem markers
@@ -152,17 +152,17 @@ my-plex --renumber
 my-plex --problems --tsv
 
 # Scope any check to a specific item
-my-plex Show:5191 --problems      # All checks for one show
-my-plex Show:5191 --broken        # Broken files for one show
+my-plex Series:5191 --problems      # All checks for one series
+my-plex Series:5191 --broken        # Broken files for one series
 my-plex 'Tagesschau' --unmatched # Check a specific title
 
 # Detect and fix incorrect episode numbering (preview)
 my-plex --renumber --fix --try
 
 # Fix numbering for a specific show
-my-plex Show:5191 --renumber --fix --try
+my-plex Series:5191 --renumber --fix --try
 
-# Missing episodes for a show
+# Missing episodes for a series
 my-plex --missing 'Tagesschau'
 
 # Missing episodes for all shows in a library
@@ -171,7 +171,7 @@ my-plex series.en --missing
 # Sort new recordings (preview)
 my-plex --sort-new --dry-run                    # shortcut for --unsorted --fix
 my-plex --unsorted --fix --dry-run              # equivalent
-my-plex 'Tagesschau' --unsorted --fix --try   # sort one show
+my-plex 'Tagesschau' --unsorted --fix --try   # sort one series
 
 # Sort movies in a specific library
 my-plex movies.fr --sort-new --dry-run
