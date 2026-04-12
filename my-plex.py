@@ -1150,12 +1150,12 @@ MEDIA MANAGEMENT:
   --remove-label LABEL SCOPE  Remove a label from media item(s)
   --watched / --unwatched  List watched / unwatched items
   --no-audio-language      Items with missing audio language metadata
-  --sort-new               Sort unsorted recordings into season directories
-  --plex2disk [TARGET]     Sync Plex metadata → disk markers
-  --disk2plex [TARGET]     Sync disk markers → Plex metadata
-  --plex-disk-sync [TARGET]    Bidirectional sync (disk2plex then plex2disk)
+  --sort-new [SCOPE]       Sort unsorted recordings (shortcut for --unsorted --fix)
+  --plex2disk [SCOPE]      Sync Plex metadata → disk markers
+  --disk2plex [SCOPE]      Sync disk markers → Plex metadata
+  --plex-disk-sync [SCOPE] Bidirectional sync (disk2plex then plex2disk)
   --scan [LIB]             Trigger Plex filesystem scan + update cache
-  --test [SCOPE]           Run unit tests
+  --test [CATEGORY]        Run unit tests
 
   --help COMMAND           Full documentation with examples for any command
 """
@@ -18743,7 +18743,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             print()
             print("Usage: my-plex --plex-disk-sync [--dry-run]              # All libraries")
-            print("       my-plex --plex-disk-sync <TARGET> [--dry-run]     # One library/item")
+            print("       my-plex --plex-disk-sync <SCOPE> [--dry-run]      # One library/item")
             print("       my-plex --sync [--dry-run]                        # Alias")
             print()
             print("  Runs both directions in sequence:")
@@ -25289,14 +25289,21 @@ def main():
     }
     if '--help' in sys.argv:
         _help_idx = sys.argv.index('--help')
-        # --help is the last arg or next arg is also a flag → look left for the option
+        # Case 1: --help --XXX → look right (next arg is a flag we recognize)
+        if _help_idx + 1 < len(sys.argv) and sys.argv[_help_idx + 1].startswith('-'):
+            _next = sys.argv[_help_idx + 1]
+            _topic = _OPTION_TO_HELP_TOPIC.get(_next)
+            if _topic:
+                sys.argv = [sys.argv[0]] + [a for i, a in enumerate(sys.argv[1:], 1) if i not in (_help_idx, _help_idx + 1)] + ['--help', _topic]
+                if DBG: print(f" ~~~ Normalized --help (right): {sys.argv}", file=sys.stderr)
+        # Case 2: --XXX --help → look left (previous arg is a flag we recognize)
         if _help_idx > 0 and (_help_idx == len(sys.argv) - 1 or sys.argv[_help_idx + 1].startswith('-')):
             _prev = sys.argv[_help_idx - 1]
             _topic = _OPTION_TO_HELP_TOPIC.get(_prev)
             if _topic:
                 # Rewrite: remove --help from current position, replace with --help <topic>
                 sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != '--help'] + ['--help', _topic]
-                if DBG: print(f" ~~~ Normalized --help: {sys.argv}", file=sys.stderr)
+                if DBG: print(f" ~~~ Normalized --help (left): {sys.argv}", file=sys.stderr)
 
     # Normalize key:value filter tokens → translate to existing flags or collect filter expressions.
     # Handles: type:movie  lang:de  watched:no  resolution:1080p  codec:h265  year>2015  etc.
@@ -25572,7 +25579,7 @@ def main():
     main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
-    main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='SCOPE', help=argparse.SUPPRESS)  # Consumed here to protect SCOPE from CMD_OR_PLEXOBJECT
+    main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -25589,14 +25596,14 @@ def main():
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--disk2plex', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--plex-disk-sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--clean', action='store_true', default=False, help=argparse.SUPPRESS)
-    main_parser.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
-    main_parser.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
-    main_parser.add_argument('--rename', metavar='TARGET', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
+    main_parser.add_argument('--map-to-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
+    main_parser.add_argument('--map-from-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
+    main_parser.add_argument('--rename', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
     main_parser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
@@ -25669,17 +25676,17 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
-    GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). TARGET: library name or media item. Without TARGET: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
-    GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='TARGET', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
-    GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='TARGET', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
-    GLOBAL_CMD_PARSER.add_argument('--sync', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
+    GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
+    GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
+    GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
     GLOBAL_CMD_PARSER.add_argument('--clean', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
-    GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
-    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
+    GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
+    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
-    GLOBAL_CMD_PARSER.add_argument('--test', nargs='?', const='', default=None, metavar='SCOPE', help="Run tests. --test: list available scopes. --test <scope>: run tests for that scope. --test all: run all tests.")
+    GLOBAL_CMD_PARSER.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help="Run tests. --test: list available categories. --test <category>: run tests for that category. --test all: run all tests.")
 
     add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
     add_PLEX_OBJ_TYPE( PLEX_Collection ) # Collection commands (fast: local cache lookup)
