@@ -6063,6 +6063,28 @@ class TestRenumber(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn('NOT YET IMPLEMENTED', result.stdout)
 
+    def test_scraped_padding_method_exists(self):
+        """_scraped_padding must exist as a static method on PLEX_Media."""
+        self.assertTrue(hasattr(PLEX_Media, '_scraped_padding'))
+        self.assertTrue(callable(getattr(PLEX_Media, '_scraped_padding')))
+
+    def test_scraped_padding_uses_scraped_data(self):
+        """_scraped_padding must derive padding from scraped episode numbers, not Plex E_idx."""
+        src = self._read_script()
+        idx = src.index('def _scraped_padding(')
+        method_body = src[idx:idx+1500]
+        self.assertIn('OBJ_BY_SHOW_SCRAPED', method_body,
+                       "_scraped_padding must read from OBJ_BY_SHOW_SCRAPED")
+
+    def test_renumber_uses_scraped_padding(self):
+        """_list_renumber_candidates and _fix_renumber_candidates must use _scraped_padding."""
+        src = self._read_script()
+        for method_name in ('_list_renumber_candidates', '_fix_renumber_candidates'):
+            idx = src.index(f'def {method_name}(')
+            method_body = src[idx:idx+5000]
+            self.assertIn('_scraped_padding', method_body,
+                          f"{method_name} must use _scraped_padding for correct padding")
+
 
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""

@@ -14344,6 +14344,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     _RE_SXEX = re.compile(r'[Ss](\d+)[Ee](\d+)')
 
     @staticmethod
+    def _scraped_padding(show_key):
+        """Compute S/E padding widths from SCRAPED episode data (ground truth).
+
+        The show's S_pad_width / E_pad_width are derived from Plex's E_idx values,
+        which may be wildly wrong (e.g. year parsed as episode number).  For
+        --renumber, we need padding based on the correct scraped numbers instead.
+
+        Returns (s_pad, e_pad) — minimum 2 each.
+        """
+        scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+        scraped_eps = scraped.get('episodes', {})
+        if not scraped_eps:
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            return (show_obj.get('S_pad_width', 2) or 2,
+                    show_obj.get('E_pad_width', 2) or 2)
+        max_s = 0
+        max_e = 0
+        for s_str, eps_dict in scraped_eps.items():
+            s_num = int(s_str.lstrip('S')) if s_str.startswith('S') else 0
+            if s_num > max_s:
+                max_s = s_num
+            for e_str in eps_dict:
+                e_num = int(e_str.lstrip('E')) if e_str.startswith('E') else 0
+                if e_num > max_e:
+                    max_e = e_num
+        s_pad = max(2, len(str(max_s))) if max_s else 2
+        e_pad = max(2, len(str(max_e))) if max_e else 2
+        return s_pad, e_pad
+
+    @staticmethod
     def _list_renumber_candidates(obj_keys, library_name=None):
         """List episodes whose filename numbering disagrees with scraped data.
         Only episodes WITH scraped data are considered (no-scraped-data is a
@@ -14404,9 +14434,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not scraped_eps:
                 continue  # no scraped data → separate problem category
 
-            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
-            s_pad = show_obj.get('S_pad_width', 2) or 2
-            e_pad = show_obj.get('E_pad_width', 2) or 2
+            # Use scraped-data-based padding (Plex E_pad_width may be inflated
+            # by the very mis-parsed episode numbers we're trying to fix)
+            s_pad, e_pad = PLEX_Media._scraped_padding(show_key)
 
             filepath = obj.get('file', '')
             if not filepath:
@@ -14534,9 +14564,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not scraped_eps:
                 continue
 
-            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
-            s_pad = show_obj.get('S_pad_width', 2) or 2
-            e_pad = show_obj.get('E_pad_width', 2) or 2
+            # Use scraped-data-based padding (Plex E_pad_width may be inflated
+            # by the very mis-parsed episode numbers we're trying to fix)
+            s_pad, e_pad = PLEX_Media._scraped_padding(show_key)
 
             filepath = obj.get('file', '')
             if not filepath:
