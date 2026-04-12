@@ -1131,6 +1131,7 @@ COMMANDS:
 
 PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
+  Movies & Series:
   --broken [SCOPE]         Broken / truncated files
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
   --mismatch [SCOPE]       Potential title / dirname mismatch candidates
