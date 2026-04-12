@@ -17798,6 +17798,18 @@ def main_print_help(args, remaining_args, main_parser):
             print(f"                          (currently {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr — set via REENCODE_THRESHOLD).")
             print(f"                          Episodes roll up to season / series level when all flagged.")
             print()
+            print("  9. --renumber           Detect episodes with incorrect S0xE0x in filename")
+            print("                          (scraped data is ground truth). Use --fix to rename.")
+            print()
+            print(" 10. Renumber: Lack of Data")
+            print("                          Episodes without scraped data — can't verify numbering.")
+            print()
+            print(" 11. Renumber: Season Mismatch")
+            print("                          S-number in filename doesn't match season directory.")
+            print()
+            print(" 12. Renumber: Absolute Numbering Mismatch")
+            print("                          Plex's episode ordering disagrees with scraped data.")
+            print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
             print("  my-plex --excess-versions 3")
@@ -23419,6 +23431,14 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --episode-numbering-issues")
     if problems.get('reencode', 0):
         print(f"  >> ⚠ {problems['reencode']} reencode candidates   →  my-plex{lib_arg} --reencode")
+    if problems.get('renumber', 0):
+        print(f"  >> ⚠ {problems['renumber']} renumber candidates   →  my-plex{lib_arg} --renumber")
+    if problems.get('renumber_nodata', 0):
+        print(f"  >> ⚠ {problems['renumber_nodata']} episodes without scraped data   →  my-plex{lib_arg} --renumber -V")
+    if problems.get('renumber_season', 0):
+        print(f"  >> ⚠ {problems['renumber_season']} season mismatch episodes   →  my-plex{lib_arg} --renumber -V")
+    if problems.get('renumber_abs', 0):
+        print(f"  >> ⚠ {problems['renumber_abs']} absolute numbering mismatch episodes   →  my-plex{lib_arg} --renumber -V")
 
 
 def _write_cache_update_log(action, completion_status, total_added, total_removed, total_updated,
@@ -24282,6 +24302,10 @@ def execute_global_commands(args, cmd_args):
         unsorted_count = 0
         mismatch_count = 0
         reencode_count = 0
+        renumber_count = 0
+        renumber_nodata_count = 0
+        renumber_season_count = 0
+        renumber_abs_count = 0
 
         def _run_check(func, *args, **kwargs):
             """Run a check function, suppressing detail output unless -V/--verbose."""
@@ -24327,8 +24351,26 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Reencode Candidates{lib_label}")
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
+            # 9. Renumber candidates (actionable — scraped data exists)
+            print(f"  >> Renumber Candidates{lib_label}")
+            renumber_count = _run_check(PLEX_Media._list_renumber_candidates, obj_keys, problems_library)
+
+            # 10. Renumber: lack of scraped data
+            print(f"  >> Renumber: Lack of Data{lib_label}")
+            renumber_nodata_count = _run_check(PLEX_Media._list_renumber_lack_of_data, obj_keys, problems_library)
+
+            # 11. Renumber: season mismatch
+            print(f"  >> Renumber: Season Mismatch{lib_label}")
+            renumber_season_count = _run_check(PLEX_Media._list_renumber_season_mismatch, obj_keys, problems_library)
+
+            # 12. Renumber: absolute numbering mismatch
+            print(f"  >> Renumber: Absolute Numbering Mismatch{lib_label}")
+            renumber_abs_count = _run_check(PLEX_Media._list_renumber_abs_mismatch, obj_keys, problems_library)
+
         # Closing milestone with total
-        total_problems = broken_count + excess_entry_count + tsv_problem_count + unmatched_count + unsorted_count + mismatch_count + numbering_count + reencode_count
+        total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
+                          + unsorted_count + mismatch_count + numbering_count + reencode_count
+                          + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
         live_problems = {
@@ -24340,6 +24382,10 @@ def execute_global_commands(args, cmd_args):
             'potential_mismatch':mismatch_count  if not tsv_only else 0,
             'numbering_issues':  numbering_count,
             'reencode':          reencode_count  if not tsv_only else 0,
+            'renumber':          renumber_count  if not tsv_only else 0,
+            'renumber_nodata':   renumber_nodata_count if not tsv_only else 0,
+            'renumber_season':   renumber_season_count if not tsv_only else 0,
+            'renumber_abs':      renumber_abs_count    if not tsv_only else 0,
         }
         _print_problem_warnings(live_problems, lib_arg)
         if total_problems == 0:
@@ -25001,7 +25047,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues + --reencode). Add -V for full details. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --episode-numbering-issues + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. Optional: library name to filter. Use --help unsorted for details.")
