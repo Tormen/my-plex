@@ -1114,16 +1114,15 @@ HELP_COMPACT="""
 OPTIONS:
   -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)
   -O, --offline            Work from cache only; no Plex connection
-  -U, --update-cache       Update / rebuild cache from Plex server
-      --force-tsv          Re-scrape all episode TSV files (use with --update-cache)
-      --verify-cache       Verify cache consistency with server
   -V, --verbose            Verbose output  (-VV for extra verbose)
   -D, --debug              Debug output    (-DD for deep debug)
   -T, --try, --dry, --dry-run     Show what would change, write nothing
   --yes / --no             Auto-yes / auto-no to all prompts (please use with care)
-      --help [WHAT]        This help; --help COMMAND for full docs + examples
 
 COMMANDS:
+  -U, --update-cache       Update / rebuild cache from Plex server
+      --force-tsv          Re-scrape all episode TSV files (use with --update-cache)
+      --verify-cache       Verify cache consistency with server
   --list-libraries         List all Plex libraries with stats
   --list [EXPR]            List / filter media  (EXPR: bitrate<2, type:movie, …)
   --duplicates             List duplicate items
