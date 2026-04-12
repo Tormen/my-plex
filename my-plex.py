@@ -1207,7 +1207,7 @@ usage:  my-plex [SCOPE] COMMAND [OPTIONS]
 
   Nearly all commands work globally or scoped to a narrower target.
 
-SCOPE SELECTORS  (optional — prefix any command to narrow its target)
+SCOPE SELECTORS  (narrow any command — before or after the flag)
 
   <library_name>              One library         e.g.  movies.en  ,unsorted
   "<title>" / <filename>      Media by title/file e.g.  "Ted Lasso"
