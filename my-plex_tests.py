@@ -5896,6 +5896,39 @@ class TestRenumber(unittest.TestCase):
         self.assertIn('--reencode', section)
         self.assertIn('--renumber', section)
 
+    def test_problems_integration_checks(self):
+        """--problems must include all 4 renumber checks (#9-#12)."""
+        content = self._read_script()
+        idx = content.index('def execute_global_commands(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_list_renumber_candidates', section)
+        self.assertIn('_list_renumber_lack_of_data', section)
+        self.assertIn('_list_renumber_season_mismatch', section)
+        self.assertIn('_list_renumber_abs_mismatch', section)
+
+    def test_print_problem_warnings_includes_renumber(self):
+        """_print_problem_warnings must show renumber warning lines."""
+        content = self._read_script()
+        idx = content.index('def _print_problem_warnings(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn('renumber', section)
+        self.assertIn('renumber_nodata', section)
+        self.assertIn('renumber_season', section)
+        self.assertIn('renumber_abs', section)
+
+    def test_help_problems_lists_renumber_checks(self):
+        """--help problems must document renumber checks #9-#12."""
+        content = self._read_script()
+        idx = content.index("case 'problems':")
+        end = content.index("sys.exit(0)", idx)
+        section = content[idx:end]
+        self.assertIn('--renumber', section)
+        self.assertIn('Lack of Data', section)
+        self.assertIn('Season Mismatch', section)
+        self.assertIn('Absolute Numbering Mismatch', section)
+
     def test_renumber_e2e(self):
         """--renumber runs without error (E2E)."""
         result = subprocess.run(
