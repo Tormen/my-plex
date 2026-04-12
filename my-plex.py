@@ -9380,6 +9380,52 @@ def _process_shows_from_database(shows_data, library_name, library_idx=0, total_
     # Ensure episodes.tsv exists for all shows and normalize episode indices from TSV
     _ensure_tsv_and_normalize_episodes(shows_data, library_name)
 
+    # Compute abs_ep_idx (absolute episode counter) for shows with scraped data.
+    # Scraped data is the source of truth for episode ordering — if no scraped
+    # data exists, abs_ep_idx is NOT assigned (falls into "Renumber: Lack of
+    # Data" problem category).  Multi-episode siblings share the leader's value.
+    for show_id, show_data in all_shows:
+        show_key = f"Show:{show_id}"
+        scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+        scraped_eps = scraped.get('episodes', {})
+        if not scraped_eps:
+            continue  # no scraped data → no abs_ep_idx
+        show_obj = PLEX_Media.OBJ_BY_ID.get(show_key)
+        if not show_obj:
+            continue
+        ep_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+        abs_counter = 0
+        show_abs_max = 0
+        for s_str in sorted(ep_data.keys()):
+            e_dict = ep_data[s_str]
+            season_abs_max = 0
+            for e_str in sorted(e_dict.keys()):
+                for _ver, ep_keys in e_dict[e_str].items():
+                    for ep_key in ep_keys:
+                        ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                        if not ep_obj:
+                            continue
+                        # Multi-episode non-leaders share the leader's abs_ep_idx
+                        siblings = ep_obj.get('multi_episode_siblings') or []
+                        if len(siblings) >= 2 and ep_key != siblings[0]:
+                            leader = PLEX_Media.OBJ_BY_ID.get(siblings[0])
+                            if leader and 'abs_ep_idx' in leader:
+                                ep_obj['abs_ep_idx'] = leader['abs_ep_idx']
+                                continue
+                        abs_counter += 1
+                        ep_obj['abs_ep_idx'] = abs_counter
+                        if abs_counter > season_abs_max:
+                            season_abs_max = abs_counter
+            # Store season abs_ep_max
+            s_key_lookup = PLEX_Media.OBJ_BY_SHOW.get(show_key, {}).get(s_str)
+            if s_key_lookup:
+                season_obj = PLEX_Media.OBJ_BY_ID.get(s_key_lookup)
+                if season_obj:
+                    season_obj['abs_ep_max'] = season_abs_max
+            if season_abs_max > show_abs_max:
+                show_abs_max = season_abs_max
+        show_obj['abs_ep_max'] = show_abs_max
+
     if VRB:
         print(f"{_get_worker_prefix()}library '{display_title}':<31s completed {processed_count} episodes")
     if DBG:
