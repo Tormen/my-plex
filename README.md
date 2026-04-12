@@ -18,9 +18,9 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **Excess versions** (`--excess-versions`) — entries with 3+ file versions (accidental duplicates, failed moves)
   - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
   - **Unmatched items** (`--unmatched`) — media with `local://` GUID: never matched by any Plex metadata agent, or matched but missing external IDs (TMDB/TVDB) needed for episode scraping
-  - **Unsorted shows** (`--unsorted`) — series with episodes directly in the show directory instead of season subdirectories
+  - **Unsorted shows** (`--unsorted`) — series with episodes directly in the show directory instead of season subdirectories; fix with `--unsorted --fix`
   - **Potential mismatches** (`--potential-mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
-  - **Episode numbering issues** (`--episode-numbering-issues`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
+  - **Plex numbering issues** (`--renumber --plex`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
   - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
   - **Renumber candidates** (`--renumber`) — episodes whose filename S0xE0x disagrees with scraped data; fix with `--renumber --fix`
   - **Renumber: lack of data** — episodes without scraped data (can't determine correct numbering)
@@ -37,15 +37,16 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **fernsehserien.de** (web scraping, German TV, no key needed)
   - Automatic fallback: if primary source returns 0 episodes, tries next source
 - **Auto-detection** of episode source from library agent + language
-- **Sort new recordings** (`--sort-new`) — organizes unsorted recordings into season directories
+- **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings into season directories
   - Series libraries: matches file dates to episode data, renames with S##E## prefix
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
-  - Target a specific library: `my-plex movies.fr --sort-new --dry-run`
+  - Scoped: `my-plex movies.fr --sort-new --dry-run` or `my-plex 'Breaking Bad' --unsorted --fix`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
 - **Renumber episodes** (`--renumber`) — detect and fix incorrect S0xE0x numbering in filenames
   - Scraped data (TMDB/TVDB/fernsehserien.de) is the ground truth for correct numbering
   - `--renumber --fix` renames files using `RENUMBER_NAME_PATTERN` config
   - `--renumber --fix --try` for dry-run preview
+  - `--renumber --plex` shows Plex metadata numbering issues (replaces `--episode-numbering-issues`)
   - Scoped: library, show, season, or single episode
 
 ### Disk Map (Metadata Markers)
@@ -77,7 +78,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Library scanning** (`--scan`) — trigger Plex filesystem scans, wait for completion
 - **Configurable scan behavior** — `AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE` controls whether `--update-cache` auto-scans
 - **File operations** — trash, rename, move with automatic alternative path resolution
-- **Label management** — add/remove labels
+- **Label management** — add/remove labels with scope support (single item, title, or entire library)
 - **Watch status** — mark watched/unwatched, set view offset
 - **Playlist management** — create, modify, delete playlists
 
@@ -145,10 +146,15 @@ my-plex --excess-versions 3
 my-plex --unmatched
 my-plex --unsorted
 my-plex --potential-mismatch
-my-plex --episode-numbering-issues
+my-plex --renumber --plex          # Plex metadata numbering issues
 my-plex --reencode
 my-plex --renumber
 my-plex --problems --tsv
+
+# Scope any check to a specific item
+my-plex Show:5191 --problems      # All checks for one show
+my-plex Show:5191 --broken        # Broken files for one show
+my-plex 'boston legal' --unmatched # Check a specific title
 
 # Detect and fix incorrect episode numbering (preview)
 my-plex --renumber --fix --try
@@ -163,7 +169,9 @@ my-plex --missing 'boston legal'
 my-plex series.en --missing
 
 # Sort new recordings (preview)
-my-plex --sort-new --dry-run
+my-plex --sort-new --dry-run                    # shortcut for --unsorted --fix
+my-plex --unsorted --fix --dry-run              # equivalent
+my-plex 'Breaking Bad' --unsorted --fix --try   # sort one show
 
 # Sort movies in a specific library
 my-plex movies.fr --sort-new --dry-run
