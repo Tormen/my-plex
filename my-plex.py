@@ -9763,9 +9763,9 @@ def _ensure_tsv_and_normalize_episodes(shows_data, library_name):
     _TSV_STATS['titles_filled'] += titles_total
 
 
-def _list_tsv_problems(library_name=None):
+def _list_tsv_problems(obj_keys, library_name=None):
     """Scan show directories for episodes.tsv/err files and print grouped results.
-    If library_name is given, only shows from that library are checked.
+    Accepts obj_keys of any type — derives show_keys internally.
     Returns: number of issues found."""
     import os
     from collections import defaultdict
@@ -9788,16 +9788,26 @@ def _list_tsv_problems(library_name=None):
     err_without_tsv = []   # (show_key, title, lib, err_path)
     by_type = defaultdict(list)  # error_type → [(show_key, title, lib, err_path)]
 
-    # Build set of show keys for the target library (or all if None)
-    if library_name:
-        lib_show_keys = set(PLEX_Media.OBJ_BY_LIBRARY.get(library_name, {}).get('Show', []))
-    else:
-        lib_show_keys = None  # no filter
+    # Derive target show keys from obj_keys
+    target_show_keys = set()
+    for key in obj_keys:
+        obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+        t = obj.get('type', '')
+        if t == 'Show':
+            target_show_keys.add(key)
+        elif t in ('Episode', 'Episode*'):
+            sk = obj.get('show_key', '')
+            if sk:
+                target_show_keys.add(sk)
+        elif t == 'Season':
+            sk = obj.get('show_key', '')
+            if sk:
+                target_show_keys.add(sk)
 
     # Collect all paths first, then batch-check which exist on remote
     show_info = []  # (show_key, show_dir, tsv_path, err_path)
     for show_key, show_seasons in PLEX_Media.OBJ_BY_SHOW.items():
-        if lib_show_keys is not None and show_key not in lib_show_keys:
+        if show_key not in target_show_keys:
             continue
         show_dict = PLEX_Media.OBJ_BY_ID.get(show_key)
         if not show_dict:
@@ -11765,8 +11775,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Handle --unsorted: list shows with episodes directly in show dir (no season subdirs)
         if safe_getattr(obj_args, 'unsorted', False):
             lib_name = obj
+            lib_obj_keys = collect_library_keys(library_name=lib_name)
             print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
-            PLEX_Media._list_unsorted(library_name=lib_name)
+            PLEX_Media._list_unsorted(lib_obj_keys, library_name=lib_name)
 
         if safe_getattr(obj_args, 'potential_mismatch', False):
             lib_name = obj
@@ -12459,7 +12470,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _pc_broken   = _silent(PLEX_Media._list_broken_files, all_obj_keys, None) or 0
             _pc_excess   = _silent(PLEX_Media._list_excess_versions, all_obj_keys, None, 3) or (0, 0)
             _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
-            _pc_unsorted = _silent(PLEX_Media._list_unsorted) or 0
+            _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
             _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
             _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues) or 0
             _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
@@ -12954,16 +12965,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Resolve media object to a show — use cache, not API
             cmd_missing(obj, source_override=safe_getattr(obj_args, 'source', None))
         if safe_getattr(obj_args, 'unsorted', False):
-            # Resolve media object to find the show key
-            found_items = resolve_cache_items(obj) if isinstance(obj, str) else [obj]
-            for item in found_items:
-                if isinstance(item, tuple):
-                    item_key, item = item
-                else:
-                    item_key = f"{item['type']}:{item['id']}"
-                if item.get('type') == 'Show':
-                    print(f"\n--- Unsorted Check for '{item.get('title', '?')}' ---")
-                    PLEX_Media._list_unsorted(show_key_filter=item_key)
+            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+            if item_keys:
+                print(f"\n--- Unsorted Check for '{obj}' ---")
+                PLEX_Media._list_unsorted(item_keys)
         if safe_getattr(obj_args, 'rename', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
@@ -13916,20 +13921,37 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(unmatched)
 
     @staticmethod
-    def _list_unsorted(library_name=None, show_key_filter=None):
+    def _list_unsorted(obj_keys, library_name=None):
         """List shows with episodes directly in the show directory (no season subdirs).
         Plex needs season directories (e.g. 'Season 01/') for proper organization.
+        Accepts obj_keys of any type — derives show_keys internally.
         Returns count of unsorted shows."""
+        # Derive unique show keys from obj_keys
+        target_show_keys = set()
+        for key in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+            t = obj.get('type', '')
+            if t == 'Show':
+                target_show_keys.add(key)
+            elif t in ('Episode', 'Episode*'):
+                sk = obj.get('show_key', '')
+                if sk:
+                    target_show_keys.add(sk)
+            elif t == 'Season':
+                sk = obj.get('show_key', '')
+                if sk:
+                    target_show_keys.add(sk)
+
         unsorted = []
         for show_key, seasons in PLEX_Media.OBJ_BY_SHOW_EPISODES.items():
+            if show_key not in target_show_keys:
+                continue
             show = PLEX_Media.OBJ_BY_ID.get(show_key)
             if not show:
                 continue
             if show.get('type') != 'Show':
                 continue
             if library_name and show.get('library') != library_name:
-                continue
-            if show_key_filter and show_key != show_key_filter:
                 continue
             show_dir = show.get('file', '')
             if not show_dir:
@@ -13956,8 +13978,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if not unsorted:
             scope = f" in '{library_name}'" if library_name else ""
-            if not show_key_filter:
-                print(f"  All shows{scope} have proper season directories.")
+            print(f"  All shows{scope} have proper season directories.")
             return 0
 
         unsorted.sort(key=lambda x: (x[2].lower(), x[1].lower()))  # library, title
@@ -24615,7 +24636,7 @@ def execute_global_commands(args, cmd_args):
 
         # 3. Episode data issues
         print(f"  >> Episode Data (TSV) Issues{lib_label}")
-        tsv_problem_count = _run_check(_list_tsv_problems, library_name=problems_library)
+        tsv_problem_count = _run_check(_list_tsv_problems, obj_keys, problems_library)
 
         if not tsv_only:
             # 4. Unmatched items
@@ -24624,7 +24645,7 @@ def execute_global_commands(args, cmd_args):
 
             # 5. Unsorted shows
             print(f"  >> Unsorted Shows{lib_label}")
-            unsorted_count = _run_check(PLEX_Media._list_unsorted, library_name=problems_library)
+            unsorted_count = _run_check(PLEX_Media._list_unsorted, obj_keys, problems_library)
 
             # 6. Potential mismatches
             print(f"  >> Potential Mismatches{lib_label}")
@@ -24700,9 +24721,11 @@ def execute_global_commands(args, cmd_args):
     unsorted_val = safe_getattr(cmd_args, 'unsorted', None)
     if unsorted_val is not None:
         library_name = None if unsorted_val is True else unsorted_val
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
         scope = f" in '{library_name}'" if library_name else ""
         print(f"\n--- Unsorted Shows{scope} (episodes without season directories) ---")
-        PLEX_Media._list_unsorted(library_name=library_name)
+        PLEX_Media._list_unsorted(obj_keys, library_name=library_name)
         return
 
     # Handle --potential-mismatch [LIBRARY]: list items where Plex title doesn't match directory name
