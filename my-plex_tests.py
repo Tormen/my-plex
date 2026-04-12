@@ -5075,7 +5075,7 @@ class TestUnsorted(unittest.TestCase):
         import re
         content = self._read_script()
         # Global dispatch: --unsorted --fix → cmd_sort_new
-        match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --potential-mismatch)", content, re.DOTALL)
+        match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --mismatch)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('fix', body, "Global --unsorted handler must check --fix flag")

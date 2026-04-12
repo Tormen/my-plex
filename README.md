@@ -19,7 +19,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
   - **Unmatched items** (`--unmatched`) — media with `local://` GUID: never matched by any Plex metadata agent, or matched but missing external IDs (TMDB/TVDB) needed for episode scraping
   - **Unsorted shows** (`--unsorted`) — series with episodes directly in the show directory instead of season subdirectories; fix with `--unsorted --fix`
-  - **Potential mismatches** (`--potential-mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
+  - **Potential mismatches** (`--mismatch`) — items where the Plex title doesn't match the filesystem directory name (likely wrong match in Plex)
   - **Plex numbering issues** (`--renumber --plex`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
   - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
   - **Renumber candidates** (`--renumber`) — episodes whose filename S0xE0x disagrees with scraped data; fix with `--renumber --fix`
@@ -145,7 +145,7 @@ my-plex --broken
 my-plex --excess-versions 3
 my-plex --unmatched
 my-plex --unsorted
-my-plex --potential-mismatch
+my-plex --mismatch
 my-plex --renumber --plex          # Plex metadata numbering issues
 my-plex --reencode
 my-plex --renumber
