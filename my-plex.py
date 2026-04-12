@@ -1160,7 +1160,7 @@ MEDIA MANAGEMENT:
   --scan [LIB]             Trigger Plex filesystem scan + update cache
   --test [CATEGORY]        Run unit tests
 
-  --help COMMAND           Full documentation with examples for any command
+--help COMMAND             Full documentation with examples for any command
 """
 
 # Canonical English genre names — genres are stored normalized in cache
