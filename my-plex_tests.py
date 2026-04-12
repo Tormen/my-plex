@@ -4570,6 +4570,85 @@ class TestRename(unittest.TestCase):
         self.assertIn('Movie', output, "--rename on movie library should mention Movie type")
 
 
+class TestRenameShared(unittest.TestCase):
+    """Tests for shared rename subroutines: _build_sxex_prefix, _build_sxex_filename, _rename_episode_file."""
+
+    def test_build_sxex_prefix_default_padding(self):
+        """_build_sxex_prefix with default padding produces S01E02."""
+        self.assertEqual(PLEX_Media._build_sxex_prefix(1, 2), 'S01E02')
+        self.assertEqual(PLEX_Media._build_sxex_prefix(12, 99), 'S12E99')
+
+    def test_build_sxex_prefix_custom_padding(self):
+        """_build_sxex_prefix with custom padding produces wider numbers."""
+        self.assertEqual(PLEX_Media._build_sxex_prefix(1, 2, s_pad=3, e_pad=4), 'S001E0002')
+        self.assertEqual(PLEX_Media._build_sxex_prefix(12, 1500, s_pad=2, e_pad=4), 'S12E1500')
+
+    def test_build_sxex_prefix_zero_season(self):
+        """_build_sxex_prefix for specials (season 0)."""
+        self.assertEqual(PLEX_Media._build_sxex_prefix(0, 5), 'S00E05')
+
+    def test_build_sxex_filename_basic(self):
+        """_build_sxex_filename prepends S0XE0X to original filename."""
+        result = PLEX_Media._build_sxex_filename(4, 1, 'Rise_September_19_2011.mkv')
+        self.assertEqual(result, 'S04E01 - Rise_September_19_2011.mkv')
+
+    def test_build_sxex_filename_custom_padding(self):
+        """_build_sxex_filename respects custom padding widths."""
+        result = PLEX_Media._build_sxex_filename(4, 1, 'test.mkv', s_pad=3, e_pad=3)
+        self.assertEqual(result, 'S004E001 - test.mkv')
+
+    def test_rename_episode_file_skips_no_file(self):
+        """_rename_episode_file returns 'skipped' when ep has no file."""
+        ep = {'type': 'Episode'}
+        result = PLEX_Media._rename_episode_file(ep, 'Episode:1', 'new.mkv', dry_run=True)
+        self.assertEqual(result, 'skipped')
+
+    def test_rename_episode_file_skips_same_name(self):
+        """_rename_episode_file returns 'skipped' when filename already matches."""
+        ep = {'type': 'Episode', 'file': '/media/shows/s01/S01E01 - Pilot.mkv'}
+        result = PLEX_Media._rename_episode_file(ep, 'Episode:1', 'S01E01 - Pilot.mkv', dry_run=True)
+        self.assertEqual(result, 'skipped')
+
+    def test_rename_episode_file_dry_run_prints(self):
+        """_rename_episode_file in dry_run mode prints the rename and returns 'renamed'."""
+        ep = {'type': 'Episode', 'file': '/media/shows/s01/old_name.mkv'}
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = PLEX_Media._rename_episode_file(ep, 'Episode:1', 'S01E01 - Pilot.mkv',
+                                                     dry_run=True, rename_siblings=False)
+        self.assertEqual(result, 'renamed')
+        output = buf.getvalue()
+        self.assertIn('[DRY-RUN]', output)
+        self.assertIn('S01E01 - Pilot.mkv', output)
+        self.assertIn('old_name.mkv', output)
+
+    def test_rename_single_episode_uses_shared_primitive(self):
+        """_rename_single_episode should delegate to _rename_episode_file (code structure check)."""
+        src_path = os.path.join(os.path.dirname(__file__), 'my-plex.py')
+        with open(src_path, 'r') as f:
+            src = f.read()
+        # Find _rename_single_episode body and verify it calls _rename_episode_file
+        idx = src.index('def _rename_single_episode(')
+        # Search within 3000 chars of the method
+        method_body = src[idx:idx+3000]
+        self.assertIn('_rename_episode_file', method_body,
+                      "_rename_single_episode should delegate to _rename_episode_file")
+
+    def test_sort_new_uses_build_sxex_filename(self):
+        """cmd_sort_new should use _build_sxex_filename instead of hardcoded f-strings."""
+        src_path = os.path.join(os.path.dirname(__file__), 'my-plex.py')
+        with open(src_path, 'r') as f:
+            src = f.read()
+        # Find cmd_sort_new and verify no hardcoded S{season:02d}E{ep_num:02d} in new_name assignments
+        idx = src.index('def cmd_sort_new(')
+        method_body = src[idx:idx+15000]
+        import re
+        hardcoded = re.findall(r'new_name\s*=\s*f"S\{', method_body)
+        self.assertEqual(len(hardcoded), 0,
+                         f"cmd_sort_new should not have hardcoded S{{}} f-strings for new_name, found {len(hardcoded)}")
+
+
 class TestShowInfoSeasonTable(unittest.TestCase):
     """Tests for --info on Show objects showing season table."""
 
@@ -6973,7 +7052,7 @@ _UNITTEST_SCOPES = {
                    TestS0XE0XPadding, TestMultiEpisodeSiblings,
                    TestAbsEpIdx, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
-    'rename':     [TestRename],
+    'rename':     [TestRename, TestRenameShared],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestSortNew, TestUnmatched, TestUnsorted],
     'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],

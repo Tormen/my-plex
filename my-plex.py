@@ -13100,6 +13100,131 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(siblings) >= 2 and key != siblings[0]
 
     @staticmethod
+    def _build_sxex_prefix(season, ep_num, s_pad=2, e_pad=2):
+        """Build a zero-padded S0XE0X prefix string.
+
+        Args:
+            season: Season number (int)
+            ep_num: Episode number (int)
+            s_pad: Minimum width for season number (default 2)
+            e_pad: Minimum width for episode number (default 2)
+
+        Returns:
+            String like "S01E02", "S01E015", "S001E0015" etc.
+        """
+        return f"S{season:0{s_pad}d}E{ep_num:0{e_pad}d}"
+
+    @staticmethod
+    def _build_sxex_filename(season, ep_num, original_filename, s_pad=2, e_pad=2):
+        """Build a filename with S0XE0X prefix prepended to the original filename.
+
+        Used by --sort-new to prepend episode numbering to unsorted files.
+
+        Args:
+            season: Season number (int)
+            ep_num: Episode number (int)
+            original_filename: Original filename (basename, with extension)
+            s_pad: Minimum width for season number (default 2)
+            e_pad: Minimum width for episode number (default 2)
+
+        Returns:
+            String like "S01E02 - original_file.mkv"
+        """
+        prefix = PLEX_Media._build_sxex_prefix(season, ep_num, s_pad, e_pad)
+        return f"{prefix} - {original_filename}"
+
+    @staticmethod
+    def _rename_episode_file(ep, ep_key, new_filename, dry_run, rename_siblings=True):
+        """Rename an episode's file on disk and update the cache.
+
+        This is the shared rename primitive used by both --rename and
+        --renumber --fix.  It handles:
+          - Actual file rename via rename_file() (SSH-aware)
+          - Cache updates (OBJ_BY_FILEPATH, ep['file'], ep['files'])
+          - Sibling file renaming (.srt, .nfo, etc.)
+
+        Args:
+            ep: Episode object dict from OBJ_BY_ID
+            ep_key: Cache key (e.g. "Episode:12345")
+            new_filename: Target filename (basename only, with extension)
+            dry_run: If True, print what would happen but don't rename
+            rename_siblings: If True, also rename sibling files (.srt, .nfo, etc.)
+
+        Returns:
+            'renamed', 'skipped' (already has that name), or 'error'
+        """
+        filepath = ep.get('file', '')
+        if not filepath:
+            return 'skipped'
+
+        current_filename = os.path.basename(filepath)
+        if current_filename == new_filename:
+            return 'skipped'
+
+        current_dir = os.path.dirname(filepath)
+        new_filepath = os.path.join(current_dir, new_filename)
+
+        pfx = "[DRY-RUN] " if dry_run else ""
+        print(f"  {pfx}{new_filename}  \u2190  {current_filename}")
+
+        if dry_run:
+            if rename_siblings:
+                # Show sibling renames in dry-run
+                base_no_ext = os.path.splitext(filepath)[0]
+                new_base_no_ext = os.path.splitext(new_filepath)[0]
+                ok, listing = my_plex_file_operation('LIST_DIR', current_dir, PLEX_DB_REMOTE_HOST, maxdepth=1)
+                if ok and listing:
+                    for sib in listing:
+                        if sib != filepath and sib.startswith(base_no_ext + '.'):
+                            sib_ext = sib[len(base_no_ext):]
+                            sib_new = os.path.basename(new_base_no_ext + sib_ext)
+                            print(f"  {pfx}{sib_new}  \u2190  {os.path.basename(sib)}")
+            return 'renamed'
+
+        success, actual_new_path = rename_file(filepath, new_filename, remote_host=PLEX_DB_REMOTE_HOST)
+        if not success:
+            print(f"    ERROR: rename failed for {current_filename}")
+            return 'error'
+
+        # Update cache
+        new_actual = actual_new_path if actual_new_path else new_filepath
+
+        # Update OBJ_BY_FILEPATH
+        if filepath in PLEX_Media.OBJ_BY_FILEPATH:
+            del PLEX_Media.OBJ_BY_FILEPATH[filepath]
+        PLEX_Media.OBJ_BY_FILEPATH[new_actual] = ep_key
+
+        # Update files dict
+        files = ep.get('files', {})
+        for version_str, file_info in files.items():
+            vpath = file_info.get('filepath', '') if isinstance(file_info, dict) else file_info
+            if vpath == filepath:
+                if isinstance(ep['files'][version_str], dict):
+                    ep['files'][version_str]['filepath'] = new_actual
+                break
+        ep['file'] = new_actual
+
+        # Rename sibling files (.srt, .nfo, etc.)
+        if rename_siblings:
+            base_no_ext = os.path.splitext(filepath)[0]
+            new_base_no_ext = os.path.splitext(new_actual)[0]
+            ok, listing = my_plex_file_operation('LIST_DIR', current_dir, PLEX_DB_REMOTE_HOST, maxdepth=1)
+            if ok and listing:
+                for sib in listing:
+                    if sib != filepath and sib != new_actual and sib.startswith(base_no_ext + '.'):
+                        sib_ext = sib[len(base_no_ext):]
+                        sib_new = os.path.basename(new_base_no_ext + sib_ext)
+                        sib_ok, _ = rename_file(sib, sib_new, remote_host=PLEX_DB_REMOTE_HOST)
+                        if sib_ok:
+                            # Update OBJ_BY_FILEPATH for sibling if tracked
+                            if sib in PLEX_Media.OBJ_BY_FILEPATH:
+                                sib_key = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
+                                sib_actual = os.path.join(current_dir, sib_new)
+                                PLEX_Media.OBJ_BY_FILEPATH[sib_actual] = sib_key
+
+        return 'renamed'
+
+    @staticmethod
     def _rename_single_episode(ep, ep_key, pattern, dry_run):
         """Rename a single episode file according to pattern.
         Returns 'renamed', 'skipped', or 'error'."""
@@ -13141,82 +13266,34 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         duration = ep.get('duration')
         var['DURATION'] = format_duration(duration, 'm') if duration else ''
 
-        # Process each file version
-        files = ep.get('files', {})
-        if not files:
-            # Single file
-            filepath = ep.get('file', '')
-            if not filepath:
-                return 'skipped'
-            files = {'_single_': {'filepath': filepath}}
+        # Build target filename from pattern
+        filepath = ep.get('file', '')
+        if not filepath:
+            return 'skipped'
 
-        result = 'skipped'
-        for version_str, file_info in files.items():
-            filepath = file_info.get('filepath', '') if isinstance(file_info, dict) else file_info
-            if not filepath:
-                continue
+        # Get extension from current file
+        _, ext = os.path.splitext(filepath)
+        ext = ext.lstrip('.')
 
-            # Get extension from current file
-            _, ext = os.path.splitext(filepath)
-            ext = ext.lstrip('.')
+        # Format the pattern
+        try:
+            new_basename = pattern.format(**var)
+        except KeyError as e:
+            print(f"  ERROR: Unknown pattern variable {e} in EPISODE_NAME_PATTERN")
+            return 'error'
 
-            # Format the pattern
-            try:
-                new_basename = pattern.format(**var)
-            except KeyError as e:
-                print(f"  ERROR: Unknown pattern variable {e} in EPISODE_NAME_PATTERN")
-                return 'error'
+        # Strip trailing whitespace (e.g. if {TITLE} is empty: "Series S01E02 " → "Series S01E02")
+        new_basename = new_basename.strip()
 
-            # Strip trailing whitespace (e.g. if {TITLE} is empty: "Series S01E02 " → "Series S01E02")
-            new_basename = new_basename.strip()
+        # Sanitize filename: replace unsafe characters
+        for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+            new_basename = new_basename.replace(ch, '_')
 
-            # Sanitize filename: replace unsafe characters
-            for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
-                new_basename = new_basename.replace(ch, '_')
+        # Add extension
+        new_filename = f"{new_basename}.{ext}" if ext else new_basename
 
-            # Add extension
-            new_filename = f"{new_basename}.{ext}" if ext else new_basename
-
-            # Compare with current filename
-            current_filename = os.path.basename(filepath)
-            if current_filename == new_filename:
-                continue  # Already correct
-
-            current_dir = os.path.dirname(filepath)
-            new_filepath = os.path.join(current_dir, new_filename)
-
-            pfx = "[DRY-RUN] " if dry_run else ""
-            print(f"  {pfx}{new_filename}  \u2190  {current_filename}")
-
-            if not dry_run:
-                success, actual_new_path = rename_file(filepath, new_filename, remote_host=PLEX_DB_REMOTE_HOST)
-                if success:
-                    # Update cache
-                    old_filepath = filepath
-                    new_actual = actual_new_path if actual_new_path else new_filepath
-
-                    # Update OBJ_BY_FILEPATH
-                    if old_filepath in PLEX_Media.OBJ_BY_FILEPATH:
-                        del PLEX_Media.OBJ_BY_FILEPATH[old_filepath]
-                    PLEX_Media.OBJ_BY_FILEPATH[new_actual] = ep_key
-
-                    # Update files dict
-                    if version_str != '_single_':
-                        if isinstance(ep['files'][version_str], dict):
-                            ep['files'][version_str]['filepath'] = new_actual
-                    ep['file'] = new_actual
-
-                    # Update OBJ_BY_MOVIE / OBJ_BY_SHOW_EPISODES filepath references
-                    # (OBJ_BY_MOVIE stores {version: filepath} for movies, not episodes)
-
-                    result = 'renamed'
-                else:
-                    print(f"    ERROR: rename failed for {current_filename}")
-                    result = 'error'
-            else:
-                result = 'renamed'
-
-        return result
+        # Use shared rename primitive
+        return PLEX_Media._rename_episode_file(ep, ep_key, new_filename, dry_run, rename_siblings=True)
 
     ############################################################
     ###### REENCODE ITEM (force-mark a specific item):
@@ -21366,7 +21443,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 season = int(sxex_match.group(1))
                 ep_num = int(sxex_match.group(2))
                 target_dir = os.path.join(show_dir, f"s{season:02d}")
-                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
@@ -21386,7 +21463,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 season = int(nxnn_match.group(1))
                 ep_num = int(nxnn_match.group(2))
                 target_dir = os.path.join(show_dir, f"s{season:02d}")
-                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
@@ -21420,7 +21497,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             season = candidate_season
                             ep_num = candidate_ep
                             target_dir = os.path.join(show_dir, f"s{season:02d}")
-                            new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                            new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                             target_path = os.path.join(target_dir, new_name)
 
                             if dry_run:
@@ -21443,7 +21520,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if 1 <= ep_num <= 99:
                     season = 1
                     target_dir = os.path.join(show_dir, f"s{season:02d}")
-                    new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                    new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                     target_path = os.path.join(target_dir, new_name)
 
                     if dry_run:
@@ -21487,7 +21564,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         season = matched_ep['season']
                         ep_num = matched_ep['episode']
                         target_dir = os.path.join(show_dir, f"s{season:02d}")
-                        new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                        new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                         target_path = os.path.join(target_dir, new_name)
                         if dry_run:
                             dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
@@ -21526,7 +21603,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     # Default: move to specials/ as S00Exx
                     target_dir = os.path.join(show_dir, 'specials')
                     ep_num = _next_episode_in_dir(target_dir, 0)
-                    new_name = f"S00E{ep_num:02d} - {fn}"
+                    new_name = PLEX_Media._build_sxex_filename(0, ep_num, fn)
                     target_path = os.path.join(target_dir, new_name)
                     if dry_run:
                         dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
@@ -21553,7 +21630,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             if result:
                 season, ep_num, title = result
                 target_dir = os.path.join(show_dir, f"s{season:02d}")
-                new_name = f"S{season:02d}E{ep_num:02d} - {fn}"
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                 target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
@@ -21573,7 +21650,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     latest_season = 1
                 target_dir = os.path.join(show_dir, f"s{latest_season:02d}")
                 ep_num = _next_episode_in_dir(target_dir, latest_season)
-                new_name = f"S{latest_season:02d}E{ep_num:02d} - {fn}"
+                new_name = PLEX_Media._build_sxex_filename(latest_season, ep_num, fn)
 
                 if dry_run:
                     dry_run_lines.append((latest_season, ep_num, f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}"))
