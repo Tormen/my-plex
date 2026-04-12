@@ -5721,6 +5721,58 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
         self.assertIn('SKIPPED', section)
 
 
+class TestAbsEpIdx(unittest.TestCase):
+    """Absolute episode counter (abs_ep_idx) — scraped-data-based running
+    counter across all seasons. Stored on episode, season, and show objects."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_abs_ep_idx_computed_in_update_cache(self):
+        """_process_shows_from_database must compute abs_ep_idx after
+        _ensure_tsv_and_normalize_episodes."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("abs_ep_idx", section)
+        self.assertIn("abs_ep_max", section)
+        # abs_ep_idx must come AFTER _ensure_tsv_and_normalize_episodes
+        tsv_pos = section.index('_ensure_tsv_and_normalize_episodes')
+        abs_pos = section.index('abs_ep_idx')
+        self.assertGreater(abs_pos, tsv_pos,
+                           "abs_ep_idx must be computed after _ensure_tsv_and_normalize_episodes")
+
+    def test_abs_ep_idx_requires_scraped_data(self):
+        """abs_ep_idx must only be assigned when scraped data exists."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("OBJ_BY_SHOW_SCRAPED", section)
+        self.assertIn("no scraped data", section.lower())
+
+    def test_abs_ep_idx_multi_episode_shares_leader(self):
+        """Multi-episode non-leaders must share the leader's abs_ep_idx."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        # The code must check multi_episode_siblings for non-leader sharing
+        self.assertIn("multi_episode_siblings", section)
+        self.assertIn("siblings[0]", section)
+
+    def test_abs_ep_max_stored_on_season_and_show(self):
+        """abs_ep_max must be stored on both season and show objects."""
+        content = self._read_script()
+        idx = content.index('def _process_shows_from_database(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn("season_obj['abs_ep_max']", section)
+        self.assertIn("show_obj['abs_ep_max']", section)
+
+
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
 
@@ -6744,7 +6796,7 @@ _UNITTEST_SCOPES = {
                    TestForceTsv, TestTsvScrapersE2E,
                    TestEpisodeNumberingIssues, TestObjByShowScraped,
                    TestS0XE0XPadding, TestMultiEpisodeSiblings,
-                   TestInfoScrapedData],
+                   TestAbsEpIdx, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
