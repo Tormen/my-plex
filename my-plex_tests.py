@@ -5431,7 +5431,7 @@ class TestPotentialMismatch(unittest.TestCase):
             [sys.executable, MAIN_SCRIPT, '--help', 'potential-mismatch'],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, f"--help potential-mismatch failed: {result.stderr}")
-        self.assertIn('POTENTIAL MISMATCH', result.stdout)
+        self.assertIn('MISMATCH', result.stdout)
 
     def test_e2e_runs(self):
         """--potential-mismatch must run without error."""

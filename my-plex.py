@@ -38,7 +38,7 @@
 # SCOPE        An optional prefix to any command that narrows its target:
 #              a library name, a title/filename, a KEY, or filter tokens.
 #              e.g.  my-plex ,unsorted --broken
-#                    my-plex "Ted Lasso" --missing
+#                    my-plex "Tagesschau" --missing
 #                    my-plex type:series lang:de --list
 #
 # FILTER TOKEN A key:value or key>value expression used as a SCOPE to select
@@ -464,9 +464,9 @@ CONFIG_DEFAULTS = {
     #   {WATCHED} (vu/nv) {WATCHEDDATE} (YYYY-MM-DD or '') {VIEWCOUNT}
     #   {RESOLUTION} {VIDEO_CODEC} {AUDIO_CODEC} {DURATION}
     # File extension is preserved automatically and NOT part of the pattern.
-    # Example: '{S0XE0X} - {TITLE}'              → 'S05E12 - Made in China.avi'
-    # Example: '{SERIES} {S0XE0X} {TITLE}'       → 'Boston Legal S05E12 Made in China.avi'
-    # Example: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]' → 'S05E12 Made in China [vu@2026-02-14].avi'
+    # Example: '{S0XE0X} - {TITLE}'              → 'S05E12 - Sondersendung.avi'
+    # Example: '{SERIES} {S0XE0X} {TITLE}'       → 'Tagesschau S05E12 Sondersendung.avi'
+    # Example: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]' → 'S05E12 Sondersendung [vu@2026-02-14].avi'
     'EPISODE_NAME_PATTERN': '{SERIES} {S0XE0X} {TITLE}',
 
     # Episode renumbering pattern for --renumber --fix
@@ -1125,14 +1125,18 @@ COMMANDS:
       --verify-cache       Verify cache consistency with server
   --list-libraries         List all Plex libraries with stats
   --list [EXPR]            List / filter media  (EXPR: bitrate<2, type:movie, …)
+  --watched / --unwatched  List watched / unwatched items  (shortcut for watched:yes/no)
   --duplicates             List duplicate items
   --info [ID]              System info, or detailed info for an item / title
+  --scan [LIB]             Trigger Plex filesystem scan + update cache
+  --test [CATEGORY]        Run unit tests
 
 PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
   Movies & Series:
   --broken [SCOPE]         Broken / truncated files
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
+  --no-audio-language      Items with missing audio language metadata
   --mismatch [SCOPE]       Potential title / dirname mismatch candidates
   --reencode [SCOPE]       Reencode candidates above bitrate threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
@@ -1144,19 +1148,16 @@ PROBLEM DETECTION:
     --fix [--try]          Rename (or dry-run) files to correct numbering
 
 MEDIA MANAGEMENT:
+  --playlist NAME          Select / manage a playlist (use with --list, --add, --remove)
   --collections [LIB]      List collections in a library
   --list-labels            List all Plex labels + item counts
   --list-label LABEL       Items with a specific label
   --add-label LABEL SCOPE  Add a label to media item(s)
   --remove-label LABEL SCOPE  Remove a label from media item(s)
-  --watched / --unwatched  List watched / unwatched items
-  --no-audio-language      Items with missing audio language metadata
   --sort-new [SCOPE]       Sort unsorted recordings (shortcut for --unsorted --fix)
   --plex2disk [SCOPE]      Sync Plex metadata → disk markers
   --disk2plex [SCOPE]      Sync disk markers → Plex metadata
   --plex-disk-sync [SCOPE] Bidirectional sync (disk2plex then plex2disk)
-  --scan [LIB]             Trigger Plex filesystem scan + update cache
-  --test [CATEGORY]        Run unit tests
 
 -H, --help COMMAND/OPTION        Full documentation with examples for any command or option
 """
@@ -1210,10 +1211,14 @@ usage:  my-plex [SCOPE] COMMAND [OPTIONS]    (order does not matter)
 
 SCOPE SELECTORS  (for commands marked with [SCOPE])
 
-  <library_name>              One library         e.g.  movies.en  ,unsorted
-  "<title>" / <filename>      Media by title/file e.g.  "Ted Lasso"
-  KEY:123 / ID:456            Exact item          (cache key / Plex rating key)
-  --playlist <name>           A Plex playlist     e.g.  --playlist "My Favs"
+  SCOPE EXAMPLES:
+    my-plex movies.en --broken                                   library
+    my-plex "Tagesschau" --reencode                              title
+    my-plex Show:4925 --renumber                                 my-plex cache key
+    my-plex ID:4925 --problems                                   Plex ID
+    my-plex --playlist "My Favs" --list                          playlist
+    my-plex ,unsorted --problems                                 library
+    my-plex type:movie lang:de watched:no bitrate'>2' --list     filter tokens
 
   FILTER TOKENS  (select multiple items — combine freely, all are AND):
     type:movie / type:series    by media type
@@ -1233,12 +1238,6 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
     label:reencode              by Plex / on-disk label
 
   → see --help scope  for full filter reference and examples
-
-SCOPE EXAMPLES:
-  my-plex ,unsorted --problems
-  my-plex "Ted Lasso" --reencode
-  my-plex type:movie lang:de watched:no bitrate'>2mbps' --list
-  my-plex movies.en --broken
 """
 
 ###########################################################################################
@@ -17718,44 +17717,43 @@ def main_print_help(args, remaining_args, main_parser):
             print("AVAILABLE COMMANDS")
             print("=" * 76)
             print()
-            print("CACHE & SERVER:")
+            print("COMMANDS:")
             print("  -U, --update-cache       Update / rebuild cache from Plex server")
             print("      --force-tsv          Re-scrape all episode TSV files (use with -U)")
             print("      --verify-cache       Verify cache consistency with server")
-            print("  --scan [LIB]             Trigger Plex filesystem scan + update cache")
-            print()
-            print("BROWSING:")
             print("  --list-libraries         List all Plex libraries with stats")
             print("  --list [EXPR]            List / filter media")
+            print("  --watched / --unwatched  List watched / unwatched items  (shortcut for watched:yes/no)")
             print("  --duplicates             List duplicate items")
             print("  --info [ID]              System info, or detailed info for an item / title")
+            print("  --scan [LIB]             Trigger Plex filesystem scan + update cache")
+            print("  --test [CATEGORY]        Run unit tests")
             print()
             print("PROBLEM DETECTION:")
             print("  --problems [SCOPE]       All problem checks in one pass")
+            print("  Movies & Series:")
             print("  --broken [SCOPE]         Broken / truncated files")
             print("  --unmatched [SCOPE]      Items not matched by Plex")
+            print("  --no-audio-language      Items with missing audio language metadata")
             print("  --mismatch [SCOPE]       Potential title / dirname mismatches")
             print("  --reencode [SCOPE]       Reencode candidates above bitrate threshold")
+            print("  Series only:")
             print("  --unsorted [SCOPE]       Series with episodes not in season subdirs")
             print("  --missing [SHOW]         Missing episodes")
             print("  --renumber [SCOPE]       Episodes with incorrect S0xE0x in filename")
             print()
             print("MEDIA MANAGEMENT:")
+            print("  --playlist NAME          Select / manage a playlist (use with --list, --add, --remove)")
             print("  --collections [LIB]      List collections in a library")
             print("  --list-labels            List all Plex labels + item counts")
             print("  --list-label LABEL       Items with a specific label")
             print("  --add-label LABEL SCOPE  Add a label to media item(s)")
             print("  --remove-label LABEL SCOPE  Remove a label from media item(s)")
-            print("  --watched / --unwatched  List watched / unwatched items")
-            print("  --no-audio-language      Items with missing audio language metadata")
             print("  --sort-new [SCOPE]       Sort unsorted recordings")
             print("  --rename [SCOPE]         Rename episode files according to pattern")
             print("  --plex2disk [SCOPE]      Sync Plex metadata → disk markers")
             print("  --disk2plex [SCOPE]      Sync disk markers → Plex metadata")
             print("  --plex-disk-sync [SCOPE] Bidirectional sync")
-            print()
-            print("TESTING:")
-            print("  --test [CATEGORY]        Run unit tests")
             print()
             print("For detailed help on any command:")
             print("  my-plex --help <command>       e.g.  my-plex --help renumber")
@@ -18106,7 +18104,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("SELECTING A SINGLE ITEM:")
             print()
-            print('  my-plex "Ted Lasso"        title search (substring)')
+            print('  my-plex "Tagesschau"       title search (substring)')
             print("  my-plex KEY:Movie:123      exact cache key")
             print("  my-plex ID:456             exact Plex rating key")
             print()
@@ -18149,7 +18147,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --problems                      all libraries")
             print("  my-plex movies.en --problems            one library")
-            print('  my-plex "Ted Lasso" --missing           one show')
+            print('  my-plex "Tagesschau" --missing          one show')
             print("  my-plex type:movie --reencode           all movies")
             print()
             print("  (nearly all commands accept a scope prefix)")
@@ -18428,10 +18426,10 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --unsorted                          # All unsorted across all libraries")
             print("  my-plex series.en --unsorted                # Unsorted in series.en only")
-            print("  my-plex 'Breaking Bad' --unsorted           # Check a specific show")
+            print("  my-plex 'Tagesschau' --unsorted             # Check a specific show")
             print("  my-plex --unsorted --fix --dry-run          # Preview sorting for all libraries")
             print("  my-plex series.en --unsorted --fix          # Sort in series.en only")
-            print("  my-plex 'Breaking Bad' --unsorted --fix     # Sort a specific show")
+            print("  my-plex 'Tagesschau' --unsorted --fix       # Sort a specific show")
             print("  my-plex Show:5191 --unsorted --fix --try    # Sort by cache key, preview")
             print("  my-plex --problems                          # Includes unsorted in full report")
             print()
@@ -18696,7 +18694,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  (from TVDB, TMDB, or fernsehserien.de) against what Plex has on disk.")
             print()
             print("  <SHOW> can be:")
-            print("    - Plex title:  my-plex --missing 'boston legal'")
+            print("    - Plex title:  my-plex --missing 'Tagesschau'")
             print("    - Plex ID:     my-plex --missing ID:4215")
             print("    - Filepath:    my-plex --missing /j2/watch.v/series.de/wer.weiss.denn.sowas_[quiz]")
             print()
@@ -18781,7 +18779,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --sort-new --dry-run              # Preview all libraries")
             print("  my-plex series.en --sort-new              # Sort in series.en only")
-            print("  my-plex 'Breaking Bad' --sort-new         # Sort a specific show")
+            print("  my-plex 'Tagesschau' --sort-new           # Sort a specific show")
             print("  my-plex --unsorted --fix --dry-run        # Equivalent to --sort-new --dry-run")
             print()
             print("=" * 76)
@@ -18807,9 +18805,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("AVAILABLE PATTERN ELEMENTS:")
             print("  {S0XE0X}        Season+episode   S05E12")
-            print("  {TITLE}         Episode title     Made in China")
+            print("  {TITLE}         Episode title     Sondersendung")
             print("  {ORIGINALTITLE} Original title    (if different)")
-            print("  {SERIES}        Show title        Boston Legal")
+            print("  {SERIES}        Show title        Tagesschau")
             print("  {YEAR}          Year              2008")
             print("  {LANG}          Library language   en")
             print("  {WATCHED}       Watch status       vu (watched) / nv (not viewed)")
@@ -18829,15 +18827,15 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print("  Pattern: '{S0XE0X} - {TITLE}'")
-            print("    → S05E12 - Made in China.avi")
+            print("    → S05E12 - Sondersendung.avi")
             print()
             print("  Pattern: '{SERIES} {S0XE0X} {TITLE}'")
-            print("    → Boston Legal S05E12 Made in China.avi")
+            print("    → Tagesschau S05E12 Sondersendung.avi")
             print()
             print("  Pattern: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]'")
-            print("    → S05E12 Made in China [vu@2026-02-14].avi")
+            print("    → S05E12 Sondersendung [vu@2026-02-14].avi")
             print()
-            print("  my-plex 'boston legal' --rename --dry-run    # Preview renames")
+            print("  my-plex 'Tagesschau' --rename --dry-run     # Preview renames")
             print("  my-plex series.en --rename                   # Rename all in library")
             print("  my-plex ID:12345 --rename                    # Rename single episode")
             print()
@@ -19029,7 +19027,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  SCOPE can be:")
             print("    - A cache key:     my-plex --add-label reencode Movie:123")
             print("    - A Plex ID:       my-plex --add-label reencode 12345")
-            print("    - A title:         my-plex --add-label foreign 'boston legal'")
+            print("    - A title:         my-plex --add-label foreign 'Tagesschau'")
             print("    - A library name:  my-plex --add-label foreign series.en")
             print()
             print("  SAFETY:")
@@ -19042,7 +19040,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --add-label reencode Movie:123          # Single item by cache key")
-            print("  my-plex --add-label foreign 'boston legal'       # By title")
+            print("  my-plex --add-label foreign 'Tagesschau'        # By title")
             print("  my-plex --add-label foreign series.en --dry-run # Preview: all items in library")
             print("  my-plex --add-label foreign series.en --yes     # Confirm: all items in library")
             print()
@@ -19150,7 +19148,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("With QUERY: shows detailed info for matching items.")
             print()
             print("QUERY TYPES:")
-            print("  Title search     my-plex --info 'boston legal'")
+            print("  Title search     my-plex --info 'Tagesschau'")
             print("  Cache key        my-plex --info Show:4925")
             print("  Plex ID          my-plex --info ID:4925")
             print("  Filepath         my-plex --info '/path/to/file.mkv'")
@@ -19161,7 +19159,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --info                         # System overview")
-            print("  my-plex --info 'Ted Lasso'             # Search by title")
+            print("  my-plex --info 'Tagesschau'            # Search by title")
             print("  my-plex --info Show:4925               # Exact cache key lookup")
             print("  my-plex --info Show:4925 -V            # Verbose: show all episodes")
             print()
@@ -20855,7 +20853,7 @@ def cmd_missing(show_ref, source_override=None):
     # Build set of (season, episode) tuples we HAVE
     # Plex stores episode.index as-is from the metadata agent / filename scanner (per plexapi
     # source: Episode.index is the episode number within the season).  Some shows use "absolute"
-    # numbering in filenames (e.g. "Boston Legal 101" → Plex stores index=101 for S01E01).
+    # numbering in filenames (e.g. "Tagesschau 101" → Plex stores index=101 for S01E01).
     # Detect per-season: if ALL episodes in a season have index // 100 == season_num, normalise.
     have_set = set()
     for s_str, eps in cached_episodes.items():
@@ -22847,7 +22845,7 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
     if len(label_args) < 2:
         err(1063, f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
             f"  Usage: my-plex --{action}-label 'my-label' Movie:123\n"
-            f"         my-plex --{action}-label 'my-label' 'boston legal'\n"
+            f"         my-plex --{action}-label 'my-label' 'Tagesschau'\n"
             f"         my-plex --{action}-label 'my-label' series.en\n"
             f"  Use --help {action}-label for details.")
 
@@ -25931,7 +25929,7 @@ def main():
     #    my-plex --list (all media), my-plex --problems (all checks).
     #
     # 3. FLEXIBLE <object>:  An object can be identified by any of:
-    #    - Title (partial, case-insensitive):  my-plex 'boston legal' --info
+    #    - Title (partial, case-insensitive):  my-plex 'Tagesschau' --info
     #    - Plex ID:                            my-plex ID:4925 --info
     #    - Cache key:                          my-plex Show:4925 --info
     #    - Filepath (server or local, with path translation):
