@@ -26040,13 +26040,15 @@ def main():
             else:
                 remaining_args.insert(0, '--renumber')
 
-    # Re-inject --detect, --mark, --fix into remaining_args (simple bool flags)
+    # Re-inject --detect, --mark, --fix, --plex into remaining_args (simple bool flags)
     if safe_getattr(args, 'detect', False):
         remaining_args.append('--detect')
     if safe_getattr(args, 'mark', False):
         remaining_args.append('--mark')
     if safe_getattr(args, 'fix', False):
         remaining_args.append('--fix')
+    if safe_getattr(args, 'plex', False):
+        remaining_args.append('--plex')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
