@@ -1134,7 +1134,7 @@ PROBLEM DETECTION:
   --broken [SCOPE]         List broken / truncated files
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
   --unsorted [SCOPE]       Series with episodes not in season subdirs
-  --potential-mismatch [SCOPE]  Title / dirname mismatch candidates
+  --mismatch [SCOPE]       Potential title / dirname mismatch candidates
   --missing [SHOW]         Missing episodes — scraped data vs Plex cache
   --reencode [SCOPE]       List reencode candidates above threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
@@ -1204,10 +1204,11 @@ def _normalize_genres(genres):
 
 HELP_SUFFIX="""
 usage:  my-plex [SCOPE] COMMAND [OPTIONS]
+        my-plex COMMAND [SCOPE] [OPTIONS]
 
-  Nearly all commands work globally or scoped to a narrower target.
+  Nearly all commands work globally or scoped on a narrower target.
 
-SCOPE SELECTORS  (for commands marked with [SCOPE] — before or after the flag)
+SCOPE SELECTORS  (for commands marked with [SCOPE])
 
   <library_name>              One library         e.g.  movies.en  ,unsorted
   "<title>" / <filename>      Media by title/file e.g.  "Ted Lasso"
@@ -1230,7 +1231,7 @@ SCOPE SELECTORS  (for commands marked with [SCOPE] — before or after the flag)
     added>2024                  by year added to Plex
     label:reencode              by Plex / on-disk label
 
-  → see --help media  for full filter reference and examples
+  → see --help scope  for full filter reference and examples
 
 SCOPE EXAMPLES:
   my-plex ,unsorted --problems
@@ -10378,7 +10379,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
     argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
-    argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
+    argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="List items where Plex title doesn't match directory name. Use --help mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     argparser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --unsorted
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --unsorted --fix
@@ -12954,7 +12955,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--plex', action='store_true',             help="With --renumber: show Plex metadata numbering issues instead of filename issues (replaces --episode-numbering-issues).")
     argparser.add_argument('--broken', action='store_true',           help="List broken/truncated media files for this item.")
     argparser.add_argument('--unmatched', action='store_true',        help="Check if this item is unmatched (no external IDs).")
-    argparser.add_argument('--potential-mismatch', action='store_true', help="Check title vs directory name for this item.")
+    argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="Check title vs directory name for this item.")
     argparser.add_argument('--problems', action='store_true',         help="Run all problem checks for this item.")
     argparser.add_argument('--fix', action='store_true',              help="With --renumber: rename episode files to correct numbering. Respects --try for dry-run.")
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --reencode, --renumber
@@ -18216,7 +18217,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  5. --unsorted           Detect shows with episodes directly in show dir")
             print("                          (missing season subdirectories). Use --fix to sort.")
             print()
-            print("  6. --potential-mismatch Detect items where Plex title doesn't match directory")
+            print("  6. --mismatch           Detect items where Plex title doesn't match directory")
             print("                          (wrong metadata match — Fix Match needed)")
             print()
             print("  7. --renumber --plex    Detect shows where Plex and scraped episode numbering")
@@ -18260,8 +18261,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --broken                # Show broken/truncated files only")
             print("  my-plex --unmatched             # Show unmatched items only")
             print("  my-plex --unsorted              # Show unsorted shows only")
-            print("  my-plex --potential-mismatch    # Show potential mismatches only")
-            print("  my-plex --episode-numbering-issues  # Show numbering issues only")
+            print("  my-plex --mismatch              # Show potential mismatches only")
+            print("  my-plex --renumber --plex       # Show numbering issues only")
             print("  my-plex --reencode              # Show reencode candidates only")
             print()
             print("=" * 76)
@@ -18354,15 +18355,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
-        case 'potential-mismatch' | 'potential_mismatch' | 'mismatch':
+        case 'mismatch' | 'potential-mismatch' | 'potential_mismatch':
             print()
             print("=" * 76)
-            print("POTENTIAL MISMATCH HELP")
+            print("MISMATCH HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --potential-mismatch")
-            print("       my-plex --potential-mismatch <LIBRARY>")
-            print("       my-plex <library> --potential-mismatch")
+            print("Usage: my-plex --mismatch [SCOPE]")
+            print("       my-plex [SCOPE] --mismatch")
             print()
             print("Detects items where the Plex title doesn't match the filesystem")
             print("directory name. This usually indicates Plex matched the wrong show")
@@ -18380,10 +18380,13 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --potential-mismatch              # All libraries")
-            print("  my-plex --potential-mismatch series.en    # One library")
-            print("  my-plex series.en --potential-mismatch    # Same")
-            print("  my-plex --problems                        # Includes this in full report")
+            print("  my-plex --mismatch                    # All libraries")
+            print("  my-plex --mismatch series.en          # One library")
+            print("  my-plex series.en --mismatch          # Same")
+            print("  my-plex --mismatch Show:4925          # One series")
+            print("  my-plex --problems                    # Includes this in full report")
+            print()
+            print("  --potential-mismatch is an alias for --mismatch.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -24023,7 +24026,7 @@ def _print_problem_warnings(problems, lib_arg=''):
     if problems.get('unsorted', 0):
         print(f"  >> ⚠ {problems['unsorted']} unsorted shows   →  my-plex{lib_arg} --unsorted")
     if problems.get('potential_mismatch', 0):
-        print(f"  >> ⚠ {problems['potential_mismatch']} potential mismatches   →  my-plex{lib_arg} --potential-mismatch")
+        print(f"  >> ⚠ {problems['potential_mismatch']} potential mismatches   →  my-plex{lib_arg} --mismatch")
     if problems.get('numbering_issues', 0):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
@@ -25018,7 +25021,7 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_unsorted(obj_keys, library_name=library_name)
         return
 
-    # Handle --potential-mismatch [SCOPE]: list items where Plex title doesn't match directory name
+    # Handle --mismatch [SCOPE]: list items where Plex title doesn't match directory name
     mismatch_val = safe_getattr(cmd_args, 'potential_mismatch', None)
     if mismatch_val is not None:
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
@@ -25305,7 +25308,7 @@ def main():
     _OPTION_TO_HELP_TOPIC = {
         '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
-        '--unsorted': 'unsorted', '--potential-mismatch': 'potential-mismatch',
+        '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
@@ -25610,7 +25613,7 @@ def main():
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--potential-mismatch', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -25670,11 +25673,11 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, default=None, help="List broken/truncated media files. Optional: library name or media identifier to filter.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
-    GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='SCOPE', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
@@ -25803,7 +25806,8 @@ def main():
                 '--list':                    'list',
                 '--unmatched':               'unmatched',
                 '--unsorted':                'unsorted',
-                '--potential-mismatch':      'potential-mismatch',
+                '--mismatch':                'mismatch',
+                '--potential-mismatch':      'mismatch',
                 '--episode-numbering-issues':'episode-numbering-issues',
                 '--missing':                 'missing',
                 '--sort-new':                'sort-new',
@@ -26048,17 +26052,17 @@ def main():
             else:
                 remaining_args.insert(0, '--unsorted')
 
-    # Re-inject --potential-mismatch into remaining_args
-    # Same pattern as --unmatched: supports --potential-mismatch [LIBRARY], <PLEXOBJ> --potential-mismatch, bare
+    # Re-inject --mismatch into remaining_args
+    # Same pattern as --unmatched: supports --mismatch [SCOPE], <PLEXOBJ> --mismatch, bare
     if safe_getattr(args, 'potential_mismatch', None) is not None:
         if args.potential_mismatch is not True:
-            remaining_args.insert(0, '--potential-mismatch')
+            remaining_args.insert(0, '--mismatch')
             remaining_args.insert(1, args.potential_mismatch)
         else:
             if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--potential-mismatch')
+                remaining_args.append('--mismatch')
             else:
-                remaining_args.insert(0, '--potential-mismatch')
+                remaining_args.insert(0, '--mismatch')
 
     # Re-inject --episode-numbering-issues into remaining_args
     # Same pattern as --unmatched: supports --episode-numbering-issues [LIBRARY], <PLEXOBJ> --episode-numbering-issues, bare
