@@ -1204,7 +1204,7 @@ def _normalize_genres(genres):
 
 
 HELP_SUFFIX="""
-usage:  my-plex COMMAND [SCOPE] [OPTIONS]    (order does not matter)
+usage:  my-plex [SCOPE] COMMAND [OPTIONS]    (order does not matter)
 
   Nearly all commands work globally or scoped on a narrower target.
 
