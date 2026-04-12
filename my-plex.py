@@ -202,6 +202,46 @@ _my-plex() {
 
     local cur="${words[$CURRENT]}"
 
+    # Handle --help <TOPIC> completion
+    local prev="${words[$((CURRENT-1))]}"
+    if [[ "$prev" == "--help" || "$prev" == "-h" || "$prev" == "-H" ]]; then
+        local -a help_topics
+        help_topics=(
+            'all:Show all help pages'
+            'broken:Broken file detection'
+            'collections:Collection management'
+            'config:Configuration file'
+            'disk2plex:Sync disk markers to Plex'
+            'duplicates:Duplicate detection'
+            'info:System and item info'
+            'labels:Label management'
+            'list:List and filter media'
+            'list-libraries:Library listing'
+            'media:Media scope and query syntax'
+            'mismatch:Title/dirname mismatch'
+            'missing:Missing episode detection'
+            'offline:Offline mode and access requirements'
+            'plex2disk:Sync Plex metadata to disk'
+            'plex-disk-sync:Bidirectional Plex/disk sync'
+            'problems:Problem detection overview'
+            'reencode:High-bitrate detection and labeling'
+            'rename:Episode file renaming'
+            'renumber:Episode renumbering'
+            'scan:Library scanning'
+            'sort-new:Sort unsorted recordings'
+            'test:Unit test runner'
+            'try:Dry-run mode'
+            'unmatched:Unmatched item detection'
+            'unsorted:Unsorted episode detection'
+            'verbose:Verbose and debug output'
+            'verify-cache:Cache verification'
+            'watched:Watched status filter'
+            'unwatched:Unwatched status filter'
+        )
+        _describe 'help topic' help_topics
+        return
+    fi
+
     # Handle key:value filter tokens for the current word
     if [[ "$cur" != -* ]]; then
         case "$cur" in
@@ -280,11 +320,28 @@ _my-plex() {
         '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--test[Run regression tests]'
+        '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
+        '(-T --try --dry --dry-run -n)'{-T,--try,--dry,--dry-run,-n}'[Dry-run: show what would change, write nothing]'
+        '--yes[Auto-yes to all prompts]'
+        '--no[Auto-no to all prompts]'
         '(- -V -VV --verbose --very-verbose)'{-V,--verbose}'[Verbose output]'
         '(- -V -VV --verbose --very-verbose)'{-VV,--very-verbose}'[Very verbose output]'
         '(- -D -DD --debug --deep-debug)'{-D,--debug}'[Debug mode]'
         '(- -D -DD --debug --deep-debug)'{-DD,--deep-debug}'[Deep debug mode]'
-        '(- -h --help)'{-h,--help}'[Show help message]'
+        '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
+        '--unmatched[List items not matched by Plex (local:// guid)]'
+        '--mismatch[Potential title / dirname mismatch candidates]'
+        '--unsorted[Series with episodes not in season subdirs]'
+        '--missing[Missing episodes — scraped data vs Plex cache]'
+        '--renumber[Episodes with incorrect S0xE0x in filename]'
+        '--plex[With --renumber: show Plex metadata numbering issues]'
+        '--fix[With --renumber/--unsorted: apply changes (respects --try)]'
+        '--force-tsv[Re-scrape all episode TSV files (use with --update-cache)]'
+        '--playlist[Select/manage a playlist]:name:'
+        '--sort-new[Sort unsorted recordings (shortcut for --unsorted --fix)]'
+        '--plex2disk[Sync Plex metadata to disk markers]'
+        '--disk2plex[Sync disk markers to Plex metadata]'
+        '--plex-disk-sync[Bidirectional sync (disk2plex then plex2disk)]'
     )
 
     if [[ $has_update_cache -eq 1 ]]; then
