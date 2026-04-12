@@ -1130,16 +1130,16 @@ COMMANDS:
   --info [ID]              System info, or detailed info for an item / title
 
 PROBLEM DETECTION:
-  --problems               All problem checks in one pass  (add -V for details)
-  --broken                 List broken / truncated files
-  --unmatched [LIB]        Items not matched by Plex (local:// guid)
-  --unsorted [LIB]         Series with episodes not in season subdirs
-  --potential-mismatch [LIB]   Title / dirname mismatch candidates
-  --episode-numbering-issues   Plex vs scraped episode numbering mismatches
+  --problems [SCOPE]       All problem checks in one pass  (add -V for details)
+  --broken [SCOPE]         List broken / truncated files
+  --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
+  --unsorted [SCOPE]       Series with episodes not in season subdirs
+  --potential-mismatch [SCOPE]  Title / dirname mismatch candidates
   --missing [SHOW]         Missing episodes — scraped data vs Plex cache
-  --reencode [LIB]         List reencode candidates above threshold (read-only)
+  --reencode [SCOPE]       List reencode candidates above threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
-  --renumber [LIB]         List episodes with incorrect S0xE0x in filename
+  --renumber [SCOPE]       List episodes with incorrect S0xE0x in filename
+    --plex                 Show Plex metadata numbering issues instead
     --fix [--try]          Rename (or dry-run) files to correct numbering
 
 MEDIA MANAGEMENT:
@@ -7658,6 +7658,38 @@ def collect_library_keys(library_name=None, media_type=None):
 
     return obj_keys
 
+def resolve_scope_to_keys(scope_val, media_type=None):
+    """Resolve a scope value (library name OR media identifier) to cache keys.
+
+    If scope_val matches a library name, returns (obj_keys, library_name, scope_label).
+    Otherwise tries to resolve as a media identifier (cache key, Plex ID, title).
+
+    Returns: (obj_keys, library_name_or_None, scope_label_string)
+    """
+    if scope_val is None or scope_val is True:
+        # No scope specified → all libraries
+        obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+        return (obj_keys, None, "")
+
+    # First: try as a library name
+    if scope_val in PLEX_Media.OBJ_BY_LIBRARY:
+        obj_keys = collect_library_keys(library_name=scope_val, media_type=media_type)
+        return (obj_keys, scope_val, f" in '{scope_val}'")
+
+    # Not a library → resolve as media identifier
+    resolved = PLEX_Media._resolve_to_media_keys(scope_val)
+    obj_keys = resolved[0]
+    if obj_keys:
+        return (obj_keys, None, f" for '{scope_val}'")
+
+    # Nothing found
+    err(1080, f"'{scope_val}' is not a library name and could not be resolved as a media identifier.\n"
+              f"  Possible reasons:\n"
+              f"  - Typo in the name or cache key\n"
+              f"  - Item not in cache (run --update-cache)\n"
+              f"  - Use --info '{scope_val}' to search")
+
+
 def generate_duplicate_keys(obj):
     """Generate keys for identifying duplicate content.
 
@@ -10347,7 +10379,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unsorted', action='store_true', help="List shows with episodes directly in show dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--potential-mismatch', action='store_true', help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
-    argparser.add_argument('--episode-numbering-issues', action='store_true', help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
+    argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     argparser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --unsorted
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --unsorted --fix
     argparser.add_argument('--search', nargs='*',          help="Perform an advanced search. Example: --search <filter1=value1> <filter2=value2>...\
@@ -24846,16 +24878,13 @@ def execute_global_commands(args, cmd_args):
         err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
 
     # Handle --problems: run all problem detection checks with summary
-    if safe_getattr(cmd_args, 'problems', False):
+    problems_val = safe_getattr(cmd_args, 'problems', None)
+    if problems_val is not None:
         tsv_only = safe_getattr(cmd_args, 'tsv', False)
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        # Detect library filter from CMD_OR_PLEXOBJECT (e.g. "my-plex series.de --problems")
-        problems_library = None
-        if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT in PLEX_Library.OBJ_DICT:
-            problems_library = args.CMD_OR_PLEXOBJECT
-        obj_keys = collect_library_keys(library_name=problems_library, media_type=media_type)
+        obj_keys, problems_library, scope = resolve_scope_to_keys(problems_val, media_type=media_type)
 
-        lib_label = f" for '{problems_library}'" if problems_library else ""
+        lib_label = scope
         scope_str = (" — Episode Data (TSV/Scraping)" if tsv_only else "") + lib_label
         lib_arg = f" {problems_library}" if problems_library else ""
         _cached_at = CACHE.get('problems', {}).get('computed_at', '')
@@ -24964,67 +24993,56 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'tsv', False):
         err(1076, "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
 
-    # Handle --unmatched [LIBRARY]: list items not matched by Plex metadata agent
+    # Handle --unmatched [SCOPE]: list items not matched by Plex metadata agent
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
     if unmatched_val is not None:
-        # unmatched_val is True (no arg) or a string (library name)
-        library_name = None if unmatched_val is True else unmatched_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(unmatched_val, media_type=media_type)
         print(f"\n--- Unmatched Items{scope} (not identified by any Plex metadata agent) ---")
         PLEX_Media._list_unmatched(obj_keys, library_name)
         return
 
-    # Handle --unsorted [LIBRARY]: list shows with episodes in show dir without season subdirs
+    # Handle --unsorted [SCOPE]: list shows with episodes in show dir without season subdirs
     unsorted_val = safe_getattr(cmd_args, 'unsorted', None)
     if unsorted_val is not None:
         fix_mode = safe_getattr(cmd_args, 'fix', False)
         if fix_mode:
             # --unsorted --fix = sort unsorted recordings into season directories
             dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-            library_name = None if unsorted_val is True else unsorted_val
-            cmd_sort_new(args, dry_run=dry_run, target=library_name)
+            target = None if unsorted_val is True else unsorted_val
+            cmd_sort_new(args, dry_run=dry_run, target=target)
             return
-        library_name = None if unsorted_val is True else unsorted_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(unsorted_val, media_type=media_type)
         print(f"\n--- Unsorted Shows{scope} (episodes without season directories) ---")
         PLEX_Media._list_unsorted(obj_keys, library_name=library_name)
         return
 
-    # Handle --potential-mismatch [LIBRARY]: list items where Plex title doesn't match directory name
+    # Handle --potential-mismatch [SCOPE]: list items where Plex title doesn't match directory name
     mismatch_val = safe_getattr(cmd_args, 'potential_mismatch', None)
     if mismatch_val is not None:
-        library_name = None if mismatch_val is True else mismatch_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(mismatch_val, media_type=media_type)
         print(f"\n--- Potential Mismatches{scope} (Plex title vs directory name) ---")
         PLEX_Media._list_potential_mismatches(obj_keys, library_name)
         return
 
-    # Handle --episode-numbering-issues [LIBRARY]: list shows with Plex vs scraped numbering conflicts
+    # Handle --episode-numbering-issues [SCOPE]: list shows with Plex vs scraped numbering conflicts
     numbering_val = safe_getattr(cmd_args, 'episode_numbering_issues', None)
     if numbering_val is not None:
         print("NOTE: --episode-numbering-issues has been replaced by --renumber --plex")
         print("      Redirecting to --renumber --plex ...\n")
-        library_name = None if numbering_val is True else numbering_val
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(numbering_val, media_type=media_type)
         print(f"\n--- Episode Numbering Issues{scope} (Plex metadata vs scraped source) ---")
         PLEX_Media._list_episode_numbering_issues(obj_keys, library_name)
         return
 
-    # Handle --reencode [LIBRARY]: list candidates above threshold; --mark writes on-disk labels
+    # Handle --reencode [SCOPE]: list candidates above threshold; --mark writes on-disk labels
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
-        library_name = None if reencode_val is True else reencode_val
         media_type   = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys     = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope        = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(reencode_val, media_type=media_type)
         reencode_cfg    = PROBLEMS2DISK.get('reencode', {})
         labeltext       = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
         remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
@@ -25045,13 +25063,11 @@ def execute_global_commands(args, cmd_args):
             )
         return
 
-    # Handle --renumber [LIBRARY]: list episodes with incorrect S0xE0x; --fix renames files; --plex shows metadata issues
+    # Handle --renumber [SCOPE]: list episodes with incorrect S0xE0x; --fix renames files; --plex shows metadata issues
     renumber_val = safe_getattr(cmd_args, 'renumber', None)
     if renumber_val is not None:
-        library_name = None if renumber_val is True else renumber_val
         media_type   = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys     = collect_library_keys(library_name=library_name, media_type=media_type)
-        scope        = f" in '{library_name}'" if library_name else ""
+        obj_keys, library_name, scope = resolve_scope_to_keys(renumber_val, media_type=media_type)
         fix_mode  = safe_getattr(cmd_args, 'fix', False)
         plex_mode = safe_getattr(cmd_args, 'plex', False) or safe_getattr(args, 'plex', False)
         dry_run   = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
@@ -25068,10 +25084,20 @@ def execute_global_commands(args, cmd_args):
             PLEX_Media._list_renumber_candidates(obj_keys, library_name)
         return
 
+    # Handle --broken [SCOPE] as standalone problem detection (not via --list path)
+    # When --broken has a scope argument (not just True), use _list_broken_files directly
+    broken_val = safe_getattr(cmd_args, 'broken', None)
+    if broken_val is not None and broken_val is not True and not RESCAN_BROKEN:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(broken_val, media_type=media_type)
+        print(f"\n--- Broken / Truncated Files{scope} ---")
+        PLEX_Media._list_broken_files(obj_keys, library_name)
+        return
+
     # Handle --list/--filter, --duplicates, --broken, or --excess-versions (all automatically enable --list)
     # Skip when --broken is used with --update-cache (rescan mode, not display mode)
     excess_versions = safe_getattr(cmd_args, 'excess_versions', None)
-    if cmd_args.list is not None or cmd_args.duplicates or (safe_getattr(cmd_args, 'broken', False) and not RESCAN_BROKEN) or excess_versions:
+    if cmd_args.list is not None or cmd_args.duplicates or (broken_val is True and not RESCAN_BROKEN) or excess_versions:
         # Handle global --list/--filter command (with optional --duplicates, --broken, --resolve, and --type)
         # Try cmd_args.type first (from GLOBAL_CMD_PARSER), fall back to args.type (from main_parser)
         # This handles the case where --type is consumed by main_parser before GLOBAL_CMD_PARSER sees it
@@ -25582,12 +25608,12 @@ def main():
     main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--potential-mismatch', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--renumber', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - with --renumber: Plex metadata numbering issues
     main_parser.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -25642,19 +25668,19 @@ def main():
              "or --no-audio-language for missing language info.")
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
-    GLOBAL_CMD_PARSER.add_argument('--broken', action='store_true', help="List broken/truncated media files.")
+    GLOBAL_CMD_PARSER.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, default=None, help="List broken/truncated media files. Optional: library name or media identifier to filter.")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', action='store_true', help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --potential-mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
-    GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name to filter. Use --help unmatched for details.")
-    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name to filter. Use --help unsorted for details.")
-    GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
-    GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, default=None, help="List shows where Plex and scraped episode numbering disagree. Use --help episode-numbering-issues for details.")
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
+    GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, default=None, help="List shows with episodes in show dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
+    GLOBAL_CMD_PARSER.add_argument('--potential-mismatch', metavar='SCOPE', nargs='?', const=True, default=None, help="List items where Plex title doesn't match directory name. Use --help potential-mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
-    GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files. Use --plex to show Plex metadata numbering issues.")
+    GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='SCOPE', nargs='?', const=True, default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files. Use --plex to show Plex metadata numbering issues.")
     GLOBAL_CMD_PARSER.add_argument('--fix', action='store_true', default=False, help="With --renumber: rename episode files to correct numbering. With --unsorted: sort files into season dirs (= --sort-new). Respects --try/--dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--plex', action='store_true', default=False, help="With --renumber: show Plex metadata numbering issues instead of filename issues (replaces --episode-numbering-issues).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
@@ -25958,6 +25984,36 @@ def main():
             # bare --missing — append after PLEXOBJECT so it becomes an obj_arg,
             # or insert at front if no PLEXOBJECT (global command will error with usage)
             remaining_args.append('--missing')
+
+    # Re-inject --broken into remaining_args
+    # Same pattern: supports --broken [SCOPE], <PLEXOBJ> --broken, bare --broken
+    if safe_getattr(args, 'broken', None) is not None:
+        if args.broken is not True:
+            # --broken <SCOPE> — explicit scope, goes through global command path
+            remaining_args.insert(0, '--broken')
+            remaining_args.insert(1, args.broken)
+        else:
+            # bare --broken — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
+            # otherwise it's a global command
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--broken')
+            else:
+                remaining_args.insert(0, '--broken')
+
+    # Re-inject --problems into remaining_args
+    # Same pattern: supports --problems [SCOPE], <PLEXOBJ> --problems, bare --problems
+    if safe_getattr(args, 'problems', None) is not None:
+        if args.problems is not True:
+            # --problems <SCOPE> — explicit scope, goes through global command path
+            remaining_args.insert(0, '--problems')
+            remaining_args.insert(1, args.problems)
+        else:
+            # bare --problems — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
+            # otherwise it's a global command
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--problems')
+            else:
+                remaining_args.insert(0, '--problems')
 
     # Re-inject --unmatched into remaining_args
     # Two cases:
