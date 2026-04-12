@@ -12905,6 +12905,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--reencode', action='store_true',         help="List reencode candidates for this item. With --mark: write on-disk [reencode] label (force-labels at series/season/file level regardless of threshold).")
     argparser.add_argument('--mark', action='store_true',             help="With --reencode: write on-disk [reencode] label to series/season/file directory. Respects --try for dry-run.")
     argparser.add_argument('--renumber', action='store_true',         help="List renumber candidates for this item (episodes with incorrect S0xE0x in filename). With --fix: rename files. Respects --try for dry-run.")
+    argparser.add_argument('--broken', action='store_true',           help="List broken/truncated media files for this item.")
+    argparser.add_argument('--unmatched', action='store_true',        help="Check if this item is unmatched (no external IDs).")
+    argparser.add_argument('--potential-mismatch', action='store_true', help="Check title vs directory name for this item.")
+    argparser.add_argument('--problems', action='store_true',         help="Run all problem checks for this item.")
     argparser.add_argument('--fix', action='store_true',              help="With --renumber: rename episode files to correct numbering. Respects --try for dry-run.")
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --reencode, --renumber
 
@@ -12980,6 +12984,58 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             fix_mode = safe_getattr(obj_args, 'fix', False)
             PLEX_Media.renumber_item(obj, dry_run=dry_run, fix_mode=fix_mode)
+        if safe_getattr(obj_args, 'broken', False):
+            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+            if item_keys:
+                print(f"\n--- Broken/Truncated Files for '{obj}' ---")
+                PLEX_Media._list_broken_files(item_keys, None)
+        if safe_getattr(obj_args, 'unmatched', False):
+            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+            if item_keys:
+                print(f"\n--- Unmatched Items for '{obj}' ---")
+                PLEX_Media._list_unmatched(item_keys, None)
+        if safe_getattr(obj_args, 'potential_mismatch', False):
+            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+            if item_keys:
+                print(f"\n--- Potential Mismatches for '{obj}' ---")
+                PLEX_Media._list_potential_mismatches(item_keys, None)
+        if safe_getattr(obj_args, 'problems', False):
+            import io, contextlib
+            item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
+            if item_keys:
+                print(f"\n >>> PROBLEM DETECTION for '{obj}'")
+                def _run_check_item(func, *a, **kw):
+                    if VRB:
+                        return func(*a, **kw)
+                    sink = io.StringIO()
+                    with contextlib.redirect_stdout(sink):
+                        return func(*a, **kw)
+                broken_count = _run_check_item(PLEX_Media._list_broken_files, item_keys, None) or 0
+                result = _run_check_item(PLEX_Media._list_excess_versions, item_keys, None, 3)
+                excess_file_count, excess_entry_count = result if result else (0, 0)
+                tsv_count = _run_check_item(_list_tsv_problems, item_keys, None) or 0
+                unmatched_count = _run_check_item(PLEX_Media._list_unmatched, item_keys, None) or 0
+                unsorted_count = _run_check_item(PLEX_Media._list_unsorted, item_keys, None) or 0
+                mismatch_count = _run_check_item(PLEX_Media._list_potential_mismatches, item_keys, None) or 0
+                numbering_count = _run_check_item(PLEX_Media._list_episode_numbering_issues) or 0
+                reencode_count = _run_check_item(PLEX_Media._list_reencode_candidates, item_keys, None) or 0
+                renumber_count = _run_check_item(PLEX_Media._list_renumber_candidates, item_keys, None) or 0
+                renumber_nodata = _run_check_item(PLEX_Media._list_renumber_lack_of_data, item_keys, None) or 0
+                renumber_season = _run_check_item(PLEX_Media._list_renumber_season_mismatch, item_keys, None) or 0
+                renumber_abs = _run_check_item(PLEX_Media._list_renumber_abs_mismatch, item_keys, None) or 0
+                total = (broken_count + excess_entry_count + tsv_count + unmatched_count
+                         + unsorted_count + mismatch_count + numbering_count + reencode_count
+                         + renumber_count + renumber_nodata + renumber_season + renumber_abs)
+                live_problems = {
+                    'broken': broken_count, 'excess_versions': {'entries': excess_entry_count, 'files': excess_file_count},
+                    'tsv': tsv_count, 'unmatched': unmatched_count, 'unsorted': unsorted_count,
+                    'potential_mismatch': mismatch_count, 'numbering_issues': numbering_count,
+                    'reencode': reencode_count, 'renumber': renumber_count,
+                    'renumber_nodata': renumber_nodata, 'renumber_season': renumber_season, 'renumber_abs': renumber_abs,
+                }
+                _print_problem_warnings(live_problems)
+                if total == 0:
+                    print(f"  >> No problems found.")
 
     ############################################################
     ###### RENAME:
@@ -17540,7 +17596,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -25306,6 +25362,8 @@ def main():
     main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
