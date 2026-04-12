@@ -5773,6 +5773,148 @@ class TestAbsEpIdx(unittest.TestCase):
         self.assertIn("show_obj['abs_ep_max']", section)
 
 
+class TestRenumber(unittest.TestCase):
+    """Test --renumber command: detection, command registration, help page."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_list_renumber_candidates_method_exists(self):
+        """_list_renumber_candidates must exist as a static method on PLEX_Media."""
+        content = self._read_script()
+        self.assertIn('def _list_renumber_candidates(obj_keys', content)
+
+    def test_list_renumber_lack_of_data_exists(self):
+        """_list_renumber_lack_of_data must exist."""
+        content = self._read_script()
+        self.assertIn('def _list_renumber_lack_of_data(obj_keys', content)
+
+    def test_list_renumber_season_mismatch_exists(self):
+        """_list_renumber_season_mismatch must exist."""
+        content = self._read_script()
+        self.assertIn('def _list_renumber_season_mismatch(obj_keys', content)
+
+    def test_list_renumber_abs_mismatch_exists(self):
+        """_list_renumber_abs_mismatch must exist."""
+        content = self._read_script()
+        self.assertIn('def _list_renumber_abs_mismatch(obj_keys', content)
+
+    def test_renumber_item_method_exists(self):
+        """renumber_item must exist as a static method on PLEX_Media."""
+        content = self._read_script()
+        self.assertIn('def renumber_item(media_identifier', content)
+
+    def test_renumber_skips_multi_ep_non_leader(self):
+        """_list_renumber_candidates must skip multi-episode non-leaders."""
+        content = self._read_script()
+        idx = content.index('def _list_renumber_candidates(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_is_multi_ep_non_leader', section)
+
+    def test_renumber_uses_scraped_data(self):
+        """_list_renumber_candidates must check OBJ_BY_SHOW_SCRAPED."""
+        content = self._read_script()
+        idx = content.index('def _list_renumber_candidates(')
+        end = content.index('\n    @staticmethod', idx + 1)
+        section = content[idx:end]
+        self.assertIn('OBJ_BY_SHOW_SCRAPED', section)
+
+    def test_renumber_regex_exists(self):
+        """_RE_SXEX regex must exist for extracting S0xE0x from filenames."""
+        content = self._read_script()
+        self.assertIn('_RE_SXEX', content)
+
+    def test_command_registration_main_parser(self):
+        """--renumber must be registered in main_parser."""
+        content = self._read_script()
+        self.assertIn("'--renumber'", content)
+        # Check both main_parser and GLOBAL_CMD_PARSER have it
+        idx = content.index('main_parser.add_argument')
+        section = content[idx:idx+5000]
+        self.assertIn("'--renumber'", section)
+
+    def test_command_registration_global_parser(self):
+        """--renumber must be registered in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        idx = content.index('GLOBAL_CMD_PARSER.add_argument')
+        section = content[idx:idx+5000]
+        self.assertIn("'--renumber'", section)
+        self.assertIn("'--fix'", section)
+
+    def test_has_standalone_cmd_includes_renumber(self):
+        """has_standalone_cmd must include renumber."""
+        content = self._read_script()
+        idx = content.index('has_standalone_cmd')
+        line_end = content.index('\n', idx)
+        line = content[idx:line_end]
+        self.assertIn('renumber', line)
+
+    def test_option_to_help_topic_includes_renumber(self):
+        """_OPTION_TO_HELP_TOPIC must include --renumber."""
+        content = self._read_script()
+        idx = content.index('_OPTION_TO_HELP_TOPIC')
+        end = content.index('}', idx)
+        section = content[idx:end]
+        self.assertIn("'--renumber'", section)
+
+    def test_help_renumber_page(self):
+        """--help renumber must have a dedicated help page."""
+        content = self._read_script()
+        self.assertIn("case 'renumber':", content)
+        idx = content.index("case 'renumber':")
+        end = content.index("sys.exit(0)", idx)
+        section = content[idx:end]
+        self.assertIn('RENUMBER HELP', section)
+        self.assertIn('--renumber --fix', section)
+        self.assertIn('MULTI-EPISODE FILES', section)
+
+    def test_execute_global_commands_handles_renumber(self):
+        """execute_global_commands must dispatch --renumber."""
+        content = self._read_script()
+        idx = content.index('def execute_global_commands(')
+        end = content.index('\ndef ', idx + 1)
+        section = content[idx:end]
+        self.assertIn('_list_renumber_candidates', section)
+
+    def test_per_object_dispatch_handles_renumber(self):
+        """Per-object argparser must dispatch --renumber to renumber_item."""
+        content = self._read_script()
+        self.assertIn("renumber_item(obj", content)
+
+    def test_help_groups_problem_commands(self):
+        """--help output must group problem detection commands under PROBLEM DETECTION."""
+        content = self._read_script()
+        self.assertIn('PROBLEM DETECTION:', content)
+        # All problem commands should be in that section
+        idx = content.index('PROBLEM DETECTION:')
+        end = content.index('MEDIA MANAGEMENT:', idx)
+        section = content[idx:end]
+        self.assertIn('--problems', section)
+        self.assertIn('--broken', section)
+        self.assertIn('--reencode', section)
+        self.assertIn('--renumber', section)
+
+    def test_renumber_e2e(self):
+        """--renumber runs without error (E2E)."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--renumber'],
+            capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(result.returncode, 0, f"--renumber failed: {result.stderr}")
+        self.assertIn('renumber candidate', result.stdout.lower())
+
+    def test_renumber_scoped_e2e(self):
+        """<SHOW> --renumber runs without error (E2E)."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, 'Show:5191', '--renumber'],
+            capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(result.returncode, 0, f"Scoped --renumber failed: {result.stderr}")
+        self.assertIn('renumber candidate', result.stdout.lower())
+
+
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
 
@@ -6814,6 +6956,7 @@ _UNITTEST_SCOPES = {
                    TestBrokenCrossValidation, TestEndToEnd,
                    TestShowInfoSeasonTable, TestPotentialMismatch,
                    TestShowDirDerivation],
+    'renumber':   [TestRenumber],
 }
 
 # List of all unittest classes for run_regression_tests()
