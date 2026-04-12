@@ -4210,6 +4210,35 @@ class TestSortNew(unittest.TestCase):
         self.assertIn('.lower()', src, "sort-new must lowercase movie dir names")
         self.assertIn("'.'", src, "sort-new must use dot as separator")
 
+    def test_sort_new_is_shortcut_for_unsorted_fix(self):
+        """--sort-new dispatch must print shortcut message."""
+        src = self._read_script()
+        self.assertIn("Shortcut for: --unsorted --fix", src,
+                       "--sort-new must print shortcut message")
+
+    def test_sort_new_in_media_argparser(self):
+        """--sort-new must be in PLEX_Media argparser."""
+        import re
+        src = self._read_script()
+        match = re.search(r"TYPE_STR = 'media'.*?argparser\.add_argument\('--sort-new'", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --sort-new in media argparser")
+
+    def test_sort_new_in_library_argparser(self):
+        """--sort-new must be in PLEX_Library argparser."""
+        import re
+        src = self._read_script()
+        match = re.search(r"class PLEX_Library.*?argparser\.add_argument\('--sort-new'", src, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --sort-new in library argparser")
+
+    def test_sort_new_help_mentions_unsorted_fix(self):
+        """--help sort-new must mention --unsorted --fix equivalence."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'sort-new'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help sort-new failed: {result.stderr}")
+        self.assertIn('--unsorted --fix', result.stdout,
+                       "--help sort-new must mention --unsorted --fix")
+
     def test_sort_new_moves_siblings(self):
         """sort-new must detect and move sibling files (.srt, .nfo, etc.)."""
         src = self._read_script()
@@ -5040,6 +5069,38 @@ class TestUnsorted(unittest.TestCase):
         """--unsorted must be re-injected into remaining_args."""
         content = self._read_script()
         self.assertIn("Re-inject --unsorted", content)
+
+    def test_unsorted_fix_dispatches_sort_new(self):
+        """--unsorted --fix must dispatch to cmd_sort_new."""
+        import re
+        content = self._read_script()
+        # Global dispatch: --unsorted --fix → cmd_sort_new
+        match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --potential-mismatch)", content, re.DOTALL)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        self.assertIn('fix', body, "Global --unsorted handler must check --fix flag")
+        self.assertIn('cmd_sort_new', body, "Global --unsorted --fix must call cmd_sort_new")
+
+    def test_unsorted_fix_in_global_parser(self):
+        """--fix must be in GLOBAL_CMD_PARSER (used with --unsorted --fix)."""
+        content = self._read_script()
+        self.assertIn("'--fix'", content)
+
+    def test_unsorted_fix_in_library_argparser(self):
+        """--fix must be in library argparser for --unsorted --fix."""
+        import re
+        content = self._read_script()
+        match = re.search(r"class PLEX_Library.*?argparser\.add_argument\('--fix'", content, re.DOTALL)
+        self.assertIsNotNone(match, "Must define --fix in library argparser")
+
+    def test_unsorted_help_mentions_fix(self):
+        """--help unsorted must document the --fix mode."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'unsorted'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help unsorted failed: {result.stderr}")
+        self.assertIn('--fix', result.stdout, "--help unsorted must mention --fix")
+        self.assertIn('--sort-new', result.stdout, "--help unsorted must mention --sort-new shortcut")
 
 
 class TestVersionStringCollision(unittest.TestCase):
