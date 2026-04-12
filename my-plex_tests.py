@@ -4989,7 +4989,7 @@ class TestUnsorted(unittest.TestCase):
         """--problems summary must show unsorted count."""
         import re
         content = self._read_script()
-        self.assertIn('Unsorted shows:', content, "Summary must show 'Unsorted shows:' line")
+        self.assertIn('unsorted shows', content, "Summary must show 'unsorted shows' in problem warnings")
 
     def test_help_unsorted_exists(self):
         """--help unsorted must have a case block."""
