@@ -1215,7 +1215,6 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
     my-plex movies.en --broken                                   library
     my-plex "Tagesschau" --reencode                              title
     my-plex Show:4925 --renumber                                 my-plex cache key
-    my-plex ID:4925 --problems                                   Plex ID
     my-plex --playlist "My Favs" --list                          playlist
     my-plex ,unsorted --problems                                 library
     my-plex type:movie lang:de watched:no bitrate'>2' --list     filter tokens
