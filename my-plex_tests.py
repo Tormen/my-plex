@@ -27,8 +27,8 @@ class StubPLEX_Media:
     OBJ_BY_LIBRARY = {}
     OBJ_BY_FILEPATH = {}
     OBJ_BY_MOVIE = {}
-    OBJ_BY_SHOW = {}
-    OBJ_BY_SHOW_EPISODES = {}
+    OBJ_BY_SERIES = {}
+    OBJ_BY_SERIES_EPISODES = {}
     OBJ_BY_COLLECTION = {}
 
     @classmethod
@@ -37,8 +37,8 @@ class StubPLEX_Media:
         cls.OBJ_BY_LIBRARY = {}
         cls.OBJ_BY_FILEPATH = {}
         cls.OBJ_BY_MOVIE = {}
-        cls.OBJ_BY_SHOW = {}
-        cls.OBJ_BY_SHOW_EPISODES = {}
+        cls.OBJ_BY_SERIES = {}
+        cls.OBJ_BY_SERIES_EPISODES = {}
         cls.OBJ_BY_COLLECTION = {}
 
 
@@ -61,7 +61,7 @@ def _make_movie(mid, title, filepath, version="90.0min 1920x1080 (h264 aac)", fi
     }
 
 
-def _make_episode(eid, title, filepath, show_key, series, s_num, e_num, version="22.0min 1920x1080 (h264 aac)", filesize=500000, library="series.en"):
+def _make_episode(eid, title, filepath, series_key, series, s_num, e_num, version="22.0min 1920x1080 (h264 aac)", filesize=500000, library="series.en"):
     return {
         'type': 'Episode', 'type_str': 'Episode', 'id': eid, 'title': title,
         'originalTitle': '', 'year': 0, 'library': library,
@@ -77,7 +77,7 @@ def _make_episode(eid, title, filepath, show_key, series, s_num, e_num, version=
         'actors': [], 'countries': [], 'directors': [], 'writers': [], 'genres': [],
         'contentRating': None, 'season': s_num, 'S_str': f"S{s_num:02d}", 'S_idx': s_num,
         'episode': e_num, 'E_str': f"E{e_num:02d}", 'E_idx': e_num,
-        'S0XE0X': f"S{s_num:02d}E{e_num:02d}", 'series': series, 'show_key': show_key,
+        'S0XE0X': f"S{s_num:02d}E{e_num:02d}", 'series': series, 'series_key': series_key,
     }
 
 
@@ -97,7 +97,7 @@ def _make_collection(cid, title, library, member_ids=None):
 class TestObjTypeHandling(unittest.TestCase):
     """Verify that the PLEX_Media.init() loop handles all object types without errors."""
 
-    KNOWN_TYPES = {"Movie", "Episode", "Show", "Season", "Collection"}
+    KNOWN_TYPES = {"Movie", "Episode", "Series", "Season", "Collection"}
 
     def test_collection_has_no_file_key(self):
         """Collection dicts must NOT have a 'file' key (they are metadata-only)."""
@@ -112,7 +112,7 @@ class TestObjTypeHandling(unittest.TestCase):
 
     def test_episode_has_file_key(self):
         """Episode dicts must have a 'file' key."""
-        e = _make_episode(200, "Pilot", "/path/to/ep.mkv", "Show:1", "TestShow", 1, 1)
+        e = _make_episode(200, "Pilot", "/path/to/ep.mkv", "Series:1", "TestShow", 1, 1)
         self.assertIn('file', e)
 
     def test_collection_type_is_known(self):
@@ -124,7 +124,7 @@ class TestObjTypeHandling(unittest.TestCase):
         """All factory-created objects must have a type in KNOWN_TYPES."""
         objects = [
             _make_movie(1, "M", "/m.mkv"),
-            _make_episode(2, "E", "/e.mkv", "Show:1", "S", 1, 1),
+            _make_episode(2, "E", "/e.mkv", "Series:1", "S", 1, 1),
             _make_collection(3, "C", "lib"),
         ]
         for obj in objects:
@@ -190,7 +190,7 @@ class TestMultiVersionMerge(unittest.TestCase):
 
     def test_episode_multi_version_type_str(self):
         """Multi-version episodes should get type_str 'Episode*'."""
-        ep = _make_episode(200, "Pilot", "/path/ep_v1.mkv", "Show:1", "TestShow", 1, 1,
+        ep = _make_episode(200, "Pilot", "/path/ep_v1.mkv", "Series:1", "TestShow", 1, 1,
                            version="v1", filesize=500)
         ep['files']["v2"] = {'filepath': '/path/ep_v2.mkv', 'filesize': 600}
         ep['media_cnt'] = len(ep['files'])
@@ -274,12 +274,12 @@ class TestDuplicateKeyGeneration(unittest.TestCase):
         self.assertEqual(keys, ["movie:inception:2010"])
 
     def test_episode_key(self):
-        e = _make_episode(2, "Pilot", "/e.mkv", "Show:1", "Breaking Bad", 1, 1)
+        e = _make_episode(2, "Pilot", "/e.mkv", "Series:1", "Breaking Bad", 1, 1)
         keys = self.generate_duplicate_keys(e)
         self.assertEqual(keys, ["episode:breaking bad:S01:E01"])
 
     def test_episode_unknown_season(self):
-        e = _make_episode(2, "Pilot", "/e.mkv", "Show:1", "X", 1, 1)
+        e = _make_episode(2, "Pilot", "/e.mkv", "Series:1", "X", 1, 1)
         e['S_str'] = 'S??'
         keys = self.generate_duplicate_keys(e)
         self.assertEqual(keys, [])
@@ -312,8 +312,8 @@ class TestInitLoopRobustness(unittest.TestCase):
             match obj['type']:
                 case "Movie":
                     processed.append('Movie')
-                case "Show":
-                    processed.append('Show')
+                case "Series":
+                    processed.append('Series')
                 case "Season":
                     processed.append('Season')
                 case "Episode":
@@ -329,7 +329,7 @@ class TestInitLoopRobustness(unittest.TestCase):
         """A mix of Movie, Episode, and Collection objects should all be processed."""
         objects = {
             'Movie:100': _make_movie(100, "Test Movie", "/movie.mkv"),
-            'Episode:200': _make_episode(200, "Pilot", "/ep.mkv", "Show:1", "S", 1, 1),
+            'Episode:200': _make_episode(200, "Pilot", "/ep.mkv", "Series:1", "S", 1, 1),
             'Collection:300': _make_collection(300, "Action", ",unsorted"),
         }
         processed = self._simulate_init_loop(objects)
@@ -446,7 +446,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
         self.assertEqual(_test_classify_multi_version(obj), 'true_multiversion')
 
     def test_episode_true_multiversion(self):
-        obj = _make_episode(4620, "Live from Studio 6H", "/east.mkv", "Show:1", "30 Rock", 6, 19)
+        obj = _make_episode(4620, "Live from Studio 6H", "/east.mkv", "Series:1", "30 Rock", 6, 19)
         obj['files'] = {
             '23.69min 960x720 (h264 aac)': {'filepath': '/east.coast.version.mkv', 'filesize': 147176738},
             '23.5min 960x720 (h264 aac)': {'filepath': '/west.coast.version.mkv', 'filesize': 147231158},
@@ -816,7 +816,7 @@ class TestCacheSkipLogic(unittest.TestCase):
 
     def test_verify_cache_counts_by_obj_type(self):
         content = self._read_script()
-        self.assertIn("obj_type_inner == 'Show'", content)
+        self.assertIn("obj_type_inner == 'Series'", content)
         self.assertIn("obj_type_inner == 'Season'", content)
         self.assertIn("obj_type_inner == 'Episode'", content)
 
@@ -1079,14 +1079,14 @@ class TestNoAPIFallbacks(unittest.TestCase):
             "update_movie_library_objs must NOT have API fallback via plex_get_all_items")
 
     def test_no_api_fallback_in_show_processing(self):
-        """update_show_library_objs must NOT fall back to plex_get_all_items."""
+        """update_series_library_objs must NOT fall back to plex_get_all_items."""
         content = self._read_script()
         import re
-        match = re.search(r'(def update_show_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        match = re.search(r'(def update_series_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("plex_get_all_items", func_body,
-            "update_show_library_objs must NOT have API fallback via plex_get_all_items")
+            "update_series_library_objs must NOT have API fallback via plex_get_all_items")
 
     def test_no_api_fallback_in_library_stats(self):
         """get_library_stats must NOT fall back to API totalSize."""
@@ -1168,10 +1168,10 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
 
     def test_verify_checks_obj_by_show(self):
         content = self._read_script()
-        self.assertIn("show_dangling", content,
-            "verify_cache must detect dangling OBJ_BY_SHOW references")
+        self.assertIn("series_dangling", content,
+            "verify_cache must detect dangling OBJ_BY_SERIES references")
         self.assertIn("episode_dangling", content,
-            "verify_cache must detect dangling OBJ_BY_SHOW_EPISODES references")
+            "verify_cache must detect dangling OBJ_BY_SERIES_EPISODES references")
 
     def test_verify_checks_labels_index(self):
         content = self._read_script()
@@ -1247,7 +1247,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         match = re.search(r'(# Check 2: OBJ_BY_FILEPATH.*?)(?=# Check 3:)', content, re.DOTALL)
         self.assertIsNotNone(match, "Must have Check 2: OBJ_BY_FILEPATH section")
         check2 = match.group(1)
-        self.assertIn("('Show', 'Season')", check2,
+        self.assertIn("('Series', 'Season')", check2,
             "OBJ_BY_FILEPATH check must skip Show/Season objects (directory containers)")
 
     def test_itemscount_compares_primary_type_only(self):
@@ -1283,19 +1283,19 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
             "Summary must show broken files as a warning before integrity issues")
 
     def test_skip_logic_compares_episode_count(self):
-        """Skip logic for show libraries must compare episode count, not just show count."""
+        """Skip logic for series libraries must compare episode count, not just series count."""
         content = self._read_script()
         import re
         match = re.search(r'(def process_single_library\(.*?\):\n.*?)(?=\n    def update_cache)', content, re.DOTALL)
         self.assertIsNotNone(match, "Must find process_single_library function")
         func_body = match.group(1)
         self.assertIn("current_episode_count", func_body,
-            "Skip logic must compare current episode count for show libraries")
+            "Skip logic must compare current episode count for series libraries")
         self.assertIn("old_episode_count", func_body,
             "Skip logic must compare old episode count from cache")
 
     def test_get_library_stats_queries_episode_count(self):
-        """get_library_stats must query episode count for show libraries."""
+        """get_library_stats must query episode count for series libraries."""
         content = self._read_script()
         import re
         match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
@@ -1304,7 +1304,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         self.assertIn("episodesCount", func_body,
             "get_library_stats must store episode count in episodesCount")
         self.assertIn("metadata_type = 4", func_body,
-            "get_library_stats must query metadata_type=4 (episodes) for show libraries")
+            "get_library_stats must query metadata_type=4 (episodes) for series libraries")
 
     def test_obj_by_filepath_rebuild_is_saved(self):
         """OBJ_BY_FILEPATH rebuild must be persisted via update_and_save_cache AFTER the rebuild."""
@@ -1393,7 +1393,7 @@ class TestCacheFormatValidation(unittest.TestCase):
 
     def test_filter_skips_show_season_types(self):
         content = self._read_script()
-        self.assertIn("obj_type in ('Show', 'Season')", content)
+        self.assertIn("obj_type in ('Series', 'Season')", content)
 
     def test_print_handles_members_list(self):
         content = self._read_script()
@@ -1407,9 +1407,9 @@ class TestCacheStructureParity(unittest.TestCase):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_show_objects_created_by_db_path(self):
+    def test_series_objects_created_by_db_path(self):
         content = self._read_script()
-        self.assertIn("'type': 'Show', 'type_str': 'Show'", content)
+        self.assertIn("'type': 'Series', 'type_str': 'Series'", content)
 
     def test_season_objects_created_by_db_path(self):
         content = self._read_script()
@@ -1417,18 +1417,18 @@ class TestCacheStructureParity(unittest.TestCase):
 
     def test_obj_by_show_populated(self):
         content = self._read_script()
-        self.assertIn("OBJ_BY_SHOW[show_key][s_str] = season_key", content)
+        self.assertIn("OBJ_BY_SERIES[series_key][s_str] = season_key", content)
 
-    def test_obj_by_show_episodes_version_format(self):
+    def test_obj_by_series_episodes_version_format(self):
         content = self._read_script()
-        self.assertIn("OBJ_BY_SHOW_EPISODES[show_key][s_str][e_str][version]", content)
+        self.assertIn("OBJ_BY_SERIES_EPISODES[series_key][s_str][e_str][version]", content)
         self.assertIn(".append(episode_key)", content)
 
     def test_obj_by_library_type_keys_format(self):
         content = self._read_script()
         self.assertIn("PLEX_Media.OBJ_BY_LIBRARY[library_name]['Movie'] = []", content)
         self.assertIn("lib_dict['Episode'] = []", content)
-        self.assertIn("lib_dict['Show'] = []", content)
+        self.assertIn("lib_dict['Series'] = []", content)
         self.assertIn("lib_dict['Season'] = []", content)
 
     def test_obj_by_movie_version_filepath_format(self):
@@ -1437,7 +1437,7 @@ class TestCacheStructureParity(unittest.TestCase):
 
     def test_get_obj_keys_iterates_by_type(self):
         content = self._read_script()
-        self.assertIn("for t in ('Show', 'Episode', 'Movie')", content)
+        self.assertIn("for t in ('Series', 'Episode', 'Movie')", content)
 
 
 class TestDbQueriesUseLibraryName(unittest.TestCase):
@@ -1555,15 +1555,15 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         self.assertIn("resolve_cache_items(", func_body,
             "show_item_info must use resolve_cache_items() for centralised resolution")
 
-    def test_resolve_show_for_episodes_uses_resolve_cache_items(self):
-        """resolve_show_for_episodes must delegate to resolve_cache_items (centralised resolution)."""
+    def test_resolve_series_for_episodes_uses_resolve_cache_items(self):
+        """resolve_series_for_episodes must delegate to resolve_cache_items (centralised resolution)."""
         content = self._read_script()
         import re
-        match = re.search(r'(def resolve_show_for_episodes\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        match = re.search(r'(def resolve_series_for_episodes\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("resolve_cache_items(", func_body,
-            "resolve_show_for_episodes must use resolve_cache_items() for centralised resolution")
+            "resolve_series_for_episodes must use resolve_cache_items() for centralised resolution")
 
 
 class TestRefactoredMethodNames(unittest.TestCase):
@@ -1695,14 +1695,14 @@ class TestListMethodSplit(unittest.TestCase):
         self.assertIn("def _normalize_list_args(", content)
 
     def test_normalize_list_args_handles_series_alias(self):
-        """_normalize_list_args must map 'Series' to 'Show'."""
+        """_normalize_list_args must map 'Series' to 'Series'."""
         content = self._read_script()
         import re
         match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('"Series"', body)
-        self.assertIn('"Show"', body)
+        self.assertIn('"Series"', body)
 
     def test_normalize_list_args_validates_media_type(self):
         """_normalize_list_args must reject invalid media types with err(1043)."""
@@ -2101,7 +2101,7 @@ class TestProblems(unittest.TestCase):
 
 
 class TestReencode(unittest.TestCase):
-    """Tests for --reencode: high-bitrate file detection with episode/season/show rollup."""
+    """Tests for --reencode: high-bitrate file detection with episode/season/series rollup."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
@@ -2179,9 +2179,9 @@ class TestReencode(unittest.TestCase):
         self.assertIn("'full'", src)
 
     def test_reencode_rollup_show(self):
-        """_list_reencode_candidates must check show-level rollup."""
+        """_list_reencode_candidates must check series-level rollup."""
         src = self._read_script()
-        self.assertIn("show_full", src)
+        self.assertIn("series_full", src)
         self.assertIn("ALL", src)
 
     def test_reencode_returns_count(self):
@@ -2276,13 +2276,13 @@ class TestReencode(unittest.TestCase):
         """reencode_item must track explicit Show/Season/Episode input so the labeling
         logic can honor user intent and not silently escalate."""
         body = self._read_reencode_item_body()
-        self.assertIn("explicit_shows",    body)
+        self.assertIn("explicit_series",    body)
         self.assertIn("explicit_seasons",  body)
         self.assertIn("explicit_episodes", body)
 
     def test_reencode_explicit_season_prevents_series_escalation(self):
         """When user explicitly passes Season:XXX, series-level labeling must be blocked
-        — even if that season happens to be the only non-special season of the show."""
+        — even if that season happens to be the only non-special season of the series."""
         body = self._read_reencode_item_body()
         self.assertIn("has_explicit_season_input", body)
         self.assertIn("can_escalate_to_series", body)
@@ -2652,22 +2652,22 @@ class TestRemoveCommand(unittest.TestCase):
         self.assertIn("OBJ_BY_ID", body, "Must update OBJ_BY_ID")
         self.assertIn("OBJ_BY_FILEPATH", body, "Must update OBJ_BY_FILEPATH")
         self.assertIn("OBJ_BY_LIBRARY", body, "Must update OBJ_BY_LIBRARY")
-        self.assertIn("OBJ_BY_SHOW_EPISODES", body, "Must update OBJ_BY_SHOW_EPISODES for episodes")
+        self.assertIn("OBJ_BY_SERIES_EPISODES", body, "Must update OBJ_BY_SERIES_EPISODES for episodes")
         self.assertIn("OBJ_BY_MOVIE", body, "Must update OBJ_BY_MOVIE for movies")
         self.assertIn("update_and_save_cache(", body, "Must save cache to disk")
 
-    def test_remove_from_cache_cleans_episode_from_show_episodes(self):
-        """_remove_from_cache_by_id must remove episode keys from OBJ_BY_SHOW_EPISODES."""
+    def test_remove_from_cache_cleans_episode_from_series_episodes(self):
+        """_remove_from_cache_by_id must remove episode keys from OBJ_BY_SERIES_EPISODES."""
         content = self._read_script()
         import re
         match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        # Must handle Episode type specifically with show_key/S_str/E_str lookups
+        # Must handle Episode type specifically with series_key/S_str/E_str lookups
         self.assertIn("obj_type == 'Episode'", body,
-            "Must have specific Episode handling for OBJ_BY_SHOW_EPISODES cleanup")
-        self.assertIn("S_str", body, "Must use S_str to find season in OBJ_BY_SHOW_EPISODES")
-        self.assertIn("E_str", body, "Must use E_str to find episode in OBJ_BY_SHOW_EPISODES")
+            "Must have specific Episode handling for OBJ_BY_SERIES_EPISODES cleanup")
+        self.assertIn("S_str", body, "Must use S_str to find season in OBJ_BY_SERIES_EPISODES")
+        self.assertIn("E_str", body, "Must use E_str to find episode in OBJ_BY_SERIES_EPISODES")
 
     def test_rm_accepts_version_spec(self):
         """--rm must accept optional version indices/ranges argument."""
@@ -2759,7 +2759,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
     OBJ_BY_LIBRARY may contain Show keys that are not in OBJ_BY_ID (Shows are
     container objects stored separately). collect_library_keys() returns these
     keys, so all methods iterating obj_keys must guard against missing keys.
-    Bug: KeyError: 'Show:4392' in _list_broken_files.
+    Bug: KeyError: 'Series:4392' in _list_broken_files.
     """
 
     def _read_script(self):
@@ -3136,7 +3136,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"codec:h264 type:series failed: {result.stderr}")
         lines = [l for l in result.stdout.splitlines() if l.strip()]
         # Must have at least some Show: or Season: rolled-up rows
-        rolled = [l for l in lines if l.startswith('Show:') or l.startswith('Season:')]
+        rolled = [l for l in lines if l.startswith('Series:') or l.startswith('Season:')]
         self.assertTrue(len(rolled) > 0,
             "Filter on series must produce Show:/Season: rolled-up rows when all episodes match")
 
@@ -3145,7 +3145,7 @@ class TestEndToEnd(unittest.TestCase):
         result = self._run_cmd('codec:h264', 'type:series')
         self.assertEqual(result.returncode, 0)
         for line in result.stdout.splitlines():
-            if line.startswith('Show:') or line.startswith('Season:'):
+            if line.startswith('Series:') or line.startswith('Season:'):
                 # Path may contain spaces; check that any token starts with '/'
                 has_path = any(t.startswith('/') for t in line.split())
                 self.assertTrue(has_path,
@@ -3212,8 +3212,8 @@ class TestFilter(unittest.TestCase):
         comedy_series_de = self._lines('genre:Comedy', 'type:series', 'lang:de')
         # More-specific filter must have <= rows (rollup may expand, but total item coverage must shrink)
         # We can't directly compare rolled-up row counts, but comedy+de shows must be <= comedy shows
-        comedy_shows = {l.split()[0] for l in comedy_series if l.startswith('Show:')}
-        comedy_de_shows = {l.split()[0] for l in comedy_series_de if l.startswith('Show:')}
+        comedy_shows = {l.split()[0] for l in comedy_series if l.startswith('Series:')}
+        comedy_de_shows = {l.split()[0] for l in comedy_series_de if l.startswith('Series:')}
         self.assertTrue(comedy_de_shows.issubset(comedy_shows) or len(comedy_de_shows) <= len(comedy_shows),
             f"Comedy+de shows ({len(comedy_de_shows)}) must be a subset of comedy shows ({len(comedy_shows)})")
 
@@ -3318,7 +3318,7 @@ class TestFilter(unittest.TestCase):
 
     # --- Series rollup ---
 
-    def test_series_rollup_all_episodes_become_show_rows(self):
+    def test_series_rollup_all_episodes_become_series_rows(self):
         """type:series with no other filter: all series must roll up to Show: rows.
 
         Regression: rollup failed when _same_vals was used — extra columns
@@ -3329,16 +3329,16 @@ class TestFilter(unittest.TestCase):
         self.assertEqual(ep_rows, [],
             f"type:series must roll up fully — no Episode: rows expected, got: {ep_rows[:3]}")
 
-    def test_series_rollup_show_rows_present(self):
+    def test_series_rollup_series_rows_present(self):
         """type:series must produce Show: level rows (full show rollup)."""
         lines = self._lines('type:series')
-        show_rows = [l for l in lines if l.startswith('Show:')]
-        self.assertTrue(len(show_rows) > 0, "type:series must produce Show: rollup rows")
+        series_rows = [l for l in lines if l.startswith('Series:')]
+        self.assertTrue(len(series_rows) > 0, "type:series must produce Show: rollup rows")
 
     def test_series_rollup_with_codec_filter(self):
         """codec:h264 type:series: rolled-up rows must contain filesystem path."""
         lines = self._lines('codec:h264', 'type:series')
-        rolled = [l for l in lines if l.startswith('Show:') or l.startswith('Season:')]
+        rolled = [l for l in lines if l.startswith('Series:') or l.startswith('Season:')]
         self.assertTrue(len(rolled) > 0, "codec:h264 type:series must produce rolled-up rows")
         for line in rolled:
             has_path = any(t.startswith('/') for t in line.split())
@@ -3351,9 +3351,9 @@ class TestFilter(unittest.TestCase):
         causing MORE rows with lang:de than without.
         """
         comedy_shows    = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series')
-                           if l.startswith('Show:')}
+                           if l.startswith('Series:')}
         comedy_de_shows = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series', 'lang:de')
-                           if l.startswith('Show:')}
+                           if l.startswith('Series:')}
         self.assertTrue(comedy_de_shows.issubset(comedy_shows),
             f"Comedy+de show keys must be subset of comedy show keys.\n"
             f"  comedy: {sorted(comedy_shows)[:5]}\n"
@@ -3366,7 +3366,7 @@ class TestFilter(unittest.TestCase):
         result = self._run('type:movie', 'genre:Drama')
         self.assertEqual(result.returncode, 0)
         for line in result.stdout.splitlines():
-            if line.startswith('Episode:') or line.startswith('Show:') or line.startswith('Season:'):
+            if line.startswith('Episode:') or line.startswith('Series:') or line.startswith('Season:'):
                 self.fail(f"type:movie genre:Drama must not include series rows: {line!r}")
 
     def test_combined_genre_lang(self):
@@ -3380,7 +3380,7 @@ class TestFilter(unittest.TestCase):
         result = self._run('--list')
         self.assertEqual(result.returncode, 0)
         self.assertRegex(result.stdout, r'Movie:\d+')
-        self.assertRegex(result.stdout, r'(Show|Episode):\d+')
+        self.assertRegex(result.stdout, r'(Series|Episode):\d+')
 
 
 class TestErrorOutputConventions(unittest.TestCase):
@@ -3425,8 +3425,8 @@ class TestObjByLibraryDedup(unittest.TestCase):
     def test_show_episode_season_appends_have_dedup_check(self):
         """All OBJ_BY_LIBRARY .append() calls in show/episode/season processing must check for duplicates."""
         src = self._read_script()
-        match = re.search(r'def _process_shows_from_database\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
-        self.assertIsNotNone(match, "_process_shows_from_database not found")
+        match = re.search(r'def _process_series_from_database\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        self.assertIsNotNone(match, "_process_series_from_database not found")
         body = match.group(1)
         append_lines = re.findall(r"lib_dict\['\w+'\]\.append\((\w+)\)", body)
         self.assertTrue(len(append_lines) >= 3, f"Expected at least 3 OBJ_BY_LIBRARY appends (Episode, Season, Show), found {len(append_lines)}")
@@ -3440,17 +3440,17 @@ class TestObjByLibraryDedup(unittest.TestCase):
         self.assertIn('duplicate keys from OBJ_BY_LIBRARY', src,
             "--update-cache must clean duplicate keys from OBJ_BY_LIBRARY")
 
-    def test_update_cache_cleans_dangling_show_keys(self):
-        """--update-cache must remove dangling keys from OBJ_BY_SHOW."""
+    def test_update_cache_cleans_dangling_series_keys(self):
+        """--update-cache must remove dangling keys from OBJ_BY_SERIES."""
         src = self._read_script()
-        self.assertIn('dangling keys from OBJ_BY_SHOW', src,
-            "--update-cache must clean dangling keys from OBJ_BY_SHOW")
+        self.assertIn('dangling keys from OBJ_BY_SERIES', src,
+            "--update-cache must clean dangling keys from OBJ_BY_SERIES")
 
     def test_update_cache_cleans_dangling_episode_keys(self):
-        """--update-cache must remove dangling keys from OBJ_BY_SHOW_EPISODES."""
+        """--update-cache must remove dangling keys from OBJ_BY_SERIES_EPISODES."""
         src = self._read_script()
-        self.assertIn('dangling keys from OBJ_BY_SHOW_EPISODES', src,
-            "--update-cache must clean dangling keys from OBJ_BY_SHOW_EPISODES")
+        self.assertIn('dangling keys from OBJ_BY_SERIES_EPISODES', src,
+            "--update-cache must clean dangling keys from OBJ_BY_SERIES_EPISODES")
 
     def test_update_cache_saves_all_structures(self):
         """--update-cache final save must include all cache structures, not just labels/filepath."""
@@ -3972,10 +3972,10 @@ class TestCacheUpdateLog(unittest.TestCase):
         self.assertIsNotNone(movie_section)
         self.assertIn("_track_delta(", movie_section.group(),
             "_process_movies_from_database must call _track_delta")
-        show_section = re.search(r'def _process_shows_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
+        show_section = re.search(r'def _process_series_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
         self.assertIsNotNone(show_section)
         self.assertIn("_track_delta(", show_section.group(),
-            "_process_shows_from_database must call _track_delta")
+            "_process_series_from_database must call _track_delta")
 
 
 ###########################################################################################
@@ -3992,7 +3992,7 @@ class TestEpisodesTSV(unittest.TestCase):
     def test_write_and_read_roundtrip(self):
         """Write a TSV and read it back, verify data integrity."""
         import tempfile, os
-        metadata = {'source': 'fernsehserien.de', 'slug': 'test-show', 'show_id': '12345'}
+        metadata = {'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '12345'}
         episodes = [
             {'season': 1, 'episode': 1, 'date': '2025-01-01', 'title': 'Pilot'},
             {'season': 1, 'episode': 2, 'date': '2025-01-08', 'title': 'Second'},
@@ -4008,7 +4008,7 @@ class TestEpisodesTSV(unittest.TestCase):
 
             self.assertEqual(read_meta['source'], 'fernsehserien.de')
             self.assertEqual(read_meta['slug'], 'test-show')
-            self.assertEqual(read_meta['show_id'], '12345')
+            self.assertEqual(read_meta['series_id'], '12345')
             self.assertEqual(len(read_eps), 3)
             self.assertEqual(read_eps[0]['season'], 1)
             self.assertEqual(read_eps[0]['episode'], 1)
@@ -4426,11 +4426,11 @@ class TestExternalIdsInCache(unittest.TestCase):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_external_ids_in_show_dict(self):
+    def test_external_ids_in_series_dict(self):
         """Show dicts in OBJ_BY_ID must include external_ids field."""
         src = self._read_script()
-        # The show dict creation in _process_shows_from_database
-        self.assertIn("'external_ids': show_info.get('external_ids'", src,
+        # The show dict creation in _process_series_from_database
+        self.assertIn("'external_ids': series_info.get('external_ids'", src,
             "external_ids not found in show dict creation")
 
     def test_external_ids_in_movie_dict(self):
@@ -4440,7 +4440,7 @@ class TestExternalIdsInCache(unittest.TestCase):
             "external_ids not found in movie dict creation")
 
     def test_tag_type_314_in_show_query(self):
-        """fetch_shows_from_database tags query must include tag_type 314."""
+        """fetch_series_from_database tags query must include tag_type 314."""
         src = self._read_script()
         # Both movie and show queries should include 314
         self.assertIn('314', src, "tag_type 314 not found in source")
@@ -4681,7 +4681,7 @@ class TestRenameShared(unittest.TestCase):
 class TestShowInfoSeasonTable(unittest.TestCase):
     """Tests for --info on Show objects showing season table."""
 
-    def test_show_info_has_season_table(self):
+    def test_series_info_has_season_table(self):
         """my-plex 'boston legal' --info should show a season table."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
             capture_output=True, text=True, timeout=30)
@@ -4695,7 +4695,7 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertIn('S01', result.stdout, "Should show S01")
         self.assertIn('Season:', result.stdout, "Should show Season: keys")
 
-    def test_show_info_no_episode_table_without_verbose(self):
+    def test_series_info_no_episode_table_without_verbose(self):
         """my-plex 'boston legal' --info (without -V) should NOT show the episode table."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
             capture_output=True, text=True, timeout=30)
@@ -4705,7 +4705,7 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertIn('SEASON', result.stdout, "Season table should still appear")
         self.assertNotIn('TITLE', result.stdout, "Episode table TITLE header should NOT appear without -V")
 
-    def test_show_info_verbose_has_episode_table(self):
+    def test_series_info_verbose_has_episode_table(self):
         """my-plex 'boston legal' --info -V should show an episode table."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info', '-V'],
             capture_output=True, text=True, timeout=30)
@@ -4725,62 +4725,62 @@ class TestEpisodesErr(unittest.TestCase):
     def test_write_read_roundtrip(self):
         """Write episodes.err and read it back, verify data integrity."""
         import tempfile, os
-        show_dir = tempfile.mkdtemp()
+        series_dir = tempfile.mkdtemp()
         try:
-            write_episodes_err(show_dir, 'no_external_ids', 'tmdb',
+            write_episodes_err(series_dir, 'no_external_ids', 'tmdb',
                                'No TMDB ID — use Plex > Fix Match')
-            result = read_episodes_err(show_dir)
+            result = read_episodes_err(series_dir)
             self.assertIsNotNone(result)
             self.assertEqual(result['error_type'], 'no_external_ids')
             self.assertEqual(result['source'], 'tmdb')
             self.assertIn('Fix Match', result['message'])
         finally:
             import shutil
-            shutil.rmtree(show_dir)
+            shutil.rmtree(series_dir)
 
     def test_read_nonexistent(self):
         """Reading from directory without episodes.err returns None."""
         import tempfile
-        show_dir = tempfile.mkdtemp()
+        series_dir = tempfile.mkdtemp()
         try:
-            result = read_episodes_err(show_dir)
+            result = read_episodes_err(series_dir)
             self.assertIsNone(result)
         finally:
             import shutil, os
-            shutil.rmtree(show_dir)
+            shutil.rmtree(series_dir)
 
     def test_clear_removes_file(self):
         """clear_episodes_err removes the file."""
         import tempfile, os
-        show_dir = tempfile.mkdtemp()
+        series_dir = tempfile.mkdtemp()
         try:
-            write_episodes_err(show_dir, 'scrape_failed', 'tvdb', 'timeout')
-            err_path = get_episodes_err_path(show_dir)
+            write_episodes_err(series_dir, 'scrape_failed', 'tvdb', 'timeout')
+            err_path = get_episodes_err_path(series_dir)
             self.assertTrue(os.path.isfile(err_path))
-            clear_episodes_err(show_dir)
+            clear_episodes_err(series_dir)
             self.assertFalse(os.path.isfile(err_path))
         finally:
             import shutil
-            shutil.rmtree(show_dir)
+            shutil.rmtree(series_dir)
 
     def test_clear_nonexistent_is_noop(self):
         """clear_episodes_err on missing file does not raise."""
         import tempfile
-        show_dir = tempfile.mkdtemp()
+        series_dir = tempfile.mkdtemp()
         try:
-            clear_episodes_err(show_dir)  # should not raise
+            clear_episodes_err(series_dir)  # should not raise
         finally:
             import shutil
-            shutil.rmtree(show_dir)
+            shutil.rmtree(series_dir)
 
     def test_err_file_format(self):
         """Verify episodes.err has expected format with comments and key-value lines."""
         import tempfile, os
-        show_dir = tempfile.mkdtemp()
+        series_dir = tempfile.mkdtemp()
         try:
-            write_episodes_err(show_dir, 'suspicious_title', 'fernsehserien.de',
+            write_episodes_err(series_dir, 'suspicious_title', 'fernsehserien.de',
                                "Title 'The G' may be truncated")
-            err_path = get_episodes_err_path(show_dir)
+            err_path = get_episodes_err_path(series_dir)
             with open(err_path, 'r') as f:
                 content = f.read()
             self.assertIn('# my-plex episode data error', content)
@@ -4789,7 +4789,7 @@ class TestEpisodesErr(unittest.TestCase):
             self.assertIn('source: fernsehserien.de', content)
         finally:
             import shutil
-            shutil.rmtree(show_dir)
+            shutil.rmtree(series_dir)
 
     def test_episodes_err_functions_exist(self):
         """Source must define episodes.err functions."""
@@ -4903,11 +4903,11 @@ class TestUnmatched(unittest.TestCase):
         content = self._read_script()
         self.assertIn("'guid': guid", content, "Movie dict must store 'guid' field")
 
-    def test_guid_stored_in_show_dict(self):
+    def test_guid_stored_in_series_dict(self):
         """Show dict (OBJ_BY_ID) must include guid field."""
         content = self._read_script()
-        self.assertIn("'guid': show_info.get('guid'", content,
-                       "Show OBJ_BY_ID dict must store 'guid' from show_info")
+        self.assertIn("'guid': series_info.get('guid'", content,
+                       "Show OBJ_BY_ID dict must store 'guid' from series_info")
 
     def test_list_unmatched_function_exists(self):
         """_list_unmatched must be defined."""
@@ -4994,14 +4994,14 @@ class TestUnsorted(unittest.TestCase):
         content = self._read_script()
         self.assertIn('def _list_unsorted(', content)
 
-    def test_list_unsorted_checks_show_dir(self):
+    def test_list_unsorted_checks_series_dir(self):
         """_list_unsorted must check if episode dir equals show dir."""
         import re
         content = self._read_script()
         match = re.search(r'def _list_unsorted\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("show_dir", body, "Must reference show_dir")
+        self.assertIn("series_dir", body, "Must reference series_dir")
         self.assertIn("dirname", body, "Must use os.path.dirname to check episode paths")
 
     def test_problems_includes_unsorted(self):
@@ -5018,7 +5018,7 @@ class TestUnsorted(unittest.TestCase):
         """--problems summary must show unsorted count."""
         import re
         content = self._read_script()
-        self.assertIn('unsorted shows', content, "Summary must show 'unsorted shows' in problem warnings")
+        self.assertIn('unsorted series', content, "Summary must show 'unsorted series' in problem warnings")
 
     def test_help_unsorted_exists(self):
         """--help unsorted must have a case block."""
@@ -5135,10 +5135,10 @@ class TestVersionStringCollision(unittest.TestCase):
         self.assertIn('_build_version_string(', body, "Movie DB path must use _build_version_string")
 
     def test_episode_db_uses_helper(self):
-        """fetch_shows_from_database must use _build_version_string."""
+        """fetch_series_from_database must use _build_version_string."""
         import re
         content = self._read_script()
-        match = re.search(r'def fetch_shows_from_database\(.*?\ndef ', content, re.DOTALL)
+        match = re.search(r'def fetch_series_from_database\(.*?\ndef ', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertIn('_build_version_string(', body, "Episode DB path must use _build_version_string")
@@ -5166,7 +5166,7 @@ class TestVersionStringCollision(unittest.TestCase):
         content = self._read_script()
         # The old pattern: version = f"...min ...x... (...codec ...codec)"
         # Should NOT appear in fetch_movies/shows_from_database anymore
-        for func_name in ['fetch_movies_from_database', 'fetch_shows_from_database']:
+        for func_name in ['fetch_movies_from_database', 'fetch_series_from_database']:
             match = re.search(rf'def {func_name}\(.*?\ndef ', content, re.DOTALL)
             if match:
                 body = match.group(0)
@@ -5241,7 +5241,7 @@ class TestTsvScrapersE2E(unittest.TestCase):
             pass
         return None
 
-    def _run_scraper_tmdb(self, tmdb_id, show_title):
+    def _run_scraper_tmdb(self, tmdb_id, series_title):
         """Call TMDB API directly and return {'episodes': N, 'max_season': M} or {'error': ...}."""
         import json
         api_key = self._get_tmdb_api_key()
@@ -5269,20 +5269,20 @@ except Exception as e:
         except (json.JSONDecodeError, IndexError):
             return {'error': f'parse failed: {result.stderr[:200]}'}
 
-    def _run_scraper_fernsehserien(self, slug, show_id=None):
+    def _run_scraper_fernsehserien(self, slug, series_id=None):
         """Scrape fernsehserien.de directly and return episode/season count."""
         import json
         code = f"""
 import json, sys, re, urllib.request, time
 slug = {slug!r}
-show_id = {show_id!r}
+series_id = {series_id!r}
 episodes = {{}}
-if show_id:
+if series_id:
     # Strategy 1: episodenguide
     consecutive_empty = 0
     s = 1
     while consecutive_empty < 2:
-        url = f'https://www.fernsehserien.de/{{slug}}/episodenguide/staffel-{{s}}/{{show_id}}'
+        url = f'https://www.fernsehserien.de/{{slug}}/episodenguide/staffel-{{s}}/{{series_id}}'
         req = urllib.request.Request(url, headers={{'User-Agent': 'Mozilla/5.0'}})
         try:
             html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
@@ -5453,7 +5453,7 @@ class TestPotentialMismatch(unittest.TestCase):
 
 
 class TestShowDirDerivation(unittest.TestCase):
-    """Test show_dir derivation uses PATHS_DICT (library root from section_locations)."""
+    """Test series_dir derivation uses PATHS_DICT (library root from section_locations)."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
@@ -5474,15 +5474,15 @@ class TestShowDirDerivation(unittest.TestCase):
         self.assertGreater(idx_recompute, idx_populate)
 
     def test_no_heuristic_fallback(self):
-        """show_dir derivation must NOT fall back to dirname heuristics — must error on failure."""
+        """series_dir derivation must NOT fall back to dirname heuristics — must error on failure."""
         content = self._read_script()
         self.assertNotIn('_is_season_dir', content,
-            "No season-dir heuristic should exist — show_dir derivation must use PATHS_DICT only")
+            "No season-dir heuristic should exist — series_dir derivation must use PATHS_DICT only")
         # Must error if lib_root not found
         self.assertIn('err(1073', content)
 
-    def test_show_dir_uses_paths_dict(self):
-        """show_dir must be derived from PATHS_DICT (subtract lib root, take first dir)."""
+    def test_series_dir_uses_paths_dict(self):
+        """series_dir must be derived from PATHS_DICT (subtract lib root, take first dir)."""
         content = self._read_script()
         # The derivation must use PATHS_DICT to find the library root
         self.assertIn('PLEX_Library.PATHS_DICT', content)
@@ -5498,77 +5498,77 @@ class TestShowDirDerivation(unittest.TestCase):
 
 
 class TestObjByShowScraped(unittest.TestCase):
-    """Test OBJ_BY_SHOW_SCRAPED cache structure and --episode-numbering-issues."""
+    """Test OBJ_BY_SERIES_SCRAPED cache structure and --episode-numbering-issues."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
     def test_cache_dict_declared(self):
-        """OBJ_BY_SHOW_SCRAPED must be declared on PLEX_Media."""
+        """OBJ_BY_SERIES_SCRAPED must be declared on PLEX_Media."""
         content = self._read_script()
-        self.assertIn('OBJ_BY_SHOW_SCRAPED', content)
+        self.assertIn('OBJ_BY_SERIES_SCRAPED', content)
 
     def test_cache_save(self):
-        """OBJ_BY_SHOW_SCRAPED must be included in cache save."""
+        """OBJ_BY_SERIES_SCRAPED must be included in cache save."""
         content = self._read_script()
-        self.assertIn("'obj_by_show_scraped'", content)
+        self.assertIn("'obj_by_series_scraped'", content)
 
     def test_cache_load(self):
-        """OBJ_BY_SHOW_SCRAPED must be loaded from cache."""
+        """OBJ_BY_SERIES_SCRAPED must be loaded from cache."""
         content = self._read_script()
-        self.assertIn("source.get('obj_by_show_scraped'", content)
+        self.assertIn("source.get('obj_by_series_scraped'", content)
 
     def test_from_scratch_reset(self):
-        """OBJ_BY_SHOW_SCRAPED must be reset during --from-scratch."""
+        """OBJ_BY_SERIES_SCRAPED must be reset during --from-scratch."""
         content = self._read_script()
-        self.assertIn('OBJ_BY_SHOW_SCRAPED = {}', content)
+        self.assertIn('OBJ_BY_SERIES_SCRAPED = {}', content)
 
     def test_checkpoint_data(self):
-        """OBJ_BY_SHOW_SCRAPED must be in checkpoint data."""
+        """OBJ_BY_SERIES_SCRAPED must be in checkpoint data."""
         content = self._read_script()
-        self.assertIn("'obj_by_show_scraped': copy.copy(PLEX_Media.OBJ_BY_SHOW_SCRAPED)", content)
+        self.assertIn("'obj_by_series_scraped': copy.copy(PLEX_Media.OBJ_BY_SERIES_SCRAPED)", content)
 
     def test_scraped_title_in_tmdb(self):
-        """TMDB scraper must capture show_title in metadata."""
+        """TMDB scraper must capture series_title in metadata."""
         content = self._read_script()
         # Find it in _scrape_tmdb
         idx = content.index('def _scrape_tmdb(')
         end = content.index('\ndef ', idx + 1)
         tmdb_section = content[idx:end]
-        self.assertIn("new_metadata['show_title']", tmdb_section)
+        self.assertIn("new_metadata['series_title']", tmdb_section)
 
     def test_scraped_title_in_tvdb(self):
-        """TVDB scraper must capture show_title in metadata."""
+        """TVDB scraper must capture series_title in metadata."""
         content = self._read_script()
         idx = content.index('def _scrape_tvdb(')
         end = content.index('\ndef ', idx + 1)
         tvdb_section = content[idx:end]
-        self.assertIn("show_title", tvdb_section)
+        self.assertIn("series_title", tvdb_section)
 
     def test_scraped_title_in_fernsehserien(self):
-        """fernsehserien.de scraper must capture show_title from page."""
+        """fernsehserien.de scraper must capture series_title from page."""
         content = self._read_script()
         idx = content.index('def _scrape_fernsehserien_de(')
         end = content.index('\ndef ', idx + 1)
         fs_section = content[idx:end]
-        self.assertIn("show_title", fs_section)
+        self.assertIn("series_title", fs_section)
 
-    def test_show_title_in_tsv_header(self):
-        """show_title must be written to TSV file header."""
+    def test_series_title_in_tsv_header(self):
+        """series_title must be written to TSV file header."""
         content = self._read_script()
         idx = content.index('def write_episodes_tsv(')
         end = content.index('\ndef ', idx + 1)
         write_section = content[idx:end]
-        self.assertIn("show_title", write_section)
+        self.assertIn("series_title", write_section)
 
-    def test_show_title_read_from_tsv(self):
-        """show_title must be read from TSV metadata."""
+    def test_series_title_read_from_tsv(self):
+        """series_title must be read from TSV metadata."""
         content = self._read_script()
         idx = content.index('def read_episodes_tsv(')
         end = content.index('\ndef ', idx + 1)
         read_section = content[idx:end]
-        self.assertIn("'show_title'", read_section)
+        self.assertIn("'series_title'", read_section)
 
     def test_no_plex_overwrite(self):
         """Scraped data must NOT overwrite Plex E_idx/E_str — old normalization removed."""
@@ -5583,7 +5583,7 @@ class TestObjByShowScraped(unittest.TestCase):
             "Must not overwrite Plex E_str with scraped data")
 
     def test_no_episode_map_in_cache(self):
-        """OBJ_BY_SHOW_SCRAPED must NOT contain an 'episode_map' sub-structure.
+        """OBJ_BY_SERIES_SCRAPED must NOT contain an 'episode_map' sub-structure.
         Scraped-source numbering is never displayed, so there's nothing to map.
         Title backfill writes directly onto the episode obj; numbering
         disagreements go into `numbering_issues`."""
@@ -5592,9 +5592,9 @@ class TestObjByShowScraped(unittest.TestCase):
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertNotIn("'episode_map'", section,
-            "OBJ_BY_SHOW_SCRAPED must no longer carry an episode_map")
+            "OBJ_BY_SERIES_SCRAPED must no longer carry an episode_map")
         self.assertNotIn("'season_map'", section,
-            "OBJ_BY_SHOW_SCRAPED must no longer carry a season_map")
+            "OBJ_BY_SERIES_SCRAPED must no longer carry a season_map")
 
     def test_scraped_e_str_stored_on_episode_obj_when_different(self):
         """When Plex and scraped numbering disagree, the scraped form must be
@@ -5615,11 +5615,11 @@ class TestS0XE0XPadding(unittest.TestCase):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
-    def test_pad_widths_stored_on_show_obj(self):
+    def test_pad_widths_stored_on_series_obj(self):
         """S_pad_width and E_pad_width must be stored on the show dict."""
         content = self._read_script()
-        # Show dict construction is in _process_shows_from_database
-        idx = content.index('def _process_shows_from_database(')
+        # Show dict construction is in _process_series_from_database
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn("'S_pad_width': S_pad_width", section)
@@ -5629,7 +5629,7 @@ class TestS0XE0XPadding(unittest.TestCase):
         """S_pad_width/E_pad_width must be computed from max season/episode
         numbers in the show BEFORE episodes are written to the cache."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn("S_pad_width = max(2", section)
@@ -5639,7 +5639,7 @@ class TestS0XE0XPadding(unittest.TestCase):
         """Episode dicts must have S0XE0X rewritten using the per-show
         S_pad_width/E_pad_width before being stored in OBJ_BY_ID."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn(":0{S_pad_width}d", section)
@@ -5653,7 +5653,7 @@ class TestS0XE0XPadding(unittest.TestCase):
     def test_pad_width_minimum_is_two(self):
         """Both widths must be at least 2 so small shows keep the S01E01 form."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         # max(2, …) guarantees the minimum
@@ -5703,7 +5703,7 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
         """--update-cache must group episodes sharing a single filepath and
         store the sorted sibling list on each episode."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn("multi_episode_siblings", section)
@@ -5870,10 +5870,10 @@ class TestAbsEpIdx(unittest.TestCase):
             return f.read()
 
     def test_abs_ep_idx_computed_in_update_cache(self):
-        """_process_shows_from_database must compute abs_ep_idx after
+        """_process_series_from_database must compute abs_ep_idx after
         _ensure_tsv_and_normalize_episodes."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn("abs_ep_idx", section)
@@ -5887,16 +5887,16 @@ class TestAbsEpIdx(unittest.TestCase):
     def test_abs_ep_idx_requires_scraped_data(self):
         """abs_ep_idx must only be assigned when scraped data exists."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
-        self.assertIn("OBJ_BY_SHOW_SCRAPED", section)
+        self.assertIn("OBJ_BY_SERIES_SCRAPED", section)
         self.assertIn("no scraped data", section.lower())
 
     def test_abs_ep_idx_multi_episode_shares_leader(self):
         """Multi-episode non-leaders must share the leader's abs_ep_idx."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         # The code must check multi_episode_siblings for non-leader sharing
@@ -5906,11 +5906,11 @@ class TestAbsEpIdx(unittest.TestCase):
     def test_abs_ep_max_stored_on_season_and_show(self):
         """abs_ep_max must be stored on both season and show objects."""
         content = self._read_script()
-        idx = content.index('def _process_shows_from_database(')
+        idx = content.index('def _process_series_from_database(')
         end = content.index('\ndef ', idx + 1)
         section = content[idx:end]
         self.assertIn("season_obj['abs_ep_max']", section)
-        self.assertIn("show_obj['abs_ep_max']", section)
+        self.assertIn("series_obj['abs_ep_max']", section)
 
 
 class TestRenumber(unittest.TestCase):
@@ -5954,12 +5954,12 @@ class TestRenumber(unittest.TestCase):
         self.assertIn('_is_multi_ep_non_leader', section)
 
     def test_renumber_uses_scraped_data(self):
-        """_list_renumber_candidates must check OBJ_BY_SHOW_SCRAPED."""
+        """_list_renumber_candidates must check OBJ_BY_SERIES_SCRAPED."""
         content = self._read_script()
         idx = content.index('def _list_renumber_candidates(')
         end = content.index('\n    @staticmethod', idx + 1)
         section = content[idx:end]
-        self.assertIn('OBJ_BY_SHOW_SCRAPED', section)
+        self.assertIn('OBJ_BY_SERIES_SCRAPED', section)
 
     def test_renumber_regex_exists(self):
         """_RE_SXEX regex must exist for extracting S0xE0x from filenames."""
@@ -6081,7 +6081,7 @@ class TestRenumber(unittest.TestCase):
     def test_renumber_scoped_e2e(self):
         """<SHOW> --renumber runs without error (E2E)."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, 'Show:5191', '--renumber'],
+            [sys.executable, MAIN_SCRIPT, 'Series:5191', '--renumber'],
             capture_output=True, text=True, timeout=60
         )
         self.assertEqual(result.returncode, 0, f"Scoped --renumber failed: {result.stderr}")
@@ -6095,7 +6095,7 @@ class TestRenumber(unittest.TestCase):
     def test_renumber_fix_dry_run_e2e(self):
         """<SHOW> --renumber --fix --try runs without error (E2E, scoped to one show)."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, 'Show:5191', '--renumber', '--fix', '--try'],
+            [sys.executable, MAIN_SCRIPT, 'Series:5191', '--renumber', '--fix', '--try'],
             capture_output=True, text=True, timeout=60
         )
         self.assertEqual(result.returncode, 0, f"--renumber --fix --try failed: {result.stderr}")
@@ -6134,8 +6134,8 @@ class TestRenumber(unittest.TestCase):
         src = self._read_script()
         idx = src.index('def _scraped_padding(')
         method_body = src[idx:idx+1500]
-        self.assertIn('OBJ_BY_SHOW_SCRAPED', method_body,
-                       "_scraped_padding must read from OBJ_BY_SHOW_SCRAPED")
+        self.assertIn('OBJ_BY_SERIES_SCRAPED', method_body,
+                       "_scraped_padding must read from OBJ_BY_SERIES_SCRAPED")
 
     def test_renumber_uses_scraped_padding(self):
         """_list_renumber_candidates and _fix_renumber_candidates must use _scraped_padding."""
@@ -6835,75 +6835,75 @@ class TestDiskMap(unittest.TestCase):
 
     def test_check_all_children_watched_all_watched(self):
         """Season is WATCHED when all child episodes are watched in Plex."""
-        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
             PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
             PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 2, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
-            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
-            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, max_lv = _check_all_children_watched(season_obj, 'Season')
             self.assertTrue(watched)
             self.assertEqual(max_lv, 2000)
         finally:
-            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SERIES_EPISODES = saved
 
     def test_check_all_children_watched_not_all(self):
         """Season is NOT WATCHED when some episodes are unwatched."""
-        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
             PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
             PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
-            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
-            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, _ = _check_all_children_watched(season_obj, 'Season')
             self.assertFalse(watched)
         finally:
-            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SERIES_EPISODES = saved
 
     def test_check_all_children_watched_disk_vu_counts(self):
         """Episode with [vu] on disk but unwatched in Plex still counts as watched."""
-        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
             PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
             PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.[vu@2026-01-01].mkv'}
-            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
-            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1'}
+            PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, _ = _check_all_children_watched(season_obj, 'Season')
             self.assertTrue(watched)
         finally:
-            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SERIES_EPISODES = saved
 
     def test_check_all_children_watched_show_all_seasons(self):
         """Show is WATCHED only if ALL seasons' episodes are watched."""
-        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Show:1'] = {'type_str': 'Show'}
+            PLEX_Media.OBJ_BY_ID['Series:1'] = {'type_str': 'Series'}
             PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
             PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
-            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {
+            PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {
                 'S01': {'E01': {'v': ['Episode:1']}},
                 'S02': {'E01': {'v': ['Episode:2']}}
             }
-            show_obj = PLEX_Media.OBJ_BY_ID['Show:1']
-            watched, _ = _check_all_children_watched(show_obj, 'Show')
+            series_obj = PLEX_Media.OBJ_BY_ID['Series:1']
+            watched, _ = _check_all_children_watched(series_obj, 'Series')
             self.assertFalse(watched)
         finally:
-            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SERIES_EPISODES = saved
 
     def test_resolve_variables_season_watched_from_children(self):
         """resolve_disk_map_variables for Season derives WATCHED from child episodes."""
-        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SHOW_EPISODES.copy())
+        saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
             PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
             PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 1, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
-            PLEX_Media.OBJ_BY_SHOW_EPISODES['Show:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
-            season_obj = {'type_str': 'Season', 'show_key': 'Show:1', 'season': 'Season 1',
+            PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
+            season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1',
                           'viewCount': 0, 'lastViewedAt': None}
             var = resolve_disk_map_variables(season_obj)
             self.assertTrue(var['WATCHED'])
             self.assertNotEqual(var['WATCHED_DATE'], '')
         finally:
-            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SHOW_EPISODES = saved
+            PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_SERIES_EPISODES = saved
 
     def test_migrate_legacy_vu_dir_trailing_dot(self):
         """Legacy migration strips trailing dots from dir names after removing [vu]."""
@@ -6938,7 +6938,7 @@ class TestDiskMap(unittest.TestCase):
         """_PLEX_WRITABLE_FIELDS has correct structure."""
         self.assertIn('Movie', _PLEX_WRITABLE_FIELDS)
         self.assertIn('Episode', _PLEX_WRITABLE_FIELDS)
-        self.assertIn('Show', _PLEX_WRITABLE_FIELDS)
+        self.assertIn('Series', _PLEX_WRITABLE_FIELDS)
         self.assertIn('Season', _PLEX_WRITABLE_FIELDS)
         # Movie and Episode support all writable fields
         self.assertIn('WATCHED', _PLEX_WRITABLE_FIELDS['Movie'])
@@ -7063,20 +7063,20 @@ class TestDiskMap(unittest.TestCase):
         content = self._read_script()
         self.assertIn('cmd_disk2plex(target, dry_run=dry_run, force=force)', content)
 
-    def test_series_dir_uses_get_show_dir_helper(self):
-        """Series dir routing uses get_show_dir() helper, which looks up Show object's file field."""
+    def test_series_dir_uses_get_series_dir_helper(self):
+        """Series dir routing uses get_series_dir() helper, which looks up Show object's file field."""
         content = self._read_script()
-        # get_show_dir must exist and use show_key → OBJ_BY_ID lookup
-        self.assertIn("def get_show_dir(obj):", content)
-        func_start = content.find('def get_show_dir(obj):')
+        # get_series_dir must exist and use series_key → OBJ_BY_ID lookup
+        self.assertIn("def get_series_dir(obj):", content)
+        func_start = content.find('def get_series_dir(obj):')
         func_end = content.find('\ndef ', func_start + 1)
         func_body = content[func_start:func_end]
-        self.assertIn("show_key", func_body)
+        self.assertIn("series_key", func_body)
         self.assertIn("OBJ_BY_ID", func_body)
         self.assertIn(".get('file'", func_body)
 
     def test_plex2disk_clean_uses_cache_helpers(self):
-        """cmd_plex2disk_clean must use get_season_dir/get_show_dir/get_movie_dir, not dirname()."""
+        """cmd_plex2disk_clean must use get_season_dir/get_series_dir/get_movie_dir, not dirname()."""
         content = self._read_script()
         clean_start = content.find('def cmd_plex2disk_clean(')
         self.assertGreater(clean_start, 0, "cmd_plex2disk_clean function not found")
@@ -7089,11 +7089,11 @@ class TestDiskMap(unittest.TestCase):
                         "cmd_plex2disk_clean still uses dirname(filepath) — should use cache helpers")
         # Must use cache helper functions
         self.assertIn('get_season_dir(obj)', clean_body)
-        self.assertIn('get_show_dir(obj)', clean_body)
+        self.assertIn('get_series_dir(obj)', clean_body)
         self.assertIn('get_movie_dir(obj)', clean_body)
 
     def test_plex2disk_uses_cache_helpers(self):
-        """cmd_plex2disk must use get_season_dir/get_show_dir/get_movie_dir, not dirname()."""
+        """cmd_plex2disk must use get_season_dir/get_series_dir/get_movie_dir, not dirname()."""
         content = self._read_script()
         plex2disk_start = content.find('def cmd_plex2disk(')
         self.assertGreater(plex2disk_start, 0, "cmd_plex2disk function not found")
@@ -7101,7 +7101,7 @@ class TestDiskMap(unittest.TestCase):
         plex2disk_body = content[plex2disk_start:plex2disk_end]
         # Must use cache helper functions, not inline dirname/lookups
         self.assertIn('get_season_dir(obj)', plex2disk_body)
-        self.assertIn('get_show_dir(obj)', plex2disk_body)
+        self.assertIn('get_series_dir(obj)', plex2disk_body)
         self.assertIn('get_movie_dir(obj)', plex2disk_body)
         # Season dir section must NOT use dirname(filepath)
         season_section_start = plex2disk_body.find('Season directory scope')
@@ -7110,12 +7110,12 @@ class TestDiskMap(unittest.TestCase):
         self.assertNotIn('dirname(filepath)', season_section)
 
     def test_cache_dir_helpers_exist(self):
-        """get_episode_dir, get_movie_dir, get_season_dir, get_show_dir helpers must exist."""
+        """get_episode_dir, get_movie_dir, get_season_dir, get_series_dir helpers must exist."""
         content = self._read_script()
         self.assertIn('def get_episode_dir(obj):', content)
         self.assertIn('def get_movie_dir(obj):', content)
         self.assertIn('def get_season_dir(obj):', content)
-        self.assertIn('def get_show_dir(obj):', content)
+        self.assertIn('def get_series_dir(obj):', content)
 
     def test_normalize_alpha(self):
         """_normalize_alpha strips non-a-z characters for fuzzy path matching."""
@@ -7136,7 +7136,7 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn('OBJ_BY_FILEPATH', resolve_body)
         self.assertIn('_normalize_alpha', resolve_body)
         # Must deduplicate episodes to their parent Show
-        self.assertIn("show_key = obj.get('show_key'", resolve_body)
+        self.assertIn("series_key = obj.get('series_key'", resolve_body)
 
     def test_plex2disk_output_has_prefix_and_full_path(self):
         """Rename output has LIBRARY|KEY| prefix and shows full path."""
@@ -8321,7 +8321,7 @@ def run_regression_tests(main_globals, scope=None):
         else:
             # Test default (include_paths=True)
             d = build_media_cache_dict()
-            required_keys = {'obj_by_id', 'obj_by_movie', 'obj_by_show', 'obj_by_show_episodes',
+            required_keys = {'obj_by_id', 'obj_by_movie', 'obj_by_series', 'obj_by_series_episodes',
                              'obj_by_collection', 'obj_by_filepath', 'obj_by_library'}
             if required_keys.issubset(d.keys()):
                 print(f"✓ PASS: build_media_cache_dict() returns all 7 required keys")
