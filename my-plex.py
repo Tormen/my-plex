@@ -469,6 +469,13 @@ CONFIG_DEFAULTS = {
     # Example: '{S0XE0X} {TITLE} [{WATCHED}@{WATCHEDDATE}]' → 'S05E12 Made in China [vu@2026-02-14].avi'
     'EPISODE_NAME_PATTERN': '{SERIES} {S0XE0X} {TITLE}',
 
+    # Episode renumbering pattern for --renumber --fix
+    # Controls how files are renamed when fixing incorrect numbering.
+    # Same variables as EPISODE_NAME_PATTERN.
+    # The {S0XE0X} is replaced with the CORRECT numbering from scraped data.
+    # Default: just prefix with corrected S0XE0X + existing title.
+    'RENUMBER_NAME_PATTERN': '{S0XE0X} {TITLE}',
+
     # Episode management (--missing, --sort-new)
     # Custom filename date extractors: path to a Python module with extract_date(filename) functions
     # The module should define EXTRACTORS = {'format_name': extract_function, ...}
@@ -951,6 +958,7 @@ TVDB_API_KEY = CONFIG_DEFAULTS['TVDB_API_KEY']
 TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
+RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
 
 # Disk marker mapping configuration (--plex2disk / --disk2plex)
 DISK_MAP = CONFIG_DEFAULTS['DISK_MAP']
@@ -13627,12 +13635,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  No episodes found for '{media_identifier}'.")
             return
 
-        print(f"\n--- Renumber Candidates for '{media_identifier}' ---")
-        PLEX_Media._list_renumber_candidates(obj_keys, library_name=None)
-
         if fix_mode:
             pfx = "[DRY-RUN] " if dry_run else ""
-            print(f"\n--- {pfx}Renumber --fix is not yet implemented (coming in a future commit) ---")
+            print(f"\n--- {pfx}Renumber --fix for '{media_identifier}' ---")
+            PLEX_Media._fix_renumber_candidates(obj_keys, library_name=None, dry_run=dry_run)
+        else:
+            print(f"\n--- Renumber Candidates for '{media_identifier}' ---")
+            PLEX_Media._list_renumber_candidates(obj_keys, library_name=None)
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -14416,6 +14425,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if correct_e is None:
                 # More Plex episodes than scraped for this season — can't determine
                 correct_e = e_idx  # fall back to Plex's own number
+            if correct_e <= 0:
+                continue  # can't determine a valid episode number
             expected = f"S{s_idx:0{s_pad}d}E{correct_e:0{e_pad}d}"
 
             # Extract current S0xE0x from filename
@@ -14467,6 +14478,159 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         print(f"\n  Total: {total} renumber candidate(s) across {len(flagged_by_show)} show(s)")
         return total
+
+    @staticmethod
+    def _fix_renumber_candidates(obj_keys, library_name=None, dry_run=False):
+        """Rename episodes whose filename numbering disagrees with scraped data.
+        Only episodes WITH scraped data are actionable.  Returns (renamed, errors) tuple."""
+        from datetime import datetime
+
+        # Reuse detection logic from _list_renumber_candidates — same positional mapping
+        _pos_map_cache = {}
+
+        def _get_correct_e_num(show_key, s_str, ep_key):
+            if show_key not in _pos_map_cache:
+                _pos_map_cache[show_key] = {}
+            if s_str not in _pos_map_cache[show_key]:
+                scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+                scraped_season = scraped.get('episodes', {}).get(s_str, {})
+                scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys()) if scraped_season else []
+                ep_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                plex_keys_sorted = []
+                for e_str_k in sorted(ep_data.keys()):
+                    for _ver, _ep_keys in ep_data[e_str_k].items():
+                        for _ek in _ep_keys:
+                            _eo = PLEX_Media.OBJ_BY_ID.get(_ek)
+                            if _eo and not PLEX_Media._is_multi_ep_non_leader(_ek, _eo):
+                                plex_keys_sorted.append(_ek)
+                pos_map = {}
+                for i, pk in enumerate(plex_keys_sorted):
+                    if i < len(scraped_e_nums):
+                        pos_map[pk] = scraped_e_nums[i]
+                _pos_map_cache[show_key][s_str] = pos_map
+            return _pos_map_cache[show_key].get(s_str, {}).get(ep_key)
+
+        renamed_count = 0
+        error_count = 0
+        skipped_count = 0
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type', '') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
+
+            show_key = obj.get('show_key', '')
+            if not show_key:
+                continue
+
+            scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+            scraped_eps = scraped.get('episodes', {})
+            if not scraped_eps:
+                continue
+
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            s_pad = show_obj.get('S_pad_width', 2) or 2
+            e_pad = show_obj.get('E_pad_width', 2) or 2
+
+            filepath = obj.get('file', '')
+            if not filepath:
+                continue
+            filename = os.path.basename(filepath)
+
+            s_idx = obj.get('S_idx', 0) or 0
+            e_idx = obj.get('E_idx', 0) or 0
+            s_str = obj.get('S_str', f'S{s_idx:02d}')
+
+            correct_e = _get_correct_e_num(show_key, s_str, key)
+            if correct_e is None:
+                correct_e = e_idx
+            if correct_e <= 0:
+                continue  # can't determine a valid episode number
+
+            expected_sxex = PLEX_Media._build_sxex_prefix(s_idx, correct_e, s_pad, e_pad)
+
+            # Check if file already has correct numbering
+            m = PLEX_Media._RE_SXEX.search(filename)
+            if m:
+                file_s = int(m.group(1))
+                file_e = int(m.group(2))
+                if file_s == s_idx and file_e == correct_e:
+                    continue  # already correct
+
+            # Build new filename using RENUMBER_NAME_PATTERN
+            var = {}
+            var['S0XE0X'] = expected_sxex
+            var['TITLE'] = obj.get('title', '') or ''
+            var['ORIGINALTITLE'] = obj.get('originalTitle', '') or ''
+            var['SERIES'] = obj.get('series', '') or ''
+            var['YEAR'] = str(obj.get('year', '')) if obj.get('year') else ''
+
+            lib_name = obj.get('library', '')
+            lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
+            if lang == 'xn':
+                lang = 'none'
+            var['LANG'] = lang
+
+            view_count = obj.get('viewCount', 0) or 0
+            var['WATCHED'] = 'vu' if view_count > 0 else 'nv'
+            var['VIEWCOUNT'] = str(view_count)
+
+            last_viewed = obj.get('lastViewedAt')
+            if last_viewed:
+                try:
+                    var['WATCHEDDATE'] = datetime.fromtimestamp(last_viewed).strftime('%Y-%m-%d')
+                except (OSError, ValueError):
+                    var['WATCHEDDATE'] = ''
+            else:
+                var['WATCHEDDATE'] = ''
+
+            var['RESOLUTION'] = obj.get('resolution', '') or ''
+            var['VIDEO_CODEC'] = obj.get('video_codec', '') or ''
+            var['AUDIO_CODEC'] = obj.get('audio_codec', '') or ''
+            duration = obj.get('duration')
+            var['DURATION'] = format_duration(duration, 'm') if duration else ''
+
+            # Get extension from current file
+            _, ext = os.path.splitext(filepath)
+            ext = ext.lstrip('.')
+
+            # Format the pattern
+            try:
+                new_basename = RENUMBER_NAME_PATTERN.format(**var)
+            except KeyError as e:
+                print(f"  ERROR: Unknown pattern variable {e} in RENUMBER_NAME_PATTERN")
+                error_count += 1
+                continue
+
+            new_basename = new_basename.strip()
+            for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+                new_basename = new_basename.replace(ch, '_')
+            new_filename = f"{new_basename}.{ext}" if ext else new_basename
+
+            result = PLEX_Media._rename_episode_file(obj, key, new_filename, dry_run, rename_siblings=True)
+            if result == 'renamed':
+                renamed_count += 1
+            elif result == 'error':
+                error_count += 1
+            else:
+                skipped_count += 1
+
+        # Save cache after real renames
+        if not dry_run and renamed_count > 0:
+            update_and_save_cache(build_media_cache_dict())
+
+        # Summary
+        pfx = "[DRY-RUN] " if dry_run else ""
+        print(f"\n  {pfx}RENUMBER FIX SUMMARY: {renamed_count} renamed"
+              + (f", {error_count} errors" if error_count else "")
+              + (f", {skipped_count} already correct" if skipped_count else ""))
+        return renamed_count, error_count
 
     @staticmethod
     def _list_renumber_lack_of_data(obj_keys, library_name=None):
@@ -18189,7 +18353,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  --renumber --fix     Rename files to correct S0xE0x numbering.")
             print("                       Only acts on episodes WITH scraped data.")
-            print("                       [NOT YET IMPLEMENTED — coming soon]")
+            print(f"                       Uses RENUMBER_NAME_PATTERN: '{RENUMBER_NAME_PATTERN}'")
             print()
             print("  --renumber --fix --try")
             print("                       Dry-run of --fix: show what WOULD be renamed,")
@@ -18221,6 +18385,23 @@ def main_print_help(args, remaining_args, main_parser):
             print("  multiple episode rows pointing at one file. --renumber evaluates each")
             print("  file exactly once, under the leader episode (lowest E number in")
             print("  the group). Non-leader siblings are skipped.")
+            print()
+            print("CONFIGURATION:")
+            print(f"  RENUMBER_NAME_PATTERN = '{RENUMBER_NAME_PATTERN}'")
+            print()
+            print("  Controls the renamed filename format. Same variables as EPISODE_NAME_PATTERN:")
+            print("  {S0XE0X} {TITLE} {ORIGINALTITLE} {SERIES} {LANG} {YEAR}")
+            print("  {WATCHED} {WATCHEDDATE} {VIEWCOUNT} {RESOLUTION} {VIDEO_CODEC} {AUDIO_CODEC}")
+            print("  {DURATION}")
+            print()
+            print("  The {S0XE0X} is replaced with the CORRECT numbering from scraped data.")
+            print("  File extension is preserved automatically.")
+            print()
+            print("  Examples:")
+            print("    '{S0XE0X} {TITLE}'         → 'S04E01 Rise.mkv'")
+            print("    '{SERIES} {S0XE0X} {TITLE}' → 'Castle S04E01 Rise.mkv'")
+            print()
+            print("  Sibling files (.srt, .nfo, etc.) are renamed automatically.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -24551,12 +24732,13 @@ def execute_global_commands(args, cmd_args):
         fix_mode = safe_getattr(cmd_args, 'fix', False)
         dry_run  = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
 
-        print(f"\n--- Renumber Candidates{scope} ---")
-        PLEX_Media._list_renumber_candidates(obj_keys, library_name)
-
         if fix_mode:
             pfx = "[DRY-RUN] " if dry_run else ""
-            print(f"\n--- {pfx}Renumber --fix is not yet implemented (coming in a future commit) ---")
+            print(f"\n--- {pfx}Renumber --fix{scope} ---")
+            PLEX_Media._fix_renumber_candidates(obj_keys, library_name, dry_run=dry_run)
+        else:
+            print(f"\n--- Renumber Candidates{scope} ---")
+            PLEX_Media._list_renumber_candidates(obj_keys, library_name)
         return
 
     # Handle --list/--filter, --duplicates, --broken, or --excess-versions (all automatically enable --list)

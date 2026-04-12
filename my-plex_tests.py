@@ -6026,6 +6026,43 @@ class TestRenumber(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"Scoped --renumber failed: {result.stderr}")
         self.assertIn('renumber candidate', result.stdout.lower())
 
+    def test_fix_renumber_candidates_method_exists(self):
+        """_fix_renumber_candidates must exist as a static method on PLEX_Media."""
+        self.assertTrue(hasattr(PLEX_Media, '_fix_renumber_candidates'))
+        self.assertTrue(callable(getattr(PLEX_Media, '_fix_renumber_candidates')))
+
+    def test_renumber_fix_dry_run_e2e(self):
+        """<SHOW> --renumber --fix --try runs without error (E2E, scoped to one show)."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, 'Show:5191', '--renumber', '--fix', '--try'],
+            capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(result.returncode, 0, f"--renumber --fix --try failed: {result.stderr}")
+        output = result.stdout.lower()
+        self.assertIn('renumber fix summary', output, "Should print summary")
+        self.assertIn('[dry-run]', output, "Should show DRY-RUN prefix")
+
+    def test_renumber_name_pattern_config_default(self):
+        """RENUMBER_NAME_PATTERN must exist in CONFIG_DEFAULTS."""
+        src = self._read_script()
+        self.assertIn("'RENUMBER_NAME_PATTERN'", src,
+                      "CONFIG_DEFAULTS should include RENUMBER_NAME_PATTERN")
+
+    def test_help_renumber_shows_pattern(self):
+        """--help renumber should show RENUMBER_NAME_PATTERN and configuration section."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'renumber'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('RENUMBER_NAME_PATTERN', result.stdout)
+        self.assertIn('CONFIGURATION', result.stdout)
+
+    def test_help_renumber_no_longer_shows_not_implemented(self):
+        """--help renumber should NOT say 'NOT YET IMPLEMENTED'."""
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'renumber'],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('NOT YET IMPLEMENTED', result.stdout)
+
 
 class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
