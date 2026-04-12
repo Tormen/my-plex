@@ -1119,8 +1119,11 @@ COMMANDS:
   --list-libraries         List all Plex libraries with stats
   --list [EXPR]            List / filter media  (EXPR: bitrate<2, type:movie, …)
   --duplicates             List duplicate items
+  --info [ID]              System info, or detailed info for an item / title
+
+PROBLEM DETECTION:
+  --problems               All problem checks in one pass  (add -V for details)
   --broken                 List broken / truncated files
-  --problems               All problem checks in one pass
   --unmatched [LIB]        Items not matched by Plex (local:// guid)
   --unsorted [LIB]         Series with episodes not in season subdirs
   --potential-mismatch [LIB]   Title / dirname mismatch candidates
@@ -1128,6 +1131,10 @@ COMMANDS:
   --missing [SHOW]         Missing episodes — scraped data vs Plex cache
   --reencode [LIB]         List reencode candidates above threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
+  --renumber [LIB]         List episodes with incorrect S0xE0x in filename
+    --fix [--try]          Rename (or dry-run) files to correct numbering
+
+MEDIA MANAGEMENT:
   --collections [LIB]      List collections in a library
   --list-labels            List all Plex labels + item counts
   --list-label LABEL       Items with a specific label
@@ -1140,7 +1147,6 @@ COMMANDS:
   --disk2plex [TARGET]     Sync disk markers → Plex metadata
   --plex-disk-sync [TARGET]    Bidirectional sync (disk2plex then plex2disk)
   --scan [LIB]             Trigger Plex filesystem scan + update cache
-  --info [ID]              System info, or detailed info for an item / title
   --test [SCOPE]           Run unit tests
 
   --help COMMAND           Full documentation with examples for any command
@@ -12879,7 +12885,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--rename', action='store_true',          help="Rename episode files according to EPISODE_NAME_PATTERN (config). Show/Season/Episode only. Use --help rename for details.")
     argparser.add_argument('--reencode', action='store_true',         help="List reencode candidates for this item. With --mark: write on-disk [reencode] label (force-labels at series/season/file level regardless of threshold).")
     argparser.add_argument('--mark', action='store_true',             help="With --reencode: write on-disk [reencode] label to series/season/file directory. Respects --try for dry-run.")
-    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename and --reencode
+    argparser.add_argument('--renumber', action='store_true',         help="List renumber candidates for this item (episodes with incorrect S0xE0x in filename). With --fix: rename files. Respects --try for dry-run.")
+    argparser.add_argument('--fix', action='store_true',              help="With --renumber: rename episode files to correct numbering. Respects --try for dry-run.")
+    argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --reencode, --renumber
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
@@ -12955,6 +12963,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             force_mark = safe_getattr(obj_args, 'mark', False)
             PLEX_Media.reencode_item(obj, dry_run=dry_run, force_mark=force_mark)
+        if safe_getattr(obj_args, 'renumber', False):
+            dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            fix_mode = safe_getattr(obj_args, 'fix', False)
+            PLEX_Media.renumber_item(obj, dry_run=dry_run, fix_mode=fix_mode)
 
     ############################################################
     ###### RENAME:
@@ -13493,6 +13505,57 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID,
                                    'ondisk_labels_index': PLEX_Media.OBJ_BY_ONDISK_LABEL})
             print(f"  Cache saved. Run --scan to update Plex library paths.")
+
+    ############################################################
+    ###### RENUMBER:
+
+    @staticmethod
+    def renumber_item(media_identifier, dry_run=False, fix_mode=False):
+        """List renumber candidates for a specific item; with fix_mode=True rename files.
+
+        media_identifier: cache key (e.g. 'Show:102639'), title string, or ID:xxx.
+        """
+        if isinstance(media_identifier, str) and media_identifier in PLEX_Media.OBJ_BY_ID:
+            found_items = [(media_identifier, PLEX_Media.OBJ_BY_ID[media_identifier])]
+        elif isinstance(media_identifier, str):
+            found_items = resolve_cache_items(media_identifier)
+        else:
+            found_items = [media_identifier]
+        if not found_items:
+            print(f"ERROR: No items found matching '{media_identifier}'")
+            return
+
+        obj_keys = []
+        for item in found_items:
+            if isinstance(item, tuple):
+                key, obj = item
+            else:
+                obj = item
+                key = f"{obj['type']}:{obj['id']}"
+            obj_type = obj.get('type', '')
+            if obj_type == 'Show':
+                obj_keys.extend(PLEX_Media._collect_episode_keys_for_show(key))
+            elif obj_type == 'Season':
+                show_key = obj.get('show_key', '')
+                s_str = obj.get('S_str', '')
+                if show_key and s_str:
+                    season_eps = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                    for e_str, versions in season_eps.items():
+                        for ver, ep_keys in versions.items():
+                            obj_keys.extend(ep_keys)
+            elif obj_type in ('Episode', 'Episode*'):
+                obj_keys.append(key)
+
+        if not obj_keys:
+            print(f"  No episodes found for '{media_identifier}'.")
+            return
+
+        print(f"\n--- Renumber Candidates for '{media_identifier}' ---")
+        PLEX_Media._list_renumber_candidates(obj_keys, library_name=None)
+
+        if fix_mode:
+            pfx = "[DRY-RUN] " if dry_run else ""
+            print(f"\n--- {pfx}Renumber --fix is not yet implemented (coming in a future commit) ---")
 
     ############################################################
     ###### HELPER FUNCTIONS:
@@ -14190,6 +14253,333 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         print(f"\n  Total: {total_file_count} file(s) above {threshold} Mbps")
         return total_file_count
+
+    # Regex to extract S0xE0x from a filename (case-insensitive, any padding)
+    _RE_SXEX = re.compile(r'[Ss](\d+)[Ee](\d+)')
+
+    @staticmethod
+    def _list_renumber_candidates(obj_keys, library_name=None):
+        """List episodes whose filename numbering disagrees with scraped data.
+        Only episodes WITH scraped data are considered (no-scraped-data is a
+        separate problem category).  Returns count of flagged episodes."""
+        # {show_key: [(ep_key, ep_obj, current_sxex, expected_sxex, filepath, reason)]}
+        flagged_by_show = {}
+        show_meta = {}  # {show_key: (series_title, library)}
+
+        # Pre-build positional mapping per show per season:
+        # {show_key: {S_str: {plex_position_0based: scraped_e_num}}}
+        _pos_map_cache = {}
+
+        def _get_correct_e_num(show_key, s_str, ep_key):
+            """Get the correct E number from scraped data via positional matching.
+            Returns the scraped episode number, or None if not determinable."""
+            if show_key not in _pos_map_cache:
+                _pos_map_cache[show_key] = {}
+            if s_str not in _pos_map_cache[show_key]:
+                scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+                scraped_season = scraped.get('episodes', {}).get(s_str, {})
+                scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys()) if scraped_season else []
+                # Get Plex episodes in this season sorted by E_idx
+                ep_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {}).get(s_str, {})
+                plex_keys_sorted = []
+                for e_str_k in sorted(ep_data.keys()):
+                    for _ver, _ep_keys in ep_data[e_str_k].items():
+                        for _ek in _ep_keys:
+                            _eo = PLEX_Media.OBJ_BY_ID.get(_ek)
+                            if _eo and not PLEX_Media._is_multi_ep_non_leader(_ek, _eo):
+                                plex_keys_sorted.append(_ek)
+                # Build position→scraped_e_num map
+                pos_map = {}
+                for i, pk in enumerate(plex_keys_sorted):
+                    if i < len(scraped_e_nums):
+                        pos_map[pk] = scraped_e_nums[i]
+                _pos_map_cache[show_key][s_str] = pos_map
+            return _pos_map_cache[show_key].get(s_str, {}).get(ep_key)
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type', '') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            # Skip multi-episode non-leaders
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
+
+            show_key = obj.get('show_key', '')
+            if not show_key:
+                continue
+
+            # Only act when scraped data exists
+            scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+            scraped_eps = scraped.get('episodes', {})
+            if not scraped_eps:
+                continue  # no scraped data → separate problem category
+
+            show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+            s_pad = show_obj.get('S_pad_width', 2) or 2
+            e_pad = show_obj.get('E_pad_width', 2) or 2
+
+            filepath = obj.get('file', '')
+            if not filepath:
+                continue
+            filename = os.path.basename(filepath)
+
+            s_idx = obj.get('S_idx', 0) or 0
+            e_idx = obj.get('E_idx', 0) or 0
+            s_str = obj.get('S_str', f'S{s_idx:02d}')
+
+            # Determine the correct E number from scraped data.
+            # scraped_E_str is set when Plex and scraped explicitly disagree,
+            # but the abs-numbering-hint logic may have suppressed it. Always
+            # do our own positional lookup to be sure.
+            correct_e = _get_correct_e_num(show_key, s_str, key)
+            if correct_e is None:
+                # More Plex episodes than scraped for this season — can't determine
+                correct_e = e_idx  # fall back to Plex's own number
+            expected = f"S{s_idx:0{s_pad}d}E{correct_e:0{e_pad}d}"
+
+            # Extract current S0xE0x from filename
+            m = PLEX_Media._RE_SXEX.search(filename)
+            if not m:
+                # No S0xE0x prefix in filename
+                flagged_by_show.setdefault(show_key, []).append(
+                    (key, obj, '(none)', expected, filepath, 'no S0xE0x in filename'))
+                if show_key not in show_meta:
+                    show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
+                continue
+
+            file_s = int(m.group(1))
+            file_e = int(m.group(2))
+
+            if file_s != s_idx or file_e != correct_e:
+                current = f"S{file_s:0{s_pad}d}E{file_e:0{e_pad}d}"
+                reason = 'filename disagrees with scraped data'
+                if file_e != correct_e and file_s == s_idx:
+                    reason = f'E{file_e} should be E{correct_e}'
+                elif file_s != s_idx and file_e == correct_e:
+                    reason = f'S{file_s} should be S{s_idx}'
+                flagged_by_show.setdefault(show_key, []).append(
+                    (key, obj, current, expected, filepath, reason))
+                if show_key not in show_meta:
+                    show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
+
+        total = sum(len(v) for v in flagged_by_show.values())
+        if not total:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No renumber candidates{scope} found.")
+            return 0
+
+        # Print output — summarized by default, details with -V
+        if VRB:
+            for show_key in sorted(flagged_by_show, key=lambda k: (show_meta[k][1].lower(), show_meta[k][0].lower())):
+                series_title, lib = show_meta[show_key]
+                eps = flagged_by_show[show_key]
+                print(f"\n  {show_key:<20}  [{lib}]  {series_title}  ({len(eps)} episode(s))")
+                for ep_key, ep_obj, current, expected, fp, reason in sorted(eps, key=lambda x: (x[1].get('S_idx', 0), x[1].get('E_idx', 0))):
+                    fn = os.path.basename(fp)
+                    print(f"    {ep_key:<20}  current: {current}  expected: {expected}  ({reason})")
+                    print(f"    {'':20}  file: {fn}")
+        else:
+            for show_key in sorted(flagged_by_show, key=lambda k: (show_meta[k][1].lower(), show_meta[k][0].lower())):
+                series_title, lib = show_meta[show_key]
+                eps = flagged_by_show[show_key]
+                print(f"  {show_key:<20}  [{lib}]  {series_title:<40}  {len(eps)} episode(s)")
+
+        print(f"\n  Total: {total} renumber candidate(s) across {len(flagged_by_show)} show(s)")
+        return total
+
+    @staticmethod
+    def _list_renumber_lack_of_data(obj_keys, library_name=None):
+        """List shows whose episodes have no scraped data — can't determine correct numbering.
+        Returns count of episodes without scraped data."""
+        # {show_key: count}
+        shows_no_data = {}
+        show_meta = {}
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type', '') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
+            show_key = obj.get('show_key', '')
+            if not show_key:
+                continue
+            scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+            if scraped.get('episodes'):
+                continue  # has scraped data → not this category
+            shows_no_data[show_key] = shows_no_data.get(show_key, 0) + 1
+            if show_key not in show_meta:
+                show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
+
+        total = sum(shows_no_data.values())
+        if not total:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No renumber lack-of-data issues{scope} found.")
+            return 0
+
+        if VRB:
+            for show_key in sorted(shows_no_data, key=lambda k: (show_meta[k][1].lower(), show_meta[k][0].lower())):
+                series_title, lib = show_meta[show_key]
+                count = shows_no_data[show_key]
+                print(f"  {show_key:<20}  [{lib}]  {series_title:<40}  {count} episode(s) — no scraped data")
+        else:
+            print(f"  {len(shows_no_data)} show(s), {total} episode(s) without scraped data")
+
+        print(f"\n  Total: {total} episode(s) across {len(shows_no_data)} show(s) without scraped data")
+        return total
+
+    @staticmethod
+    def _list_renumber_season_mismatch(obj_keys, library_name=None):
+        """List episodes where S-number in filename doesn't match the season directory.
+        Returns count of mismatched episodes."""
+        flagged = []  # [(ep_key, show_key, filename_s, dir_s, filepath)]
+        show_meta = {}
+
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type', '') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
+            filepath = obj.get('file', '')
+            if not filepath:
+                continue
+            filename = os.path.basename(filepath)
+            season_dir = os.path.basename(os.path.dirname(filepath))
+
+            # Extract S number from filename
+            m = PLEX_Media._RE_SXEX.search(filename)
+            if not m:
+                continue  # no S0xE0x → different problem category
+            file_s = int(m.group(1))
+
+            # Extract season number from directory name (e.g., "Season 03" → 3)
+            dir_m = re.search(r'(\d+)', season_dir)
+            if not dir_m:
+                continue  # no number in dir name → can't compare
+            dir_s = int(dir_m.group(1))
+
+            if file_s != dir_s:
+                show_key = obj.get('show_key', '')
+                flagged.append((key, show_key, file_s, dir_s, filepath))
+                if show_key not in show_meta:
+                    show_meta[show_key] = (obj.get('series', show_key), obj.get('library', '?'))
+
+        if not flagged:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No renumber season-mismatch issues{scope} found.")
+            return 0
+
+        # Group by show
+        by_show = {}
+        for ep_key, show_key, file_s, dir_s, fp in flagged:
+            by_show.setdefault(show_key, []).append((ep_key, file_s, dir_s, fp))
+
+        if VRB:
+            for show_key in sorted(by_show, key=lambda k: (show_meta.get(k, ('', ''))[1].lower(), show_meta.get(k, ('', ''))[0].lower())):
+                series_title, lib = show_meta.get(show_key, (show_key, '?'))
+                eps = by_show[show_key]
+                print(f"\n  {show_key:<20}  [{lib}]  {series_title}  ({len(eps)} episode(s))")
+                for ep_key, file_s, dir_s, fp in eps:
+                    fn = os.path.basename(fp)
+                    print(f"    {ep_key:<20}  filename S{file_s:02d} vs directory S{dir_s:02d}  file: {fn}")
+        else:
+            total_shows = len(by_show)
+            print(f"  {total_shows} show(s), {len(flagged)} episode(s) with season mismatch")
+
+        print(f"\n  Total: {len(flagged)} episode(s) across {len(by_show)} show(s) with season mismatch")
+        return len(flagged)
+
+    @staticmethod
+    def _list_renumber_abs_mismatch(obj_keys, library_name=None):
+        """List episodes where Plex's abs ordering disagrees with scraped data ordering.
+        Compares positional ordering: if Plex E_idx sequence within a season doesn't
+        match scraped episode number sequence. Returns count of mismatched episodes."""
+        flagged_by_show = {}
+        show_meta = {}
+
+        # Collect shows from obj_keys
+        show_keys_seen = set()
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type', '') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            show_key = obj.get('show_key', '')
+            if show_key and show_key not in show_keys_seen:
+                show_keys_seen.add(show_key)
+                show_obj = PLEX_Media.OBJ_BY_ID.get(show_key, {})
+                show_meta[show_key] = (show_obj.get('title', show_key), show_obj.get('library', '?'))
+
+        for show_key in show_keys_seen:
+            scraped = PLEX_Media.OBJ_BY_SHOW_SCRAPED.get(show_key, {})
+            scraped_eps = scraped.get('episodes', {})
+            if not scraped_eps:
+                continue  # no scraped data → different category
+
+            ep_data = PLEX_Media.OBJ_BY_SHOW_EPISODES.get(show_key, {})
+            for s_str in sorted(ep_data.keys()):
+                scraped_season = scraped_eps.get(s_str, {})
+                if not scraped_season:
+                    continue
+                # Scraped episode numbers in order
+                scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys())
+                # Plex episodes in E_idx order
+                plex_e_idxs = []
+                plex_ep_keys = []
+                for e_str in sorted(ep_data[s_str].keys()):
+                    for _ver, ep_keys in ep_data[s_str][e_str].items():
+                        for ep_key in ep_keys:
+                            ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                            if not ep_obj:
+                                continue
+                            if PLEX_Media._is_multi_ep_non_leader(ep_key, ep_obj):
+                                continue
+                            plex_e_idxs.append(ep_obj.get('E_idx', 0))
+                            plex_ep_keys.append(ep_key)
+
+                # Compare positionally: plex_e_idxs[i] vs scraped_e_nums[i]
+                for i, (plex_e, ep_key) in enumerate(zip(plex_e_idxs, plex_ep_keys)):
+                    if i >= len(scraped_e_nums):
+                        break  # more Plex episodes than scraped
+                    scraped_e = scraped_e_nums[i]
+                    if plex_e != scraped_e:
+                        flagged_by_show.setdefault(show_key, []).append(
+                            (ep_key, s_str, plex_e, scraped_e))
+
+        total = sum(len(v) for v in flagged_by_show.values())
+        if not total:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No renumber absolute-numbering-mismatch issues{scope} found.")
+            return 0
+
+        if VRB:
+            for show_key in sorted(flagged_by_show, key=lambda k: (show_meta.get(k, ('', ''))[1].lower(), show_meta.get(k, ('', ''))[0].lower())):
+                series_title, lib = show_meta.get(show_key, (show_key, '?'))
+                eps = flagged_by_show[show_key]
+                print(f"\n  {show_key:<20}  [{lib}]  {series_title}  ({len(eps)} episode(s))")
+                for ep_key, s_str, plex_e, scraped_e in eps:
+                    print(f"    {ep_key:<20}  {s_str}: Plex E{plex_e} vs Scraped E{scraped_e}")
+        else:
+            print(f"  {len(flagged_by_show)} show(s), {total} episode(s) with absolute numbering mismatch")
+
+        print(f"\n  Total: {total} episode(s) across {len(flagged_by_show)} show(s) with absolute numbering mismatch")
+        return total
 
     @staticmethod
     def _parse_filter_sub_expr(sub_expr):
@@ -16858,7 +17248,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
@@ -17678,6 +18068,70 @@ def main_print_help(args, remaining_args, main_parser):
             print("  the group). Labeling operations (--mark / --force) apply to the")
             print("  single shared file — non-leader siblings are skipped so the file")
             print("  isn't renamed twice.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'renumber':
+            print()
+            print("=" * 76)
+            print("RENUMBER HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --renumber [LIBRARY]")
+            print("       my-plex <SHOW|SEASON|EPISODE> --renumber")
+            print("       my-plex --renumber --fix [--try]")
+            print("       my-plex <SHOW|SEASON|EPISODE> --renumber --fix [--try]")
+            print()
+            print("Lists episodes whose filename has incorrect S0xE0x numbering.")
+            print("Scraped data (TMDB / TVDB / fernsehserien.de) is the ground truth")
+            print("for correct episode numbering.")
+            print()
+            print("DETECTION (read-only):")
+            print("  (a)  No S0xE0x prefix in filename at all")
+            print("  (b)  Filename S0xE0x disagrees with scraped data numbering")
+            print()
+            print("  Default output:  one summary line per show (count of candidates)")
+            print("  With -V:         per-episode details (current vs expected, filename)")
+            print()
+            print("MODES:")
+            print()
+            print("  --renumber           List renumber candidates (read-only).")
+            print()
+            print("  --renumber --fix     Rename files to correct S0xE0x numbering.")
+            print("                       Only acts on episodes WITH scraped data.")
+            print("                       [NOT YET IMPLEMENTED — coming soon]")
+            print()
+            print("  --renumber --fix --try")
+            print("                       Dry-run of --fix: show what WOULD be renamed,")
+            print("                       without writing anything.")
+            print()
+            print("RELATED PROBLEM CATEGORIES (shown in --problems):")
+            print()
+            print("  Renumber: Lack of Data")
+            print("    Episodes without scraped data — can't determine correct numbering.")
+            print("    Detection only; no --fix available yet.")
+            print()
+            print("  Renumber: Season Mismatch")
+            print("    S-number in filename doesn't match the season directory.")
+            print("    Detection only; no --fix available yet.")
+            print()
+            print("  Renumber: Absolute Numbering Mismatch")
+            print("    Plex's absolute episode ordering disagrees with scraped data ordering.")
+            print("    Detection only; no --fix available yet.")
+            print()
+            print("SCOPE:")
+            print("  my-plex --renumber                # all libraries")
+            print("  my-plex --renumber series.en      # one library")
+            print("  my-plex Show:5191 --renumber      # one show")
+            print("  my-plex Season:5192 --renumber    # one season")
+            print("  my-plex Episode:2579 --renumber   # one episode")
+            print()
+            print("MULTI-EPISODE FILES:")
+            print("  Plex multi-episode files (e.g. S07E15-E16 in a single file) have")
+            print("  multiple episode rows pointing at one file. --renumber evaluates each")
+            print("  file exactly once, under the leader episode (lowest E number in")
+            print("  the group). Non-leader siblings are skipped.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -23964,6 +24418,24 @@ def execute_global_commands(args, cmd_args):
             )
         return
 
+    # Handle --renumber [LIBRARY]: list episodes with incorrect S0xE0x; --fix renames files
+    renumber_val = safe_getattr(cmd_args, 'renumber', None)
+    if renumber_val is not None:
+        library_name = None if renumber_val is True else renumber_val
+        media_type   = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys     = collect_library_keys(library_name=library_name, media_type=media_type)
+        scope        = f" in '{library_name}'" if library_name else ""
+        fix_mode = safe_getattr(cmd_args, 'fix', False)
+        dry_run  = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+
+        print(f"\n--- Renumber Candidates{scope} ---")
+        PLEX_Media._list_renumber_candidates(obj_keys, library_name)
+
+        if fix_mode:
+            pfx = "[DRY-RUN] " if dry_run else ""
+            print(f"\n--- {pfx}Renumber --fix is not yet implemented (coming in a future commit) ---")
+        return
+
     # Handle --list/--filter, --duplicates, --broken, or --excess-versions (all automatically enable --list)
     # Skip when --broken is used with --update-cache (rescan mode, not display mode)
     excess_versions = safe_getattr(cmd_args, 'excess_versions', None)
@@ -24173,7 +24645,7 @@ def main():
     # Normalize: --<option> --help  →  --help <option>
     # Allows `my-plex --reencode --help` as a synonym for `my-plex --help reencode`.
     _OPTION_TO_HELP_TOPIC = {
-        '--reencode': 'reencode', '--problems': 'problems', '--broken': 'broken',
+        '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--potential-mismatch': 'potential-mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
@@ -24475,8 +24947,10 @@ def main():
     main_parser.add_argument('--potential-mismatch', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='TARGET', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -24537,6 +25011,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
+    GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='LIBRARY', nargs='?', const=True, default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files.")
+    GLOBAL_CMD_PARSER.add_argument('--fix', action='store_true', default=False, help="With --renumber: rename episode files to correct numbering (scraped data = ground truth). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
     GLOBAL_CMD_PARSER.add_argument('--resolve', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in --duplicates
     GLOBAL_CMD_PARSER.add_argument('--type', metavar='TYPE', type=str.lower,
@@ -24908,11 +25384,25 @@ def main():
             else:
                 remaining_args.insert(0, '--reencode')
 
-    # Re-inject --detect and --mark into remaining_args (both are simple bool flags)
+    # Re-inject --renumber into remaining_args
+    # Same pattern as --reencode: supports --renumber [LIBRARY], <PLEXOBJ> --renumber, bare
+    if safe_getattr(args, 'renumber', None) is not None:
+        if args.renumber is not True:
+            remaining_args.insert(0, '--renumber')
+            remaining_args.insert(1, args.renumber)
+        else:
+            if args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append('--renumber')
+            else:
+                remaining_args.insert(0, '--renumber')
+
+    # Re-inject --detect, --mark, --fix into remaining_args (simple bool flags)
     if safe_getattr(args, 'detect', False):
         remaining_args.append('--detect')
     if safe_getattr(args, 'mark', False):
         remaining_args.append('--mark')
+    if safe_getattr(args, 'fix', False):
+        remaining_args.append('--fix')
 
     # Re-inject --source into remaining_args so it reaches obj_parser or GLOBAL_CMD_PARSER
     if safe_getattr(args, 'source', None):
@@ -24979,7 +25469,8 @@ def main():
     # Re-inject --dry-run into remaining_args
     if safe_getattr(args, 'dry_run', False) and '--dry-run' not in remaining_args:
         if safe_getattr(args, 'rename', None) is not None or (
-                safe_getattr(args, 'reencode', None) is not None and args.CMD_OR_PLEXOBJECT is not None):
+                safe_getattr(args, 'reencode', None) is not None and args.CMD_OR_PLEXOBJECT is not None) or (
+                safe_getattr(args, 'renumber', None) is not None and args.CMD_OR_PLEXOBJECT is not None):
             remaining_args.append('--dry-run')  # append after PLEXOBJECT (like --rename)
         else:
             remaining_args.insert(0, '--dry-run')  # global command (--sort-new)
