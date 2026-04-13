@@ -1181,7 +1181,7 @@ COMMANDS:
       --force-tsv          Re-scrape all episode TSV files (use with --update-cache)
       --verify-cache       Verify cache consistency with server
   --list-libraries         List all Plex libraries with stats
-  --list [EXPR]            List / filter media  (EXPR: bitrate<2, type:movie, …)
+  --list [SCOPE]           List / filter media  (SCOPE: bitrate<2, type:movie, …)
   --watched / --unwatched  List watched / unwatched items  (shortcut for watched:yes/no)
   --duplicates             List duplicate items
   --info [ID]              System info, or detailed info for an item / title
@@ -17789,7 +17789,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("      --force-tsv          Re-scrape all episode TSV files (use with -U)")
             print("      --verify-cache       Verify cache consistency with server")
             print("  --list-libraries         List all Plex libraries with stats")
-            print("  --list [EXPR]            List / filter media")
+            print("  --list [SCOPE]           List / filter media")
             print("  --watched / --unwatched  List watched / unwatched items  (shortcut for watched:yes/no)")
             print("  --duplicates             List duplicate items")
             print("  --info [ID]              System info, or detailed info for an item / title")
@@ -18237,8 +18237,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("LIST / FILTER HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex [<scope>] --list [EXPR] [OPTIONS]")
-            print("       my-plex [<scope>] --filter [EXPR] [OPTIONS]   ← same as --list")
+            print("Usage: my-plex [SCOPE] --list [OPTIONS]")
+            print("       my-plex [SCOPE] --filter [OPTIONS]   ← same as --list")
             print("       my-plex 'EXPR'                                 ← auto-detects --list")
             print()
             print("--list and --filter are synonyms.")
