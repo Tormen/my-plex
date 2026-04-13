@@ -665,6 +665,49 @@ CONFIG_DEFAULTS = {
     # List of tuples: (library_name, 2-letter ISO 639-1 language code).
     # Items in listed libraries auto-select this language without prompting.
     'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY': [],
+
+    # --info field visibility per type and verbosity level.
+    # Each type has three keys: 'type' (default), 'type.v' (-V), 'type.vv' (-VV).
+    # Fields in 'type' are always shown. Fields in 'type.v' are added with -V.
+    # Fields in 'type.vv' are added with -VV. All three levels are cumulative.
+    #
+    # Type alias: set a type to a string (e.g. 'series': 'movie') to reuse
+    # another type's field lists for all three verbosity levels.
+    #
+    # Available fields:
+    #   Key, Type, Title, Library, Year, Series, Season, Episode,
+    #   Match, OriginalTitle, ContentRating, Rating, Genres, Studio,
+    #   File, Size, Duration, Resolution, Video, Audio, Bitrate,
+    #   AudioLanguage, Subtitles, Actors, Directors, Writers, Countries,
+    #   Summary, Added, Updated, Labels, Duplicates, BROKEN,
+    #   ScrapedData, SeasonTable, EpisodeTable, EpisodeFile
+    'INFO_FIELDS': {
+        'movie':      ['Key', 'Type', 'Title', 'Library', 'Year',
+                       'OriginalTitle', 'ContentRating', 'Rating', 'Genres', 'Studio',
+                       'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
+                       'Duplicates', 'Labels', 'BROKEN'],
+        'movie.v':    ['Match', 'Resolution', 'Video', 'Audio', 'Bitrate',
+                       'Actors', 'Directors', 'Writers', 'Countries', 'Summary',
+                       'Added', 'Updated'],
+        'movie.vv':   [],
+        'series':     'movie',
+        'series.v':   'movie.v',
+        'series.vv':  'movie.vv',
+        'season':     ['Key', 'Type', 'Title', 'Library', 'Series', 'Season',
+                       'File', 'Size', 'Labels'],
+        'season.v':   'movie.v',
+        'season.vv':  'movie.vv',
+        'episode':    ['Key', 'Type', 'Title', 'Library', 'Series', 'Episode',
+                       'OriginalTitle', 'ContentRating', 'Rating', 'Genres',
+                       'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
+                       'Duplicates', 'Labels', 'BROKEN'],
+        'episode.v':  'movie.v',
+        'episode.vv': 'movie.vv',
+        # Series-only structural fields (always shown regardless of alias):
+        '_series_extra':  ['ScrapedData', 'SeasonTable'],
+        '_series_extra.v':  ['EpisodeTable'],
+        '_series_extra.vv': ['EpisodeFile'],
+    },
 }
 
 # ISO 639-1 (2-letter) to ISO 639-2 (3-letter) language code mapping.
@@ -758,6 +801,63 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}
 # DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}
 # PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}
+
+###############################################################################
+# --info Field Visibility (INFO_FIELDS)
+###############################################################################
+
+# Controls which fields are shown in --info output per type and verbosity level.
+# Three levels per type: 'type' (default), 'type.v' (-V), 'type.vv' (-VV).
+# Levels are cumulative: -V shows default + .v fields, -VV shows all three.
+#
+# Type alias: set a type to a string to reuse another type's field list.
+# Example: 'series': 'movie' means series uses movie's field lists.
+#
+# Available fields:
+#   Key, Type, Title, Library, Year, Series, Season, Episode,
+#   Match, OriginalTitle, ContentRating, Rating, Genres, Studio,
+#   File, Size, Duration, Resolution, Video, Audio, Bitrate,
+#   AudioLanguage, Subtitles, Actors, Directors, Writers, Countries,
+#   Summary, Added, Updated, Labels, Duplicates, BROKEN,
+#   ScrapedData, SeasonTable, EpisodeTable, EpisodeFile
+#
+# INFO_FIELDS = {{
+#     # Movie: default fields
+#     'movie':      ['Key', 'Type', 'Title', 'Library', 'Year',
+#                    'OriginalTitle', 'ContentRating', 'Rating', 'Genres', 'Studio',
+#                    'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
+#                    'Duplicates', 'Labels', 'BROKEN'],
+#     # Movie: additional fields with -V
+#     'movie.v':    ['Match', 'Resolution', 'Video', 'Audio', 'Bitrate',
+#                    'Actors', 'Directors', 'Writers', 'Countries', 'Summary',
+#                    'Added', 'Updated'],
+#     # Movie: additional fields with -VV
+#     'movie.vv':   [],
+#
+#     # Series: reuse movie's field lists (alias)
+#     'series':     'movie',
+#     'series.v':   'movie.v',
+#     'series.vv':  'movie.vv',
+#
+#     # Season: minimal fields
+#     'season':     ['Key', 'Type', 'Title', 'Library', 'Series', 'Season',
+#                    'File', 'Size', 'Labels'],
+#     'season.v':   'movie.v',
+#     'season.vv':  'movie.vv',
+#
+#     # Episode: includes Series + Episode fields
+#     'episode':    ['Key', 'Type', 'Title', 'Library', 'Series', 'Episode',
+#                    'OriginalTitle', 'ContentRating', 'Rating', 'Genres',
+#                    'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
+#                    'Duplicates', 'Labels', 'BROKEN'],
+#     'episode.v':  'movie.v',
+#     'episode.vv': 'movie.vv',
+#
+#     # Series-only structural fields (always additive, not overridden by alias):
+#     '_series_extra':    ['ScrapedData', 'SeasonTable'],
+#     '_series_extra.v':  ['EpisodeTable'],
+#     '_series_extra.vv': ['EpisodeFile'],
+# }}
 # VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}
 
 ###############################################################################
@@ -1110,6 +1210,9 @@ ONDISK_LABEL_END_MARKER   = CONFIG_DEFAULTS.get('ONDISK_LABEL_END_MARKER', ']')
 
 # Problems-to-disk config (see CONFIG_DEFAULTS for structure)
 PROBLEMS2DISK = CONFIG_DEFAULTS.get('PROBLEMS2DISK', {})
+
+# --info field visibility (see CONFIG_DEFAULTS for structure and available fields)
+INFO_FIELDS = CONFIG_DEFAULTS['INFO_FIELDS']
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
@@ -19223,12 +19326,27 @@ def main_print_help(args, remaining_args, main_parser):
             print("If title search fails, automatically searches directory names")
             print("(catches Plex mismatches where the Plex title doesn't match the folder).")
             print()
+            print("VERBOSITY LEVELS:")
+            print("  (default)  Key, Type, Title, Library, Year, OriginalTitle, ContentRating,")
+            print("             Rating, Genres, Studio, File, Size, Duration, AudioLanguage,")
+            print("             Subtitles, Duplicates, Labels, BROKEN")
+            print("  -V         + Match, Resolution, Video, Audio, Bitrate, Actors, Directors,")
+            print("             Writers, Countries, Summary, Added, Updated, EpisodeTable")
+            print("  -VV        + EpisodeFile (FILE column in episode table)")
+            print()
+            print("CUSTOMIZATION:")
+            print("  Field visibility is configurable per type via INFO_FIELDS in ~/.my-plex.conf.")
+            print("  Each type (movie, series, season, episode) can define its own field list")
+            print("  at three levels: default, .v (-V), .vv (-VV). Levels are cumulative.")
+            print("  Use type aliases to share field lists: 'series': 'movie'")
+            print()
             print("EXAMPLES:")
             print()
             print("  my-plex --info                         # System overview")
             print("  my-plex --info 'Tagesschau'            # Search by title")
             print("  my-plex --info Series:4925               # Exact cache key lookup")
-            print("  my-plex --info Series:4925 -V            # Verbose: show all episodes")
+            print("  my-plex --info Series:4925 -V            # Verbose: all metadata + episodes")
+            print("  my-plex --info Series:4925 -VV           # Very verbose: + file paths")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -24759,53 +24877,97 @@ def resolve_cache_items(identifier):
     return found_items
 
 
-def _print_item_ratings(obj):
-    """Print rating & metadata fields for a single item (Movie, Series, Episode)."""
-    obj_type = obj.get('type')
-    original_title = obj.get('originalTitle', '')
-    if original_title and original_title != obj.get('title', ''):
-        print(f"Original Title:\t{original_title}")
-    content_rating = obj.get('contentRating')
-    if content_rating:
-        print(f"Content Rating:\t{content_rating}")
-    # Ratings line: combine all available ratings on one line
-    ratings_parts = []
-    critics = obj.get('criticsRating')
-    if critics is not None:
-        ratings_parts.append(f"Critics: {critics:.1f}/10")
-    audience = obj.get('audienceRating')
-    if audience is not None:
-        ratings_parts.append(f"Audience: {audience:.1f}/10")
-    user_rating = obj.get('userRating')
-    if user_rating is not None and user_rating > 0:
-        stars = user_rating / 2  # Plex stores 0-10, display as 0-5 stars
-        full = int(stars)
-        half = '½' if stars - full >= 0.5 else ''
-        ratings_parts.append(f"Personal: {'★' * full}{half}{'☆' * (5 - full - (1 if half else 0))} ({user_rating:.1f}/10)")
-    if ratings_parts:
-        print(f"Rating:\t{' | '.join(ratings_parts)}")
-    # Genres (always shown if available)
-    genres = obj.get('genres', [])
-    if genres:
-        print(f"Genres:\t{', '.join(genres)}")
-    # Studio (always shown for Movie/Series)
-    studio = obj.get('studio')
-    if studio and obj_type in ('Movie', 'Series'):
-        print(f"Studio:\t{studio}")
-    # Verbose (-V): show all remaining metadata fields
+def _resolve_info_fields(obj_type):
+    """Resolve visible fields for --info output based on INFO_FIELDS config and verbosity.
+
+    Returns a set of field names that should be displayed for the given object type
+    at the current verbosity level. Handles type aliases (e.g. 'series': 'movie')
+    and series-specific structural fields.
+    """
+    fields = INFO_FIELDS
+    type_key = obj_type.lower()  # 'movie', 'series', 'episode', 'season'
+
+    def _resolve_list(key):
+        """Resolve a config key, following string aliases."""
+        val = fields.get(key, [])
+        seen = set()
+        while isinstance(val, str):
+            if val in seen:
+                break  # circular alias protection
+            seen.add(val)
+            val = fields.get(val, [])
+        return list(val) if val else []
+
+    # Cumulative: default + optionally .v + optionally .vv
+    visible = set(_resolve_list(type_key))
     if VRB:
+        visible.update(_resolve_list(f'{type_key}.v'))
+    if VERYVRB:
+        visible.update(_resolve_list(f'{type_key}.vv'))
+
+    # Series-specific structural fields (always additive, not overridden by alias)
+    if type_key == 'series':
+        visible.update(_resolve_list('_series_extra'))
+        if VRB:
+            visible.update(_resolve_list('_series_extra.v'))
+        if VERYVRB:
+            visible.update(_resolve_list('_series_extra.vv'))
+
+    return visible
+
+
+def _print_item_ratings(obj, visible):
+    """Print rating & metadata fields for a single item, controlled by visible field set."""
+    obj_type = obj.get('type')
+    if 'OriginalTitle' in visible:
+        original_title = obj.get('originalTitle', '')
+        if original_title and original_title != obj.get('title', ''):
+            print(f"Original Title:\t{original_title}")
+    if 'ContentRating' in visible:
+        content_rating = obj.get('contentRating')
+        if content_rating:
+            print(f"Content Rating:\t{content_rating}")
+    if 'Rating' in visible:
+        ratings_parts = []
+        critics = obj.get('criticsRating')
+        if critics is not None:
+            ratings_parts.append(f"Critics: {critics:.1f}/10")
+        audience = obj.get('audienceRating')
+        if audience is not None:
+            ratings_parts.append(f"Audience: {audience:.1f}/10")
+        user_rating = obj.get('userRating')
+        if user_rating is not None and user_rating > 0:
+            stars = user_rating / 2  # Plex stores 0-10, display as 0-5 stars
+            full = int(stars)
+            half = '½' if stars - full >= 0.5 else ''
+            ratings_parts.append(f"Personal: {'★' * full}{half}{'☆' * (5 - full - (1 if half else 0))} ({user_rating:.1f}/10)")
+        if ratings_parts:
+            print(f"Rating:\t{' | '.join(ratings_parts)}")
+    if 'Genres' in visible:
+        genres = obj.get('genres', [])
+        if genres:
+            print(f"Genres:\t{', '.join(genres)}")
+    if 'Studio' in visible:
+        studio = obj.get('studio')
+        if studio and obj_type in ('Movie', 'Series'):
+            print(f"Studio:\t{studio}")
+    if 'Actors' in visible:
         actors = obj.get('actors', [])
         if actors:
             print(f"Actors:\t{', '.join(actors)}")
+    if 'Directors' in visible:
         directors = obj.get('directors', [])
         if directors:
             print(f"Directors:\t{', '.join(directors)}")
+    if 'Writers' in visible:
         writers = obj.get('writers', [])
         if writers:
             print(f"Writers:\t{', '.join(writers)}")
+    if 'Countries' in visible:
         countries = obj.get('countries', [])
         if countries:
             print(f"Countries:\t{', '.join(countries)}")
+    if 'Summary' in visible:
         summary = obj.get('summary', '')
         if summary:
             print(f"Summary:\t{summary}")
@@ -24858,263 +25020,264 @@ def show_item_info(identifier, table_only=False):
 
     # Single result: show detailed info
     key, obj = found_items[0]
+    obj_type = obj.get('type')
+    visible = _resolve_info_fields(obj_type or 'movie')
 
     # Basic info
-    print(f"Key:\t{key}")
-    print(f"Type:\t{obj.get('type', 'Unknown')}")
-    print(f"Title:\t{obj.get('title', 'N/A')}")
-    plex_id = obj.get('id', 'N/A')
-    item_id = obj.get('item_id')
-    if plex_id != item_id:
-        print(f"Plex ID:\t{plex_id}")
-        print(f"Item ID:\t{item_id}")
-    print(f"Library:\t{obj.get('library', 'N/A')}")
+    if 'Key' in visible:
+        print(f"Key:\t{key}")
+    if 'Type' in visible:
+        print(f"Type:\t{obj.get('type', 'Unknown')}")
+    if 'Title' in visible:
+        print(f"Title:\t{obj.get('title', 'N/A')}")
+        plex_id = obj.get('id', 'N/A')
+        item_id = obj.get('item_id')
+        if plex_id != item_id:
+            print(f"Plex ID:\t{plex_id}")
+            print(f"Item ID:\t{item_id}")
+    if 'Library' in visible:
+        print(f"Library:\t{obj.get('library', 'N/A')}")
 
     # Match status (guid) — highlight unmatched items
-    guid = obj.get('guid', '')
-    if guid.startswith('local://'):
-        print(f"Match:\t⚠ UNMATCHED (local://) — use Fix Match in Plex to identify this item")
-    elif guid:
-        ext_ids = obj.get('external_ids', {})
-        if ext_ids:
-            ids_str = ', '.join(f"{k.upper()}:{v}" for k, v in ext_ids.items())
-            print(f"Match:\t{ids_str}")
-        else:
-            print(f"Match:\t⚠ Matched but no external IDs — rematch in Plex recommended")
+    if 'Match' in visible:
+        guid = obj.get('guid', '')
+        if guid.startswith('local://'):
+            print(f"Match:\t⚠ UNMATCHED (local://) — use Fix Match in Plex to identify this item")
+        elif guid:
+            ext_ids = obj.get('external_ids', {})
+            if ext_ids:
+                ids_str = ', '.join(f"{k.upper()}:{v}" for k, v in ext_ids.items())
+                print(f"Match:\t{ids_str}")
+            else:
+                print(f"Match:\t⚠ Matched but no external IDs — rematch in Plex recommended")
 
     # Type-specific info
-    obj_type = obj.get('type')
     if obj_type == 'Episode':
-        print(f"Series:\t{obj.get('series', 'N/A')}")
-        # S0XE0X is the padded-per-show display id (e.g. S07E15 or S01E015).
-        # It is Plex-sourced and is the ONLY episode number shown in output.
-        # When the episode is part of a Plex multi-episode file (sNNeXX-eYY),
-        # series the collapsed "S07E15-16" form and list all sibling cache
-        # keys so --info works for both leader and non-leader queries.
-        siblings = obj.get('multi_episode_siblings') or []
-        if len(siblings) >= 2:
-            leader_obj = PLEX_Media.OBJ_BY_ID.get(siblings[0], obj)
-            ep_range = _format_episode_range(leader_obj)
-            print(f"Episode:\t{ep_range}")
-            print(f"Multi-episode file:\t{len(siblings)} siblings share one file")
-            for sk in siblings:
-                sib = PLEX_Media.OBJ_BY_ID.get(sk, {})
-                marker = '  (leader)' if sk == siblings[0] else ''
-                sib_s0xe0x = sib.get('S0XE0X', '')
-                sib_title = sib.get('title', '')
-                print(f"  {sk:<16}  {sib_s0xe0x:<10}  {sib_title}{marker}")
-        else:
-            plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
-            print(f"Episode:\t{plex_s0xe0x}")
-        # Debug-only: if Plex and the scraped source disagree on numbering, show
-        # the scraped form too so users can see the discrepancy on demand.
-        if DBG:
-            scraped_e = obj.get('scraped_E_str', '')
-            if scraped_e:
-                print(f"Episode (Scraped):\t{obj.get('S_str', '')}{scraped_e}")
-        _print_item_ratings(obj)
+        if 'Series' in visible:
+            print(f"Series:\t{obj.get('series', 'N/A')}")
+        if 'Episode' in visible:
+            siblings = obj.get('multi_episode_siblings') or []
+            if len(siblings) >= 2:
+                leader_obj = PLEX_Media.OBJ_BY_ID.get(siblings[0], obj)
+                ep_range = _format_episode_range(leader_obj)
+                print(f"Episode:\t{ep_range}")
+                print(f"Multi-episode file:\t{len(siblings)} siblings share one file")
+                for sk in siblings:
+                    sib = PLEX_Media.OBJ_BY_ID.get(sk, {})
+                    marker = '  (leader)' if sk == siblings[0] else ''
+                    sib_s0xe0x = sib.get('S0XE0X', '')
+                    sib_title = sib.get('title', '')
+                    print(f"  {sk:<16}  {sib_s0xe0x:<10}  {sib_title}{marker}")
+            else:
+                plex_s0xe0x = obj.get('S0XE0X', obj.get('S_str', 'S??') + obj.get('E_str', 'E??'))
+                print(f"Episode:\t{plex_s0xe0x}")
+            if DBG:
+                scraped_e = obj.get('scraped_E_str', '')
+                if scraped_e:
+                    print(f"Episode (Scraped):\t{obj.get('S_str', '')}{scraped_e}")
+        _print_item_ratings(obj, visible)
     elif obj_type == 'Season':
-        print(f"Series:\t{obj.get('series', 'N/A')}")
-        print(f"Season:\t{obj.get('S_str', 'N/A')}")
+        if 'Series' in visible:
+            print(f"Series:\t{obj.get('series', 'N/A')}")
+        if 'Season' in visible:
+            print(f"Season:\t{obj.get('S_str', 'N/A')}")
     elif obj_type == 'Series':
-        year = obj.get('year', 0)
-        if year and year > 0:
-            print(f"Year:\t{year}")
-        _print_item_ratings(obj)
+        if 'Year' in visible:
+            year = obj.get('year', 0)
+            if year and year > 0:
+                print(f"Year:\t{year}")
+        _print_item_ratings(obj, visible)
 
         # TSV episode data summary (from episodes.tsv on disk)
-        series_dir_server = obj.get('file', '')
-        if series_dir_server:
-            series_dir = get_local_path(series_dir_server)
-            tsv_path = get_episodes_tsv_path(series_dir)
-            tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
-            if tsv_meta:
-                tsv_source = tsv_meta.get('source', '')
-                tsv_slug = tsv_meta.get('slug', '')
-                tsv_series_id = tsv_meta.get('series_id', '')
-                tsv_updated = tsv_meta.get('updated', '')
-                tsv_ep_count = len(tsv_episodes) if tsv_episodes else 0
-                tsv_seasons = set()
-                if tsv_episodes:
-                    for ep in tsv_episodes:
-                        tsv_seasons.add(ep.get('season', 0))
-                tsv_seasons_str = len(tsv_seasons)
-                print(f"\nScraped Data (episodes.tsv):")
-                print(f"  Source:\t{tsv_source}")
-                if tsv_slug:
-                    print(f"  Slug:\t\t{tsv_slug}")
-                if tsv_series_id:
-                    print(f"  Show ID:\t{tsv_series_id}")
-                print(f"  Episodes:\t{tsv_ep_count} in {tsv_seasons_str} season(s)")
-                if tsv_updated:
-                    print(f"  Updated:\t{tsv_updated}")
-                print(f"  Path:\t\t{tsv_path}")
-            elif series_dir and os.path.isdir(series_dir):
-                print(f"\nScraped Data:\tNo episodes.tsv found")
+        if 'ScrapedData' in visible:
+            series_dir_server = obj.get('file', '')
+            if series_dir_server:
+                series_dir = get_local_path(series_dir_server)
+                tsv_path = get_episodes_tsv_path(series_dir)
+                tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
+                if tsv_meta:
+                    tsv_source = tsv_meta.get('source', '')
+                    tsv_slug = tsv_meta.get('slug', '')
+                    tsv_series_id = tsv_meta.get('series_id', '')
+                    tsv_updated = tsv_meta.get('updated', '')
+                    tsv_ep_count = len(tsv_episodes) if tsv_episodes else 0
+                    tsv_seasons = set()
+                    if tsv_episodes:
+                        for ep in tsv_episodes:
+                            tsv_seasons.add(ep.get('season', 0))
+                    tsv_seasons_str = len(tsv_seasons)
+                    print(f"\nScraped Data (episodes.tsv):")
+                    print(f"  Source:\t{tsv_source}")
+                    if tsv_slug:
+                        print(f"  Slug:\t\t{tsv_slug}")
+                    if tsv_series_id:
+                        print(f"  Show ID:\t{tsv_series_id}")
+                    print(f"  Episodes:\t{tsv_ep_count} in {tsv_seasons_str} season(s)")
+                    if tsv_updated:
+                        print(f"  Updated:\t{tsv_updated}")
+                    print(f"  Path:\t\t{tsv_path}")
+                elif series_dir and os.path.isdir(series_dir):
+                    print(f"\nScraped Data:\tNo episodes.tsv found")
 
-        # Scraped info from OBJ_BY_SERIES_SCRAPED
-        scraped_data = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key, {})
-        if scraped_data:
-            scraped_title = scraped_data.get('title', '')
-            scraped_source = scraped_data.get('source', '')
-            if scraped_title:
-                print(f"Scraped Title:\t{scraped_title}")
-            if scraped_source:
-                print(f"Scraped Source:\t{scraped_source}")
-            num_issues = len(scraped_data.get('numbering_issues', []))
-            if num_issues:
-                print(f"Numbering Issues:\t{num_issues}")
+            # Scraped info from OBJ_BY_SERIES_SCRAPED
+            scraped_data = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key, {})
+            if scraped_data:
+                scraped_title = scraped_data.get('title', '')
+                scraped_source = scraped_data.get('source', '')
+                if scraped_title:
+                    print(f"Scraped Title:\t{scraped_title}")
+                if scraped_source:
+                    print(f"Scraped Source:\t{scraped_source}")
+                num_issues = len(scraped_data.get('numbering_issues', []))
+                if num_issues:
+                    print(f"Numbering Issues:\t{num_issues}")
 
         # Season table
-        series_seasons = PLEX_Media.OBJ_BY_SERIES.get(key, {})
-        series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
-        if series_seasons:
-            # Collect per-season stats
-            season_rows = []
-            for S_str in sorted(series_seasons.keys()):
-                season_key = series_seasons[S_str]
-                ep_count = 0
-                reencode_count = 0
-                broken_count = 0
-                total_filesize = 0
-                total_duration_ms = 0
-                file_count = 0
-                for e_str, versions in series_episodes.get(S_str, {}).items():
-                    for version_str, ep_keys in versions.items():
-                        for ep_key in ep_keys:
-                            ep_count += 1
-                            ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
-                            duration_ms = ep_obj.get('duration') or 0
-                            for fi in ep_obj.get('files', {}).values():
-                                filesize = fi.get('filesize') or 0
-                                # Accumulate for averages
-                                if filesize and duration_ms >= 60_000:
-                                    total_filesize += filesize
-                                    total_duration_ms += duration_ms
-                                    file_count += 1
-                                    # Reencode check
-                                    bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
-                                    fp = fi.get('filepath', '')
-                                    excluded = REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in fp for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS)
-                                    if bitrate_mbps >= REENCODE_THRESHOLD_MBPS and not excluded:
-                                        reencode_count += 1
-                                # Broken check
-                                fm = fi.get('file_metadata')
-                                if fm:
-                                    if fm.get('broken'):
-                                        broken_count += 1
-                                    elif duration_ms > 0:
-                                        cd = fm.get('container_duration')
-                                        if cd:
-                                            diff_pct = ((cd - duration_ms) / duration_ms) * 100
-                                            if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                                                vd = fm.get('video_duration')
-                                                if vd and abs(cd - vd) < 2000:
-                                                    pass
-                                                elif fm.get('file_ends_cleanly'):
-                                                    pass
-                                                else:
-                                                    broken_count += 1
-                # Compute averages
-                if file_count:
-                    avg_br = (total_filesize * 8) / (total_duration_ms / 1000) / 1_000_000
-                    avg_sz = total_filesize / file_count
-                    avg_dur = total_duration_ms / file_count
-                    fs = format_filesize(int(avg_sz)).replace(' ', '')
-                    avg_str = f"{avg_br:.1f}Mbps/{fs}/{int(avg_dur/60000)}min"
-                else:
-                    avg_str = ''
-                season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count, avg_str))
-            has_reencode = any(r[3] for r in season_rows)
-            has_broken = any(r[4] for r in season_rows)
-            has_avg = any(r[5] for r in season_rows)
-            avg_w = max((len(r[5]) for r in season_rows), default=0) if has_avg else 0
-            avg_w = max(avg_w, 3)  # min width for "AVG" header
-            hdr = f"  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}"
-            if has_avg:
-                hdr += f"  {'AVG':>{avg_w}}"
-            if has_reencode:
-                hdr += f"  {'REENCODE':>8}"
-            if has_broken:
-                hdr += f"  {'BROKEN':>8}"
-            print(f"\n{hdr}")
-            for S_str, season_key, ep_count, reencode_count, broken_count, avg_str in season_rows:
-                row = f"  {S_str:<8} {season_key:<16} {ep_count:>8}"
+        if 'SeasonTable' in visible:
+            series_seasons = PLEX_Media.OBJ_BY_SERIES.get(key, {})
+            series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
+            if series_seasons:
+                season_rows = []
+                for S_str in sorted(series_seasons.keys()):
+                    season_key = series_seasons[S_str]
+                    ep_count = 0
+                    reencode_count = 0
+                    broken_count = 0
+                    total_filesize = 0
+                    total_duration_ms = 0
+                    file_count = 0
+                    for e_str, versions in series_episodes.get(S_str, {}).items():
+                        for version_str, ep_keys in versions.items():
+                            for ep_key in ep_keys:
+                                ep_count += 1
+                                ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                                duration_ms = ep_obj.get('duration') or 0
+                                for fi in ep_obj.get('files', {}).values():
+                                    filesize = fi.get('filesize') or 0
+                                    if filesize and duration_ms >= 60_000:
+                                        total_filesize += filesize
+                                        total_duration_ms += duration_ms
+                                        file_count += 1
+                                        bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
+                                        fp = fi.get('filepath', '')
+                                        excluded = REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in fp for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS)
+                                        if bitrate_mbps >= REENCODE_THRESHOLD_MBPS and not excluded:
+                                            reencode_count += 1
+                                    fm = fi.get('file_metadata')
+                                    if fm:
+                                        if fm.get('broken'):
+                                            broken_count += 1
+                                        elif duration_ms > 0:
+                                            cd = fm.get('container_duration')
+                                            if cd:
+                                                diff_pct = ((cd - duration_ms) / duration_ms) * 100
+                                                if diff_pct < -TRUNCATION_THRESHOLD_PCT:
+                                                    vd = fm.get('video_duration')
+                                                    if vd and abs(cd - vd) < 2000:
+                                                        pass
+                                                    elif fm.get('file_ends_cleanly'):
+                                                        pass
+                                                    else:
+                                                        broken_count += 1
+                    if file_count:
+                        avg_br = (total_filesize * 8) / (total_duration_ms / 1000) / 1_000_000
+                        avg_sz = total_filesize / file_count
+                        avg_dur = total_duration_ms / file_count
+                        fs = format_filesize(int(avg_sz)).replace(' ', '')
+                        avg_str = f"{avg_br:.1f}Mbps/{fs}/{int(avg_dur/60000)}min"
+                    else:
+                        avg_str = ''
+                    season_rows.append((S_str, season_key, ep_count, reencode_count, broken_count, avg_str))
+                has_reencode = any(r[3] for r in season_rows)
+                has_broken = any(r[4] for r in season_rows)
+                has_avg = any(r[5] for r in season_rows)
+                avg_w = max((len(r[5]) for r in season_rows), default=0) if has_avg else 0
+                avg_w = max(avg_w, 3)  # min width for "AVG" header
+                hdr = f"  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}"
                 if has_avg:
-                    row += f"  {avg_str:>{avg_w}}"
+                    hdr += f"  {'AVG':>{avg_w}}"
                 if has_reencode:
-                    row += f"  {reencode_count:>8}" if reencode_count else f"  {'':>8}"
+                    hdr += f"  {'REENCODE':>8}"
                 if has_broken:
-                    row += f"  {broken_count:>8}" if broken_count else f"  {'':>8}"
-                print(row)
-
-        # Episode table (verbose only). EPISODE column shows the padded-per-show
-        # S0XE0X value (Plex-sourced), collapsed to "S07E15-16" when the
-        # episode is part of a Plex multi-episode file. FILE column is only
-        # seriesn with -VV.
-        if series_episodes and VRB:
-            all_eps = []
-            _seen_sibling_keys = set()
-            for S_str in sorted(series_episodes.keys()):
-                for E_str in sorted(series_episodes[S_str].keys()):
-                    for version_str, ep_keys in series_episodes[S_str][E_str].items():
-                        for ep_key in ep_keys:
-                            if ep_key in _seen_sibling_keys:
-                                continue
-                            ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
-                            siblings = ep.get('multi_episode_siblings') or []
-                            if len(siblings) >= 2:
-                                # Leader is the lowest E_idx sibling. Skip
-                                # non-leaders so the group renders once.
-                                if ep_key != siblings[0]:
-                                    continue
-                                _seen_sibling_keys.update(siblings)
-                                ep_range = _format_episode_range(ep)
-                                titles = [
-                                    PLEX_Media.OBJ_BY_ID.get(k, {}).get('title', '')
-                                    for k in siblings
-                                ]
-                                title = ' / '.join(t for t in titles if t)
-                            else:
-                                ep_range = ep.get('S0XE0X', f"{S_str}{E_str}")
-                                title = ep.get('title', '')
-                            ep_file = ep.get('file', '')
-                            all_eps.append((ep_range, ep_key, title, ep_file))
-            if all_eps:
-                col_ep    = max(max(len(e[0]) for e in all_eps), 7)
-                col_key   = max(max(len(e[1]) for e in all_eps), 3)
-                col_title = max(max((len(e[2]) for e in all_eps), default=5), 5)
-                hdr = f"\n   {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
-                if VERYVRB:
-                    hdr += "  FILE"
-                print(hdr)
-                for s0xe0x, ep_key, title, ep_file in all_eps:
-                    row = f"   {s0xe0x:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
-                    if VERYVRB:
-                        row += f"  {ep_file}"
+                    hdr += f"  {'BROKEN':>8}"
+                print(f"\n{hdr}")
+                for S_str, season_key, ep_count, reencode_count, broken_count, avg_str in season_rows:
+                    row = f"  {S_str:<8} {season_key:<16} {ep_count:>8}"
+                    if has_avg:
+                        row += f"  {avg_str:>{avg_w}}"
+                    if has_reencode:
+                        row += f"  {reencode_count:>8}" if reencode_count else f"  {'':>8}"
+                    if has_broken:
+                        row += f"  {broken_count:>8}" if broken_count else f"  {'':>8}"
                     print(row)
-    elif obj_type == 'Movie':
-        print(f"Year:\t{obj.get('year', 'N/A')}")
-        _print_item_ratings(obj)
 
-    # Same-library duplicate check (using multi-key matching for originalTitle)
-    dup_keys = set(generate_duplicate_keys(obj))
-    if dup_keys:
-        same_lib_dups = []
-        item_library = obj.get('library', '')
-        for other_key, other_obj in PLEX_Media.OBJ_BY_ID.items():
-            if other_key == key:
-                continue
-            if other_obj.get('library', '') != item_library:
-                continue
-            other_keys = set(generate_duplicate_keys(other_obj))
-            if dup_keys & other_keys:  # any key in common
-                same_lib_dups.append((other_key, other_obj))
-        if same_lib_dups:
-            print()
-            print(f"⚠ DUPLICATE in same library ({item_library}):")
-            for dk, dobj in same_lib_dups:
-                print(f"  {dk}  {dobj.get('title', '')}")
+        # Episode table (verbose only)
+        if 'EpisodeTable' in visible:
+            series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
+            if series_episodes:
+                all_eps = []
+                _seen_sibling_keys = set()
+                for S_str in sorted(series_episodes.keys()):
+                    for E_str in sorted(series_episodes[S_str].keys()):
+                        for version_str, ep_keys in series_episodes[S_str][E_str].items():
+                            for ep_key in ep_keys:
+                                if ep_key in _seen_sibling_keys:
+                                    continue
+                                ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                                siblings = ep.get('multi_episode_siblings') or []
+                                if len(siblings) >= 2:
+                                    if ep_key != siblings[0]:
+                                        continue
+                                    _seen_sibling_keys.update(siblings)
+                                    ep_range = _format_episode_range(ep)
+                                    titles = [
+                                        PLEX_Media.OBJ_BY_ID.get(k, {}).get('title', '')
+                                        for k in siblings
+                                    ]
+                                    title = ' / '.join(t for t in titles if t)
+                                else:
+                                    ep_range = ep.get('S0XE0X', f"{S_str}{E_str}")
+                                    title = ep.get('title', '')
+                                ep_file = ep.get('file', '')
+                                all_eps.append((ep_range, ep_key, title, ep_file))
+                if all_eps:
+                    col_ep    = max(max(len(e[0]) for e in all_eps), 7)
+                    col_key   = max(max(len(e[1]) for e in all_eps), 3)
+                    col_title = max(max((len(e[2]) for e in all_eps), default=5), 5)
+                    show_ep_file = 'EpisodeFile' in visible
+                    hdr = f"\n   {'EPISODE':<{col_ep}}  {'KEY':<{col_key}}  {'TITLE':<{col_title}}"
+                    if show_ep_file:
+                        hdr += "  FILE"
+                    print(hdr)
+                    for s0xe0x, ep_key, title, ep_file in all_eps:
+                        row = f"   {s0xe0x:<{col_ep}}  {ep_key:<{col_key}}  {title:<{col_title}}"
+                        if show_ep_file:
+                            row += f"  {ep_file}"
+                        print(row)
+    elif obj_type == 'Movie':
+        if 'Year' in visible:
+            print(f"Year:\t{obj.get('year', 'N/A')}")
+        _print_item_ratings(obj, visible)
+
+    # Same-library duplicate check
+    if 'Duplicates' in visible:
+        dup_keys = set(generate_duplicate_keys(obj))
+        if dup_keys:
+            same_lib_dups = []
+            item_library = obj.get('library', '')
+            for other_key, other_obj in PLEX_Media.OBJ_BY_ID.items():
+                if other_key == key:
+                    continue
+                if other_obj.get('library', '') != item_library:
+                    continue
+                other_keys = set(generate_duplicate_keys(other_obj))
+                if dup_keys & other_keys:
+                    same_lib_dups.append((other_key, other_obj))
+            if same_lib_dups:
+                print()
+                print(f"⚠ DUPLICATE in same library ({item_library}):")
+                for dk, dobj in same_lib_dups:
+                    print(f"  {dk}  {dobj.get('title', '')}")
 
     # File info — show all versions from 'files' dict, fall back to 'file'
     files = obj.get('files', {})
@@ -25122,64 +25285,70 @@ def show_item_info(identifier, table_only=False):
     if files:
         if len(files) == 1:
             ver, info = next(iter(files.items()))
-            print(f"File:\t{info.get('filepath', 'N/A')}")
+            if 'File' in visible:
+                print(f"File:\t{info.get('filepath', 'N/A')}")
             fs = info.get('filesize') or obj.get('filesize')
-            if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
-            # Per-file media info (only shown for single-file items)
-            if 'duration' in obj and obj['duration']:
+            if 'Size' in visible and fs:
+                print(f"Size:\t{fs / (1024*1024):.1f} MB")
+            if 'Duration' in visible and 'duration' in obj and obj['duration']:
                 print(f"Duration:\t{obj['duration'] / 60000:.1f} minutes")
-            if VRB:
-                if obj.get('resolution'):
-                    print(f"Resolution:\t{obj['resolution']}")
-                if obj.get('video_codec'):
-                    print(f"Video:\t{obj['video_codec']}")
-                if obj.get('audio_codec'):
-                    print(f"Audio:\t{obj['audio_codec']}")
-                # Bitrate (computed from filesize and duration)
-                if fs and plex_duration and plex_duration >= 60_000:
-                    bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
-                    print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
-            audio_langs = obj.get('audio_languages', [])
-            if audio_langs:
-                print(f"Audio Language:\t{', '.join(audio_langs)}")
-            subtitle_langs = obj.get('subtitle_languages', [])
-            if subtitle_langs:
-                print(f"Subtitles:\t{', '.join(subtitle_langs)}")
-            broken_reason = _get_broken_reason(info, plex_duration)
-            if broken_reason:
-                print(f"BROKEN:\t{broken_reason}")
-        else:
-            print(f"Files:\t{len(files)} versions")
-            for i, (ver, info) in enumerate(files.items(), 1):
-                fs = info.get('filesize')
-                size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
+            if 'Resolution' in visible and obj.get('resolution'):
+                print(f"Resolution:\t{obj['resolution']}")
+            if 'Video' in visible and obj.get('video_codec'):
+                print(f"Video:\t{obj['video_codec']}")
+            if 'Audio' in visible and obj.get('audio_codec'):
+                print(f"Audio:\t{obj['audio_codec']}")
+            if 'Bitrate' in visible and fs and plex_duration and plex_duration >= 60_000:
+                bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
+                print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
+            if 'AudioLanguage' in visible:
+                audio_langs = obj.get('audio_languages', [])
+                if audio_langs:
+                    print(f"Audio Language:\t{', '.join(audio_langs)}")
+            if 'Subtitles' in visible:
+                subtitle_langs = obj.get('subtitle_languages', [])
+                if subtitle_langs:
+                    print(f"Subtitles:\t{', '.join(subtitle_langs)}")
+            if 'BROKEN' in visible:
                 broken_reason = _get_broken_reason(info, plex_duration)
-                broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
-                print(f"  [{i}] {ver}{size_str}{broken_str}")
-                print(f"      {info.get('filepath', 'N/A')}")
-            audio_langs = obj.get('audio_languages', [])
-            if audio_langs:
-                print(f"Audio Language:\t{', '.join(audio_langs)}")
-            subtitle_langs = obj.get('subtitle_languages', [])
-            if subtitle_langs:
-                print(f"Subtitles:\t{', '.join(subtitle_langs)}")
+                if broken_reason:
+                    print(f"BROKEN:\t{broken_reason}")
+        else:
+            if 'File' in visible:
+                print(f"Files:\t{len(files)} versions")
+                for i, (ver, info) in enumerate(files.items(), 1):
+                    fs = info.get('filesize')
+                    size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
+                    broken_reason = _get_broken_reason(info, plex_duration) if 'BROKEN' in visible else None
+                    broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
+                    print(f"  [{i}] {ver}{size_str}{broken_str}")
+                    print(f"      {info.get('filepath', 'N/A')}")
+            if 'AudioLanguage' in visible:
+                audio_langs = obj.get('audio_languages', [])
+                if audio_langs:
+                    print(f"Audio Language:\t{', '.join(audio_langs)}")
+            if 'Subtitles' in visible:
+                subtitle_langs = obj.get('subtitle_languages', [])
+                if subtitle_langs:
+                    print(f"Subtitles:\t{', '.join(subtitle_langs)}")
     elif obj.get('file'):
-        # For Series with -V, episode table already shows files — skip redundant directory line
-        if not (obj_type == 'Series' and VRB):
-            print(f"File:\t{obj['file']}")
-        fs = obj.get('filesize')
-        if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
+        if 'File' in visible:
+            # For Series with episode table, skip redundant directory line
+            if not (obj_type == 'Series' and 'EpisodeTable' in visible):
+                print(f"File:\t{obj['file']}")
+        if 'Size' in visible:
+            fs = obj.get('filesize')
+            if fs: print(f"Size:\t{fs / (1024*1024):.1f} MB")
 
     # Labels
-    if obj.get('labels'):
+    if 'Labels' in visible and obj.get('labels'):
         print(f"Labels:\t{', '.join(obj['labels'])}")
 
-    # Metadata (verbose only)
-    if VRB:
-        if 'added_at' in obj:
-            print(f"Added:\t{obj['added_at']}")
-        if 'updated_at' in obj:
-            print(f"Updated:\t{obj['updated_at']}")
+    # Added / Updated
+    if 'Added' in visible and 'added_at' in obj:
+        print(f"Added:\t{obj['added_at']}")
+    if 'Updated' in visible and 'updated_at' in obj:
+        print(f"Updated:\t{obj['updated_at']}")
 
 ###########################################################################################
 #### GLOBAL PLEX COMMANDS:
