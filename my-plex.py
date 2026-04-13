@@ -1298,6 +1298,7 @@ PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
   MOVIES & SERIES:
   --broken [SCOPE]         Broken / truncated files
+  --excess-versions [N]    Entries with N+ file versions (default: 3)
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
   --no-audio-language      Items with missing audio language metadata
   --mismatch [SCOPE]       Potential title / dirname mismatch candidates
@@ -8982,7 +8983,9 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
                 # Also check if file paths changed (e.g. rename .mkv → .mp4)
                 new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
                 cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
-                if new_file_count == cached_file_count and new_paths == cached_paths:
+                # Check if cached files are missing per-file language data (added later)
+                cached_missing_langs = any(fi.get('audio_languages') is None for fi in cached_files.values())
+                if new_file_count == cached_file_count and new_paths == cached_paths and not cached_missing_langs:
                     if DBG: print(f"{DBGPFX}update_movie_library_objs_db(): SKIPPING movie '{movie_dict['title']}' - already in cache ({cached_file_count} files)")
                     _collect_missing_file_metadata(cached, display_title)
                     continue
@@ -9380,7 +9383,9 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
                         # Also check if file paths changed (e.g. rename .mkv → .mp4)
                         new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
                         cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
-                        if new_file_count == cached_file_count and new_paths == cached_paths:
+                        # Check if cached files are missing per-file language data
+                        cached_missing_langs = any(fi.get('audio_languages') is None for fi in cached_files.values())
+                        if new_file_count == cached_file_count and new_paths == cached_paths and not cached_missing_langs:
                             if DBG: print(f"{DBGPFX}_process_series_from_database(): SKIPPING episode '{episode_dict['S0XE0X']}' - already cached ({cached_file_count} files)")
                             _collect_missing_file_metadata(cached, display_title)
                             continue
@@ -17250,6 +17255,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'MEMBER_IDS':          label = 'MEMBER:' if labeled else ''
                     case 'MEMBERS':             label = 'MEMBER:' if labeled else ''
                     case 'ONDISK_LABELS':       label = 'ONDISK-LABEL:' if labeled else ''
+                    case 'MULTI_EPISODE_SIBLINGS': label = '' if labeled else ''
                     case _:                     err(1058, f"Unknown list type (k={k})")
                 v = (label if len(v)>0 else'') + (','+label).join(str(x) for x in v)
             else:
@@ -17926,6 +17932,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --problems [SCOPE]       All problem checks in one pass")
             print("  MOVIES & SERIES:")
             print("  --broken [SCOPE]         Broken / truncated files")
+            print("  --excess-versions [N]    Entries with N+ file versions (default: 3)")
             print("  --unmatched [SCOPE]      Items not matched by Plex")
             print("  --no-audio-language      Items with missing audio language metadata")
             print("  --mismatch [SCOPE]       Potential title / dirname mismatches")

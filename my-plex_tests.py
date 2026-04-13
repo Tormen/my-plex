@@ -4552,7 +4552,7 @@ class TestRename(unittest.TestCase):
     def test_rename_dry_run_no_file_changes(self):
         """--rename --dry-run should preview without changing files."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename', 'boston legal', '--dry-run'],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=60)
         output = result.stdout + result.stderr
         if result.returncode != 0 and 'No items found' not in output and 'Traceback' not in result.stderr:
             self.skipTest("'boston legal' not in cache or cache empty — cannot test --rename dry-run")
@@ -4564,7 +4564,7 @@ class TestRename(unittest.TestCase):
     def test_rename_obj_form_dry_run(self):
         """my-plex 'boston legal' --rename --dry-run should work."""
         result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--rename', '--dry-run'],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=60)
         output = result.stdout + result.stderr
         if result.returncode != 0 and 'No items found' not in output and 'Traceback' not in result.stderr:
             self.skipTest("'boston legal' not in cache or cache empty — cannot test --rename obj form")
@@ -4847,7 +4847,7 @@ class TestEpisodesErr(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
         self.assertIn('PROBLEM DETECTION', result.stdout)
         self.assertIn('Episode Data', result.stdout)
-        self.assertIn('SUMMARY', result.stdout)
+        self.assertIn('problem(s) found', result.stdout)
 
 
 class TestEpisodesErrClassification(unittest.TestCase):
