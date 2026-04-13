@@ -25128,16 +25128,17 @@ def show_item_info(identifier, table_only=False):
             # Per-file media info (only shown for single-file items)
             if 'duration' in obj and obj['duration']:
                 print(f"Duration:\t{obj['duration'] / 60000:.1f} minutes")
-            if obj.get('resolution'):
-                print(f"Resolution:\t{obj['resolution']}")
-            if obj.get('video_codec'):
-                print(f"Video:\t{obj['video_codec']}")
-            if obj.get('audio_codec'):
-                print(f"Audio:\t{obj['audio_codec']}")
-            # Bitrate (computed from filesize and duration)
-            if fs and plex_duration and plex_duration >= 60_000:
-                bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
-                print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
+            if VRB:
+                if obj.get('resolution'):
+                    print(f"Resolution:\t{obj['resolution']}")
+                if obj.get('video_codec'):
+                    print(f"Video:\t{obj['video_codec']}")
+                if obj.get('audio_codec'):
+                    print(f"Audio:\t{obj['audio_codec']}")
+                # Bitrate (computed from filesize and duration)
+                if fs and plex_duration and plex_duration >= 60_000:
+                    bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
+                    print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
             audio_langs = obj.get('audio_languages', [])
             if audio_langs:
                 print(f"Audio Language:\t{', '.join(audio_langs)}")
