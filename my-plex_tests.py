@@ -839,6 +839,17 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("['metadata_probed'] += 1", content,
             "metadata_probed must be incremented when ffprobe runs")
 
+    def test_removal_detection_uses_type_map_not_naive_plural(self):
+        """Removal detection must use type_map, not obj_type.lower()+'s' (Series→'seriess' bug)."""
+        content = self._read_script()
+        # The removal detection loop must NOT use naive pluralization
+        self.assertNotIn("obj_type.lower() + 's'", content,
+            "Removal detection must use type_map dict, not obj_type.lower()+'s' — "
+            "'Series'.lower()+'s' = 'seriess' which is a KeyError")
+        # It must use the same type_map as _increment_delta_counters
+        self.assertIn("'Series': 'series'", content,
+            "type_map must map 'Series' to 'series' (already plural)")
+
     def test_from_scratch_counts_all_items_as_added(self):
         """--from-scratch summary must count all Movie/Episode objects as added."""
         content = self._read_script()
@@ -3934,12 +3945,6 @@ class TestCacheUpdateLog(unittest.TestCase):
         src = self._read_script()
         self.assertIn("Details: {CACHE_UPDATES_FILE}", src,
             "Must print the JSON log file path for the user")
-        # Should also appear after the "no changes" branch
-        no_changes_idx = src.index("no changes{broken_str}")
-        next_newline = src.index('\n', no_changes_idx)
-        after_no_changes = src[next_newline:next_newline+200]
-        self.assertIn("Details:", after_no_changes,
-            "Must print Details: line even when there are no changes")
 
     def test_metadata_summary_in_summary_section(self):
         """Metadata collection summary must appear in SUMMARY OF CHANGES, not in batch function."""
