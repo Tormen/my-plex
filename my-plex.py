@@ -25134,6 +25134,16 @@ def show_item_info(identifier, table_only=False):
                 print(f"Video:\t{obj['video_codec']}")
             if obj.get('audio_codec'):
                 print(f"Audio:\t{obj['audio_codec']}")
+            # Bitrate (computed from filesize and duration)
+            if fs and plex_duration and plex_duration >= 60_000:
+                bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
+                print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
+            audio_langs = obj.get('audio_languages', [])
+            if audio_langs:
+                print(f"Audio Language:\t{', '.join(audio_langs)}")
+            subtitle_langs = obj.get('subtitle_languages', [])
+            if subtitle_langs:
+                print(f"Subtitles:\t{', '.join(subtitle_langs)}")
             broken_reason = _get_broken_reason(info, plex_duration)
             if broken_reason:
                 print(f"BROKEN:\t{broken_reason}")
@@ -25146,6 +25156,12 @@ def show_item_info(identifier, table_only=False):
                 broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
                 print(f"  [{i}] {ver}{size_str}{broken_str}")
                 print(f"      {info.get('filepath', 'N/A')}")
+            audio_langs = obj.get('audio_languages', [])
+            if audio_langs:
+                print(f"Audio Language:\t{', '.join(audio_langs)}")
+            subtitle_langs = obj.get('subtitle_languages', [])
+            if subtitle_langs:
+                print(f"Subtitles:\t{', '.join(subtitle_langs)}")
     elif obj.get('file'):
         # For Series with -V, episode table already shows files — skip redundant directory line
         if not (obj_type == 'Series' and VRB):
