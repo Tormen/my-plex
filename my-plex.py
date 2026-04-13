@@ -12705,6 +12705,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _pc_broken   = _silent(PLEX_Media._list_broken_files, all_obj_keys, None) or 0
             _pc_excess   = _silent(PLEX_Media._list_excess_versions, all_obj_keys, None, 3) or (0, 0)
             _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
+            _pc_noaudio  = _silent(PLEX_Media._list_no_audio_language, all_obj_keys, None) or 0
             _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
             _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
             _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
@@ -12719,6 +12720,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                       'files':   _pc_excess[0] if isinstance(_pc_excess, tuple) else 0},
                 'tsv':               _pc_tsv,
                 'unmatched':         _pc_unmatched,
+                'no_audio_language': _pc_noaudio,
                 'unsorted':          _pc_unsorted,
                 'potential_mismatch':_pc_mismatch,
                 'numbering_issues':  _pc_numbering,
@@ -14231,6 +14233,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  {cache_key:<17} {title[:45]:<45} {library:<20} {reason:<20} {filepath}")
         print(f"\n  {len(unmatched)} unmatched item(s) found.")
         return len(unmatched)
+
+    @staticmethod
+    def _list_no_audio_language(obj_keys, library_name):
+        """List items (Movie/Episode) with no audio language metadata."""
+        count = 0
+        for key in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type')
+            if obj_type not in ('Movie', 'Episode'):
+                continue
+            audio_languages = obj.get('audio_languages', [])
+            if not audio_languages:
+                count += 1
+                title = obj.get('title', '')
+                library = obj.get('library', '')
+                filepath = obj.get('file', '')
+                print(f"  {key:<17} {library:<20} {title[:45]:<45} {filepath}")
+        if count:
+            print(f"\n  {count} item(s) with missing audio language.")
+        return count
 
     @staticmethod
     def _list_unsorted(obj_keys, library_name=None):
@@ -24612,6 +24636,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['tsv']} episode data failures   →  my-plex{lib_arg} --problems --tsv")
     if problems.get('unmatched', 0):
         print(f"  >> ⚠ {problems['unmatched']} unmatched items   →  my-plex{lib_arg} --unmatched")
+    if problems.get('no_audio_language', 0):
+        print(f"  >> ⚠ {problems['no_audio_language']} items with no audio language   →  my-plex{lib_arg} --no-audio-language")
     if problems.get('unsorted', 0):
         print(f"  >> ⚠ {problems['unsorted']} unsorted series   →  my-plex{lib_arg} --unsorted")
     if problems.get('potential_mismatch', 0):
@@ -25630,6 +25656,7 @@ def execute_global_commands(args, cmd_args):
         broken_count = 0
         excess_file_count = excess_entry_count = 0
         unmatched_count = 0
+        noaudio_count = 0
         unsorted_count = 0
         mismatch_count = 0
         reencode_count = 0
@@ -25665,7 +25692,11 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Unmatched Items{lib_label}")
             unmatched_count = _run_check(PLEX_Media._list_unmatched, obj_keys, None)
 
-            # 5. Unsorted shows
+            # 5. No audio language
+            print(f"  >> No Audio Language{lib_label}")
+            noaudio_count = _run_check(PLEX_Media._list_no_audio_language, obj_keys, None)
+
+            # 6. Unsorted shows
             print(f"  >> Unsorted Shows{lib_label}")
             unsorted_count = _run_check(PLEX_Media._list_unsorted, obj_keys, problems_library)
 
@@ -25700,7 +25731,7 @@ def execute_global_commands(args, cmd_args):
 
         # Closing milestone with total
         total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
-                          + unsorted_count + mismatch_count + numbering_count + reencode_count
+                          + noaudio_count + unsorted_count + mismatch_count + numbering_count + reencode_count
                           + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
@@ -25709,6 +25740,7 @@ def execute_global_commands(args, cmd_args):
             'excess_versions':   {'entries': excess_entry_count, 'files': excess_file_count},
             'tsv':               tsv_problem_count,
             'unmatched':         unmatched_count if not tsv_only else 0,
+            'no_audio_language': noaudio_count   if not tsv_only else 0,
             'unsorted':          unsorted_count  if not tsv_only else 0,
             'potential_mismatch':mismatch_count  if not tsv_only else 0,
             'numbering_issues':  numbering_count,
