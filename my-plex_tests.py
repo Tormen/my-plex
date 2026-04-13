@@ -4843,11 +4843,21 @@ class TestEpisodesErr(unittest.TestCase):
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--problems'],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
         self.assertIn('PROBLEM DETECTION', result.stdout)
         self.assertIn('Episode Data', result.stdout)
         self.assertIn('problem(s) found', result.stdout)
+        # Verify all --help PROBLEM DETECTION checks are present
+        self.assertIn('Broken', result.stdout, "--problems must include Broken check")
+        self.assertIn('Excess Versions', result.stdout, "--problems must include Excess Versions check")
+        self.assertIn('Unmatched', result.stdout, "--problems must include Unmatched check")
+        self.assertIn('No Audio Language', result.stdout, "--problems must include No Audio Language check")
+        self.assertIn('Unsorted', result.stdout, "--problems must include Unsorted check")
+        self.assertIn('Mismatch', result.stdout, "--problems must include Mismatch check")
+        self.assertIn('Reencode', result.stdout, "--problems must include Reencode check")
+        self.assertIn('Missing Episodes', result.stdout, "--problems must include Missing Episodes check")
+        self.assertIn('Renumber', result.stdout, "--problems must include Renumber check")
 
 
 class TestEpisodesErrClassification(unittest.TestCase):
