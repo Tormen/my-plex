@@ -12710,6 +12710,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
             _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
             _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
+            _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None) or 0
             # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
             _pc_tsv      = len(_TSV_FAILED_SHOWS)
             from datetime import datetime as _dtpc
@@ -12725,6 +12726,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'potential_mismatch':_pc_mismatch,
                 'numbering_issues':  _pc_numbering,
                 'reencode':          _pc_reencode,
+                'missing_episodes':  _pc_missing,
             }
         else:
             _problems_cache = CACHE.get('problems')
@@ -14255,6 +14257,81 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if count:
             print(f"\n  {count} item(s) with missing audio language.")
         return count
+
+    @staticmethod
+    def _list_missing_episodes(obj_keys, library_name):
+        """Count missing episodes across all series (cache-only, reads episodes.tsv from disk).
+        Returns total number of missing episodes across all series that have TSV data."""
+        from datetime import datetime
+        today = datetime.now().strftime('%Y-%m-%d')
+        total_missing = 0
+        series_with_missing = 0
+        # Collect series keys from obj_keys
+        series_keys = set()
+        for key in obj_keys:
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type') == 'Series':
+                series_keys.add(key)
+            elif obj.get('type') in ('Season', 'Episode'):
+                sk = obj.get('series_key')
+                if sk:
+                    series_keys.add(sk)
+
+        for series_key in sorted(series_keys):
+            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+            if not series_obj:
+                continue
+            series_dir_server = series_obj.get('file', '')
+            if not series_dir_server:
+                continue
+            series_dir = get_local_path(series_dir_server)
+            tsv_path = get_episodes_tsv_path(series_dir)
+            _, all_episodes = read_episodes_tsv(tsv_path)
+            if not all_episodes:
+                continue
+
+            # Build have_set from cached episodes
+            cached_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
+            have_set = set()
+            for s_str, eps in cached_episodes.items():
+                try:
+                    s_num = int(s_str[1:])
+                except (ValueError, IndexError):
+                    continue
+                e_nums = []
+                for e_str in eps:
+                    try:
+                        e_nums.append(int(e_str[1:]))
+                    except (ValueError, IndexError):
+                        continue
+                uses_absolute = (s_num > 0 and e_nums
+                                 and all(e >= 100 and e // 100 == s_num for e in e_nums))
+                for e_num in e_nums:
+                    if uses_absolute:
+                        e_num = e_num % 100
+                    have_set.add((s_num, e_num))
+
+            # Count missing (aired only — skip future episodes)
+            missing_count = 0
+            for ep in all_episodes:
+                ep_key = (ep['season'], ep['episode'])
+                if ep_key not in have_set:
+                    ep_date = ep.get('date', '')
+                    if ep_date and ep_date <= today:
+                        missing_count += 1
+
+            if missing_count:
+                series_title = series_obj.get('title', '?')
+                library = series_obj.get('library', '')
+                print(f"  {series_key:<17} {library:<20} {series_title:<45} {missing_count} missing")
+                total_missing += missing_count
+                series_with_missing += 1
+
+        if total_missing:
+            print(f"\n  {total_missing} missing episode(s) across {series_with_missing} series.")
+        return total_missing
 
     @staticmethod
     def _list_unsorted(obj_keys, library_name=None):
@@ -24646,6 +24723,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
         print(f"  >> ⚠ {problems['reencode']} reencode candidates   →  my-plex{lib_arg} --reencode")
+    if problems.get('missing_episodes', 0):
+        print(f"  >> ⚠ {problems['missing_episodes']} missing episodes   →  my-plex{lib_arg} --missing <SERIES>")
     if problems.get('renumber', 0):
         print(f"  >> ⚠ {problems['renumber']} renumber candidates   →  my-plex{lib_arg} --renumber")
     if problems.get('renumber_nodata', 0):
@@ -25660,6 +25739,7 @@ def execute_global_commands(args, cmd_args):
         unsorted_count = 0
         mismatch_count = 0
         reencode_count = 0
+        missing_count = 0
         renumber_count = 0
         renumber_nodata_count = 0
         renumber_season_count = 0
@@ -25713,7 +25793,11 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Reencode Candidates{lib_label}")
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
-            # 9. Renumber candidates (actionable — scraped data exists)
+            # 9. Missing episodes (cache-only — reads episodes.tsv from disk)
+            print(f"  >> Missing Episodes{lib_label}")
+            missing_count = _run_check(PLEX_Media._list_missing_episodes, obj_keys, problems_library)
+
+            # 10. Renumber candidates (actionable — scraped data exists)
             print(f"  >> Renumber Candidates{lib_label}")
             renumber_count = _run_check(PLEX_Media._list_renumber_candidates, obj_keys, problems_library)
 
@@ -25732,7 +25816,7 @@ def execute_global_commands(args, cmd_args):
         # Closing milestone with total
         total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
                           + noaudio_count + unsorted_count + mismatch_count + numbering_count + reencode_count
-                          + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
+                          + missing_count + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
         live_problems = {
@@ -25745,6 +25829,7 @@ def execute_global_commands(args, cmd_args):
             'potential_mismatch':mismatch_count  if not tsv_only else 0,
             'numbering_issues':  numbering_count,
             'reencode':          reencode_count  if not tsv_only else 0,
+            'missing_episodes':  missing_count   if not tsv_only else 0,
             'renumber':          renumber_count  if not tsv_only else 0,
             'renumber_nodata':   renumber_nodata_count if not tsv_only else 0,
             'renumber_season':   renumber_season_count if not tsv_only else 0,
