@@ -24759,6 +24759,58 @@ def resolve_cache_items(identifier):
     return found_items
 
 
+def _print_item_ratings(obj):
+    """Print rating & metadata fields for a single item (Movie, Series, Episode)."""
+    obj_type = obj.get('type')
+    original_title = obj.get('originalTitle', '')
+    if original_title and original_title != obj.get('title', ''):
+        print(f"Original Title:\t{original_title}")
+    content_rating = obj.get('contentRating')
+    if content_rating:
+        print(f"Content Rating:\t{content_rating}")
+    # Ratings line: combine all available ratings on one line
+    ratings_parts = []
+    critics = obj.get('criticsRating')
+    if critics is not None:
+        ratings_parts.append(f"Critics: {critics:.1f}/10")
+    audience = obj.get('audienceRating')
+    if audience is not None:
+        ratings_parts.append(f"Audience: {audience:.1f}/10")
+    user_rating = obj.get('userRating')
+    if user_rating is not None and user_rating > 0:
+        stars = user_rating / 2  # Plex stores 0-10, display as 0-5 stars
+        full = int(stars)
+        half = '½' if stars - full >= 0.5 else ''
+        ratings_parts.append(f"Personal: {'★' * full}{half}{'☆' * (5 - full - (1 if half else 0))} ({user_rating:.1f}/10)")
+    if ratings_parts:
+        print(f"Rating:\t{' | '.join(ratings_parts)}")
+    # Genres (always shown if available)
+    genres = obj.get('genres', [])
+    if genres:
+        print(f"Genres:\t{', '.join(genres)}")
+    # Studio (always shown for Movie/Series)
+    studio = obj.get('studio')
+    if studio and obj_type in ('Movie', 'Series'):
+        print(f"Studio:\t{studio}")
+    # Verbose (-V): show all remaining metadata fields
+    if VRB:
+        actors = obj.get('actors', [])
+        if actors:
+            print(f"Actors:\t{', '.join(actors)}")
+        directors = obj.get('directors', [])
+        if directors:
+            print(f"Directors:\t{', '.join(directors)}")
+        writers = obj.get('writers', [])
+        if writers:
+            print(f"Writers:\t{', '.join(writers)}")
+        countries = obj.get('countries', [])
+        if countries:
+            print(f"Countries:\t{', '.join(countries)}")
+        summary = obj.get('summary', '')
+        if summary:
+            print(f"Summary:\t{summary}")
+
+
 def show_item_info(identifier, table_only=False):
     """Show detailed information about a Plex item by ID, key, or search term.
     If identifier is None or empty, shows general system information instead.
@@ -24860,6 +24912,7 @@ def show_item_info(identifier, table_only=False):
             scraped_e = obj.get('scraped_E_str', '')
             if scraped_e:
                 print(f"Episode (Scraped):\t{obj.get('S_str', '')}{scraped_e}")
+        _print_item_ratings(obj)
     elif obj_type == 'Season':
         print(f"Series:\t{obj.get('series', 'N/A')}")
         print(f"Season:\t{obj.get('S_str', 'N/A')}")
@@ -24867,6 +24920,7 @@ def show_item_info(identifier, table_only=False):
         year = obj.get('year', 0)
         if year and year > 0:
             print(f"Year:\t{year}")
+        _print_item_ratings(obj)
 
         # TSV episode data summary (from episodes.tsv on disk)
         series_dir_server = obj.get('file', '')
@@ -25041,6 +25095,7 @@ def show_item_info(identifier, table_only=False):
                     print(row)
     elif obj_type == 'Movie':
         print(f"Year:\t{obj.get('year', 'N/A')}")
+        _print_item_ratings(obj)
 
     # Same-library duplicate check (using multi-key matching for originalTitle)
     dup_keys = set(generate_duplicate_keys(obj))
@@ -25102,11 +25157,12 @@ def show_item_info(identifier, table_only=False):
     if obj.get('labels'):
         print(f"Labels:\t{', '.join(obj['labels'])}")
 
-    # Metadata
-    if 'added_at' in obj:
-        print(f"Added:\t{obj['added_at']}")
-    if 'updated_at' in obj:
-        print(f"Updated:\t{obj['updated_at']}")
+    # Metadata (verbose only)
+    if VRB:
+        if 'added_at' in obj:
+            print(f"Added:\t{obj['added_at']}")
+        if 'updated_at' in obj:
+            print(f"Updated:\t{obj['updated_at']}")
 
 ###########################################################################################
 #### GLOBAL PLEX COMMANDS:
