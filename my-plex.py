@@ -682,22 +682,22 @@ CONFIG_DEFAULTS = {
     #   Summary, Added, Updated, Labels, Duplicates, BROKEN,
     #   ScrapedData, SeasonTable, EpisodeTable, EpisodeFile
     'INFO_FIELDS': {
-        'movie':      ['Key', 'Type', 'Title', 'Library', 'Year',
+        'movie':      ['Key', 'Title', 'Library', 'Year',
                        'OriginalTitle', 'ContentRating', 'Rating', 'Genres', 'Studio',
                        'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
                        'Duplicates', 'Labels', 'BROKEN'],
         'movie.v':    ['Match', 'Resolution', 'Video', 'Audio', 'Bitrate',
                        'Actors', 'Directors', 'Writers', 'Countries', 'Summary',
                        'Added', 'Updated'],
-        'movie.vv':   [],
+        'movie.vv':   ['Type'],
         'series':     'movie',
         'series.v':   'movie.v',
         'series.vv':  'movie.vv',
-        'season':     ['Key', 'Type', 'Title', 'Library', 'Series', 'Season',
+        'season':     ['Key', 'Title', 'Library', 'Series', 'Season',
                        'File', 'Size', 'Labels'],
         'season.v':   'movie.v',
         'season.vv':  'movie.vv',
-        'episode':    ['Key', 'Type', 'Title', 'Library', 'Series', 'Episode',
+        'episode':    ['Key', 'Title', 'Library', 'Series', 'Episode',
                        'OriginalTitle', 'ContentRating', 'Rating', 'Genres',
                        'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
                        'Duplicates', 'Labels', 'BROKEN'],
@@ -808,7 +808,10 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # Controls which fields are shown in --info output per type and verbosity level.
 # Three levels per type: 'type' (default), 'type.v' (-V), 'type.vv' (-VV).
-# Levels are cumulative: -V shows default + .v fields, -VV shows all three.
+# Levels are cumulative (each level ADDS fields to the previous):
+#   default    → shows 'type' fields
+#   -V         → shows 'type' + 'type.v' fields
+#   -VV        → shows 'type' + 'type.v' + 'type.vv' fields
 #
 # Type alias: set a type to a string to reuse another type's field list.
 # Example: 'series': 'movie' means series uses movie's field lists.
@@ -823,16 +826,16 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # INFO_FIELDS = {{
 #     # Movie: default fields
-#     'movie':      ['Key', 'Type', 'Title', 'Library', 'Year',
+#     'movie':      ['Key', 'Title', 'Library', 'Year',
 #                    'OriginalTitle', 'ContentRating', 'Rating', 'Genres', 'Studio',
 #                    'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
 #                    'Duplicates', 'Labels', 'BROKEN'],
-#     # Movie: additional fields with -V
+#     # Movie: additional fields with -V (supplementary — added to default)
 #     'movie.v':    ['Match', 'Resolution', 'Video', 'Audio', 'Bitrate',
 #                    'Actors', 'Directors', 'Writers', 'Countries', 'Summary',
 #                    'Added', 'Updated'],
-#     # Movie: additional fields with -VV
-#     'movie.vv':   [],
+#     # Movie: additional fields with -VV (supplementary — added to default + .v)
+#     'movie.vv':   ['Type'],
 #
 #     # Series: reuse movie's field lists (alias)
 #     'series':     'movie',
@@ -840,13 +843,13 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #     'series.vv':  'movie.vv',
 #
 #     # Season: minimal fields
-#     'season':     ['Key', 'Type', 'Title', 'Library', 'Series', 'Season',
+#     'season':     ['Key', 'Title', 'Library', 'Series', 'Season',
 #                    'File', 'Size', 'Labels'],
 #     'season.v':   'movie.v',
 #     'season.vv':  'movie.vv',
 #
 #     # Episode: includes Series + Episode fields
-#     'episode':    ['Key', 'Type', 'Title', 'Library', 'Series', 'Episode',
+#     'episode':    ['Key', 'Title', 'Library', 'Series', 'Episode',
 #                    'OriginalTitle', 'ContentRating', 'Rating', 'Genres',
 #                    'File', 'Size', 'Duration', 'AudioLanguage', 'Subtitles',
 #                    'Duplicates', 'Labels', 'BROKEN'],
@@ -3721,7 +3724,9 @@ def fetch_movies_from_database(library_section_id):
             existing['files'][version] = {
                 'filepath': filepath,
                 'filesize': int(filesize) if filesize else None,
-                'part_id': part_id
+                'part_id': part_id,
+                'audio_languages': list(streams['audio_languages']),
+                'subtitle_languages': list(streams['subtitle_languages']),
             }
             # Update media_cnt and type_str to reflect multi-version
             media_cnt = len(existing['files'])
@@ -3744,7 +3749,9 @@ def fetch_movies_from_database(library_section_id):
                     version: {
                         'filepath': filepath,
                         'filesize': int(filesize) if filesize else None,
-                        'part_id': part_id
+                        'part_id': part_id,
+                        'audio_languages': list(streams['audio_languages']),
+                        'subtitle_languages': list(streams['subtitle_languages']),
                     }
                 },
                 'type': 'Movie',
@@ -8213,7 +8220,9 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
     part_size = plex_retry_operation(lambda: part.size if hasattr(part, 'size') else None, context=f"{key} {ctx_title} part.size", library=lib_title)
     version, resolution_full = _build_version_string(media_duration, media_width, media_height, media_videoCodec, media_audioCodec, part_size, part_id)
 
-    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size, 'part_id': part_id}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
+    _audio_langs = plex_retry_operation(lambda: [ audio.language for audio in part.audioStreams() if hasattr(audio, 'language') and audio.language ], context=f"{key} {ctx_title} audioStreams", library=lib_title)
+    _subtitle_langs = plex_retry_operation(lambda: [ subtitle.language for subtitle in part.subtitleStreams() if hasattr(subtitle, 'language') and subtitle.language ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title)
+    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size, 'part_id': part_id, 'audio_languages': list(_audio_langs), 'subtitle_languages': list(_subtitle_langs)}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
           'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
           'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
           'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
@@ -8224,8 +8233,8 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
           'filesize':part_size,  # Store filesize for primary version
           'collections'         : plex_retry_operation(lambda: [c.tag for c in obj.collections], context=f"{key} {ctx_title} collections", library=lib_title),
           'labels'              : plex_retry_operation(lambda: [l.tag for l in obj.labels], context=f"{key} {ctx_title} labels", library=lib_title),
-          'audio_languages'     : plex_retry_operation(lambda: [ audio.language for audio in part.audioStreams() if hasattr(audio, 'language') and audio.language ], context=f"{key} {ctx_title} audioStreams", library=lib_title),            # of this MediaPart (file)
-          'subtitle_languages'  : plex_retry_operation(lambda: [ subtitle.language for subtitle in part.subtitleStreams() if hasattr(subtitle, 'language') and subtitle.language ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title),   # of this MediaPart (file)
+          'audio_languages'     : _audio_langs,            # of this MediaPart (file) — also stored per-file in files dict
+          'subtitle_languages'  : _subtitle_langs,   # of this MediaPart (file) — also stored per-file in files dict
           # defaulting all other possible values:
           'actors'              : [],
           'countries'           : [],
@@ -9190,7 +9199,8 @@ def fetch_series_from_database(library_section_id):
             # Additional media item for existing episode — merge into files dict
             existing = episodes_seen[ep_id]
             version, res_full = _build_version_string(md_dur, width, height, v_codec, a_codec, filesize, mp_id, existing['files'])
-            existing['files'][version] = {'filepath': filepath, 'filesize': int(filesize) if filesize else None, 'part_id': mp_id}
+            existing['files'][version] = {'filepath': filepath, 'filesize': int(filesize) if filesize else None, 'part_id': mp_id,
+                'audio_languages': list(streams['audio_languages']), 'subtitle_languages': list(streams['subtitle_languages'])}
             media_cnt = len(existing['files'])
             existing['media_cnt'] = media_cnt
             existing['type_str'] = 'Episode*'
@@ -9204,7 +9214,8 @@ def fetch_series_from_database(library_section_id):
         else:
             version, res_full = _build_version_string(md_dur, width, height, v_codec, a_codec, filesize, mp_id)
             ep_dict = {
-                'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None,'part_id':mp_id}},
+                'file':filepath,'files':{version:{'filepath':filepath,'filesize':int(filesize) if filesize else None,'part_id':mp_id,
+                    'audio_languages':list(streams['audio_languages']),'subtitle_languages':list(streams['subtitle_languages'])}},
                 'type':'Episode','type_str':'Episode','id':ep_id,'title':ep_title,'originalTitle':ep_orig or '',
                 'year':int(ep_year) if ep_year else 0,'library':lib_name,'item_id':ep_id,'media_id':md_id,'part_id':mp_id,
                 'version':version,'media_nr':'1/1','media_idx':0,'media_cnt':1,'part_nr':'1/1','part_idx':0,'part_cnt':1,
@@ -10848,7 +10859,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     # Find cache keys that are NOT in server's current items
                     removed_keys = objects_before[obj_type] - server_ids
 
-                    type_key = obj_type.lower() + 's'
+                    type_map = {'Series': 'series', 'Season': 'seasons', 'Episode': 'episodes', 'Movie': 'movies'}
+                    type_key = type_map[obj_type]
                     PLEX_Media.library_delta_counters[completion_key]['removed'][type_key] = len(removed_keys)
 
                     # Build detailed info BEFORE removing (capture original paths before deletion)
@@ -11375,6 +11387,17 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # so _determine_episode_source() can read agent/language for TSV source selection
         if FORCE_CACHE_UPDATE:
             CACHE['library_stats'] = current_library_stats
+
+        if FORCE_CACHE_UPDATE:
+            # Print current cache stats on start
+            _n_obj = len(PLEX_Media.OBJ_BY_ID)
+            _type_counts = {}
+            for _obj in PLEX_Media.OBJ_BY_ID.values():
+                _t = _obj.get('type', '?')
+                _type_counts[_t] = _type_counts.get(_t, 0) + 1
+            _stats_parts = [f"{v} {k}{'s' if v != 1 and not k.endswith('s') else ''}" for k, v in sorted(_type_counts.items())]
+            _libs_in_cache = len(set(_obj.get('library', '') for _obj in PLEX_Media.OBJ_BY_ID.values()))
+            print(f" >>> Cache: {_n_obj} objects in {_libs_in_cache} libraries ({', '.join(_stats_parts)})")
 
         if FORCE_CACHE_UPDATE and max_workers > 1:
             print(f" >>> Processing {total_libraries} libraries in parallel with {max_workers} workers...")
@@ -25302,11 +25325,11 @@ def show_item_info(identifier, table_only=False):
                 bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
                 print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
             if 'AudioLanguage' in visible:
-                audio_langs = obj.get('audio_languages', [])
+                audio_langs = info.get('audio_languages') or obj.get('audio_languages', [])
                 if audio_langs:
                     print(f"Audio Language:\t{', '.join(audio_langs)}")
             if 'Subtitles' in visible:
-                subtitle_langs = obj.get('subtitle_languages', [])
+                subtitle_langs = info.get('subtitle_languages') or obj.get('subtitle_languages', [])
                 if subtitle_langs:
                     print(f"Subtitles:\t{', '.join(subtitle_langs)}")
             if 'BROKEN' in visible:
@@ -25321,16 +25344,30 @@ def show_item_info(identifier, table_only=False):
                     size_str = f", {fs / (1024*1024):.1f} MB" if fs else ""
                     broken_reason = _get_broken_reason(info, plex_duration) if 'BROKEN' in visible else None
                     broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
-                    print(f"  [{i}] {ver}{size_str}{broken_str}")
+                    # Per-file language info
+                    lang_parts = []
+                    if 'AudioLanguage' in visible:
+                        audio_langs = info.get('audio_languages') or []
+                        if audio_langs:
+                            lang_parts.append(f"lang:{','.join(audio_langs)}")
+                    if 'Subtitles' in visible:
+                        subtitle_langs = info.get('subtitle_languages') or []
+                        if subtitle_langs:
+                            lang_parts.append(f"subs:{','.join(subtitle_langs)}")
+                    lang_str = f"  {' '.join(lang_parts)}" if lang_parts else ""
+                    print(f"  [{i}] {ver}{size_str}{lang_str}{broken_str}")
                     print(f"      {info.get('filepath', 'N/A')}")
-            if 'AudioLanguage' in visible:
-                audio_langs = obj.get('audio_languages', [])
-                if audio_langs:
-                    print(f"Audio Language:\t{', '.join(audio_langs)}")
-            if 'Subtitles' in visible:
-                subtitle_langs = obj.get('subtitle_languages', [])
-                if subtitle_langs:
-                    print(f"Subtitles:\t{', '.join(subtitle_langs)}")
+            # Fallback: if no per-file language data, show object-level aggregated data
+            has_per_file_langs = any(fi.get('audio_languages') or fi.get('subtitle_languages') for fi in files.values())
+            if not has_per_file_langs:
+                if 'AudioLanguage' in visible:
+                    audio_langs = obj.get('audio_languages', [])
+                    if audio_langs:
+                        print(f"Audio Language:\t{', '.join(audio_langs)}")
+                if 'Subtitles' in visible:
+                    subtitle_langs = obj.get('subtitle_languages', [])
+                    if subtitle_langs:
+                        print(f"Subtitles:\t{', '.join(subtitle_langs)}")
     elif obj.get('file'):
         if 'File' in visible:
             # For Series with episode table, skip redundant directory line
