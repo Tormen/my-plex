@@ -558,6 +558,14 @@ CONFIG_DEFAULTS = {
     'PRINTPFX': ' >>> ',
     'VRBPFX': '  >> ',
 
+    # Default scope: space-separated list of filter tokens applied to all listing commands.
+    # These tokens are ANDed with any user-specified filters.
+    # If the user explicitly specifies a filter for the same field, the user's filter wins.
+    # Example: 'watched:no'          → only show unwatched items by default
+    # Example: 'watched:no lang:de'  → only show unwatched German items by default
+    # Set to '' to disable (no default filter).
+    'DEFAULT_SCOPE': 'watched:no',
+
     # Debug/Verbose Flags
     'DBG': False,
     'VRB': False,
@@ -1006,6 +1014,24 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [('movies.de', 'de'), ('movies.en', 'en')]
 
 ###############################################################################
+# Default Scope (DEFAULT_SCOPE)
+###############################################################################
+
+# Space-separated list of filter tokens applied to ALL listing commands by default.
+# These tokens are ANDed with any user-specified filters.
+# If the user explicitly specifies a filter for the same field, the user's filter wins.
+#
+# Examples:
+#   DEFAULT_SCOPE = 'watched:no'            # Only show unwatched items
+#   DEFAULT_SCOPE = 'watched:no lang:de'    # Only show unwatched German items
+#   DEFAULT_SCOPE = ''                      # No default filter (show everything)
+#
+# Applies to: --list, --filter, --duplicates, --broken, --reencode, etc.
+# Does NOT apply to: --update-cache, --problems, --info, --help, --test
+#
+DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
+
+###############################################################################
 # Debug/Verbose Flags - These are defaults. They can be set via commandline.
 ###############################################################################
 
@@ -1216,6 +1242,9 @@ PROBLEMS2DISK = CONFIG_DEFAULTS.get('PROBLEMS2DISK', {})
 
 # --info field visibility (see CONFIG_DEFAULTS for structure and available fields)
 INFO_FIELDS = CONFIG_DEFAULTS['INFO_FIELDS']
+
+# Default scope: space-separated filter tokens applied to all listing commands
+DEFAULT_SCOPE = CONFIG_DEFAULTS['DEFAULT_SCOPE']
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
@@ -13987,13 +14016,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if library_name is None and not media_type and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
             PLEX_Library.print()
             return audio_filter, media_type, False  # False = should not continue
-        if library_name is None:
-            if watched_only:
-                err(1069, "--watched requires a library name.\nExample: my-plex ,unsorted --watched")
-            if unwatched_only:
-                err(1070, "--unwatched requires a library name.\nExample: my-plex ,unsorted --unwatched")
-            if audio_filter:
-                err(1071, "--audio/--en/--de/--fr requires a library name.\nExample: my-plex ,unsorted --en")
+        # Note: watched/unwatched/audio filters work across all libraries.
+        # No library_name requirement — DEFAULT_SCOPE may set these globally.
         return audio_filter, media_type, True  # True = continue
 
     @staticmethod
@@ -15568,6 +15592,75 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return None
 
     @staticmethod
+    def _apply_default_scope(expr, watched_only, unwatched_only, audio_filter):
+        """Merge DEFAULT_SCOPE tokens into filter params, skipping fields already set by user.
+
+        Returns (expr, watched_only, unwatched_only, audio_filter) with defaults applied.
+        """
+        if not DEFAULT_SCOPE or not DEFAULT_SCOPE.strip():
+            return expr, watched_only, unwatched_only, audio_filter
+
+        # Parse DEFAULT_SCOPE into individual tokens
+        default_tokens = DEFAULT_SCOPE.strip().split()
+
+        # Determine which fields the user already specified (via explicit flags or filter expr)
+        user_fields = set()
+        if watched_only:
+            user_fields.add('watched')
+        if unwatched_only:
+            user_fields.add('watched')
+        if audio_filter:
+            user_fields.update(('lang', 'language'))
+        if expr:
+            # Parse field names from user's filter expression
+            for sub in re.split(r'\bAND\b', expr, flags=re.IGNORECASE):
+                sub = sub.strip()
+                if not sub:
+                    continue
+                m = re.match(r'^(\w+)', sub)
+                if m:
+                    user_fields.add(m.group(1).lower())
+
+        # Merge non-conflicting DEFAULT_SCOPE tokens
+        extra_exprs = []
+        for token in default_tokens:
+            m = re.match(r'^(\w+)', token)
+            if not m:
+                continue
+            field = m.group(1).lower()
+            if field in user_fields:
+                if DBG:
+                    print(f"{DBGPFX}DEFAULT_SCOPE: skipping '{token}' (user already specified '{field}')")
+                continue
+            # Apply token
+            user_fields.add(field)  # prevent duplicates within DEFAULT_SCOPE itself
+
+            # Convert known tokens to explicit flags (for PLEX_Media.list() which lacks expr parsing)
+            val_m = re.match(r'^\w+[:=](.+)$', token)
+            val = val_m.group(1).lower() if val_m else ''
+            if field == 'watched' and val in ('no', 'false', '0', 'unwatched'):
+                unwatched_only = True
+                continue
+            if field == 'watched' and val in ('yes', 'true', '1'):
+                watched_only = True
+                continue
+            if field in ('lang', 'language') and val:
+                audio_filter = val
+                continue
+
+            # All other tokens go into the filter expression
+            norm = re.sub(r'^(\w+):', r'\1=', token)  # genre:action → genre=action
+            extra_exprs.append(norm)
+
+        if extra_exprs:
+            if expr:
+                expr = ' AND '.join(extra_exprs) + ' AND ' + expr
+            else:
+                expr = ' AND '.join(extra_exprs)
+
+        return expr, watched_only, unwatched_only, audio_filter
+
+    @staticmethod
     def _list_filtered(expr=None, library_name=None, media_type=None,
                        watched_only=False, unwatched_only=False, audio_filter=None):
         """List media items matching filter expressions joined by AND.
@@ -15581,6 +15674,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         audio_filter: 'en'/'de'/'fr' — filter by audio_languages list.
         """
         import datetime as _dt_mod
+
+        # Apply DEFAULT_SCOPE tokens (skipping fields the user already specified)
+        expr, watched_only, unwatched_only, audio_filter = \
+            PLEX_Media._apply_default_scope(expr, watched_only, unwatched_only, audio_filter)
 
         # Normalise media_type
         if media_type:
@@ -15753,10 +15850,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # For each filter, show ALL related Plex fields — not just the one filtered on.
         extra_cols = []  # list of (header, width, value_fn)
 
-        # watched: viewCount (the completion counter) + lastViewedAt (any play activity)
+        # Agents that provide critics (Rotten Tomatoes): tv.plex.agents.movie only
+        _CRITICS_AGENTS = {'tv.plex.agents.movie'}
+
+        # watched: viewCount + lastViewedAt — for unwatched, rename column to reflect partial views
         if has_watched or has_unwatched:
             extra_cols.append(('WATCH#',      6,  lambda r: str(r['view_count']) if r['view_count'] else '-'))
-            extra_cols.append(('LAST-PLAYED', 11, lambda r: _fmt_ts(r['last_watched'])))
+            _play_header = 'PARTIAL-VIEW' if has_unwatched else 'LAST-PLAYED'
+            extra_cols.append((_play_header, 11, lambda r: _fmt_ts(r['last_watched'])))
 
         # bitrate: already two columns (Mbps + MB/hr, both derived from filesize+duration)
         if has_bitrate:
@@ -15786,8 +15887,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('RAW',   4, lambda r: str(int(r['stars'])) if r['stars'] else '-'))
 
         # rating + critics: check whether any matched library uses RT (supports criticsRating)
-        # Agents that provide critics (Rotten Tomatoes): tv.plex.agents.movie only
-        _CRITICS_AGENTS = {'tv.plex.agents.movie'}
         if has_rating or has_critics:
             _lib_agents = CACHE.get('library_stats', {}).get('agent', {})
             # Determine which libraries are in the result set
@@ -15816,6 +15915,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('GENRE',  16, lambda r: r['genres'][:15] if r['genres'] else '-'))
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
+
+        # --- Generic column sanitizer ---
+        # 1. Remove columns that are ALL empty ('-' or '') across all rows
+        if rows and extra_cols:
+            sanitized = []
+            removed_headers = set()
+            for header, width, vfn in extra_cols:
+                all_empty = all(vfn(r) in ('-', '', 'N/A', '0') for r in rows)
+                if all_empty:
+                    removed_headers.add(header)
+                else:
+                    sanitized.append((header, width, vfn))
+            # If WATCH# and LAST-PLAYED were removed (unwatched filter), add RATING/CRITICS instead
+            if 'WATCH#' in removed_headers and 'LAST-PLAYED' in removed_headers:
+                if not any(h == 'RATING' for h, _, _ in sanitized):
+                    _lib_agents = CACHE.get('library_stats', {}).get('agent', {})
+                    _result_libs = {r['lib'] for r in rows}
+                    _check_libs = {library_name} if library_name else _result_libs
+                    _any_critics = any(_lib_agents.get(lib, '') in _CRITICS_AGENTS for lib in _check_libs)
+                    sanitized.append(('RATING', 7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
+                    if _any_critics:
+                        sanitized.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
+            # 2. Remove duplicate column headers (keep first occurrence)
+            seen_headers = set()
+            deduped = []
+            for col in sanitized:
+                if col[0] not in seen_headers:
+                    seen_headers.add(col[0])
+                    deduped.append(col)
+            extra_cols = deduped
 
         # --- Series rollup: compact episode output by season → show ---
         # Rule (user-specified): compare display column values (strings).
@@ -16537,6 +16666,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None):
         global FORMAT
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
+
+        # Apply DEFAULT_SCOPE (merge default filter tokens into explicit flags)
+        _, watched_only, unwatched_only, audio_filter = \
+            PLEX_Media._apply_default_scope(None, watched_only, unwatched_only, audio_filter)
 
         audio_filter, media_type, should_continue = PLEX_Media._normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language, excess_versions)
         if not should_continue:
@@ -17974,10 +18107,17 @@ def main_print_help(args, remaining_args, main_parser):
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
     has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
+    # from filter token normalization), reset to 'default' and put it back in remaining_args
+    if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
+        if DBG: print(f"{DBGPFX}main_print_help(): resetting args.help from '{args.help}' to 'default' (filter token consumed by argparse)")
+        remaining_args.insert(0, args.help)
+        args.help = 'default'
     # Allow --help --XXX as synonym for --help XXX (argparse treats --XXX as a separate flag)
+    # Skip --flag=value entries (e.g. --list=watched=no from filter token normalization)
     if args.help == 'default' and remaining_args:
         for i, ra in enumerate(remaining_args):
-            if ra.startswith('--'):
+            if ra.startswith('--') and '=' not in ra:
                 topic = ra.lstrip('-')
                 if topic:
                     args.help = topic
@@ -18525,6 +18665,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --en / --de / --fr        Filter by audio language (requires library)")
             print("  --no-audio-language       Show items with missing audio language")
             print("  --resolve                 Interactive resolution (with --duplicates or --no-audio-language)")
+            print()
+            print("DEFAULT_SCOPE:")
+            print(f"  Config variable DEFAULT_SCOPE = '{DEFAULT_SCOPE}' applies default filter tokens")
+            print("  to all listing commands. User-specified filters for the same field override it.")
+            print("  Set DEFAULT_SCOPE = '' to disable. Active scope is shown with -V.")
             print()
             print("EXAMPLES:")
             print()
@@ -19528,6 +19673,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  REENCODE_THRESHOLD_MBPS      Bitrate threshold for --reencode")
             print("  EPISODE_NAME_PATTERN         Pattern for --rename")
             print("  RENUMBER_NAME_PATTERN        Pattern for --renumber --fix")
+            print("  DEFAULT_SCOPE                Default filter tokens for listing commands")
+            print()
+            print("DEFAULT_SCOPE:")
+            print("  Space-separated filter tokens applied to ALL listing commands by default.")
+            print("  If user specifies a filter for the same field, the user's filter wins.")
+            print("  Example: DEFAULT_SCOPE = 'watched:no'          → only unwatched items")
+            print("  Example: DEFAULT_SCOPE = 'watched:no lang:de'  → unwatched German items")
+            print("  Example: DEFAULT_SCOPE = ''                    → no default (show all)")
+            print("  Applies to: --list, --filter, --duplicates, --broken, --reencode, etc.")
+            print("  Does NOT apply to: --update-cache, --problems, --info, --help, --test")
+            print("  Active DEFAULT_SCOPE is shown with -V.")
             print()
             print("EXAMPLES:")
             print()
@@ -26596,6 +26752,10 @@ def main():
     # debugging. Anything -V would have shown must also appear under -D.
     if DBG: VRB = True
     if DEEPDBG: VERYVRB = True
+
+    # Print DEFAULT_SCOPE notice with -V so users know a default filter is active
+    if VRB and DEFAULT_SCOPE and DEFAULT_SCOPE.strip():
+        print(f"  >> DEFAULT_SCOPE: {DEFAULT_SCOPE.strip()}")
 
     # NOTE: Plex API connection parameters removed - now using direct database access via SSH
     # Database configuration is in PLEX_DB_PATH and accessed via 'my-plex' SSH host

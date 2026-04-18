@@ -210,6 +210,9 @@ RENUMBER_NAME_PATTERN = '{S0XE0X} {TITLE}'
 # Optional: Duplicate detection — ignore cross-library duplicates
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
 
+# Optional: Default filter scope (applied to all listing commands)
+DEFAULT_SCOPE = 'watched:no'  # Only show unwatched items by default
+
 # Optional: Disk map markers (sync Plex metadata to filenames)
 DISK_MAP = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
 DISK_MAP_MOVIE_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
