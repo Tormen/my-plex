@@ -3484,6 +3484,55 @@ class TestDefaultScope(unittest.TestCase):
                 "Must not have duplicate RATING columns")
 
 
+    def test_help_with_multiple_filter_tokens(self):
+        """--help must not crash when combined with multiple filter tokens."""
+        result = self._run(',unsorted', 'watched:no', 'rating>7', '--help')
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('ERROR', result.stdout)
+
+    def test_bare_token_adds_column(self):
+        """A bare field name (e.g. 'genre') must add a display column without filtering."""
+        result = self._run(',unsorted', 'genre', '-V')
+        self.assertIn('GENRE', result.stdout, "Bare 'genre' token must add GENRE column")
+        # Should not produce an error
+        self.assertNotIn('ERROR', result.stdout)
+
+    def test_bare_token_combined_with_filter(self):
+        """Bare token + filter token must work together (e.g. 'rating>7 genre')."""
+        result = self._run(',unsorted', 'watched:no', 'rating>7', 'genre', '-V')
+        header_lines = [l for l in result.stdout.splitlines() if 'RATING' in l and 'GENRE' in l]
+        self.assertTrue(len(header_lines) >= 1, "Must show both RATING and GENRE columns")
+
+    def test_bare_token_display_only_no_filter(self):
+        """_parse_filter_sub_expr must handle +field tokens (display-only, no filtering)."""
+        src = self._read_script()
+        idx = src.index('def _parse_filter_sub_expr(')
+        snippet = src[idx:idx+2000]
+        self.assertIn("sub.startswith('+')", snippet, "_parse_filter_sub_expr must handle +field tokens")
+
+    def test_cat_c_token_regex_exists(self):
+        """Cat-C bare token regex must exist in argv normalization."""
+        src = self._read_script()
+        self.assertIn('_CAT_C_TOKEN_RE', src, "Cat-C regex for bare field tokens must exist")
+
+    def test_rollup_shows_matched_total_counts(self):
+        """Series rollup with filtered episodes must show matched/total annotation."""
+        result = self._run('series.de', '-V')
+        lines = result.stdout.splitlines()
+        series_lines = [l for l in lines if l.startswith('Series:')]
+        if series_lines:
+            # At least one series should have (N/M eps, X/Y seasons) annotation
+            annotated = [l for l in series_lines if ' eps,' in l and 'seasons)' in l]
+            self.assertTrue(len(annotated) > 0,
+                "Filtered series rollup must annotate with matched/total counts")
+
+    def test_rollup_season_annotation(self):
+        """Season rows with partial episode match must show (N/M eps) annotation."""
+        src = self._read_script()
+        self.assertIn('_matched_eps', src, "Season rollup must track matched episode count")
+        self.assertIn('_total_eps', src, "Season rollup must track total episode count")
+
+
 class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
 
