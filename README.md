@@ -4,13 +4,16 @@ Still under heavy development, but already somewhat usable.
 
 The swiss-army knife for PLEX - a comprehensive Plex media management tool with direct database access and PLEX API access, intelligent caching for offline usage.
 
-**25,000+ lines of Python** | **680+ tests** | **Offline-capable** | **60x faster than Plex API**
+**25,000+ lines of Python** | **750+ tests** | **Offline-capable** | **60x faster than Plex API**
 
 ## Features
 
 ### Library & Media Management
 - **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
+- **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
+- **DEFAULT_SCOPE** — config variable for default filters applied to all listings (e.g. `watched:no`)
+- **Smart rollup** — episodes with identical display values collapse into Season/Series rows, with matched/total counts when filters are active
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations
 - **Duplicate detection** with intelligent classification (exact duplicates vs re-encodes vs true multi-version)
 - **Problem scanner** (`--problems`) — runs all 12 checks in one pass, counts stored in cache after every `--update-cache`:

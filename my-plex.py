@@ -15362,6 +15362,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         sub = sub_expr.strip()
 
+        # --- Display-only column: +field — adds column, no filtering ---
+        if sub.startswith('+'):
+            _display_field = sub[1:].strip().lower()
+            if _display_field in ('bitrate', 'resolution', 'codec', 'year', 'label', 'genre',
+                                  'size', 'duration', 'rating', 'stars', 'critics', 'added',
+                                  'watched', 'lang', 'language', 'subs', 'sub', 'subtitle', 'subtitles'):
+                return f"+{_display_field}", lambda obj, fi: True
+
         # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
         _bitrate_re = re.match(
             r'^(?:(?:bitrate|mb_per_hour|mbph)\s*)?'
@@ -15617,7 +15625,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 sub = sub.strip()
                 if not sub:
                     continue
-                m = re.match(r'^(\w+)', sub)
+                m = re.match(r'^\+?(\w+)', sub)
                 if m:
                     user_fields.add(m.group(1).lower())
 
@@ -15649,8 +15657,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
 
             # All other tokens go into the filter expression
-            norm = re.sub(r'^(\w+):', r'\1=', token)  # genre:action → genre=action
-            extra_exprs.append(norm)
+            # Bare field name (no operator/value) → display-only column (+field)
+            if re.match(r'^\w+$', token) and not val:
+                extra_exprs.append(f"+{field}")
+            else:
+                norm = re.sub(r'^(\w+):', r'\1=', token)  # genre:action → genre=action
+                extra_exprs.append(norm)
 
         if extra_exprs:
             if expr:
@@ -15711,7 +15723,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         }
         _active_fields = set()
         for lbl, _ in filters:
-            tok = lbl.split()[0].split(':')[0].lower()
+            tok = lbl.split()[0].split(':')[0].lstrip('+').lower()
             field_name = _LABEL_TO_FIELD.get(tok, tok)
             _active_fields.add(field_name)
         if media_type:    _active_fields.add('type')
@@ -15927,8 +15939,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     removed_headers.add(header)
                 else:
                     sanitized.append((header, width, vfn))
-            # If WATCH# and LAST-PLAYED were removed (unwatched filter), add RATING/CRITICS instead
-            if 'WATCH#' in removed_headers and 'LAST-PLAYED' in removed_headers:
+            # If WATCH# and LAST-PLAYED/PARTIAL-VIEW were removed (unwatched filter), add RATING/CRITICS instead
+            if 'WATCH#' in removed_headers and ('LAST-PLAYED' in removed_headers or 'PARTIAL-VIEW' in removed_headers):
                 if not any(h == 'RATING' for h, _, _ in sanitized):
                     _lib_agents = CACHE.get('library_stats', {}).get('agent', {})
                     _result_libs = {r['lib'] for r in rows}
@@ -15988,6 +16000,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Phase 1: season rollup — same display values → Season: row
             _series_rows = _dd(list)  # series_key → [season or individual episode rows]
 
+            # Count total episodes per season from cache (for matched/total annotation)
+            def _total_eps_in_season(sk, s):
+                """Count total episodes in a season from OBJ_BY_SERIES_EPISODES."""
+                eps = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(sk, {}).get(s, {})
+                return sum(len(ks) for ev in eps.values() for ks in ev.values())
+
             for (_sk, _s), _grp in _season_grps.items():
                 _sigs = {_row_sig(r) for r in _grp}
                 if len(_sigs) <= 1:  # all matched episodes share the same display values
@@ -16003,13 +16021,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _sr['_sk']    = _sk
                     _sr['_s']     = _s
                     _sr['_dir']   = _season_dir
+                    _total = _total_eps_in_season(_sk, _s)
+                    _matched = len(_grp)
+                    _sr['_matched_eps'] = _matched
+                    _sr['_total_eps']   = _total
                     _series_rows[_sk].append(_sr)
                 else:
                     for r in _grp:
                         r['_rtype'] = 'ep'
                     _series_rows[_sk].extend(_grp)
 
-            # Phase 2: show rollup — all Season: rows same values + all seasons covered
+            # Phase 2: show rollup — all Season: rows same values → Series: row
+            # When filters cause uncovered seasons, still roll up but annotate with counts
             _final_ep = []
             for _sk, _s_rows in _series_rows.items():
                 _all_season = all(r.get('_rtype') == 'season' for r in _s_rows)
@@ -16017,19 +16040,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _all_seasons_in_show = set((PLEX_Media.OBJ_BY_SERIES.get(_sk) or {}).keys())
                     _covered   = {r['_s'] for r in _s_rows}
                     _uncovered = _all_seasons_in_show - _covered
-                    # Uncovered seasons (zero matches) are OK ONLY for lang: filters,
-                    # where episodes lacking audio_languages metadata are a Plex detection
-                    # gap — not a genuine exclusion from the filter.
-                    # For other filters (watched:, genre:, …) an uncovered season means
-                    # the series genuinely has seasons that don't match, so no rollup.
-                    _uncovered_ok = has_lang and all(
-                        all(not PLEX_Media.OBJ_BY_ID.get(_ek, {}).get('audio_languages')
-                            for _e2, _vs2 in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(_sk, {}).get(_s2, {}).items()
-                            for _ver2, _ks2 in _vs2.items()
-                            for _ek in _ks2)
-                        for _s2 in _uncovered
-                    )
-                    if _covered and (_covered == _all_seasons_in_show or _uncovered_ok):
+
+                    if _covered:
                         import os as _os
                         from collections import Counter as _Counter
                         _s_dirs  = [r.get('_dir', '') for r in _s_rows if r.get('_dir')]
@@ -16037,9 +16049,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         _wr = dict(_s_rows[0])
                         _wr['key']      = _sk
                         _wr['filepath'] = _series_dir
+
+                        # Compute total episodes across ALL seasons (matched + uncovered)
+                        _matched_eps = sum(r.get('_matched_eps', 0) for r in _s_rows)
+                        _total_eps = sum(_total_eps_in_season(_sk, s) for s in _all_seasons_in_show)
+
+                        # Annotate if not all episodes/seasons matched
+                        if _uncovered or _matched_eps < _total_eps:
+                            _wr['filepath'] += f"  ({_matched_eps}/{_total_eps} eps, {len(_covered)}/{len(_all_seasons_in_show)} seasons)"
+
                         _wr.pop('_rtype', None); _wr.pop('_sk', None); _wr.pop('_s', None); _wr.pop('_dir', None)
+                        _wr.pop('_matched_eps', None); _wr.pop('_total_eps', None)
                         _final_ep.append(_wr)
                         continue
+                # Season rows not rolled up to show — annotate individually
+                for r in _s_rows:
+                    if r.get('_rtype') == 'season':
+                        _m = r.pop('_matched_eps', 0)
+                        _t = r.pop('_total_eps', 0)
+                        if _m < _t:
+                            r['filepath'] += f"  ({_m}/{_t} eps)"
                 _final_ep.extend(_s_rows)
 
             _final_ep.extend(_no_show)
@@ -18650,6 +18679,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("  codec:h265        → filter expression")
             print("  Operators: < > <= >= = !=")
             print()
+            print("DISPLAY COLUMNS (bare field name — no filtering, just adds column):")
+            print("  genre             → adds GENRE column to output")
+            print("  rating            → adds RATING column")
+            print("  year              → adds YEAR column")
+            print("  label / stars / codec / resolution / bitrate / size / duration / added")
+            print("  lang / subs / critics / watched")
+            print("  Works on CLI and in DEFAULT_SCOPE. Combinable with filters:")
+            print("  my-plex ,unsorted rating>7 genre    ← filters by rating, shows GENRE column")
+            print()
             print("SCOPE:")
             print("  my-plex 'EXPR'                  # all libraries")
             print("  my-plex KEY-1234 'EXPR'          # single Plex object")
@@ -18670,6 +18708,11 @@ def main_print_help(args, remaining_args, main_parser):
             print(f"  Config variable DEFAULT_SCOPE = '{DEFAULT_SCOPE}' applies default filter tokens")
             print("  to all listing commands. User-specified filters for the same field override it.")
             print("  Set DEFAULT_SCOPE = '' to disable. Active scope is shown with -V.")
+            print()
+            print("SERIES ROLLUP:")
+            print("  Episodes with identical display values are rolled up into Season/Series rows.")
+            print("  When a filter (e.g. watched:no) excludes some episodes, rolled-up rows show")
+            print("  matched/total counts:  Series:1234  /path  (39/85 eps, 4/4 seasons)")
             print()
             print("EXAMPLES:")
             print()
@@ -26361,6 +26404,11 @@ def main():
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
+    # Cat-C: bare field name without operator/value — adds a display column, no filtering
+    _CAT_C_TOKEN_RE = re.compile(
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)$',
+        re.IGNORECASE
+    )
     _new_argv = [sys.argv[0]]
     _inject_flags = []   # flags to append after the current argv sweep
     _filter_exprs = []   # category B expressions collected
@@ -26370,6 +26418,7 @@ def main():
         arg = sys.argv[_i]
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
+        _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
         if _ma and not arg.startswith('-'):
             key = _ma.group('key').lower()
             val = _ma.group('val')
@@ -26387,6 +26436,11 @@ def main():
             _filter_exprs.append(expr)
             _translations.append((arg, f"--list filter: {expr}"))
             if DBG: print(f" ~~~ Filter token '{arg}' → expr '{expr}'", file=sys.stderr)
+        elif _mc and not arg.startswith('-'):
+            field = _mc.group('field').lower()
+            _filter_exprs.append(f"+{field}")
+            _translations.append((arg, f"--list column: {field}"))
+            if DBG: print(f" ~~~ Display token '{arg}' → column '{field}'", file=sys.stderr)
         else:
             _new_argv.append(arg)
         _i += 1
