@@ -15365,9 +15365,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # --- Display-only column: +field — adds column, no filtering ---
         if sub.startswith('+'):
             _display_field = sub[1:].strip().lower()
-            if _display_field in ('bitrate', 'resolution', 'codec', 'year', 'label', 'genre',
-                                  'size', 'duration', 'rating', 'stars', 'critics', 'added',
-                                  'watched', 'lang', 'language', 'subs', 'sub', 'subtitle', 'subtitles'):
+            if _display_field in ('title', 'library', 'bitrate', 'resolution', 'codec', 'year',
+                                  'label', 'genre', 'size', 'duration', 'rating', 'stars',
+                                  'critics', 'added', 'watched', 'lang', 'language',
+                                  'subs', 'sub', 'subtitle', 'subtitles',
+                                  'country', 'countries', 'director', 'directors',
+                                  'actor', 'actors', 'contentrating', 'writer', 'writers'):
                 return f"+{_display_field}", lambda obj, fi: True
 
         # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
@@ -15720,6 +15723,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'watched': 'watched', 'unwatched': 'unwatched',
             'lang': 'lang', 'language': 'lang',
             'subs': 'subs', 'sub': 'subs', 'subtitle': 'subs', 'subtitles': 'subs',
+            'title': 'title', 'library': 'library',
+            'country': 'country', 'countries': 'country',
+            'director': 'director', 'directors': 'director',
+            'writer': 'writer', 'writers': 'writer',
+            'actor': 'actor', 'actors': 'actor',
+            'contentrating': 'contentrating',
         }
         _active_fields = set()
         for lbl, _ in filters:
@@ -15798,6 +15807,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'rating':       obj.get('audienceRating') or 0,    # external audience score
                 'critics':      obj.get('criticsRating') or 0,     # RT Tomatometer only
                 'added':        obj.get('addedAt') or 0,
+                'title':        obj.get('title', ''),
+                'library':      lib,
+                'countries':    ', '.join(str(c) for c in (obj.get('countries') or [])),
+                'directors':    ', '.join(str(d) for d in (obj.get('directors') or [])),
+                'writers':      ', '.join(str(w) for w in (obj.get('writers') or [])),
+                'actors':       ', '.join(str(a) for a in (obj.get('actors') or [])[:5]),
+                'content_rating': obj.get('contentRating', ''),
                 'audio_langs':  ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
                 'sub_langs':    ', '.join(str(l) for l in (obj.get('subtitle_languages') or [])),
                 'genres':       ', '.join(str(g) for g in (obj.get('genres') or [])),
@@ -15828,6 +15844,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_added    = 'added'    in _active_fields
         has_genre    = 'genre'    in _active_fields
         has_label    = 'label'    in _active_fields
+        has_title    = 'title'    in _active_fields
+        has_library  = 'library'  in _active_fields
+        has_country  = 'country'  in _active_fields
+        has_director = 'director' in _active_fields
+        has_writer   = 'writer'   in _active_fields
+        has_actor    = 'actor'    in _active_fields
+        has_contentrating = 'contentrating' in _active_fields
 
         if has_bitrate:
             rows.sort(key=lambda r: r['bitrate'], reverse=True)
@@ -15923,10 +15946,24 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_subs:
             extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
 
+        if has_title:
+            extra_cols.append(('TITLE', 30, lambda r: r['title'][:29] if r['title'] else '-'))
+        if has_library:
+            extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
             extra_cols.append(('GENRE',  16, lambda r: r['genres'][:15] if r['genres'] else '-'))
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
+        if has_country:
+            extra_cols.append(('COUNTRY', 10, lambda r: r['countries'][:9] if r['countries'] else '-'))
+        if has_director:
+            extra_cols.append(('DIRECTOR', 18, lambda r: r['directors'][:17] if r['directors'] else '-'))
+        if has_writer:
+            extra_cols.append(('WRITER', 18, lambda r: r['writers'][:17] if r['writers'] else '-'))
+        if has_actor:
+            extra_cols.append(('ACTORS', 30, lambda r: r['actors'][:29] if r['actors'] else '-'))
+        if has_contentrating:
+            extra_cols.append(('RATED', 7, lambda r: r['content_rating'] or '-'))
 
         # --- Generic column sanitizer ---
         # 1. Remove columns that are ALL empty ('-' or '') across all rows
@@ -18680,13 +18717,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Operators: < > <= >= = !=")
             print()
             print("DISPLAY COLUMNS (bare field name — no filtering, just adds column):")
-            print("  genre             → adds GENRE column to output")
-            print("  rating            → adds RATING column")
-            print("  year              → adds YEAR column")
-            print("  label / stars / codec / resolution / bitrate / size / duration / added")
-            print("  lang / subs / critics / watched")
+            print("  title             → adds TITLE column to output")
+            print("  genre             → adds GENRE column")
+            print("  rating / stars    → adds RATING / STARS column")
+            print("  year / added      → adds YEAR / ADDED column")
+            print("  library / label / codec / resolution / bitrate / size / duration")
+            print("  lang / subs / critics / watched / contentrating")
+            print("  country / director / writer / actors")
             print("  Works on CLI and in DEFAULT_SCOPE. Combinable with filters:")
-            print("  my-plex ,unsorted rating>7 genre    ← filters by rating, shows GENRE column")
+            print("  my-plex ,unsorted rating>7 genre title  ← filter + GENRE + TITLE columns")
             print()
             print("SCOPE:")
             print("  my-plex 'EXPR'                  # all libraries")
@@ -26405,8 +26444,9 @@ def main():
         re.IGNORECASE
     )
     # Cat-C: bare field name without operator/value — adds a display column, no filtering
+    # Cat-C: bare field name — display-only column (superset of Cat-B fields + title, library, country, etc.)
     _CAT_C_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)$',
+        r'^(?P<field>title|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers)$',
         re.IGNORECASE
     )
     _new_argv = [sys.argv[0]]
