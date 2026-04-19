@@ -1436,6 +1436,11 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
     added>2024                  by year added to Plex
     label:reencode              by Plex / on-disk label
 
+  DISPLAY / HIDE / SEARCH:
+    genre                       bare field → add GENRE column (no filtering)
+    -file                       -field → hide FILEPATH column
+    tagesschau                  bare word → title search
+
   → see --help scope  for full filter reference and examples
 """
 
@@ -15399,6 +15404,41 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _c(br, _t)
             return label, _bitrate_fn
 
+        # --- Title search: title~word or title:word or bare ~word ---
+        # Searches Movie title + originalTitle. For Episodes, also matches parent series title.
+        # Use ep:word to search ONLY episode titles (not series-level).
+        _title_re = re.match(
+            r'^(?:title|originaltitle)?[~:=](?P<val>.+)$',
+            sub, re.IGNORECASE
+        )
+        _ep_title_re = re.match(
+            r'^ep(?:isode)?[~:=](?P<val>.+)$',
+            sub, re.IGNORECASE
+        ) if not _title_re else None
+        if _title_re or _ep_title_re or sub.startswith('~'):
+            _ep_only = bool(_ep_title_re)
+            needle = ((_ep_title_re or _title_re).group('val') if (_ep_title_re or _title_re) else sub[1:]).strip().strip("'\"").lower()
+            label = f"{'ep' if _ep_only else 'title'}~{needle}"
+            # Pre-build set of series keys whose title matches (for fast episode lookup)
+            _matching_series = set()
+            if not _ep_only:
+                for _sk2 in PLEX_Media.OBJ_BY_SERIES_EPISODES:
+                    _sobj = PLEX_Media.OBJ_BY_ID.get(_sk2, {})
+                    _st = (_sobj.get('title') or '').lower()
+                    _sot = (_sobj.get('originalTitle') or '').lower()
+                    if needle in _st or needle in _sot:
+                        _matching_series.add(_sk2)
+            def _title_fn(obj, fi, _n=needle, _ep_only=_ep_only, _ms=_matching_series):
+                t = (obj.get('title') or '').lower()
+                ot = (obj.get('originalTitle') or '').lower()
+                if _n in t or _n in ot:
+                    return True
+                # For episodes: also match parent series title (unless ep: search)
+                if not _ep_only and _ms:
+                    return obj.get('series_key', '') in _ms
+                return False
+            return label, _title_fn
+
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
             r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)'
@@ -15732,7 +15772,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         }
         _active_fields = set()
         for lbl, _ in filters:
-            tok = lbl.split()[0].split(':')[0].lstrip('+').lower()
+            tok = re.split(r'[\s:~]', lbl)[0].lstrip('+').lower()
             field_name = _LABEL_TO_FIELD.get(tok, tok)
             _active_fields.add(field_name)
         if media_type:    _active_fields.add('type')
@@ -15965,6 +16005,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_contentrating:
             extra_cols.append(('RATED', 7, lambda r: r['content_rating'] or '-'))
 
+        # --- Negative Cat-C: remove user-hidden columns ---
+        _hide = getattr(PLEX_Media, '_REMOVE_COLS', set())
+        if _hide and extra_cols:
+            extra_cols = [(h, w, fn) for h, w, fn in extra_cols if h not in _hide]
+        _hide_key = 'KEY' in _hide
+        _hide_filepath = 'FILEPATH' in _hide
+
         # --- Generic column sanitizer ---
         # 1. Remove columns that are ALL empty ('-' or '') across all rows
         if rows and extra_cols:
@@ -16112,23 +16159,25 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             rows = _movie_rows + _final_ep
 
         # Print header
-        hdr  = f"{'KEY':<22}"
-        sep  = "-" * 22
+        hdr  = f"{'KEY':<22}" if not _hide_key else ""
+        sep  = "-" * 22 if not _hide_key else ""
         for hname, hwidth, _ in extra_cols:
             hdr += f"  {hname:<{hwidth}}"
             sep += "  " + "-" * hwidth
-        hdr += "  FILEPATH"
-        sep += "  " + "-" * 40
+        if not _hide_filepath:
+            hdr += "  FILEPATH"
+            sep += "  " + "-" * 40
         try:
             if VRB:
                 print(hdr)
                 print(sep)
             for r in rows:
-                line = f"{r['key']:<22}"
+                line = f"{r['key']:<22}" if not _hide_key else ""
                 for _, hwidth, vfn in extra_cols:
                     val = vfn(r)
                     line += f"  {str(val):<{hwidth}}"
-                line += f"  {r['filepath']}"
+                if not _hide_filepath:
+                    line += f"  {r['filepath']}"
                 print(line)
             if VRB: print(f"\n >>> {len(rows)} item(s)")
         except BrokenPipeError:
@@ -18650,6 +18699,35 @@ def main_print_help(args, remaining_args, main_parser):
             print("   >>> Interpreted: --type movie --de --unwatched --list 'bitrate>2mbps'")
             print("  (add -V to see per-token breakdown)")
             print()
+            print("DISPLAY COLUMNS  (bare field name — adds column, no filtering):")
+            print()
+            print("  my-plex ,unsorted genre                    add GENRE column")
+            print("  my-plex ,unsorted rating>7 genre title     add GENRE + TITLE columns")
+            print("  my-plex ,unsorted year country director    add multiple columns")
+            print()
+            print("  Supported: title, library, genre, year, rating, stars, critics, added,")
+            print("    bitrate, resolution, codec, size, duration, watched, lang, subs,")
+            print("    country, director, writer, actor, contentrating, label")
+            print()
+            print("HIDING COLUMNS  (-field — removes a column from output):")
+            print()
+            print("  my-plex ,unsorted -file                    hide FILEPATH column")
+            print("  my-plex ,unsorted -key -file               hide both KEY and FILEPATH")
+            print("  my-plex ,unsorted genre -file              add GENRE, hide FILEPATH")
+            print()
+            print("  Synonyms: -file = -filepath = -path,  -watched = -watch")
+            print()
+            print("TITLE SEARCH  (bare word — full-text search on title/originalTitle):")
+            print()
+            print("  my-plex tagesschau                         search movies + series")
+            print("  my-plex tagesschau genre title              search + add columns")
+            print("  my-plex tagesschau -file                   search, hide FILEPATH")
+            print()
+            print("  Matches movies/series by title. Episodes are included if their")
+            print("  series title matches. For episode-only title search, use ep:word:")
+            print()
+            print("  my-plex ,unsorted ep:pilot                 episodes with 'pilot' in title")
+            print()
             print("SCOPING COMMANDS:")
             print()
             print("  my-plex --problems                      all libraries")
@@ -18726,6 +18804,20 @@ def main_print_help(args, remaining_args, main_parser):
             print("  country / director / writer / actors")
             print("  Works on CLI and in DEFAULT_SCOPE. Combinable with filters:")
             print("  my-plex ,unsorted rating>7 genre title  ← filter + GENRE + TITLE columns")
+            print()
+            print("HIDING COLUMNS (-field — removes a column from output):")
+            print("  -file / -filepath / -path  → hides FILEPATH column")
+            print("  -key                       → hides KEY column")
+            print("  -genre / -title / -year    → hides that display column")
+            print("  -watched / -watch          → hides WATCH# + LAST-PLAYED columns")
+            print("  my-plex ,unsorted genre -file  ← add GENRE, hide FILEPATH")
+            print()
+            print("TITLE SEARCH (bare word — full-text search on title/originalTitle):")
+            print("  my-plex tagesschau         ← search movies + series by title")
+            print("  my-plex tagesschau genre   ← search + add GENRE column")
+            print("  Matches movies/series by title. Episodes are included if their")
+            print("  series title matches. For episode-only title search, use ep:word:")
+            print("  my-plex ep:pilot           ← episodes with 'pilot' in title")
             print()
             print("SCOPE:")
             print("  my-plex 'EXPR'                  # all libraries")
@@ -26449,13 +26541,44 @@ def main():
         r'^(?P<field>title|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers)$',
         re.IGNORECASE
     )
+    # Negative Cat-C: -field removes a column from output (e.g. -file, -genre, -title)
+    _NEG_FIELD_MAP = {
+        # synonyms → canonical column header to remove
+        'file': 'FILEPATH', 'filepath': 'FILEPATH', 'path': 'FILEPATH',
+        'key': 'KEY',
+        'title': 'TITLE', 'library': 'LIBRARY',
+        'genre': 'GENRE', 'label': 'LABELS', 'labels': 'LABELS',
+        'year': 'YEAR', 'rating': 'RATING', 'stars': 'STARS',
+        'critics': 'CRITICS', 'added': 'ADDED',
+        'bitrate': 'BITRATE', 'resolution': 'RES', 'codec': 'VCODEC',
+        'size': 'SIZE', 'duration': 'DURATION',
+        'lang': 'AUDIO', 'language': 'AUDIO', 'audio': 'AUDIO',
+        'subs': 'SUBS', 'sub': 'SUBS', 'subtitle': 'SUBS', 'subtitles': 'SUBS',
+        'watched': 'WATCH#', 'watch': 'WATCH#',
+        'country': 'COUNTRY', 'countries': 'COUNTRY',
+        'director': 'DIRECTOR', 'directors': 'DIRECTOR',
+        'writer': 'WRITER', 'writers': 'WRITER',
+        'actor': 'ACTORS', 'actors': 'ACTORS',
+        'contentrating': 'RATED', 'rated': 'RATED',
+    }
+    _NEG_CAT_C_RE = re.compile(
+        r'^-(?P<field>' + '|'.join(re.escape(k) for k in _NEG_FIELD_MAP) + r')$',
+        re.IGNORECASE
+    )
     _new_argv = [sys.argv[0]]
     _inject_flags = []   # flags to append after the current argv sweep
     _filter_exprs = []   # category B expressions collected
+    _remove_cols = set()  # column headers to remove (from negative Cat-C)
     _translations = []   # (original_token, translated_to) for user echo
     _i = 1
     while _i < len(sys.argv):
         arg = sys.argv[_i]
+        # Skip arguments that follow --help/-H (they are the help topic, not filter tokens)
+        _prev_arg = sys.argv[_i - 1] if _i > 1 else ''
+        if _prev_arg in ('--help', '-H'):
+            _new_argv.append(arg)
+            _i += 1
+            continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
         _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
@@ -26481,10 +26604,41 @@ def main():
             _filter_exprs.append(f"+{field}")
             _translations.append((arg, f"--list column: {field}"))
             if DBG: print(f" ~~~ Display token '{arg}' → column '{field}'", file=sys.stderr)
+        elif _NEG_CAT_C_RE.match(arg):
+            _nf = _NEG_CAT_C_RE.match(arg).group('field').lower()
+            _remove_cols.add(_NEG_FIELD_MAP[_nf])
+            # Also remove synonyms: -file removes both FILEPATH, -watched removes WATCH# + PARTIAL-VIEW
+            if _nf in ('file', 'filepath', 'path'):
+                _remove_cols.add('FILEPATH')
+            if _nf in ('watched', 'watch'):
+                _remove_cols.update(('WATCH#', 'LAST-PLAYED', 'PARTIAL-VIEW'))
+            _translations.append((arg, f"hide column: {_NEG_FIELD_MAP[_nf]}"))
+            if DBG: print(f" ~~~ Negative token '{arg}' → hide {_NEG_FIELD_MAP[_nf]}", file=sys.stderr)
         else:
-            _new_argv.append(arg)
+            # Cat-D: unrecognized bare word → title search (full-text)
+            # Keep as CMD_OR_PLEXOBJECT if it looks like: flag, library, path, cache key, Plex ID
+            # Flags whose next positional arg is NOT a filter token
+            _VALUE_FLAGS = {'--type', '--info', '--format', '-f', '--help', '-H',
+                            '--config-file', '-C', '--source', '--rename',
+                            '--playlist', '--add-label', '--remove-label',
+                            '--list-label', '--map-to-filename', '--map-from-filename'}
+            _is_search = (not arg.startswith(('-', ',', '/'))
+                          and ':' not in arg
+                          and ' ' not in arg  # multi-word quoted strings are scope, not search
+                          and not re.match(r'^(?:movies?|series|shows?|music|photos?|collections?)\.\w', arg, re.IGNORECASE)
+                          and not re.match(r'^\d+$', arg)  # bare number = potential Plex ID
+                          and arg not in ('--', 'all', 'ALL')
+                          and _prev_arg not in _VALUE_FLAGS)  # skip values of --type, --info, etc.
+            if _is_search and not arg.startswith('-'):
+                _filter_exprs.append(f"title~{arg}")
+                _translations.append((arg, f"--list search: title~{arg}"))
+                if DBG: print(f" ~~~ Search token '{arg}' → title~{arg}", file=sys.stderr)
+            else:
+                _new_argv.append(arg)
         _i += 1
-    if _inject_flags or _filter_exprs:
+    # Store negative columns globally for _list_filtered to use
+    PLEX_Media._REMOVE_COLS = _remove_cols
+    if _inject_flags or _filter_exprs or _remove_cols:
         sys.argv = _new_argv + _inject_flags
         if _filter_exprs:
             combined = ' AND '.join(_filter_exprs)

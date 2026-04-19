@@ -12,6 +12,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
+- **Title search** — bare words search movies/series by title: `my-plex tagesschau` (episode title search with `ep:word`)
+- **Column hiding** — `-field` removes columns: `my-plex ,unsorted -file` hides FILEPATH
 - **DEFAULT_SCOPE** — config variable for default filters applied to all listings (e.g. `watched:no`)
 - **Smart rollup** — episodes with identical display values collapse into Season/Series rows, with matched/total counts when filters are active
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations

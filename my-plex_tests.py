@@ -3532,6 +3532,78 @@ class TestDefaultScope(unittest.TestCase):
         self.assertIn('_matched_eps', src, "Season rollup must track matched episode count")
         self.assertIn('_total_eps', src, "Season rollup must track total episode count")
 
+    # --- Cat-D: bare word title search ---
+
+    def test_cat_d_title_search(self):
+        """A bare word (not a field/flag/library) must trigger title~word search."""
+        result = self._run('tagesschau', '-V')
+        self.assertIn('title~tagesschau', result.stdout,
+            "Bare word must be interpreted as title search")
+        self.assertNotIn('ERROR', result.stdout)
+
+    def test_cat_d_title_search_results(self):
+        """Title search must return items whose title matches the search term."""
+        result = self._run('tagesschau', '-V')
+        lines = [l for l in result.stdout.splitlines() if l.startswith(('Movie:', 'Series:', 'Episode:', 'Season:'))]
+        self.assertTrue(len(lines) > 0, "Title search 'tagesschau' must return at least one result")
+
+    def test_cat_d_skips_help_topic(self):
+        """--help <topic> must NOT treat the topic as a Cat-D title search."""
+        result = self._run('--help', 'scope')
+        self.assertNotIn('title~scope', result.stdout,
+            "--help topic must not be treated as title search")
+        self.assertIn('SCOPE', result.stdout,
+            "--help scope must show scope help page")
+
+    def test_cat_d_skips_library_names(self):
+        """Library names like 'series.de' must NOT trigger Cat-D title search."""
+        src = self._read_script()
+        self.assertIn("not re.match(r'^(?:movies?|series|shows?", src,
+            "Cat-D must skip library name patterns")
+
+    # --- Negative Cat-C: -field removes columns ---
+
+    def test_neg_cat_c_removes_filepath(self):
+        """-file must remove the FILEPATH column from output."""
+        result = self._run(',unsorted', '-file', '-V')
+        header_lines = [l for l in result.stdout.splitlines() if l.startswith('---')]
+        if header_lines:
+            self.assertNotIn('FILEPATH', result.stdout.splitlines()[
+                result.stdout.splitlines().index(header_lines[0]) - 1],
+                "-file must remove FILEPATH from header")
+
+    def test_neg_cat_c_synonyms(self):
+        """-file, -filepath, -path must all map to FILEPATH removal."""
+        src = self._read_script()
+        self.assertIn("'file': 'FILEPATH'", src)
+        self.assertIn("'filepath': 'FILEPATH'", src)
+        self.assertIn("'path': 'FILEPATH'", src)
+
+    def test_neg_cat_c_regex_exists(self):
+        """Negative Cat-C regex and field map must exist in argv normalization."""
+        src = self._read_script()
+        self.assertIn('_NEG_CAT_C_RE', src, "Negative Cat-C regex must exist")
+        self.assertIn('_NEG_FIELD_MAP', src, "Negative Cat-C field map must exist")
+        self.assertIn('_REMOVE_COLS', src, "Column removal storage must exist")
+
+    def test_neg_cat_c_wired_into_list(self):
+        """_list_filtered must read _REMOVE_COLS and filter extra_cols."""
+        src = self._read_script()
+        idx = src.index('def _list_filtered(')
+        body = src[idx:idx+30000]
+        self.assertIn('_REMOVE_COLS', body,
+            "_list_filtered must use _REMOVE_COLS to hide columns")
+
+    # --- ep:word episode title search ---
+
+    def test_ep_title_search_handler(self):
+        """_parse_filter_sub_expr must handle ep:word syntax for episode-only title search."""
+        src = self._read_script()
+        idx = src.index('def _parse_filter_sub_expr(')
+        snippet = src[idx:idx+8000]
+        self.assertIn('_ep_title_re', snippet,
+            "_parse_filter_sub_expr must handle ep: prefix for episode title search")
+
 
 class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
