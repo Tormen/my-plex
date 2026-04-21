@@ -40,4 +40,4 @@ Thumbs.db
 # Project-internal (not for publishing)
 .archive/
 test-playground/
-.claude/
+.claude
