@@ -15991,7 +15991,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_library:
             extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
-            extra_cols.append(('GENRE',  16, lambda r: r['genres'][:15] if r['genres'] else '-'))
+            extra_cols.append(('GENRE',  16, lambda r: r['genres'] if r['genres'] else '-'))
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
         if has_country:
@@ -16157,6 +16157,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             _final_ep.extend(_no_show)
             rows = _movie_rows + _final_ep
+
+        # Auto-fit column widths to actual data (never narrower than the default)
+        if rows and extra_cols:
+            extra_cols = [
+                (hname, max(hwidth, len(hname), max((len(str(vfn(r))) for r in rows), default=0)), vfn)
+                for hname, hwidth, vfn in extra_cols
+            ]
 
         # Print header
         hdr  = f"{'KEY':<22}" if not _hide_key else ""
