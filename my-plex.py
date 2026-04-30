@@ -16182,16 +16182,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _final_ep.extend(_no_show)
             rows = _movie_rows + _final_ep
 
-        # Auto-fit column widths to actual data (never narrower than the default)
+        # Auto-fit column widths to actual data (never narrower than the header)
         if rows and extra_cols:
             extra_cols = [
-                (hname, max(hwidth, len(hname), max((len(str(vfn(r))) for r in rows), default=0)), vfn)
+                (hname, max(len(hname), max((len(str(vfn(r))) for r in rows), default=0)), vfn)
                 for hname, hwidth, vfn in extra_cols
             ]
+        # Auto-fit KEY column to actual data (e.g. 'Movie:12345' fits in 11 chars,
+        # while 'Episode:S01E12:12345' may need 22+)
+        _key_width = max(3, max((len(r.get('key', '')) for r in rows), default=3)) if rows else 3
 
         # Print header
-        hdr  = f"{'KEY':<22}" if not _hide_key else ""
-        sep  = "-" * 22 if not _hide_key else ""
+        hdr  = f"{'KEY':<{_key_width}}" if not _hide_key else ""
+        sep  = "-" * _key_width if not _hide_key else ""
         for hname, hwidth, _ in extra_cols:
             hdr += f"  {hname:<{hwidth}}"
             sep += "  " + "-" * hwidth
@@ -16203,7 +16206,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(hdr)
                 print(sep)
             for r in rows:
-                line = f"{r['key']:<22}" if not _hide_key else ""
+                line = f"{r['key']:<{_key_width}}" if not _hide_key else ""
                 for _, hwidth, vfn in extra_cols:
                     val = vfn(r)
                     line += f"  {str(val):<{hwidth}}"
