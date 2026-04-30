@@ -14,6 +14,9 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
 - **Title search** — bare words search movies/series by title: `my-plex tagesschau` (episode title search with `ep:word`)
 - **Column hiding** — `-field` removes columns: `my-plex ,unsorted -file` hides FILEPATH
+- **Filter + hide** — `-field:value` filters AND hides the column: `my-plex ,unsorted -genre:comedy` filters by comedy without showing the GENRE column
+- **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
+- **End-of-filters marker** — `--` makes every following token a literal title search, bypassing filter heuristics: `my-plex -- imdb` searches for the word "imdb" in titles
 - **DEFAULT_SCOPE** — config variable for default filters applied to all listings (e.g. `watched:no`)
 - **Smart rollup** — episodes with identical display values collapse into Season/Series rows, with matched/total counts when filters are active
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations

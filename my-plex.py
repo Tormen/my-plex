@@ -155,6 +155,9 @@ _my-plex-filter-token() {
         'critics:filter by RT Tomatometer (e.g. >80)'
         'added:filter by year added (e.g. >2024)'
         'bitrate:filter by bitrate (e.g. >2mbps)'
+        'imdb:add IMDB URL column (display only)'
+        'tmdb:add TMDB URL column (display only)'
+        'tvdb:add TVDB URL column (display only)'
     )
 
     case "$cur" in
@@ -15375,7 +15378,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                   'critics', 'added', 'watched', 'lang', 'language',
                                   'subs', 'sub', 'subtitle', 'subtitles',
                                   'country', 'countries', 'director', 'directors',
-                                  'actor', 'actors', 'contentrating', 'writer', 'writers'):
+                                  'actor', 'actors', 'contentrating', 'writer', 'writers',
+                                  'imdb', 'tmdb', 'tvdb'):
                 return f"+{_display_field}", lambda obj, fi: True
 
         # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
@@ -15769,6 +15773,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'writer': 'writer', 'writers': 'writer',
             'actor': 'actor', 'actors': 'actor',
             'contentrating': 'contentrating',
+            'imdb': 'imdb', 'tmdb': 'tmdb', 'tvdb': 'tvdb',
         }
         _active_fields = set()
         for lbl, _ in filters:
@@ -15829,6 +15834,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             fs_bytes  = matched_fi.get('filesize') or obj.get('filesize') or 0
             bitrate   = (fs_bytes * 8) / (dur_ms / 1000) / 1_000_000 if dur_ms > 0 and fs_bytes > 0 else 0.0
             filepath  = matched_fi.get('filepath', '')
+            # External IDs: episodes inherit from parent series (no per-episode IMDB usually)
+            _ext_src = obj
+            if obj_type in ('Episode', 'Episode*'):
+                _series_obj = PLEX_Media.OBJ_BY_ID.get(obj.get('series_key', ''), {})
+                if _series_obj:
+                    _ext_src = _series_obj
+            _ext_ids  = _ext_src.get('external_ids') or {}
 
             rows.append({
                 'key':          key,
@@ -15857,6 +15869,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'audio_langs':  ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
                 'sub_langs':    ', '.join(str(l) for l in (obj.get('subtitle_languages') or [])),
                 'genres':       ', '.join(str(g) for g in (obj.get('genres') or [])),
+                'imdb_id':      _ext_ids.get('imdb', '') or '',
+                'tmdb_id':      _ext_ids.get('tmdb', '') or '',
+                'tvdb_id':      _ext_ids.get('tvdb', '') or '',
                 'labels':       ', '.join(str(l) for l in (obj.get('labels') or [])),
                 'last_watched': obj.get('lastViewedAt') or 0,
                 'view_count':   obj.get('viewCount', 0) or 0,
@@ -15891,6 +15906,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_writer   = 'writer'   in _active_fields
         has_actor    = 'actor'    in _active_fields
         has_contentrating = 'contentrating' in _active_fields
+        has_imdb     = 'imdb'     in _active_fields
+        has_tmdb     = 'tmdb'     in _active_fields
+        has_tvdb     = 'tvdb'     in _active_fields
 
         if has_bitrate:
             rows.sort(key=lambda r: r['bitrate'], reverse=True)
@@ -16004,6 +16022,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('ACTORS', 30, lambda r: r['actors'][:29] if r['actors'] else '-'))
         if has_contentrating:
             extra_cols.append(('RATED', 7, lambda r: r['content_rating'] or '-'))
+        if has_imdb:
+            extra_cols.append(('IMDB', 36, lambda r: f"https://imdb.com/title/{r['imdb_id']}/" if r['imdb_id'] else '-'))
+        if has_tmdb:
+            extra_cols.append(('TMDB', 40, lambda r: f"https://themoviedb.org/movie/{r['tmdb_id']}" if r['tmdb_id'] else '-'))
+        if has_tvdb:
+            extra_cols.append(('TVDB', 40, lambda r: f"https://thetvdb.com/?id={r['tvdb_id']}&tab=series" if r['tvdb_id'] else '-'))
 
         # --- Negative Cat-C: remove user-hidden columns ---
         _hide = getattr(PLEX_Media, '_REMOVE_COLS', set())
@@ -18724,6 +18748,20 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  Synonyms: -file = -filepath = -path,  -watched = -watch")
             print()
+            print("FILTER + HIDE COMBINED  (-field:value — filters AND hides the column):")
+            print()
+            print("  my-plex ,unsorted -genre:comedy            filter by comedy AND hide GENRE column")
+            print("  my-plex ,unsorted -year>2020 -lang:de      apply both filters, no extra columns")
+            print()
+            print("  Use this when a field is only useful as a filter, not for display.")
+            print()
+            print("EXTERNAL ID URLS  (imdb / tmdb / tvdb — adds clickable URL column):")
+            print()
+            print("  my-plex ,unsorted imdb                     add IMDB URL column")
+            print("  my-plex Tagesschau imdb tmdb               add both IMDB and TMDB URLs")
+            print()
+            print("  Episodes inherit the parent series' external IDs.")
+            print()
             print("TITLE SEARCH  (bare word — full-text search on title/originalTitle):")
             print()
             print("  my-plex tagesschau                         search movies + series")
@@ -18734,6 +18772,16 @@ def main_print_help(args, remaining_args, main_parser):
             print("  series title matches. For episode-only title search, use ep:word:")
             print()
             print("  my-plex ,unsorted ep:pilot                 episodes with 'pilot' in title")
+            print()
+            print("END-OF-FILTERS MARKER  (--):")
+            print()
+            print("  my-plex -- imdb genre comedy               literal title search (all 3 words)")
+            print("  my-plex ,unsorted -- year                  search titles for 'year' literally")
+            print()
+            print("  After --, every remaining token is a literal title~ search,")
+            print("  bypassing all filter heuristics. Use this to match words that")
+            print("  would otherwise be interpreted as filter keywords (imdb, year,")
+            print("  genre, title, etc.) or as field names.")
             print()
             print("SCOPING COMMANDS:")
             print()
@@ -18818,6 +18866,19 @@ def main_print_help(args, remaining_args, main_parser):
             print("  -genre / -title / -year    → hides that display column")
             print("  -watched / -watch          → hides WATCH# + LAST-PLAYED columns")
             print("  my-plex ,unsorted genre -file  ← add GENRE, hide FILEPATH")
+            print()
+            print("FILTER + HIDE COMBINED (-field:value — filter AND hide column):")
+            print("  -genre:comedy              → filter by comedy AND hide GENRE column")
+            print("  -year>2020                 → filter by year AND hide YEAR column")
+            print("  -lang:de                   → filter by audio language AND hide AUDIO column")
+            print()
+            print("EXTERNAL ID URLS (imdb / tmdb / tvdb — adds URL column):")
+            print("  imdb / tmdb / tvdb         → adds external service URL column")
+            print("  Episodes inherit external IDs from their parent series.")
+            print()
+            print("END-OF-FILTERS MARKER (-- — every following token is a literal title search):")
+            print("  my-plex -- imdb genre      ← match titles containing 'imdb' AND 'genre' literally")
+            print("  Use this to match words that would otherwise be filter keywords.")
             print()
             print("TITLE SEARCH (bare word — full-text search on title/originalTitle):")
             print("  my-plex tagesschau         ← search movies + series by title")
@@ -26545,7 +26606,7 @@ def main():
     # Cat-C: bare field name without operator/value — adds a display column, no filtering
     # Cat-C: bare field name — display-only column (superset of Cat-B fields + title, library, country, etc.)
     _CAT_C_TOKEN_RE = re.compile(
-        r'^(?P<field>title|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers)$',
+        r'^(?P<field>title|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers|imdb|tmdb|tvdb)$',
         re.IGNORECASE
     )
     # Negative Cat-C: -field removes a column from output (e.g. -file, -genre, -title)
@@ -26567,9 +26628,17 @@ def main():
         'writer': 'WRITER', 'writers': 'WRITER',
         'actor': 'ACTORS', 'actors': 'ACTORS',
         'contentrating': 'RATED', 'rated': 'RATED',
+        'imdb': 'IMDB', 'tmdb': 'TMDB', 'tvdb': 'TVDB',
     }
     _NEG_CAT_C_RE = re.compile(
         r'^-(?P<field>' + '|'.join(re.escape(k) for k in _NEG_FIELD_MAP) + r')$',
+        re.IGNORECASE
+    )
+    # Negative Cat-A/B: -field:value or -field<value> filters AND hides the column
+    # (e.g. -genre:comedy filters for comedy AND hides GENRE column from output)
+    _NEG_CAT_B_RE = re.compile(
+        r'^-(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|type)'
+        r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
     _new_argv = [sys.argv[0]]
@@ -26577,6 +26646,7 @@ def main():
     _filter_exprs = []   # category B expressions collected
     _remove_cols = set()  # column headers to remove (from negative Cat-C)
     _translations = []   # (original_token, translated_to) for user echo
+    _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
     _i = 1
     while _i < len(sys.argv):
         arg = sys.argv[_i]
@@ -26586,9 +26656,32 @@ def main():
             _new_argv.append(arg)
             _i += 1
             continue
+        # End-of-filters marker: every remaining token is a literal title search,
+        # bypassing all heuristics (so words like 'imdb', 'genre' that would otherwise
+        # be filter keywords can still be matched against titles).
+        if arg == '--':
+            _after_dashdash = True
+            _translations.append((arg, "end-of-filters: remaining args are literal title search"))
+            _i += 1
+            continue
+        if _after_dashdash:
+            # After `--`, only bare positional words become literal title searches;
+            # flags (anything starting with `-`) continue normal processing so
+            # things like `-V` / `--debug` still work after the marker.
+            if not arg.startswith('-'):
+                _filter_exprs.append(f"title~{arg}")
+                _translations.append((arg, f"--list search (after --): title~{arg}"))
+                _i += 1
+                continue
+            # Flag → fall through to normal handling (skip filter-token matching though,
+            # since the user already said "no more filters")
+            _new_argv.append(arg)
+            _i += 1
+            continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
         _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
+        _mnb = _NEG_CAT_B_RE.match(arg)
         if _ma and not arg.startswith('-'):
             key = _ma.group('key').lower()
             val = _ma.group('val')
@@ -26611,6 +26704,27 @@ def main():
             _filter_exprs.append(f"+{field}")
             _translations.append((arg, f"--list column: {field}"))
             if DBG: print(f" ~~~ Display token '{arg}' → column '{field}'", file=sys.stderr)
+        elif _mnb:
+            # -field:value → filter AND hide the resulting column
+            field = _mnb.group('field').lower()
+            op    = _mnb.group('op')
+            val   = _mnb.group('val')
+            if field == 'type':
+                # type is Cat-A: translate to --type flag, then mark column hidden
+                _inject_flags += ['--type', val]
+                _translations.append((arg, f"--type {val}  (and hide TYPE column)"))
+            else:
+                op_norm = '=' if op in (':', '==') else op
+                expr = f"{field}{op_norm}{val}"
+                _filter_exprs.append(expr)
+                _translations.append((arg, f"--list filter: {expr}  (and hide column)"))
+            # Hide the corresponding column
+            _hidden_col = _NEG_FIELD_MAP.get(field)
+            if _hidden_col:
+                _remove_cols.add(_hidden_col)
+                if field in ('watched', 'watch'):
+                    _remove_cols.update(('WATCH#', 'LAST-PLAYED', 'PARTIAL-VIEW'))
+            if DBG: print(f" ~~~ Negative filter token '{arg}' → filter '{expr if field != 'type' else f'type={val}'}' + hide {_hidden_col}", file=sys.stderr)
         elif _NEG_CAT_C_RE.match(arg):
             _nf = _NEG_CAT_C_RE.match(arg).group('field').lower()
             _remove_cols.add(_NEG_FIELD_MAP[_nf])
@@ -26628,7 +26742,8 @@ def main():
             _VALUE_FLAGS = {'--type', '--info', '--format', '-f', '--help', '-H',
                             '--config-file', '-C', '--source', '--rename',
                             '--playlist', '--add-label', '--remove-label',
-                            '--list-label', '--map-to-filename', '--map-from-filename'}
+                            '--list-label', '--map-to-filename', '--map-from-filename',
+                            '--test', '--unittest'}
             _is_search = (not arg.startswith(('-', ',', '/'))
                           and ':' not in arg
                           and ' ' not in arg  # multi-word quoted strings are scope, not search
