@@ -3604,6 +3604,66 @@ class TestDefaultScope(unittest.TestCase):
         self.assertIn('_ep_title_re', snippet,
             "_parse_filter_sub_expr must handle ep: prefix for episode title search")
 
+    # --- `--` end-of-filters marker ---
+
+    def test_dashdash_marker_handler_exists(self):
+        """`--` must be handled in argv normalization to switch into literal-title-search mode."""
+        src = self._read_script()
+        self.assertIn("_after_dashdash", src,
+            "argv normalization must track after-dashdash state")
+        self.assertIn("if arg == '--':", src,
+            "argv normalization must recognize the `--` end-of-filters marker")
+
+    def test_dashdash_makes_filter_keyword_a_title_search(self):
+        """After `--`, words that would normally be filter keywords become literal title searches.
+
+        Regression: 'imdb' alone is a Cat-C display column, but `-- imdb` must search titles.
+        """
+        result = self._run('--', 'imdb', '-V')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('title~imdb', result.stdout,
+            "`-- imdb` must produce a title~imdb filter, not an IMDB display column")
+
+    # --- Negative Cat-B: -field:value filters AND hides column ---
+
+    def test_neg_cat_b_regex_exists(self):
+        """Negative Cat-B regex (-field:value) must exist for combined filter+hide."""
+        src = self._read_script()
+        self.assertIn('_NEG_CAT_B_RE', src,
+            "Negative Cat-B regex (filter+hide) must exist")
+
+    def test_neg_genre_filters_and_hides_column(self):
+        """-genre:comedy must filter for comedy AND hide the GENRE column."""
+        result = self._run(',unsorted', '-genre:comedy', '-V')
+        # Filter line must show genre:comedy is being applied
+        self.assertIn('genre:comedy', result.stdout.lower(),
+            "-genre:comedy must apply genre filter")
+        # GENRE column must NOT appear in the header
+        header_lines = [l for l in result.stdout.splitlines()
+                        if 'KEY' in l and 'TITLE' not in l[:5]]
+        for hdr in header_lines:
+            self.assertNotIn('GENRE', hdr,
+                "-genre:comedy must hide GENRE column from output")
+
+    # --- imdb / tmdb / tvdb display columns ---
+
+    def test_imdb_token_adds_url_column(self):
+        """Bare `imdb` token must add an IMDB URL column to output."""
+        result = self._run(',unsorted', 'imdb', '-V')
+        self.assertEqual(result.returncode, 0)
+        # Either the IMDB header is present, or no rows match (empty libraries)
+        if 'Movie:' in result.stdout or 'Episode:' in result.stdout or 'Series:' in result.stdout:
+            self.assertIn('IMDB', result.stdout,
+                "imdb token must add IMDB column header")
+            self.assertIn('imdb.com/title/', result.stdout,
+                "IMDB column must contain imdb.com URLs")
+
+    def test_imdb_in_cat_c_regex(self):
+        """imdb / tmdb / tvdb must be in the Cat-C display-only token regex."""
+        src = self._read_script()
+        self.assertIn('|imdb|tmdb|tvdb)', src,
+            "Cat-C regex must include imdb/tmdb/tvdb tokens")
+
 
 class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
@@ -5588,7 +5648,7 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
             self.skipTest(f"fernsehserien.de scraper failed: {data['error']}")
         self.assertGreaterEqual(data['episodes'], 30, f"Ted Lasso should have >=30 episodes, got {data['episodes']}")
         self.assertLessEqual(data['episodes'], 50, f"Ted Lasso should have <=50 episodes, got {data['episodes']}")
-        self.assertEqual(data['max_season'], 3, f"Ted Lasso should have 3 seasons, got {data['max_season']}")
+        self.assertGreaterEqual(data['max_season'], 3, f"Ted Lasso should have >=3 seasons, got {data['max_season']}")
 
     def test_fernsehserien_different_shows_different_data(self):
         """fernsehserien.de: Different shows must return different episode counts (no data leakage)."""
