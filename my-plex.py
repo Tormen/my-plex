@@ -147,6 +147,7 @@ _my-plex-filter-token() {
         'codec:filter by video codec (h265/h264)'
         'year:filter by release year'
         'genre:filter by genre (action/drama/…)'
+        'director:filter by director (substring)'
         'label:filter by Plex label'
         'size:filter by file size (e.g. >1gb)'
         'duration:filter by duration (e.g. >2h)'
@@ -1431,6 +1432,7 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
     codec:h265                  by video codec (h264 / hevc / …)
     year>2015                   by release year
     genre:action                by genre (substring)
+    director:woody              by director (substring)
     size>1gb                    by file size
     duration>2h                 by duration (min / h / s)
     stars>3.5                   by personal Plex star rating (0–5, half-star)
@@ -15348,6 +15350,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
           Year:       'year:2020'  'year>2015'  'year<2000'
           Label:      'label:reencode'
           Genre:      'genre:action'
+          Director:   'director:scorsese'  'director:"woody allen"'
           Size:       'size>1gb'  'size>500mb'  (filesize in bytes)
           Duration:   'duration>2h'  'duration>120min'  'duration>7200s'
           Stars:      'stars>3.5'  'stars>=4'  (your Plex star rating, 0–5 with half-star)
@@ -15445,7 +15448,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -15507,6 +15510,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             def _genre_fn(obj, fi, _n=needle):
                 return any(_n in str(g).lower() for g in (obj.get('genres') or []))
             return label_str, _genre_fn
+
+        # --- Director (case-insensitive substring match against directors list) ---
+        if field in ('director', 'directors'):
+            needle = val.lower()
+            label_str = f"director:{val}"
+            # For episodes, also match the parent series' directors
+            def _director_fn(obj, fi, _n=needle):
+                if any(_n in str(d).lower() for d in (obj.get('directors') or [])):
+                    return True
+                _sk = obj.get('series_key', '')
+                if _sk:
+                    _so = PLEX_Media.OBJ_BY_ID.get(_sk, {})
+                    if any(_n in str(d).lower() for d in (_so.get('directors') or [])):
+                        return True
+                return False
+            return label_str, _director_fn
 
         # --- Size ---
         if field == 'size':
@@ -18710,6 +18729,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex codec:h265         H.265 encoded (h264 / hevc / av1 / …)")
             print("  my-plex year>2015          released after 2015")
             print("  my-plex genre:action       action genre  (substring)")
+            print("  my-plex director:scorsese  by director  (substring)")
             print("  my-plex size'>1gb'         file larger than 1 GB  (mb / gb)")
             print("  my-plex duration'>2h'      longer than 2 hours    (min / h / s)")
             print("  my-plex stars'>3.5'        personal Plex rating above 3.5 stars  (0–5, half-star)")
@@ -18831,6 +18851,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Year:       'year:2020'  'year>2015'  'year<2000'")
             print("  Label:      'label:reencode'  (Plex label, exact match)")
             print("  Genre:      'genre:action'  (substring match)")
+            print("  Director:   'director:scorsese'  'director:\"woody allen\"'  (substring)")
             print("  Size:       'size>1gb'  'size>500mb'  (file size on disk)")
             print("  Duration:   'duration>2h'  'duration>120min'  'duration>7200s'")
             print("  Stars:      'stars>3.5'  'stars>=4'  (personal Plex rating, 0–5 half-star)")
@@ -26602,7 +26623,7 @@ def main():
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
@@ -26640,7 +26661,7 @@ def main():
     # Negative Cat-A/B: -field:value or -field<value> filters AND hides the column
     # (e.g. -genre:comedy filters for comedy AND hides GENRE column from output)
     _NEG_CAT_B_RE = re.compile(
-        r'^-(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|type)'
+        r'^-(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|type)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )

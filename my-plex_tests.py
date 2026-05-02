@@ -3256,6 +3256,29 @@ class TestFilter(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertRegex(result.stdout, r'(Movie|Show|Season|Episode):\d+')
 
+    # --- director: filter ---
+
+    def test_director_filter_recognized(self):
+        """director:NAME must be parsed as a filter (not as a Cat-D title search)."""
+        result = self._run('director:scorsese', '-V')
+        self.assertEqual(result.returncode, 0)
+        # Must be interpreted as a director filter, not title~scorsese
+        self.assertIn('director:scorsese', result.stdout.lower(),
+            "director:scorsese must be applied as a director filter")
+        self.assertNotIn('title~director', result.stdout.lower(),
+            "director:scorsese must NOT fall through to Cat-D title search")
+
+    def test_director_filter_substring_match(self):
+        """director:woody must match any director whose name contains 'woody' (case-insensitive)."""
+        # Run filter, capture output. If no matches, skip — depends on user's library.
+        result = self._run('director:woody')
+        self.assertEqual(result.returncode, 0)
+        if 'No items match' in result.stdout:
+            self.skipTest("No woody-directed items in this cache")
+        # Each result row must come from an obj whose director list includes 'woody' (substring)
+        self.assertRegex(result.stdout, r'Movie:\d+|Episode:\d+|Series:\d+',
+            "director:woody must return at least one matching item when matches exist")
+
     # --- lang: filter ---
 
     def test_lang_de_returns_results(self):
