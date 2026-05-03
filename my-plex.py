@@ -16279,11 +16279,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     removed_headers.add(header)
                 else:
                     sanitized.append((header, width, vfn))
-            # If WATCH# and LAST-PLAYED/PARTIAL-VIEW were removed (unwatched filter),
-            # add RATING / CRITICS / IMDB instead so the row stays informative.
+            # When the user filtered for unwatched (or watched), the WATCH#
+            # column is pruned (always 0 for unwatched) so we add RATING /
+            # CRITICS / IMDB instead — they make the row much more useful for
+            # a "what should I watch next?" workflow.  Use the explicit
+            # has_unwatched / has_watched intent, NOT the pruning result:
+            # PARTIAL-VIEW can survive pruning when some unwatched items have
+            # an interrupted-play timestamp, which previously suppressed the
+            # fallback even though RATING/IMDB were still useful.
             # IMDB ids for episodes inherit from the parent series at row-build
             # time (see _ext_src), so the URL points to the series page.
-            if 'WATCH#' in removed_headers and ('LAST-PLAYED' in removed_headers or 'PARTIAL-VIEW' in removed_headers):
+            if has_unwatched or has_watched:
                 if not any(h == 'RATING' for h, _, _ in sanitized):
                     _lib_agents = CACHE.get('library_stats', {}).get('agent', {})
                     _result_libs = {r['lib'] for r in rows}
@@ -16293,8 +16299,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         sanitized.append(('RATING', 7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
                     if _any_critics and any(r['critics'] for r in rows):
                         sanitized.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
-                    if not any(h == 'IMDB' for h, _, _ in sanitized) and any(r['imdb_id'] for r in rows):
-                        sanitized.append(('IMDB', 36, lambda r: f"https://imdb.com/title/{r['imdb_id']}/" if r['imdb_id'] else '-'))
+                if not any(h == 'IMDB' for h, _, _ in sanitized) and any(r['imdb_id'] for r in rows):
+                    sanitized.append(('IMDB', 36, lambda r: f"https://imdb.com/title/{r['imdb_id']}/" if r['imdb_id'] else '-'))
             # 2. Remove duplicate column headers (keep first occurrence)
             seen_headers = set()
             deduped = []
