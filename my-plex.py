@@ -1141,20 +1141,75 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
 
 ###############################################################################
-# Disk Marker Mapping (--plex2disk / --disk2plex)
+# DISK_PLEX_MAP — unified, bidirectional disk ↔ Plex marker map
 ###############################################################################
-
-# Map Plex metadata into filenames and directory names using Python expressions.
-# Each key is an aspect name (your choice), each value is a Python expression.
-# The expression is evaluated with metadata variables in scope.
-# Truthy results are wrapped in [...] and added to filenames/dirnames.
-# Falsy results (empty string, None, 0, False) → marker skipped entirely.
+#
+# A single dict drives both --plex2disk (Plex → filenames/dirnames) and
+# --disk2plex (filename markers → Plex).  Each top-level key is a Plex
+# variable (see "Available variables" below); each entry has a `scope`
+# (where on disk the marker may appear), a `merge` policy (how to resolve
+# conflicts), and a `values` map describing what marker to write per value
+# and what regexes to recognise on the way back.
+#
+# Top-level shape:
+#   DISK_PLEX_MAP = {{
+#       '<PLEX_VAR>': {{
+#           'scope': 'file' | 'movie_dir' | 'series_dir' | 'season_dir' | [list of those],
+#           'merge': 'newer' | 'plex' | 'disk' | 'ignore' | 'warn' | 'fail',
+#           'values': {{ <plex_value>: <entry>, ... }},
+#       }},
+#   }}
+#
+# Each `<entry>` may carry:
+#   'plex2disk':  marker template — str.format(**plex_vars), or callable(vars)→str
+#   'disk2plex':  list of compiled-IGNORECASE regexes; named groups become
+#                 additional captured plex_vars (e.g. WATCHED_DATE).
+#   ('plex2disk','<scope>'):  per-scope override of the bare 'plex2disk'
+#   ('disk2plex','<scope>'):  per-scope additional regexes (augments, not replaces)
+#   'when':                   Python expression — entry only applies if truthy
+#
+# Available variables (all UPPERCASE; falsy values usually mute the marker):
+#   WATCHED (bool), WATCHED_DATE (str), WATCHED_TS (str), VIEW_COUNT (int)
+#   RATING_USER (float|None), RATING_CRITICS, RATING_AUDIENCE, CONTENT_RATING
+#   ACTORS_TOP3, ACTORS_ALL, ACTOR1_FN..ACTOR3_LN
+#   COUNTRY, COUNTRIES, GENRE, GENRES, DIRECTOR, DIRECTORS, WRITER, WRITERS
+#   AUDIO_LANG, AUDIO_LANGS_LIST, RESOLUTION, YEAR (int|None), TITLE, SERIES
+#   IMDB_ID, TMDB_ID, TVDB_ID, LABELS, COLLECTIONS
 #
 # Example:
-# DISK_MAP = {{
-#     'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
-#     'rating':  "RATING_USER",                   # → [7.5] if rated
-#     'country': "COUNTRY",                       # → [US] if known
+# DISK_PLEX_MAP = {{
+#     # Audio language — filename only, disk wins (filename is ground truth):
+#     'AUDIO_LANG': {{
+#         'scope': 'file',
+#         'merge': 'disk',
+#         'values': {{
+#             'de':      {{'plex2disk': '[de]',
+#                         'disk2plex': [r'\\[(de|german)\\]', r'_TVOON_DE\\.']}},
+#             'fr':      {{'plex2disk': '[fr]',
+#                         'disk2plex': [r'\\[(fr|french)\\]']}},
+#             'en':      {{'plex2disk': '[en]',
+#                         'disk2plex': [r'\\[(en|english)\\]']}},
+#             # Mute the 'unknown' bucket — write no marker when AUDIO_LANG is
+#             # und/mis/mul/zxx/empty (all collapsed to 'unknown' in cache):
+#             'unknown': {{}},
+#             # Catchall wildcard — '*' template captures any other 2-letter
+#             # ISO 639-1 code into the marker (and back via named group):
+#             # '*':       {{'plex2disk': '[{{AUDIO_LANG}}]',
+#             #              'disk2plex': [r'\\[(?P<AUDIO_LANG>[a-z]{{2}})\\]']}},
+#         }},
+#     }},
+#     # Watched state — file + every dir level; newest wins:
+#     'WATCHED': {{
+#         'scope': ['file', 'movie_dir', 'series_dir', 'season_dir'],
+#         'merge': 'newer',
+#         'values': {{
+#             True: {{
+#                 'plex2disk': '[vu@{{WATCHED_DATE}}]',
+#                 'disk2plex': [r'\\[vu@(?P<WATCHED_DATE>\\d{{4}}-\\d{{2}}-\\d{{2}})\\]',
+#                               r'\\[vu\\]'],
+#             }},
+#         }},
+#     }},
 # }}
 
 ###############################################################################
@@ -1189,23 +1244,12 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # ]
 
 # Filepath-pattern audio language hints — ground truth.
-# List of (regex, 2-letter_ISO_code) tuples.  Each regex is tested against
-# the item's filepath case-insensitively; first match wins and overrides
-# every library-level rule.  Use this for filename markers you trust
-# absolutely (e.g. release-name conventions or DVR recording schemes).
-# Example:
-# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN = [
-#     (r'\\[de\\]',          'de'),
-#     (r'\\[german\\]',      'de'),
-#     (r'_TVOON_DE\\.',      'de'),
-#     (r'\\[fr\\]',          'fr'),
-#     (r'\\[french\\]',      'fr'),
-#     (r'\\[en\\]',          'en'),
-#     (r'\\[english\\]',     'en'),
-# ]
+# Define these as DISK_PLEX_MAP['AUDIO_LANG']['values'][<code>]['disk2plex']
+# (see DISK_PLEX_MAP block above).  The legacy global
+# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN was removed in v1.2.
 #
-# FULL resolution order in --resolve (first match wins):
-#   1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN match → use that code
+# FULL resolution order in --no-audio-language --resolve (first match wins):
+#   1. DISK_PLEX_MAP['AUDIO_LANG']['disk2plex'] regex match → use that code
 #   2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI'  → PROMPT
 #   3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use that code
 #   4. Plex library.language                                  → use that code
@@ -19302,25 +19346,36 @@ def main_print_help(args, remaining_args, main_parser):
             print("          ('movies.de',   'de'),")
             print("      ]")
             print()
-            print("  AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN  (ground truth):")
-            print("    List of (regex_pattern, 2-letter_ISO_code) tuples.  Each pattern")
-            print("    is tested against the item's filepath case-insensitively; the")
-            print("    first match wins and overrides every library-level rule.")
+            print("  DISK_PLEX_MAP['AUDIO_LANG']  (ground truth — filename hint):")
+            print("    The unified disk↔Plex map's AUDIO_LANG entry doubles as the")
+            print("    filename-hint table for --resolve.  Each value's 'disk2plex'")
+            print("    list of regexes is tested (IGNORECASE) against the basename;")
+            print("    the first match wins and overrides every library-level rule.")
+            print("    Use the 'unknown': {} bucket to mute the placeholder, or a")
+            print("    '*' wildcard with a named group to capture any 2-letter code.")
             print("    Example:")
-            print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN = [")
-            print("          (r'\\[de\\]',      'de'),")
-            print("          (r'\\[german\\]',  'de'),")
-            print("          (r'_TVOON_DE\\.', 'de'),")
-            print("          (r'\\[fr\\]',      'fr'),")
-            print("          (r'\\[en\\]',      'en'),")
-            print("      ]")
+            print("      DISK_PLEX_MAP = {")
+            print("          'AUDIO_LANG': {")
+            print("              'scope': 'file',")
+            print("              'merge': 'disk',")
+            print("              'values': {")
+            print("                  'de':      {'plex2disk': '[de]',")
+            print("                              'disk2plex': [r'\\[(de|german)\\]', r'_TVOON_DE\\.']},")
+            print("                  'fr':      {'plex2disk': '[fr]',")
+            print("                              'disk2plex': [r'\\[(fr|french)\\]']},")
+            print("                  'en':      {'plex2disk': '[en]',")
+            print("                              'disk2plex': [r'\\[(en|english)\\]']},")
+            print("                  'unknown': {},  # mute placeholder")
+            print("              },")
+            print("          },")
+            print("      }")
             print()
             print("  FULL resolution order in --resolve (first match wins):")
-            print("    1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN match → use code")
-            print("    2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI'  → PROMPT")
-            print("    3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use code")
-            print("    4. Plex library.language                                  → use code")
-            print("    5. (none of the above)                                    → PROMPT")
+            print("    1. DISK_PLEX_MAP['AUDIO_LANG'] regex match              → use code")
+            print("    2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI' → PROMPT")
+            print("    3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code → use code")
+            print("    4. Plex library.language                                 → use code")
+            print("    5. (none of the above)                                   → PROMPT")
             print()
             print("  EXTERNAL_TOOLS['SERVER']['mp4box']:")
             print("  EXTERNAL_TOOLS['SERVER']['mkvpropedit']:")
@@ -20379,48 +20434,70 @@ def main_print_help(args, remaining_args, main_parser):
             print("SYNC PLEX METADATA TO DISK (--plex2disk) HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --plex2disk [--dry-run]              # All libraries")
-            print("       my-plex --plex2disk <LIBRARY> [--dry-run]    # One library")
-            print("       my-plex --plex2disk <MEDIA> [--dry-run]      # One item")
-            print("       my-plex --plex2disk --force [--dry-run]      # Plex is authoritative")
-            print("       my-plex --plex2disk --clean [--dry-run]      # Strip all markers")
+            print("Usage: my-plex --plex2disk [--dry-run]                # All libraries")
+            print("       my-plex --plex2disk <LIBRARY> [--dry-run]      # One library")
+            print("       my-plex --plex2disk <MEDIA> [--dry-run]        # One item")
+            print("       my-plex --plex2disk --force [--dry-run]        # Plex is authoritative")
+            print("       my-plex --plex2disk --replace [--dry-run]      # Re-canonicalise markers")
+            print("       my-plex --plex2disk --clean [--dry-run]        # Strip all markers")
             print()
-            print("  Encodes Plex metadata into filenames and directory names using configurable")
-            print("  Python expressions. Each expression is evaluated with metadata variables in")
-            print("  scope. Truthy results are wrapped in [...] brackets; falsy results are skipped.")
+            print("  Encodes Plex metadata into filenames and directory names using")
+            print("  DISK_PLEX_MAP.  Each entry's `plex2disk` template (str.format(**vars)")
+            print("  or callable(vars)→str) is rendered for the resolved Plex value and")
+            print("  appended to the file/dir name; an empty result skips the marker.")
             print()
-            print("  --dry-run / -n   Show what would change without renaming")
-            print("  --force          Plex is authoritative: REMOVE markers when Plex has no value")
-            print("                   Without --force, existing markers are preserved (additive)")
-            print("  --clean          Strip all markers from disk (reverse of --plex2disk)")
+            print("  --dry-run / --try / -n  Show what would change without renaming")
+            print("  --force                 Plex is authoritative: REMOVE markers when Plex")
+            print("                          has no value.  Without --force, existing")
+            print("                          markers are preserved (additive merge).")
+            print("  --replace               Re-canonicalise existing markers — also rewrites")
+            print("                          markers that match a non-canonical 'disk2plex'")
+            print("                          regex back into the entry's canonical 'plex2disk'")
+            print("                          form (e.g. [german] → [de], [vu] → [vu@DATE]).")
+            print("  --clean                 Strip all markers from disk (reverse of --plex2disk)")
             print()
-            print("CONFIGURATION (in ~/.my-plex/my-plex.conf):")
+            print("CONFIGURATION (in ~/.my-plex.conf):")
             print()
-            print("  # File markers (space+brackets before extension)")
-            print("  DISK_MAP = {'watched': \"'vu@' + WATCHED_DATE if WATCHED else ''\"}")
+            print("  DISK_PLEX_MAP — one dict that drives BOTH directions.  Each key is")
+            print("  a Plex variable; each entry has 'scope', 'merge', and 'values'.")
+            print("  See --help no-audio-language for an AUDIO_LANG example.")
             print()
-            print("  # Directory markers (appended, space-separated)")
-            print("  DISK_MAP_MOVIE_DIR  = {'watched': \"'vu@' + WATCHED_DATE if WATCHED else ''\"}")
-            print("  DISK_MAP_SERIES_DIR = {'watched': \"'vu@' + WATCHED_DATE if WATCHED else ''\"}")
-            print("  DISK_MAP_SEASON_DIR = {'watched': \"'vu@' + WATCHED_DATE if WATCHED else ''\"}")
+            print("  DISK_PLEX_MAP = {")
+            print("      'WATCHED': {")
+            print("          'scope': ['file', 'movie_dir', 'series_dir', 'season_dir'],")
+            print("          'merge': 'newer',  # newer/plex/disk/ignore/warn/fail")
+            print("          'values': {")
+            print("              True: {")
+            print("                  'plex2disk': '[vu@{WATCHED_DATE}]',")
+            print("                  'disk2plex': [r'\\[vu@(?P<WATCHED_DATE>\\d{4}-\\d{2}-\\d{2})\\]',")
+            print("                                r'\\[vu\\]'],")
+            print("              },")
+            print("          },")
+            print("      },")
+            print("  }")
             print()
-            print("  # Merge strategy: 'newer' (compare timestamps), 'plex', or 'disk'")
-            print("  DISK_MAP_MERGE = {'watched': 'newer'}")
+            print("VALUE TEMPLATES:")
+            print("  'plex2disk' is either:")
+            print("    - a str.format() template — '{TITLE} [{YEAR}]' uses any plex_var, OR")
+            print("    - a callable taking the plex_vars dict and returning a string.")
+            print("  Falsy result (empty/None/0/False) → marker not written.")
+            print("  Wildcard key '*' acts as a catchall when no specific value matched:")
+            print("    'AUDIO_LANG': {'values': {'*': {'plex2disk': '[{AUDIO_LANG}]', ...}}}")
             print()
-            print("EXPRESSION SYNTAX:")
-            print("  Each value is a Python expression. Available variables:")
-            print("    WATCHED (bool), WATCHED_DATE (str), WATCHED_TS (str), VIEW_COUNT (int)")
-            print("    RATING_USER (float|None), RATING_CRITICS, RATING_AUDIENCE, CONTENT_RATING")
-            print("    ACTORS_TOP3, ACTORS_ALL, ACTOR1_FN..ACTOR3_LN")
-            print("    COUNTRY, COUNTRIES, GENRE, GENRES, DIRECTOR, DIRECTORS, WRITER, WRITERS")
-            print("    LANG, RESOLUTION, YEAR (int|None), TITLE, SERIES")
-            print("    IMDB_ID, TMDB_ID, TVDB_ID, LABELS, COLLECTIONS")
+            print("AVAILABLE VARIABLES:")
+            print("  WATCHED (bool), WATCHED_DATE (str), WATCHED_TS (str), VIEW_COUNT (int)")
+            print("  RATING_USER (float|None), RATING_CRITICS, RATING_AUDIENCE, CONTENT_RATING")
+            print("  ACTORS_TOP3, ACTORS_ALL, ACTOR1_FN..ACTOR3_LN")
+            print("  COUNTRY, COUNTRIES, GENRE, GENRES, DIRECTOR, DIRECTORS, WRITER, WRITERS")
+            print("  AUDIO_LANG, AUDIO_LANGS_LIST, RESOLUTION, YEAR (int|None), TITLE, SERIES")
+            print("  IMDB_ID, TMDB_ID, TVDB_ID, LABELS, COLLECTIONS")
             print()
             print("EXAMPLES:")
-            print("  my-plex --plex2disk --dry-run              # Preview all changes")
-            print("  my-plex movies.en --plex2disk               # Map metadata for English movies")
-            print("  my-plex --plex2disk --force --dry-run       # Preview destructive sync (Plex wins)")
-            print("  my-plex --plex2disk --clean                 # Strip all markers")
+            print("  my-plex --plex2disk --try                  # Preview all changes")
+            print("  my-plex movies.en --plex2disk              # Map metadata for English movies")
+            print("  my-plex --plex2disk --force --try          # Preview destructive sync (Plex wins)")
+            print("  my-plex --plex2disk --replace --try        # Preview canonicalising rename")
+            print("  my-plex --plex2disk --clean                # Strip all markers")
             print()
             print("WATCHED STATE FOR SERIES (applies to --plex2disk and --disk2plex):")
             print()
@@ -20455,30 +20532,63 @@ def main_print_help(args, remaining_args, main_parser):
             print("SYNC DISK MARKERS TO PLEX (--disk2plex) HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --disk2plex [--dry-run]              # All items")
-            print("       my-plex --disk2plex <LIBRARY> [--dry-run]    # One library")
-            print("       my-plex --disk2plex --force [--dry-run]      # Disk is authoritative")
+            print("Usage: my-plex --disk2plex [--try|--yes]               # All items")
+            print("       my-plex --disk2plex <LIBRARY> [--try|--yes]     # One library")
+            print("       my-plex --disk2plex <MEDIA> [--try|--yes]       # One item")
+            print("       my-plex --disk2plex --force [--try|--yes]       # Disk is authoritative")
             print()
-            print("  Reads markers from disk (via sidecar) and pushes changes back to Plex.")
-            print("  Uses DISK_MAP_PUSH config to determine which aspects to sync.")
-            print("  Uses DISK_MAP_MERGE to resolve conflicts (e.g. 'newer' keeps most recent).")
+            print("  Reads user-authored markers from filenames AND from the DISK_PLEX_MAP")
+            print("  sidecar, resolves each disk value vs Plex via the entry's `merge`")
+            print("  policy, and pushes accepted changes back to Plex through a per")
+            print("  plex_var handler registry.")
             print()
-            print("  Only Plex-writable fields are supported: WATCHED, RATING_USER, LABELS, COLLECTIONS")
+            print("  Built-in push handlers:")
+            print("    WATCHED      → markWatched + lastViewedAt (Plex API)")
+            print("    AUDIO_LANG   → mp4box / mkvpropedit on the file container,")
+            print("                   then trigger Plex re-analyze.  Items in MULTI")
+            print("                   libraries skip the auto-write — use")
+            print("                   --no-audio-language --resolve for those.")
+            print("  Other plex_vars without a registered handler print a clear")
+            print("  'no push handler' note and are skipped.")
             print()
-            print("  Without --force (default, ADDITIVE ONLY):")
-            print("    If a file has no marker on disk, Plex is NOT changed.")
-            print("    Absence of a marker never removes metadata from Plex.")
+            print("TWO-PHASE EXECUTION:")
+            print()
+            print("  Phase 1 always runs.  It collects every change that WOULD be")
+            print("  applied and prints a summary (one line per plex_var, with a")
+            print("  per-value breakdown).  Then:")
+            print("    --dry-run / --try / -n   Stop after Phase 1.  Nothing is mutated.")
+            print("    --yes / -Y               Run Phase 2 unconditionally (no prompt).")
+            print("    (default)                Prompt 'Apply N changes? [y/N]' before")
+            print("                             running Phase 2.")
+            print("    -V                       Also dump the per-item diff (old → new)")
+            print("                             before the prompt.")
+            print("    -DD (DEEPDBG)            Print per-item rule resolution chain")
+            print("                             (which regex matched, which scope,")
+            print("                             which handler dispatched).")
+            print()
+            print("  Successful pushes also record the source marker in the sidecar so")
+            print("  future --plex2disk --replace can canonicalise the filename.")
+            print()
+            print("  Without --force (default, ADDITIVE):")
+            print("    Items without disk markers are left alone — Plex is not touched.")
             print()
             print("  With --force (DESTRUCTIVE):")
-            print("    Disk is authoritative. If a file has NO marker for an aspect,")
-            print("    that value is actively REMOVED from Plex:")
-            print("      - WATCHED → marks as unwatched")
-            print("      - RATING_USER → removes user rating")
-            print("      - LABELS → removes all labels")
-            print("      - COLLECTIONS → removes all collections")
+            print("    Disk is authoritative.  Items with NO marker for an aspect have")
+            print("    that value actively REMOVED from Plex (e.g. WATCHED → unwatched).")
             print()
             print("CONFIGURATION:")
-            print("  DISK_MAP_PUSH = {'watched': 'WATCHED'}  # aspect → Plex field")
+            print("  DISK_PLEX_MAP — see --help plex2disk for the full schema.  The")
+            print("  same dict drives both directions: each entry's 'disk2plex' regexes")
+            print("  recognise user-authored markers (named groups capture extras like")
+            print("  WATCHED_DATE), and each entry's 'merge' policy decides who wins.")
+            print()
+            print("RECIPES:")
+            print("  # Mark a downloaded movie as German by renaming to '... [de].mkv':")
+            print("  mv 'Movie.mkv' 'Movie [de].mkv'")
+            print("  my-plex --disk2plex --try            # preview the audio-tag push")
+            print()
+            print("  # Mark a series as fully watched by renaming the series dir to")
+            print("  # '... [vu@2026-04-29]/'.  --disk2plex propagates to every episode.")
             print()
             print("WATCHED STATE FOR SERIES (applies to --plex2disk and --disk2plex):")
             print()
