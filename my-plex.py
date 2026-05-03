@@ -60,6 +60,18 @@
 # errCode range: 1001..1070
 
 # ---------------------------------------------------------------------------
+# Version / license constants.
+# SCRIPT_VERSION tracks the latest git tag; bump in lockstep with `git tag`.
+# SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
+# copies (no .git alongside) still print the commit they were built from.
+# ---------------------------------------------------------------------------
+SCRIPT_VERSION = "v1"
+SCRIPT_COMMIT  = ""
+SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
+SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
+SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
+
+# ---------------------------------------------------------------------------
 # Venv bootstrap: ensure we run inside a venv with plexapi+readchar installed.
 # If not, create the venv, install deps, and re-exec ourselves in it.
 # ---------------------------------------------------------------------------
@@ -111,6 +123,88 @@ def _bootstrap_venv():
     # Re-exec with venv python, preserving all arguments
     os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
 
+
+# --- Early --version / --stamp-version handling (no venv / no Plex needed) ---
+def _script_version_string():
+    """Display version: SCRIPT_VERSION + commit sha (baked or live).
+
+    SCRIPT_COMMIT (baked at --stamp-version time) is authoritative when set.
+    Otherwise falls back to a live `git rev-parse` from the script's directory
+    (with a -dirty suffix if the working copy has uncommitted changes)."""
+    v = SCRIPT_VERSION
+    sha = ""
+    if SCRIPT_COMMIT:
+        sha = SCRIPT_COMMIT
+    else:
+        try:
+            here = os.path.dirname(os.path.realpath(__file__))
+            r = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
+                               capture_output=True, text=True, timeout=2)
+            if r.returncode == 0 and r.stdout.strip():
+                sha = r.stdout.strip()
+                d = subprocess.run(['git', '-C', here, 'diff', '--quiet'],
+                                   capture_output=True, timeout=2)
+                ds = subprocess.run(['git', '-C', here, 'diff', '--cached', '--quiet'],
+                                    capture_output=True, timeout=2)
+                if d.returncode != 0 or ds.returncode != 0:
+                    sha += "-dirty"
+        except Exception:
+            pass
+    return f"{v} ({sha})" if sha else v
+
+def _print_version_and_exit():
+    print(f"my-plex {_script_version_string()}")
+    print(SCRIPT_COPYRIGHT)
+    print(f"License: {SCRIPT_LICENSE_SHORT}")
+    print(f"         {SCRIPT_LICENSE_URL}")
+    print()
+    print("This is free software: you are free to redistribute and modify it")
+    print("under the terms of the GNU General Public License as published by")
+    print("the Free Software Foundation, either version 3 of the License or")
+    print("(at your option) any later version.")
+    print()
+    print("This program comes with ABSOLUTELY NO WARRANTY.")
+    print("Derivative works MUST be released under a compatible copyleft")
+    print('license (this is the "copyleft" obligation of the GPL).')
+    sys.exit(0)
+
+def _stamp_version_and_exit():
+    """Bake current HEAD short sha into SCRIPT_COMMIT and amend the commit."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    self_path = os.path.realpath(__file__)
+    r = subprocess.run(['git', '-C', here, 'rev-parse', '--show-toplevel'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"ERROR: Not in a git repo (script dir: {here})", file=sys.stderr)
+        sys.exit(1)
+    new_sha = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
+                             capture_output=True, text=True).stdout.strip()
+    with open(self_path, 'r') as f:
+        src = f.read()
+    import re as _re
+    new_src, n = _re.subn(r'^SCRIPT_COMMIT\s*=\s*"[^"]*"',
+                          f'SCRIPT_COMMIT  = "{new_sha}"',
+                          src, count=1, flags=_re.MULTILINE)
+    if n == 0:
+        print("ERROR: Could not find SCRIPT_COMMIT line to stamp.", file=sys.stderr)
+        sys.exit(1)
+    if new_src == src:
+        print(f"SCRIPT_COMMIT already matches HEAD ({new_sha}); nothing to do.")
+        sys.exit(0)
+    with open(self_path, 'w') as f:
+        f.write(new_src)
+    subprocess.run(['git', '-C', here, 'add', self_path], check=True)
+    subprocess.run(['git', '-C', here, 'commit', '--amend', '--no-edit', '--no-verify'], check=True)
+    final_sha = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
+                               capture_output=True, text=True).stdout.strip()
+    print(f"Stamped SCRIPT_COMMIT='{new_sha}'; HEAD is now '{final_sha}'.")
+    print("Note: amend rewrote HEAD's sha, so SCRIPT_COMMIT lags HEAD by 1.")
+    sys.exit(0)
+
+if any(a in ('--version', '-version') for a in sys.argv[1:]):
+    _print_version_and_exit()
+if '--stamp-version' in sys.argv[1:]:
+    _stamp_version_and_exit()
 
 # If we're not already running inside our venv, bootstrap it
 if os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
