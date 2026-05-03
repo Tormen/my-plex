@@ -16220,8 +16220,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         def _title_for_row(r, _ml=_multi_libs_set):
             if r['lib'] in _ml and r['original_title']:
-                return r['original_title'][:29]
-            return r['title'][:29] if r['title'] else '-'
+                return r['original_title']
+            return r['title'] if r['title'] else '-'
 
         if _movies_only and not has_filepath:
             if not has_year:
@@ -16233,7 +16233,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('TITLE', 30, _title_for_row))
         if has_originaltitle:
             extra_cols.append(('ORIGINAL-TITLE', 30,
-                               lambda r: r['original_title'][:29] if r['original_title'] else '-'))
+                               lambda r: r['original_title'] if r['original_title'] else '-'))
         if has_library:
             extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
@@ -16241,13 +16241,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_label:
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
         if has_country:
-            extra_cols.append(('COUNTRY', 10, lambda r: r['countries'][:9] if r['countries'] else '-'))
+            extra_cols.append(('COUNTRY', 10, lambda r: r['countries'] if r['countries'] else '-'))
         if has_director:
-            extra_cols.append(('DIRECTOR', 18, lambda r: r['directors'][:17] if r['directors'] else '-'))
+            extra_cols.append(('DIRECTOR', 18, lambda r: r['directors'] if r['directors'] else '-'))
         if has_writer:
-            extra_cols.append(('WRITER', 18, lambda r: r['writers'][:17] if r['writers'] else '-'))
+            extra_cols.append(('WRITER', 18, lambda r: r['writers'] if r['writers'] else '-'))
         if has_actor:
-            extra_cols.append(('ACTORS', 30, lambda r: r['actors'][:29] if r['actors'] else '-'))
+            extra_cols.append(('ACTORS', 30, lambda r: r['actors'] if r['actors'] else '-'))
         if has_contentrating:
             extra_cols.append(('RATED', 7, lambda r: r['content_rating'] or '-'))
         if has_imdb:
