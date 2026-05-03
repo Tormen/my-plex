@@ -6681,41 +6681,6 @@ class TestDiskMap(unittest.TestCase):
         obj.update(overrides)
         return obj
 
-    # --- validate_disk_map ---
-
-    def test_validate_map_valid(self):
-        """Valid DISK_MAP with Python expressions passes validation."""
-        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
-              'rating': "RATING_USER",
-              'info': "f'{RATING_CRITICS}-{COUNTRY}' if RATING_CRITICS else ''"}
-        errors = validate_disk_map(fm)
-        self.assertEqual(errors, [])
-
-    def test_validate_map_empty(self):
-        """Empty DISK_MAP is valid (just does nothing)."""
-        errors = validate_disk_map({})
-        self.assertEqual(errors, [])
-
-    def test_validate_map_syntax_error(self):
-        """Invalid Python expression produces error."""
-        fm = {'test': "if WATCHED"}
-        errors = validate_disk_map(fm)
-        self.assertEqual(len(errors), 1)
-        self.assertIn('not a valid Python expression', errors[0])
-
-    def test_validate_map_empty_value(self):
-        """Empty expression string produces error."""
-        fm = {'test': ''}
-        errors = validate_disk_map(fm)
-        self.assertEqual(len(errors), 1)
-        self.assertIn('non-empty string', errors[0])
-
-    def test_validate_map_not_dict(self):
-        """Non-dict DISK_MAP produces error."""
-        errors = validate_disk_map("not a dict")
-        self.assertEqual(len(errors), 1)
-        self.assertIn('must be a dict', errors[0])
-
     # --- resolve_disk_map_variables ---
 
     def test_resolve_variables_basic(self):
@@ -6784,45 +6749,6 @@ class TestDiskMap(unittest.TestCase):
         var = resolve_disk_map_variables(obj)
         self.assertEqual(var['LABELS'], 'favorite, horror')
         self.assertEqual(var['COLLECTIONS'], 'Halloween, Slashers')
-
-    # --- compute_markers ---
-
-    def test_compute_markers_basic(self):
-        """Basic marker computation with eval expressions — bare values without brackets."""
-        obj = self._mock_obj()
-        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''",
-              'rating': "RATING_USER"}
-        markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], 'vu@2024-03-22')
-        self.assertEqual(markers['rating'], '7.5')
-
-    def test_compute_markers_compound_expression(self):
-        """Compound expression with f-string resolves correctly."""
-        obj = self._mock_obj()
-        fm = {'info': "f'{RATING_CRITICS}-{COUNTRY}' if RATING_CRITICS else ''"}
-        markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['info'], '8.2-US')
-
-    def test_compute_markers_falsy_skips(self):
-        """When expression result is falsy, marker is empty string (skip)."""
-        obj = self._mock_obj(userRating=None)
-        fm = {'rating': "RATING_USER"}
-        markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['rating'], '')
-
-    def test_compute_markers_unwatched_skips(self):
-        """Unwatched item with conditional expression produces empty marker."""
-        obj = self._mock_obj(viewCount=0, lastViewedAt=None)
-        fm = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-        markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], '')
-
-    def test_compute_markers_simple_label(self):
-        """Simple string expression like 'seen' if WATCHED else ''."""
-        obj = self._mock_obj()
-        fm = {'watched': "'seen' if WATCHED else ''"}
-        markers = compute_markers(obj, 'Movie:1', fm)
-        self.assertEqual(markers['watched'], 'seen')
 
     # --- strip_our_markers ---
 
@@ -7027,11 +6953,14 @@ class TestDiskMap(unittest.TestCase):
     def test_source_has_disk_map_functions(self):
         """Source must contain all disk map functions."""
         content = self._read_script()
-        for func in ['validate_disk_map', 'resolve_disk_map_variables',
-                     'compute_markers', 'strip_our_markers', 'apply_markers',
-                     'apply_markers_to_dir', 'strip_markers_from_dir',
+        for func in ['validate_disk_plex_map', 'compute_markers_dpm',
+                     'read_markers_from_disk',
+                     'resolve_disk_map_variables', 'strip_our_markers',
+                     'apply_markers', 'apply_markers_to_dir',
+                     'strip_markers_from_dir',
                      'load_disk_map_sidecar', 'save_disk_map_sidecar',
                      'cmd_plex2disk', 'cmd_plex2disk_clean', 'cmd_disk2plex',
+                     '_DISK2PLEX_PUSH_HANDLERS',
                      'transfer_disk_map_markers', 'transfer_disk_map_markers_dir',
                      '_merge_marker', '_extract_legacy_vu_marker',
                      '_migrate_legacy_vu_sidecar', 'DISK_MAP_VARIABLES',
@@ -7321,65 +7250,6 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(_PLEX_WRITABLE_FIELDS['Season'], {'WATCHED'})
 
     # --- --force tests ---
-
-    def test_plex2disk_process_scope_force_removes_marker(self):
-        """--force: when Plex has no value, marker is removed from disk."""
-        # File markers use dot-separated format WITHOUT brackets: Movie.vu@DATE.mkv
-        sidecar = {'/fake/Movie.vu@2026-01-15.mkv': {
-            'markers': {'watched': 'vu@2026-01-15'},
-            'clean_name': 'Movie.mkv',
-            'last_updated': '2026-01-15'
-        }}
-        obj = {'type': 'Movie', 'type_str': 'Movie', 'viewCount': 0, 'lastViewedAt': None,
-               'title': 'TestMovie', 'library': 'movies'}
-        items = [('/fake/Movie.vu@2026-01-15.mkv', 'Movie:1', obj)]
-        config = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-
-        buf = io.StringIO()
-        import contextlib
-        with contextlib.redirect_stdout(buf):
-            r, s, w, e, renames = _plex2disk_process_scope(
-                'DISK_MAP', config, items, sidecar, dry_run=True,
-                is_dir=False, apply_fn=apply_markers, strip_fn=strip_our_markers,
-                force=True)
-        output = buf.getvalue()
-        # Force should rename the file (remove marker)
-        self.assertEqual(r, 1, f"Expected 1 rename, got {r}. Output: {output}")
-        self.assertIn('Removing', output)
-
-    def test_plex2disk_process_scope_no_force_preserves(self):
-        """Without --force: existing marker is preserved even when Plex is empty."""
-        # Access main module globals via the function's module
-        main_mod = sys.modules[_plex2disk_process_scope.__module__]
-        saved_merge = main_mod.DISK_MAP_MERGE
-        try:
-            # Even with 'plex' strategy, additive mode preserves existing markers
-            main_mod.DISK_MAP_MERGE = {'watched': 'plex'}
-            # Use bracket format (current standard) so no format migration rename
-            sidecar = {'/fake/Movie [vu@2026-01-15].mkv': {
-                'markers': {'watched': 'vu@2026-01-15'},
-                'clean_name': 'Movie.mkv',
-                'last_updated': '2026-01-15'
-            }}
-            obj = {'type': 'Movie', 'type_str': 'Movie', 'viewCount': 0, 'lastViewedAt': None,
-                   'title': 'TestMovie', 'library': 'movies'}
-            items = [('/fake/Movie [vu@2026-01-15].mkv', 'Movie:1', obj)]
-            config = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-
-            buf = io.StringIO()
-            import contextlib
-            with contextlib.redirect_stdout(buf):
-                r, s, w, e, renames = _plex2disk_process_scope(
-                    'DISK_MAP', config, items, sidecar, dry_run=True,
-                    is_dir=False, apply_fn=apply_markers, strip_fn=strip_our_markers,
-                    force=False)
-            output = buf.getvalue()
-            # Without force: marker preserved (no rename), message about Plex empty
-            self.assertEqual(r, 0, f"Should not rename. Output: {output}")
-            self.assertIn('Preserving', output)
-            self.assertIn('--force', output)
-        finally:
-            main_mod.DISK_MAP_MERGE = saved_merge
 
     def test_sync_force_error_in_source(self):
         """--sync --force error message exists in source."""
