@@ -26327,7 +26327,11 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.localmedia':   ('-',                       False),
         }
         _eps_col = 'EPISODE-MEDIA-FILES-META-DATA-SOURCE' if VRB else 'EPISODE-DATA-SOURCE'
-        print(f"LIBRARY-NAME\tLANG\tLANGUAGES\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t{_eps_col}\tRATINGS")
+        _hdr = ['LIBRARY-NAME', 'LANG', 'LANGUAGES', 'TYPE', 'MY-PLEX',
+                'PLEX-MEDIA-INFO-SOURCE', 'ITEMS', _eps_col, 'RATINGS']
+        # Build all rows in memory first, then pad each cell to its column's
+        # max width and join with TAB (so awk -F'\t' / cut still parse cleanly).
+        _rows = []
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
@@ -26338,8 +26342,6 @@ def execute_global_commands(args, cmd_args):
                 lang = 'none'
             items = items_count.get(lib_name, '-')
             # Determine --missing episode source for Series libraries
-            # All values padded to _EPS_W chars so RATINGS column aligns across rows
-            _EPS_W = 34 if VRB else 20
             if l_type == 'Series':
                 lib_lang = languages.get(lib_name, '')
                 if MISSING_EPISODES_SOURCE and lib_name in MISSING_EPISODES_SOURCE:
@@ -26371,7 +26373,6 @@ def execute_global_commands(args, cmd_args):
                 missing_src = f'{src} {desc}' if VRB else src
             else:
                 missing_src = 'n/a (not a series library)' if VRB else 'n/a'
-            missing_src = missing_src.ljust(_EPS_W)
             rating_src, has_critics = AGENT_RATINGS.get(agent_id, ('-', False))
             if rating_src == '-':
                 rating_col = '-'
@@ -26380,14 +26381,24 @@ def execute_global_commands(args, cmd_args):
             else:
                 rating_col = rating_src
             languages_col = _format_language_distribution(lib_name)
-            print(f"{lib_name}\t{lang}\t{languages_col}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}\t{rating_col}")
+            _rows.append([str(c) for c in (lib_name, lang, languages_col, l_type,
+                                            supported, agent, items, missing_src, rating_col)])
+        # Column widths: max(len of header, len of each cell). Last column not padded.
+        _widths = [max([len(_hdr[i])] + [len(r[i]) for r in _rows]) for i in range(len(_hdr))]
+        def _format_row(cells):
+            # Pad every cell except the last; tab-separate them all
+            return '\t'.join((cells[i].ljust(_widths[i]) if i < len(cells) - 1 else cells[i])
+                              for i in range(len(cells)))
+        print(_format_row(_hdr))
+        for row in _rows:
+            print(_format_row(row))
         # Footnote explaining the markers
         print()
         print(" LANG       = primary language Plex was configured with for this library")
         print("              (used for metadata fetching).")
         print(" LANGUAGES  = actual distribution of audio languages across cached items:")
-        print("              code* 79%   * = matches Plex's LANG (default)")
-        print("              code** 5%  ** = matches AUTO_RESOLVE override AND differs from LANG")
+        print("              *  = matches Plex's LANG (default)")
+        print("              ** = matches AUTO_RESOLVE override AND differs from LANG")
         print("              [MULTI]       library is set to 'MULTI' in AUTO_RESOLVE_AUDIO_")
         print("                            LANGUAGE_BY_LIBRARY config (mixed-language library;")
         print("                            --resolve always prompts and --list auto-shows AUDIO).")
