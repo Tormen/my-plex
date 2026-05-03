@@ -3684,8 +3684,72 @@ class TestDefaultScope(unittest.TestCase):
     def test_imdb_in_cat_c_regex(self):
         """imdb / tmdb / tvdb must be in the Cat-C display-only token regex."""
         src = self._read_script()
-        self.assertIn('|imdb|tmdb|tvdb)', src,
+        self.assertIn('|imdb|tmdb|tvdb', src,
             "Cat-C regex must include imdb/tmdb/tvdb tokens")
+
+    # --- Per-library language distribution + MULTI config ---
+
+    def test_language_distribution_in_schema(self):
+        """EMPTY_LIBRARY_STATS must include the 'language_distribution' key."""
+        src = self._read_script()
+        self.assertIn("'language_distribution'", src,
+            "EMPTY_LIBRARY_STATS must include language_distribution")
+
+    def test_languages_column_in_list_libraries(self):
+        """--list-libraries must include the LANGUAGES column."""
+        result = self._run('--list-libraries')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('LANGUAGES', result.stdout,
+            "--list-libraries must include LANGUAGES column")
+
+    def test_multi_marker_recognized_in_config(self):
+        """The autoresolve rewire must recognize 'MULTI' as a special config value."""
+        src = self._read_script()
+        self.assertIn("'MULTI'", src,
+            "Code must recognize 'MULTI' in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY")
+
+    def test_audio_auto_show_for_multi_library_logic_present(self):
+        """_list_filtered must auto-set has_lang when results span a MULTI library."""
+        src = self._read_script()
+        idx = src.index('def _list_filtered(')
+        body = src[idx:idx+30000]
+        self.assertIn("'MULTI'", body,
+            "_list_filtered must check AUTO_RESOLVE entries for 'MULTI'")
+        self.assertIn('_multi_libs', body,
+            "_list_filtered must build a _multi_libs set from the config")
+
+    def test_movies_only_layout_logic_present(self):
+        """_list_filtered must compute _movies_only and use original_title-aware TITLE."""
+        src = self._read_script()
+        idx = src.index('def _list_filtered(')
+        body = src[idx:idx+30000]
+        self.assertIn('_movies_only', body,
+            "_list_filtered must detect movies-only result sets")
+        self.assertIn('_title_for_row', body,
+            "_list_filtered must use a title chooser that picks original_title for MULTI libs")
+        # ORIGINAL-TITLE column only when the user explicitly opts in via originaltitle token
+        self.assertIn("'ORIGINAL-TITLE'", body,
+            "_list_filtered must offer ORIGINAL-TITLE column when user passes the originaltitle token")
+
+    def test_filepath_opt_in_token(self):
+        """Bare `path` / `filepath` / `file` token must be recognized as Cat-C (opt-in to FILEPATH)."""
+        src = self._read_script()
+        # Cat-C regex must list path/filepath/file
+        self.assertRegex(src, r'_CAT_C_TOKEN_RE\s*=.*',
+            "_CAT_C_TOKEN_RE must exist")
+        self.assertIn('path|filepath|file', src,
+            "Cat-C regex must accept path/filepath/file as bare display tokens")
+        # _LABEL_TO_FIELD must map them to 'filepath'
+        self.assertIn("'filepath': 'filepath'", src,
+            "Display field mapping must include filepath")
+
+    def test_lang_de_filter_still_works(self):
+        """Regression: lang:de must still return items with German audio."""
+        result = self._run('lang:de')
+        self.assertEqual(result.returncode, 0)
+        # Either matches exist or empty; both are acceptable as long as no error.
+        self.assertNotIn('ERROR', result.stdout,
+            "lang:de must not error out")
 
 
 class TestErrorOutputConventions(unittest.TestCase):

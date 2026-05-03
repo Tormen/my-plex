@@ -16,6 +16,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Column hiding** — `-field` removes columns: `my-plex ,unsorted -file` hides FILEPATH
 - **Filter + hide** — `-field:value` filters AND hides the column: `my-plex ,unsorted -genre:comedy` filters by comedy without showing the GENRE column
 - **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
+- **Per-library audio-language stats** — `--update-cache` builds a per-library `{lang: [keys]}` index, surfaced as a `LANGUAGES` column in `--list-libraries` (e.g. `en* 79%, fr 15%, de 2% [MULTI]`). Mark a library multi-language by adding `('lib', 'MULTI')` to `AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY` — `--list` then auto-shows the AUDIO column for results from that library, and `--no-audio-language --resolve` always prompts (no autoresolve)
+- **Movies-only result layout** — when a `--list` result set is all movies, my-plex auto-replaces FILEPATH with YEAR + TITLE + ORIGINAL-TITLE columns. Use bare `path` / `filepath` / `file` token to bring FILEPATH back
 - **End-of-filters marker** — `--` makes every following token a literal title search, bypassing filter heuristics: `my-plex -- imdb` searches for the word "imdb" in titles
 - **DEFAULT_SCOPE** — config variable for default filters applied to all listings (e.g. `watched:no`)
 - **Smart rollup** — episodes with identical display values collapse into Season/Series rows, with matched/total counts when filters are active
