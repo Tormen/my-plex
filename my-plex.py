@@ -16218,10 +16218,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _multi_libs_set = {l for l, v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
                            if str(v).upper() == 'MULTI'}
 
+        # Hard cap on TITLE display width to keep rows readable when one item
+        # has an absurdly long title (e.g. 200-char auto-generated names).
+        # When truncating, append U+2026 HORIZONTAL ELLIPSIS so the cut is
+        # visible — silent slicing is forbidden.
+        _TITLE_MAX = 60
+        def _clip(s, n=_TITLE_MAX):
+            return s if len(s) <= n else s[:n-1] + '…'
+
         def _title_for_row(r, _ml=_multi_libs_set):
             if r['lib'] in _ml and r['original_title']:
-                return r['original_title']
-            return r['title'] if r['title'] else '-'
+                return _clip(r['original_title'])
+            return _clip(r['title']) if r['title'] else '-'
 
         if _movies_only and not has_filepath:
             if not has_year:
@@ -16233,7 +16241,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('TITLE', 30, _title_for_row))
         if has_originaltitle:
             extra_cols.append(('ORIGINAL-TITLE', 30,
-                               lambda r: r['original_title'] if r['original_title'] else '-'))
+                               lambda r: _clip(r['original_title']) if r['original_title'] else '-'))
         if has_library:
             extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
