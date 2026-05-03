@@ -7101,7 +7101,7 @@ class TestDiskMap(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn('SYNC PLEX METADATA TO DISK', result.stdout)
-        self.assertIn('Available variables', result.stdout)
+        self.assertIn('AVAILABLE VARIABLES', result.stdout)
 
     def test_help_disk2plex(self):
         """--help disk2plex should print help and exit 0."""
@@ -7110,7 +7110,7 @@ class TestDiskMap(unittest.TestCase):
             capture_output=True, text=True, timeout=30
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn('ADDITIVE ONLY', result.stdout)
+        self.assertIn('ADDITIVE', result.stdout)
 
     def test_help_plex_disk_sync(self):
         """--help plex-disk-sync should print help and exit 0."""
@@ -7521,6 +7521,196 @@ class TestDiskMap(unittest.TestCase):
         self.assertIn("prefix = f\"{lib}|{cache_key}| \"", content)
         # Rename lines use prefix and full path on single line
         self.assertIn('Rename: {path}', content)
+
+    # ==================================================================
+    # v1.2: DISK_PLEX_MAP — validate / compute / read
+    # ==================================================================
+
+    # --- validate_disk_plex_map ---
+
+    def test_validate_dpm_valid(self):
+        """Valid DISK_PLEX_MAP passes."""
+        cfg = {
+            'AUDIO_LANG': {
+                'scope': 'file', 'merge': 'disk',
+                'values': {
+                    'de': {'plex2disk': '[de]', 'disk2plex': [r'\[de\]']},
+                    'unknown': {},
+                },
+            },
+            'WATCHED': {
+                'scope': ['file', 'movie_dir'], 'merge': 'newer',
+                'values': {True: {'plex2disk': '[vu@{WATCHED_DATE}]',
+                                   'disk2plex': [r'\[vu@(?P<WATCHED_DATE>\d{4}-\d{2}-\d{2})\]']}},
+            },
+        }
+        self.assertEqual(validate_disk_plex_map(cfg), [])
+
+    def test_validate_dpm_unknown_plex_var(self):
+        cfg = {'NOT_A_PLEX_VAR': {'scope': 'file', 'values': {}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('unknown plex variable' in e for e in errs), errs)
+
+    def test_validate_dpm_bad_scope(self):
+        cfg = {'WATCHED': {'scope': 'nope', 'values': {}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('scope' in e for e in errs), errs)
+
+    def test_validate_dpm_bad_merge(self):
+        cfg = {'WATCHED': {'scope': 'file', 'merge': 'lol', 'values': {}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('merge' in e for e in errs), errs)
+
+    def test_validate_dpm_bad_entry_key(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'badkey': 'whatever'}}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('badkey' in e for e in errs), errs)
+
+    def test_validate_dpm_bad_regex(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'disk2plex': [r'[unbalanced']}}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('does not compile' in e for e in errs), errs)
+
+    def test_validate_dpm_bad_when(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'when': 'if not '}}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('not a valid expression' in e for e in errs), errs)
+
+    def test_validate_dpm_not_dict(self):
+        errs = validate_disk_plex_map([1, 2, 3])
+        self.assertTrue(errs)
+        self.assertIn('must be a dict', errs[0])
+
+    # --- compute_markers_dpm ---
+
+    def test_compute_dpm_scalar_specific(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'plex2disk': '[de]'}}}}
+        out = compute_markers_dpm(cfg, {'AUDIO_LANG': 'de'}, 'file')
+        self.assertEqual(out, {'AUDIO_LANG': '[de]'})
+
+    def test_compute_dpm_scalar_wildcard(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'*': {'plex2disk': '[{AUDIO_LANG}]'}}}}
+        out = compute_markers_dpm(cfg, {'AUDIO_LANG': 'es'}, 'file')
+        self.assertEqual(out, {'AUDIO_LANG': '[es]'})
+
+    def test_compute_dpm_muted(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'unknown': {}}}}
+        out = compute_markers_dpm(cfg, {'AUDIO_LANG': 'unknown'}, 'file')
+        self.assertNotIn('AUDIO_LANG', out)
+
+    def test_compute_dpm_boolean_specific(self):
+        cfg = {'WATCHED': {'scope': 'file',
+                           'values': {True: {'plex2disk': '[vu@{WATCHED_DATE}]'}}}}
+        out = compute_markers_dpm(cfg, {'WATCHED': True, 'WATCHED_DATE': '2026-01-15'}, 'file')
+        self.assertEqual(out, {'WATCHED': '[vu@2026-01-15]'})
+
+    def test_compute_dpm_list_whitelist(self):
+        """List-valued plex_var: every element with a matching entry contributes one marker."""
+        cfg = {'AUDIO_LANGS_LIST': {'scope': 'file',
+                                    'values': {'de': {'plex2disk': '[de]'},
+                                               'en': {'plex2disk': '[en]'},
+                                               'es': {'plex2disk': '[es]'}}}}
+        out = compute_markers_dpm(cfg, {'AUDIO_LANGS_LIST': ['de', 'en']}, 'file')
+        self.assertEqual(out, {'AUDIO_LANGS_LIST': '[de][en]'})
+
+    def test_compute_dpm_when_gates(self):
+        """The 'when' predicate filters entries."""
+        cfg = {'AUDIO_LANG': {'scope': 'file', 'values': {
+            'de': [{'plex2disk': '[HD-de]', 'when': "RESOLUTION=='1080p'"},
+                   {'plex2disk': '[de]'}],
+        }}}
+        hd  = compute_markers_dpm(cfg, {'AUDIO_LANG': 'de', 'RESOLUTION': '1080p'}, 'file')
+        sd  = compute_markers_dpm(cfg, {'AUDIO_LANG': 'de', 'RESOLUTION': '480p'},  'file')
+        self.assertEqual(hd, {'AUDIO_LANG': '[HD-de]'})
+        self.assertEqual(sd, {'AUDIO_LANG': '[de]'})
+
+    def test_compute_dpm_per_scope_override(self):
+        """Tuple key (plex2disk, scope) overrides bare 'plex2disk'."""
+        cfg = {'WATCHED': {'scope': ['file', 'movie_dir'],
+                           'values': {True: {
+                                'plex2disk': '[vu]',
+                                ('plex2disk', 'movie_dir'): '[movie_vu]'}}}}
+        f  = compute_markers_dpm(cfg, {'WATCHED': True}, 'file')
+        md = compute_markers_dpm(cfg, {'WATCHED': True}, 'movie_dir')
+        self.assertEqual(f,  {'WATCHED': '[vu]'})
+        self.assertEqual(md, {'WATCHED': '[movie_vu]'})
+
+    def test_compute_dpm_scope_filter(self):
+        """An entry whose scope doesn't include the queried scope produces nothing."""
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'plex2disk': '[de]'}}}}
+        out = compute_markers_dpm(cfg, {'AUDIO_LANG': 'de'}, 'movie_dir')
+        self.assertEqual(out, {})
+
+    # --- read_markers_from_disk ---
+
+    def test_read_dpm_simple_value_match(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'disk2plex': [r'\[de\]']}}}}
+        out = read_markers_from_disk('Movie [de].mkv', cfg, {'AUDIO_LANG': None}, 'file')
+        self.assertEqual(out.get('AUDIO_LANG'), 'de')
+
+    def test_read_dpm_wildcard_named_group(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file', 'values': {
+            '*': {'disk2plex': [r'\[(?P<AUDIO_LANG>[a-z]{2})\]']}}}}
+        out = read_markers_from_disk('Movie [es].mkv', cfg, {'AUDIO_LANG': None}, 'file')
+        self.assertEqual(out.get('AUDIO_LANG'), 'es')
+
+    def test_read_dpm_watched_with_date(self):
+        cfg = {'WATCHED': {'scope': 'file', 'values': {True: {
+            'disk2plex': [r'\[vu@(?P<WATCHED_DATE>\d{4}-\d{2}-\d{2})\]']}}}}
+        out = read_markers_from_disk('Movie [vu@2026-01-15].mkv',
+                                     cfg, {'WATCHED': False}, 'file')
+        self.assertTrue(out.get('WATCHED'))
+        self.assertEqual(out.get('WATCHED_DATE'), '2026-01-15')
+
+    def test_read_dpm_list_collection(self):
+        cfg = {'AUDIO_LANGS_LIST': {'scope': 'file',
+                                    'values': {'de': {'disk2plex': [r'\[de\]']},
+                                               'en': {'disk2plex': [r'\[en\]']}}}}
+        out = read_markers_from_disk('Movie [de][en].mkv',
+                                     cfg, {'AUDIO_LANGS_LIST': []}, 'file')
+        self.assertEqual(out.get('AUDIO_LANGS_LIST'), ['de', 'en'])
+
+    def test_read_dpm_no_match_returns_empty(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'disk2plex': [r'\[de\]']}}}}
+        out = read_markers_from_disk('Movie.mkv', cfg, {'AUDIO_LANG': None}, 'file')
+        self.assertEqual(out, {})
+
+    def test_read_dpm_scope_filter(self):
+        """Reading from a scope not in entry's scope-set returns empty."""
+        cfg = {'AUDIO_LANG': {'scope': 'file',
+                              'values': {'de': {'disk2plex': [r'\[de\]']}}}}
+        out = read_markers_from_disk('Movie Dir [de]', cfg,
+                                     {'AUDIO_LANG': None}, 'movie_dir')
+        self.assertEqual(out, {})
+
+    # --- v1.2: cmd_disk2plex two-phase / handler-registry source-presence ---
+
+    def test_disk2plex_has_push_handler_registry(self):
+        """cmd_disk2plex must dispatch via _DISK2PLEX_PUSH_HANDLERS registry."""
+        content = self._read_script()
+        self.assertIn('_DISK2PLEX_PUSH_HANDLERS', content)
+        self.assertIn("'WATCHED'", content)
+        self.assertIn("'AUDIO_LANG'", content)
+
+    def test_disk2plex_dispatch_passes_yes(self):
+        """--disk2plex dispatch passes yes flag to cmd_disk2plex."""
+        content = self._read_script()
+        import re
+        self.assertRegex(content, r'cmd_disk2plex\(target,[^)]*\byes=yes\b[^)]*\)')
+
+    def test_cmd_disk2plex_accepts_yes(self):
+        """cmd_disk2plex signature accepts yes parameter."""
+        sig = inspect.signature(cmd_disk2plex)
+        self.assertIn('yes', sig.parameters)
 
 
 # Test scopes: logical groupings of test classes by feature area
