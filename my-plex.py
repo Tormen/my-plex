@@ -26395,7 +26395,7 @@ def execute_global_commands(args, cmd_args):
         # Footnote explaining the markers
         print()
         print(" LANG       = primary language Plex was configured with for this library (used for metadata fetching).")
-        print(" LANGUAGES  = actual distribution of audio languages across cached items:")
+        print(" LANGUAGES  = actual distribution of audio languages across cached items (first audio track only):")
         print("              *  = matches Plex's LANG (default)")
         print("              ** = matches AUTO_RESOLVE override AND differs from LANG")
         print("              [MULTI] = mixed-language library (set 'MULTI' in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY config; --resolve always prompts and --list auto-shows AUDIO)")
