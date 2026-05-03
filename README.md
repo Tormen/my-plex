@@ -223,13 +223,35 @@ DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr'
 # Optional: Default filter scope (applied to all listing commands)
 DEFAULT_SCOPE = 'watched:no'  # Only show unwatched items by default
 
-# Optional: Disk map markers (sync Plex metadata to filenames)
-DISK_MAP = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-DISK_MAP_MOVIE_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-DISK_MAP_SERIES_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-DISK_MAP_SEASON_DIR = {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
-DISK_MAP_MERGE = {'watched': 'newer'}
-DISK_MAP_PUSH = {'watched': 'WATCHED'}
+# Optional: Unified disk ↔ Plex marker map (drives both --plex2disk and --disk2plex).
+# One entry per Plex variable; each entry has scope, merge policy, and a
+# `values` map of Plex-value → marker template + recognising regexes.
+DISK_PLEX_MAP = {
+    'AUDIO_LANG': {
+        'scope': 'file',
+        'merge': 'disk',  # filename is ground truth
+        'values': {
+            'de':      {'plex2disk': '[de]',
+                        'disk2plex': [r'\[(de|german)\]', r'_TVOON_DE\.']},
+            'fr':      {'plex2disk': '[fr]',
+                        'disk2plex': [r'\[(fr|french)\]']},
+            'en':      {'plex2disk': '[en]',
+                        'disk2plex': [r'\[(en|english)\]']},
+            'unknown': {},  # mute placeholder bucket
+        },
+    },
+    'WATCHED': {
+        'scope': ['file', 'movie_dir', 'series_dir', 'season_dir'],
+        'merge': 'newer',  # most recent timestamp wins
+        'values': {
+            True: {
+                'plex2disk': '[vu@{WATCHED_DATE}]',
+                'disk2plex': [r'\[vu@(?P<WATCHED_DATE>\d{4}-\d{2}-\d{2})\]',
+                              r'\[vu\]'],
+            },
+        },
+    },
+}
 ```
 
 Use `my-plex --help <topic>` for detailed help on any command.
