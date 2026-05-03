@@ -7429,12 +7429,15 @@ class TestDiskMap(unittest.TestCase):
     def test_plex2disk_dispatch_passes_force(self):
         """--plex2disk dispatch passes force to cmd_plex2disk."""
         content = self._read_script()
-        self.assertIn('cmd_plex2disk(target, dry_run=dry_run, force=force)', content)
+        # Match cmd_plex2disk(target, ... force=force ...) regardless of other kw args
+        import re
+        self.assertRegex(content, r'cmd_plex2disk\(target,[^)]*\bforce=force\b[^)]*\)')
 
     def test_disk2plex_dispatch_passes_force(self):
         """--disk2plex dispatch passes force to cmd_disk2plex."""
         content = self._read_script()
-        self.assertIn('cmd_disk2plex(target, dry_run=dry_run, force=force)', content)
+        import re
+        self.assertRegex(content, r'cmd_disk2plex\(target,[^)]*\bforce=force\b[^)]*\)')
 
     def test_series_dir_uses_get_series_dir_helper(self):
         """Series dir routing uses get_series_dir() helper, which looks up Show object's file field."""
