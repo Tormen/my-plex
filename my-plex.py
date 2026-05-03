@@ -756,16 +756,41 @@ CONFIG_DEFAULTS = {
     # Each is a dict of aspect_name → Python expression (evaluated with metadata variables in scope).
     # Example: {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
     # Falsy results (empty string, None, 0, False) → marker skipped entirely.
-    'DISK_MAP': {},              # Markers on media files (Movie.mkv, S01E01.mkv)
-    'DISK_MAP_MOVIE_DIR': {},    # Markers on movie directories
-    'DISK_MAP_SERIES_DIR': {},   # Markers on series directories
-    'DISK_MAP_SEASON_DIR': {},   # Markers on season directories
+    'DISK_MAP': {},              # [LEGACY v7] Markers on media files
+    'DISK_MAP_MOVIE_DIR': {},    # [LEGACY v7] Markers on movie directories
+    'DISK_MAP_SERIES_DIR': {},   # [LEGACY v7] Markers on series directories
+    'DISK_MAP_SEASON_DIR': {},   # [LEGACY v7] Markers on season directories
     # Sidecar tracking file — records which [MARKER] segments were added to each file/dir
     'DISK_MAP_FILE': '.my-plex/disk_map.json',
     # Merge strategy per aspect: 'newer' (compare timestamps), 'plex' (Plex wins), 'disk' (disk wins)
+    # [LEGACY v7] superseded by per-plex_var 'merge' inside DISK_PLEX_MAP.
     'DISK_MAP_MERGE': {'watched': 'newer'},
     # Push-to-Plex mapping: aspect name → Plex variable (for --disk2plex)
+    # [LEGACY v7] superseded by DISK_PLEX_MAP keying directly by plex_var.
     'DISK_MAP_PUSH': {'watched': 'WATCHED'},
+
+    # ============================================================================
+    # DISK_PLEX_MAP (NEW in v8) — unified, bidirectional disk ↔ Plex marker map.
+    # ============================================================================
+    # Top level: Plex variable name (one of DISK_MAP_VARIABLES).
+    # Per plex_var:
+    #   'scope': default scope ('file' | 'movie_dir' | 'series_dir' | 'season_dir'
+    #            | list of those | 'all'). Default if omitted: 'file'.
+    #   'merge': 'newer' | 'plex' | 'disk' | 'ignore' | 'warn' | 'fail'. Default: 'newer'.
+    #   'values': dict {plex_value: entry-or-list-of-entries}.  Special key '*' is
+    #             the wildcard catchall used when no specific value matches.
+    # Per value entry:
+    #   'plex2disk': str template (str.format(**plex_vars)) OR callable(vars)→str
+    #   'disk2plex': list of regexes (compiled IGNORECASE).  Named groups
+    #                (?P<NAME>...) auto-assign captured text to Plex var NAME.
+    #   ('plex2disk','<scope>'): per-direction × per-scope override
+    #   ('disk2plex','<scope>'): per-direction × per-scope additional patterns
+    #   'when': optional str — Python expression evaluated against plex_vars.
+    #           When falsy, the entry is skipped (next entry in the list tried).
+    #   Empty {} → entry is recognised but neither writes nor reads.  Use this
+    #   together with '*' to mute one specific value while catchall covers the rest.
+    # See ~/.my-plex.conf for the user's working examples (lang + watched).
+    'DISK_PLEX_MAP': {},
 
     # External Tool Paths
     # LOCAL tools run on this machine, SERVER tools run on the Plex server (via SSH).
@@ -1327,6 +1352,7 @@ DISK_MAP_SEASON_DIR = CONFIG_DEFAULTS['DISK_MAP_SEASON_DIR']
 DISK_MAP_FILE = CONFIG_DEFAULTS['DISK_MAP_FILE']
 DISK_MAP_MERGE = CONFIG_DEFAULTS['DISK_MAP_MERGE']
 DISK_MAP_PUSH = CONFIG_DEFAULTS['DISK_MAP_PUSH']
+DISK_PLEX_MAP = CONFIG_DEFAULTS['DISK_PLEX_MAP']  # NEW in v8
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -4296,9 +4322,16 @@ DISK_MAP_VARIABLES = {
     'ACTOR1_FN', 'ACTOR1_LN', 'ACTOR2_FN', 'ACTOR2_LN', 'ACTOR3_FN', 'ACTOR3_LN',
     'COUNTRY', 'COUNTRIES', 'GENRE', 'GENRES',
     'DIRECTOR', 'DIRECTORS', 'WRITER', 'WRITERS',
-    'LANG', 'RESOLUTION', 'YEAR',
+    'LANG',                                 # [LEGACY v7] library.language
+    'LIBRARY_LANG',                         # NEW in v8 — replaces LANG
+    'AUDIO_LANG',                           # NEW in v8 — first audio track (str)
+    'AUDIO_LANGS',                          # NEW in v8 — comma-joined string
+    'AUDIO_LANGS_LIST',                     # NEW in v8 — Python list (for iter)
+    'RESOLUTION', 'YEAR',
     'IMDB_ID', 'TMDB_ID', 'TVDB_ID',
     'TITLE', 'SERIES',
+    'FILENAME',                             # NEW in v8 — basename, lower-cased
+    'FILEPATH',                             # NEW in v8 — full path, lower-cased
     'LABELS', 'COLLECTIONS',
 }
 
@@ -4478,7 +4511,8 @@ def resolve_disk_map_variables(obj, cache_key=None):
     var['WRITER'] = writers[0] if writers else ''
     var['WRITERS'] = ', '.join(writers) if writers else ''
 
-    # Language from library
+    # Library-level language (Plex's library.language setting).
+    # LIBRARY_LANG is the v8 name; LANG is kept as a v7-compat alias.
     lib_name = obj.get('library', '')
     lang = ''
     try:
@@ -4487,7 +4521,23 @@ def resolve_disk_map_variables(obj, cache_key=None):
         pass
     if lang == 'xn':
         lang = 'none'
-    var['LANG'] = lang
+    var['LIBRARY_LANG'] = lang
+    var['LANG'] = lang  # legacy
+
+    # Per-item audio languages (after _normalize_audio_languages).
+    # AUDIO_LANG       = first track (scalar, e.g. 'de' or 'unknown')
+    # AUDIO_LANGS      = comma-joined string for printing (e.g. 'de, en')
+    # AUDIO_LANGS_LIST = Python list (for plex_var auto-iteration)
+    _alangs = obj.get('audio_languages') or []
+    var['AUDIO_LANG']       = _alangs[0] if _alangs else 'unknown'
+    var['AUDIO_LANGS']      = ', '.join(str(_l) for _l in _alangs) if _alangs else 'unknown'
+    var['AUDIO_LANGS_LIST'] = list(_alangs)
+
+    # Filename / filepath helpers — useful for 'when' predicates and
+    # disk2plex regexes that need to match path-shaped tokens.
+    _fp = obj.get('file', '') or ''
+    var['FILEPATH'] = _fp.lower()
+    var['FILENAME'] = os.path.basename(_fp).lower()
 
     # Technical / metadata
     var['RESOLUTION'] = obj.get('resolution', '') or ''
@@ -27056,7 +27106,7 @@ def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORCE_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
-    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN, EPISODE_NAME_PATTERN
+    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN, EPISODE_NAME_PATTERN, DISK_PLEX_MAP
 
     # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
     # This allows us to use DBG/DEEPDBG during config file loading
