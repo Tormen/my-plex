@@ -235,14 +235,16 @@ _my-plex-filter-token() {
     local -a token_keys
     token_keys=(
         'type:filter by media type (movie/series)'
-        'lang:filter by audio language (en/de/fr)'
+        'lang:filter by audio language (en/de/fr/unknown)'
+        'subs:filter by subtitle language (en/de/fr)'
         'watched:filter by watch status (yes/no)'
+        'unwatched:bare shortcut for watched:no'
         'resolution:filter by resolution (1080p/4k/720p)'
         'codec:filter by video codec (h265/h264)'
         'year:filter by release year'
         'genre:filter by genre (action/drama/…)'
         'director:filter by director (substring)'
-        'label:filter by Plex label'
+        'label:filter by Plex / on-disk label'
         'size:filter by file size (e.g. >1gb)'
         'duration:filter by duration (e.g. >2h)'
         'stars:filter by personal star rating (e.g. >3.5, scale 0-5)'
@@ -250,9 +252,17 @@ _my-plex-filter-token() {
         'critics:filter by RT Tomatometer (e.g. >80)'
         'added:filter by year added (e.g. >2024)'
         'bitrate:filter by bitrate (e.g. >2mbps)'
+        'title:add TITLE column (display only)'
+        'originaltitle:add ORIGINAL-TITLE column (display only)'
+        'library:add LIBRARY column (display only)'
+        'country:add COUNTRY column (display only)'
+        'writer:add WRITER column (display only)'
+        'actor:add ACTORS column (display only)'
+        'contentrating:add RATED column (display only)'
         'imdb:add IMDB URL column (display only)'
         'tmdb:add TMDB URL column (display only)'
         'tvdb:add TVDB URL column (display only)'
+        'path:add FILEPATH column (display only) — overrides movies-only auto-hide'
     )
 
     case "$cur" in
@@ -260,7 +270,15 @@ _my-plex-filter-token() {
             compadd -S '' -P 'type:' -- movie series show
             ;;
         lang:*|language:*)
+            compadd -S '' -P "${cur%%:*}:" -- en de fr unknown english german french
+            ;;
+        subs:*|sub:*|subtitle:*|subtitles:*)
             compadd -S '' -P "${cur%%:*}:" -- en de fr english german french
+            ;;
+        director:*|writer:*|actor:*|country:*)
+            # Substring filters — no completion list (cardinality too high
+            # and value may contain spaces). Just leave the user typing.
+            return
             ;;
         watched:*)
             compadd -S '' -P 'watched:' -- yes no
@@ -343,11 +361,11 @@ _my-plex() {
     # Handle key:value filter tokens for the current word
     if [[ "$cur" != -* ]]; then
         case "$cur" in
-            type:*|lang:*|language:*|watched:*|resolution:*|codec:*|genre:*|label:*)
+            type:*|lang:*|language:*|subs:*|sub:*|subtitle:*|subtitles:*|watched:*|resolution:*|codec:*|genre:*|label:*|director:*|writer:*|actor:*|country:*)
                 _my-plex-filter-token "$cur"
                 return
                 ;;
-            ty*|la*|wa*|re*|co*|ye*|ge*|si*|du*|ra*|ad*|bi*)
+            ty*|la*|wa*|un*|re*|co*|ye*|ge*|di*|si*|du*|st*|cr*|ad*|bi*|im*|tm*|tv*|ti*|or*|li*|wr*|ac*|pa*|fi*|su*)
                 # Could be a filter token prefix — offer token completions alongside other options
                 _my-plex-filter-token "$cur"
                 ;;
@@ -27166,7 +27184,7 @@ def main():
                             '--config-file', '-C', '--source', '--rename',
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
-                            '--test', '--unittest'}
+                            '--test', '--unittest', '--complete'}
             _is_search = (not arg.startswith(('-', ',', '/'))
                           and ':' not in arg
                           and ' ' not in arg  # multi-word quoted strings are scope, not search
@@ -27344,10 +27362,13 @@ def main():
     if '--complete' in sys.argv:
         _ci = sys.argv.index('--complete')
         _complete_what = sys.argv[_ci + 1].lower() if _ci + 1 < len(sys.argv) else ''
-        global CACHE_FILE
-        CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+        global CACHE_FILE, LOCK_FILE
+        if not os.path.isabs(CACHE_FILE):
+            CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+        if not os.path.isabs(LOCK_FILE):
+            LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
         load_cache()
-        PLEX_Media.load_cache()
+        load_media_cache(CACHE)
         if _complete_what in ('genres', 'genre'):
             seen = set()
             for obj in PLEX_Media.OBJ_BY_ID.values():
@@ -27357,9 +27378,17 @@ def main():
                         seen.add(gs.lower())
                         print(gs)
         elif _complete_what in ('labels', 'label'):
+            # Combine Plex labels (obj['labels']) with on-disk labels parsed
+            # from filenames (obj['ondisk_labels']) — the label: filter and
+            # --add-label / --remove-label both accept either kind.
             seen = set()
             for obj in PLEX_Media.OBJ_BY_ID.values():
                 for lbl in (obj.get('labels') or []):
+                    ls = str(lbl).strip()
+                    if ls and ls.lower() not in seen:
+                        seen.add(ls.lower())
+                        print(ls)
+                for lbl in (obj.get('ondisk_labels') or []):
                     ls = str(lbl).strip()
                     if ls and ls.lower() not in seen:
                         seen.add(ls.lower())
