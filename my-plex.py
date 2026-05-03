@@ -4698,6 +4698,159 @@ def compute_markers(obj, cache_key, disk_map):
             markers[aspect] = ''
     return markers
 
+
+# ============================================================================
+# DISK_PLEX_MAP marker engine (NEW in v1.1).  See validate_disk_plex_map and
+# CONFIG_DEFAULTS['DISK_PLEX_MAP'] comment for schema.
+# ============================================================================
+
+def _dpm_entry_active(entry, plex_vars):
+    """Evaluate the entry's optional 'when' predicate.  True = entry applies."""
+    when = entry.get('when')
+    if not when:
+        return True
+    try:
+        return bool(eval(when, {"__builtins__": {}}, plex_vars))
+    except Exception:
+        return False
+
+
+def _dpm_resolve_plex2disk(entry, plex_vars, scope):
+    """Resolve the plex2disk value for `entry` at `scope`.
+    Tuple-key (plex2disk, scope) overrides bare 'plex2disk'.
+    Returns the marker string ('' if no marker), or None if entry doesn't define plex2disk."""
+    spec = entry.get(('plex2disk', scope), entry.get('plex2disk'))
+    if spec is None:
+        return None
+    try:
+        if callable(spec):
+            return str(spec(plex_vars) or '')
+        return str(spec).format(**plex_vars)
+    except (KeyError, ValueError):
+        return ''
+
+
+def _dpm_resolve_disk2plex(entry, scope):
+    """Resolve the disk2plex regex list for `entry` at `scope`.
+    The bare 'disk2plex' is augmented (not replaced) by ('disk2plex', scope)."""
+    out = list(entry.get('disk2plex') or [])
+    out.extend(entry.get(('disk2plex', scope)) or [])
+    return out
+
+
+def _dpm_first_active_entry(entry_or_list, plex_vars):
+    """Given an entry (dict) or a list of entries, return the first whose
+    'when' predicate is true (or which has no 'when').  Returns None if all
+    entries are gated out."""
+    entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if _dpm_entry_active(e, plex_vars):
+            return e
+    return None
+
+
+def compute_markers_dpm(disk_plex_map, plex_vars, scope):
+    """Resolve every plex_var in DISK_PLEX_MAP to a marker for `scope`.
+
+    Returns a dict {plex_var: marker_string}.  List-valued plex_vars produce
+    a concatenated marker (e.g. '[de][en]').  Empty markers are omitted.
+    """
+    markers = {}
+    for plex_var, var_spec in disk_plex_map.items():
+        scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
+        if scope not in scope_set:
+            continue
+        values_dict = var_spec.get('values', {})
+        plex_value = plex_vars.get(plex_var)
+
+        # List-valued plex_var → iterate per element
+        elements = list(plex_value) if isinstance(plex_value, list) else [plex_value]
+        out_parts = []
+        for el in elements:
+            # Specific value first; else wildcard '*'
+            entry_or_list = values_dict.get(el)
+            if entry_or_list is None and '*' in values_dict:
+                entry_or_list = values_dict['*']
+            if entry_or_list is None:
+                continue
+            entry = _dpm_first_active_entry(entry_or_list, plex_vars)
+            if entry is None:
+                continue
+            # Build local plex_vars adding the current iteration value so
+            # templates like '[{AUDIO_LANG}]' work both for scalar and list cases.
+            local_vars = dict(plex_vars)
+            local_vars[plex_var] = el if not isinstance(plex_value, list) else el
+            marker = _dpm_resolve_plex2disk(entry, local_vars, scope)
+            if marker:
+                out_parts.append(marker)
+        if out_parts:
+            markers[plex_var] = ''.join(out_parts)
+    return markers
+
+
+def read_markers_from_disk(name, disk_plex_map, plex_vars, scope):
+    """Scan a disk name (filename basename or directory name) at `scope`
+    against the disk2plex regex lists in DISK_PLEX_MAP.
+
+    Returns a dict {plex_var: value}:
+      - scalar plex_vars get a single value (the matched 'values' key, OR
+        the regex's named-group capture for '*' wildcards).
+      - list-valued plex_vars get a deduped, order-preserved list of values.
+      - regex named groups whose name matches a known PLEX VARIABLE also
+        contribute (e.g. (?P<WATCHED_DATE>\\d{4}-\\d{2}-\\d{2}) sets WATCHED_DATE).
+    """
+    out = {}
+    for plex_var, var_spec in disk_plex_map.items():
+        scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
+        if scope not in scope_set:
+            continue
+        # Detect list-valued plex_var by inspecting its current value type
+        is_list = isinstance(plex_vars.get(plex_var), list)
+        values_dict = var_spec.get('values', {})
+
+        # Iterate specific values first (deterministic), then wildcard '*'.
+        ordered_keys = [k for k in values_dict.keys() if k != '*'] + (['*'] if '*' in values_dict else [])
+        for plex_val in ordered_keys:
+            entry_or_list = values_dict[plex_val]
+            entry = _dpm_first_active_entry(entry_or_list, plex_vars)
+            if entry is None:
+                continue
+            for rg in _dpm_resolve_disk2plex(entry, scope):
+                try:
+                    m = re.search(rg, name, re.IGNORECASE)
+                except re.error:
+                    continue
+                if not m:
+                    continue
+                # Determine value being assigned to plex_var:
+                #   - specific key: use that key
+                #   - '*' wildcard: rely on named group to carry the value
+                if plex_val == '*':
+                    captured = m.groupdict().get(plex_var)
+                    if captured is None:
+                        # Wildcard match without a named group for plex_var:
+                        # cannot assign, skip
+                        continue
+                    val_for_plex_var = captured
+                else:
+                    val_for_plex_var = plex_val
+                if is_list:
+                    out.setdefault(plex_var, [])
+                    if val_for_plex_var not in out[plex_var]:
+                        out[plex_var].append(val_for_plex_var)
+                else:
+                    out.setdefault(plex_var, val_for_plex_var)
+                # Extra named groups → auxiliary plex var assignments
+                for grp_name, grp_val in m.groupdict().items():
+                    if grp_name == plex_var or grp_val is None:
+                        continue
+                    if grp_name in DISK_MAP_VARIABLES:
+                        out.setdefault(grp_name, grp_val)
+                break  # one matching pattern per (plex_val, scope); move on
+    return out
+
 def strip_our_markers(filename, sidecar_entry):
     """Strip markers that we previously added (tracked in sidecar) from a filename.
 
