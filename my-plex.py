@@ -16167,8 +16167,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _result_libs = {r['lib'] for r in rows}
                     _check_libs = {library_name} if library_name else _result_libs
                     _any_critics = any(_lib_agents.get(lib, '') in _CRITICS_AGENTS for lib in _check_libs)
-                    sanitized.append(('RATING', 7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
-                    if _any_critics:
+                    if any(r['rating'] for r in rows):
+                        sanitized.append(('RATING', 7, lambda r: f"{r['rating']:.1f}" if r['rating'] else '-'))
+                    if _any_critics and any(r['critics'] for r in rows):
                         sanitized.append(('CRITICS', 7, lambda r: f"{r['critics']:.0f}%" if r['critics'] else '-'))
             # 2. Remove duplicate column headers (keep first occurrence)
             seen_headers = set()
