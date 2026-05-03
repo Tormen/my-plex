@@ -27620,6 +27620,14 @@ def main():
             import traceback
             traceback.print_exc(file=sys.stderr)
 
+    # Validate DISK_PLEX_MAP (NEW in v1.1).  Empty config validates trivially.
+    _dpm_errors = validate_disk_plex_map(globals().get('DISK_PLEX_MAP', {}))
+    if _dpm_errors:
+        print("ERROR: invalid DISK_PLEX_MAP configuration:", file=sys.stderr)
+        for _e in _dpm_errors:
+            print(f"  {_e}", file=sys.stderr)
+        sys.exit(1)
+
     # Re-derive values that are computed from config keys (not set directly by name in globals).
     # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
     # so they must be recomputed here after the config file values have been applied.
