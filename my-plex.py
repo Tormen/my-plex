@@ -7474,25 +7474,61 @@ def resolve_no_audio_language(obj_keys, args):
         if code and code != 'xn':
             _lib_resolve[lib_name] = code
 
-    # Compile filepath patterns once (case-insensitive).  Invalid regexes
-    # are dropped with a warning so a typo in the user's config doesn't
-    # crash the whole wizard.
+    # Compile filepath patterns once (case-insensitive).  v1.1 reads from
+    # DISK_PLEX_MAP['AUDIO_LANG']['values'][*]['disk2plex'] FIRST (the new
+    # canonical source); legacy AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN
+    # is read as a fallback (deprecation warning emitted if non-empty).
     _filepath_patterns = []
-    for _pat, _code in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN or []):
-        try:
-            _filepath_patterns.append((re.compile(_pat, re.IGNORECASE),
-                                       str(_code).lower()[:2]))
-        except re.error as _e:
-            print(f"  WARNING: bad regex in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN: {_pat!r} ({_e})")
+    _audio_lang_spec = (DISK_PLEX_MAP or {}).get('AUDIO_LANG', {})
+    for _plex_val, _entry_or_list in (_audio_lang_spec.get('values') or {}).items():
+        _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
+        for _entry in _entries:
+            if not isinstance(_entry, dict):
+                continue
+            for _rg in _dpm_resolve_disk2plex(_entry, 'file'):
+                try:
+                    _compiled = re.compile(_rg, re.IGNORECASE)
+                except re.error as _e:
+                    print(f"  WARNING: bad regex in DISK_PLEX_MAP['AUDIO_LANG']: {_rg!r} ({_e})")
+                    continue
+                # For the wildcard '*' the value comes from the regex's named
+                # group (?P<AUDIO_LANG>...).  For specific value keys, the key
+                # is the language code.  For autoresolve we only need the code.
+                if _plex_val == '*':
+                    # The regex MUST capture (?P<AUDIO_LANG>...) — record the
+                    # pattern; resolution time will re-run the regex to pull
+                    # out the captured code.
+                    _filepath_patterns.append((_compiled, '__from_named_group__'))
+                else:
+                    _filepath_patterns.append((_compiled, str(_plex_val).lower()[:2]))
+    # Legacy fallback (empty by default once user migrates):
+    if AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN:
+        if not _filepath_patterns:
+            print("  NOTE: AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN is deprecated. "
+                  "Move it to DISK_PLEX_MAP['AUDIO_LANG']['values'][...]['disk2plex'].")
+        for _pat, _code in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN:
+            try:
+                _filepath_patterns.append((re.compile(_pat, re.IGNORECASE),
+                                           str(_code).lower()[:2]))
+            except re.error as _e:
+                print(f"  WARNING: bad regex in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN: {_pat!r} ({_e})")
 
     def _resolve_lang_for_item(filepath, library):
         """Return (code, source) where code is a 2-letter ISO or None
         (None means: prompt the user). source is a short label for the
         user-facing 'Auto-resolve' line."""
-        # 1. Filepath pattern (ground truth)
+        # 1. Filepath pattern (ground truth) — DISK_PLEX_MAP wildcard '*'
+        # entries pull the code from the regex's (?P<AUDIO_LANG>...) group.
         for _re_obj, _code in _filepath_patterns:
-            if _re_obj.search(filepath or ''):
-                return _code, f"filepath pattern {_re_obj.pattern!r}"
+            _m = _re_obj.search(filepath or '')
+            if not _m:
+                continue
+            if _code == '__from_named_group__':
+                _captured = _m.groupdict().get('AUDIO_LANG')
+                if not _captured:
+                    continue
+                return str(_captured).lower()[:2], f"filepath pattern {_re_obj.pattern!r} (named group)"
+            return _code, f"filepath pattern {_re_obj.pattern!r}"
         # 2. MULTI library → prompt
         if library in _multi_libs:
             return None, "library is MULTI (prompt)"
@@ -23049,7 +23085,17 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     total_errors = 0
 
     scope_count = sum(1 for m in [DISK_MAP, DISK_MAP_MOVIE_DIR, DISK_MAP_SERIES_DIR, DISK_MAP_SEASON_DIR] if m)
+    if DISK_PLEX_MAP:
+        # Count distinct scopes the DPM config reaches.
+        _dpm_scopes = set()
+        for _v in DISK_PLEX_MAP.values():
+            if isinstance(_v, dict):
+                for _s in _normalise_disk_plex_scope(_v.get('scope', 'file')) or ():
+                    _dpm_scopes.add(_s)
+        scope_count += len(_dpm_scopes)
     force_label = " --force" if force else ""
+    if replace:
+        force_label += " --replace"
     if VRB:
         if dry_run:
             print(f"DRY RUN: --plex2disk{force_label} ({len(items)} items, {scope_count} scope(s))")
@@ -23062,6 +23108,17 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     season_dir_items = [] # (dirpath, cache_key, obj)
     series_dir_items = [] # (dirpath, cache_key, obj)
 
+    # Determine which scopes to collect: legacy DISK_MAP* OR DPM-configured scopes.
+    _dpm_collect_scopes = set()
+    for _vspec in (DISK_PLEX_MAP or {}).values():
+        if isinstance(_vspec, dict):
+            for _s in _normalise_disk_plex_scope(_vspec.get('scope', 'file')) or ():
+                _dpm_collect_scopes.add(_s)
+    _need_file       = bool(DISK_MAP)            or 'file' in _dpm_collect_scopes
+    _need_movie_dir  = bool(DISK_MAP_MOVIE_DIR)  or 'movie_dir' in _dpm_collect_scopes
+    _need_season_dir = bool(DISK_MAP_SEASON_DIR) or 'season_dir' in _dpm_collect_scopes
+    _need_series_dir = bool(DISK_MAP_SERIES_DIR) or 'series_dir' in _dpm_collect_scopes
+
     for cache_key, obj in items:
         obj_type = obj.get('type', '')
         type_str = obj.get('type_str', '')
@@ -23069,17 +23126,17 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
 
         for filepath in filepaths:
             # File scope — only actual media files (Movie, Episode), not dir-only types
-            if DISK_MAP and type_str in ('Movie', 'Episode'):
+            if _need_file and type_str in ('Movie', 'Episode'):
                 file_items.append((filepath, cache_key, obj))
 
             # Movie directory scope
-            if DISK_MAP_MOVIE_DIR and obj_type == 'Movie':
+            if _need_movie_dir and obj_type == 'Movie':
                 movie_dir = get_movie_dir(obj)
                 if movie_dir and os.path.basename(movie_dir) != os.path.basename(filepath):
                     movie_dir_items.append((movie_dir, cache_key, obj))
 
             # Season directory scope (from Season cache object, or Season object directly)
-            if DISK_MAP_SEASON_DIR:
+            if _need_season_dir:
                 if obj_type == 'Episode':
                     season_dir = get_season_dir(obj)
                     if season_dir:
@@ -23088,7 +23145,7 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
                     season_dir_items.append((filepath, cache_key, obj))
 
             # Series directory scope (from Show cache object, or Series object directly)
-            if DISK_MAP_SERIES_DIR:
+            if _need_series_dir:
                 if obj_type == 'Episode':
                     series_dir = get_series_dir(obj)
                     if series_dir:
