@@ -766,10 +766,18 @@ CONFIG_DEFAULTS = {
         },
     },
 
-    # Audio Language Resolution Configuration
-    # Auto-resolve audio language by library (used ONLY with --no-audio-language --resolve).
-    # List of tuples: (library_name, 2-letter ISO 639-1 language code).
-    # Items in listed libraries auto-select this language without prompting.
+    # Audio Language Resolution Configuration — single source of truth.
+    # List of (library_name, value) tuples.  Two value kinds:
+    #   - 2-letter ISO 639-1 code ('en','de','fr',…) — explicit autoresolve
+    #     override for --no-audio-language --resolve (use when Plex's
+    #     library.language is wrong/missing).
+    #   - 'MULTI' — library is mixed-language (Plex has no "mixed" flag).
+    #     --resolve always PROMPTS for items in this library, and
+    #     --list/--filter auto-shows the AUDIO column.
+    # Resolution order in --resolve:
+    #   1. 'MULTI'         → always PROMPT
+    #   2. 2-letter ISO    → use that code
+    #   3. no entry        → fall back to Plex library.language
     'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY': [],
 
     # --info field visibility per type and verbosity level.
@@ -1106,10 +1114,24 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Audio Language Resolution Configuration
 ###############################################################################
 
-# Auto-resolve audio language by library (used ONLY with --no-audio-language --resolve).
-# List of tuples: (library_name, 2-letter ISO 639-1 language code).
-# Items in listed libraries auto-select this language without prompting.
-# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [('movies.de', 'de'), ('movies.en', 'en')]
+# Per-library audio language config — single source of truth.
+# List of (library_name, value) tuples.  Two value kinds:
+#   - 2-letter ISO 639-1 code ('en','de','fr',…) — explicit autoresolve
+#     override for --no-audio-language --resolve (when Plex's
+#     library.language is wrong/missing).
+#   - 'MULTI' — library is mixed-language (Plex has no "mixed" flag).
+#     --resolve always PROMPTS for items in this library, and
+#     --list/--filter auto-shows the AUDIO column when results span it.
+# Resolution order in --resolve:
+#   1. value 'MULTI'         → always PROMPT
+#   2. value is 2-letter ISO → use that code
+#   3. no entry              → fall back to Plex library.language
+# Example:
+# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [
+#     (',unsorted',   'MULTI'),
+#     ('documentary', 'MULTI'),
+#     ('movies.de',   'de'),
+# ]
 
 ###############################################################################
 # Default Scope (DEFAULT_SCOPE)
@@ -1383,7 +1405,17 @@ US=os.path.basename(__file__); # "my-plex-api.py"
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
 
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{} }
+EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{}, 'language_distribution':{} }
+# language_distribution: per-library audio-language index, populated during
+# --update-cache from each item's audio_languages[0].
+#   {lib_title: {lang_code: [obj_keys, ...]}}
+# Empty/garbage language strings are dropped; 3-letter Plex codes are
+# normalised to 2-letter ISO 639-1.  Used for:
+#   - LANGUAGES column in --list-libraries (percentages derived on the fly)
+#   - Auto-show AUDIO column when results span a 'MULTI' library (Plex has
+#     no "mixed" flag, so multi-language is opt-in via the value 'MULTI'
+#     in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY config)
+#   - O(1) lang:<code> filtering in _list_filtered
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
@@ -6974,8 +7006,11 @@ def resolve_no_audio_language(obj_keys, args):
 
     For each item with no audio language:
     - Shows file info (title, Plex ID, library, filepath, container type, local/remote)
-    - If AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY has a match, auto-selects that language
-    - Otherwise prompts with language menu (E=eng, D=deu, F=fra, etc.)
+    - Resolution order:
+        1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI' → always PROMPT
+        2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 2-letter → use that code
+        3. otherwise                                              → use Plex library.language
+    - When no autoresolve match, prompts with language menu (E=eng, D=deu, F=fra, etc.)
     - Records pending operations, then batch applies:
       runs mp4box/mkvpropedit, then triggers Plex analyze
 
@@ -7012,10 +7047,25 @@ def resolve_no_audio_language(obj_keys, args):
     }
     print(f"\n  Resolution log: {log_filename}\n")
 
-    # Build auto-resolve lookup: library_name -> 2-letter code
+    # Build auto-resolve lookup: library_name -> 2-letter code.
+    # Resolution order:
+    #   1. entry value 'MULTI' → always PROMPT (never autoresolve)
+    #   2. entry value is a 2-letter ISO → use that code
+    #   3. no entry for the library → fall back to Plex's library.language
+    _multi_libs = set()
     auto_resolve = {}
-    for lib_name, lang_code in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
-        auto_resolve[lib_name] = lang_code
+    for lib_name, value in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
+        if str(value).upper() == 'MULTI':
+            _multi_libs.add(lib_name)
+        else:
+            auto_resolve[lib_name] = str(value).lower()[:2]
+    # Plex library.language fallback (only when not in config and not MULTI)
+    for lib_name, plex_lang in CACHE.get('library_stats', {}).get('language', {}).items():
+        if lib_name in auto_resolve or lib_name in _multi_libs:
+            continue
+        code = (plex_lang or '').lower()[:2]
+        if code and code != 'xn':
+            auto_resolve[lib_name] = code
 
     pending_operations = []
     total_items = len(obj_keys)
@@ -11135,8 +11185,20 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and hasattr(PLEX_Media, 'cache_rebuild_lock') and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Saving cache to disk...")
 
-        # Rebuild library_object_counts after all updates are complete
+        # Rebuild library_object_counts after all updates are complete.
+        # In the same pass, build language_distribution: per-library
+        # {lang_code: [obj_keys]} index used for --list-libraries stats,
+        # MULTI-library AUDIO auto-show, and O(1) lang:<code> filtering.
+        # Plex sometimes returns 3-letter ISO 639-2 codes; normalise to 2-letter.
+        _ISO_3_TO_2 = {'eng':'en','deu':'de','ger':'de','fra':'fr','fre':'fr',
+                       'ita':'it','spa':'es','jpn':'ja','kor':'ko','zho':'zh',
+                       'por':'pt','rus':'ru','nld':'nl','swe':'sv','dan':'da',
+                       'nor':'no','fin':'fi','pol':'pl','tur':'tr','ara':'ar',
+                       'hin':'hi','ces':'cs','cze':'cs','heb':'he','ell':'el',
+                       'gre':'el'}
+        _GARBAGE_CODES = {'und', 'mis', 'mul', 'zxx', ''}
         updated_library_object_counts = {}
+        _lang_distribution = {}  # {lib: {code: [obj_keys]}}
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             lib = obj['library']
             obj_type = obj['type']
@@ -11150,6 +11212,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 updated_library_object_counts[lib]['episodes'] = updated_library_object_counts[lib].get('episodes', 0) + 1
             elif obj_type == 'Movie':
                 updated_library_object_counts[lib]['movies'] = updated_library_object_counts[lib].get('movies', 0) + 1
+            # Tally first audio language for Movie/Episode items only
+            if obj_type in ('Movie', 'Episode'):
+                _langs = obj.get('audio_languages') or []
+                _code = (str(_langs[0]).lower().strip() if _langs else '')
+                _code = _ISO_3_TO_2.get(_code, _code)
+                # Drop unknown/garbage codes and Plex concatenations like 'engeng'
+                if _code in _GARBAGE_CODES or len(_code) > 3:
+                    continue
+                _lang_distribution.setdefault(lib, {}).setdefault(_code, []).append(key)
 
         if DBG:
             print(f"{DBGPFX}Saving cache with updated library_object_counts:")
@@ -11184,6 +11255,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 }
             except Exception:
                 pass  # Keep existing server_info from cache
+
+        # Persist the per-library audio-language index built above
+        current_library_stats['language_distribution'] = _lang_distribution
 
         # Save cache to disk
         if DBG:
@@ -15470,13 +15544,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # --- Display-only column: +field — adds column, no filtering ---
         if sub.startswith('+'):
             _display_field = sub[1:].strip().lower()
-            if _display_field in ('title', 'library', 'bitrate', 'resolution', 'codec', 'year',
+            if _display_field in ('title', 'originaltitle', 'library', 'bitrate', 'resolution',
+                                  'codec', 'year',
                                   'label', 'genre', 'size', 'duration', 'rating', 'stars',
                                   'critics', 'added', 'watched', 'lang', 'language',
                                   'subs', 'sub', 'subtitle', 'subtitles',
                                   'country', 'countries', 'director', 'directors',
                                   'actor', 'actors', 'contentrating', 'writer', 'writers',
-                                  'imdb', 'tmdb', 'tvdb'):
+                                  'imdb', 'tmdb', 'tvdb',
+                                  'path', 'filepath', 'file'):
                 return f"+{_display_field}", lambda obj, fi: True
 
         # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
@@ -15880,7 +15956,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'watched': 'watched', 'unwatched': 'unwatched',
             'lang': 'lang', 'language': 'lang',
             'subs': 'subs', 'sub': 'subs', 'subtitle': 'subs', 'subtitles': 'subs',
-            'title': 'title', 'library': 'library',
+            'title': 'title', 'originaltitle': 'originaltitle',
+            'library': 'library',
+            'path': 'filepath', 'filepath': 'filepath', 'file': 'filepath',
             'country': 'country', 'countries': 'country',
             'director': 'director', 'directors': 'director',
             'writer': 'writer', 'writers': 'writer',
@@ -15973,6 +16051,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'critics':      obj.get('criticsRating') or 0,     # RT Tomatometer only
                 'added':        obj.get('addedAt') or 0,
                 'title':        obj.get('title', ''),
+                'original_title': obj.get('originalTitle', '') or '',
                 'library':      lib,
                 'countries':    ', '.join(str(c) for c in (obj.get('countries') or [])),
                 'directors':    ', '.join(str(d) for d in (obj.get('directors') or [])),
@@ -16013,6 +16092,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_genre    = 'genre'    in _active_fields
         has_label    = 'label'    in _active_fields
         has_title    = 'title'    in _active_fields
+        has_originaltitle = 'originaltitle' in _active_fields
+        has_filepath = 'filepath' in _active_fields  # explicit `path` / `filepath` / `file` token
         has_library  = 'library'  in _active_fields
         has_country  = 'country'  in _active_fields
         has_director = 'director' in _active_fields
@@ -16111,14 +16192,48 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if has_added:
             extra_cols.append(('ADDED', 10, lambda r: _fmt_ts(r['added'])))
 
-        # lang: → AUDIO column only; subs: → SUBS column only; both → AUDIO + SUBS
+        # lang: → AUDIO column only; subs: → SUBS column only; both → AUDIO + SUBS.
+        # Auto-add AUDIO when matched results span any library configured 'MULTI'
+        # in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY (Plex has no "mixed" flag,
+        # so multi-language is opt-in via that config value).
+        if not has_lang:
+            _multi_libs = {l for l, v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
+                           if str(v).upper() == 'MULTI'}
+            if _multi_libs and any(r['lib'] in _multi_libs for r in rows):
+                has_lang = True
         if has_lang:
             extra_cols.append(('AUDIO', 8,  lambda r: r['audio_langs'] or '-'))
         if has_subs:
             extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
 
+        # Movies-only result set → auto-show YEAR + TITLE, and hide FILEPATH
+        # (unless the user explicitly opted in via the bare `path` token).
+        # The TITLE column shows `original_title` for rows whose library is
+        # configured 'MULTI' (mixed-language libraries — English titles from
+        # cross-language items are usually most useful), falling back to
+        # `title` when `original_title` is empty.  Non-MULTI libraries always
+        # show `title`.  A separate ORIGINAL-TITLE column is only added when
+        # the user explicitly requests it via the bare `originaltitle` token.
+        _movies_only = bool(rows) and all(r['type'] == 'Movie' for r in rows)
+        _multi_libs_set = {l for l, v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
+                           if str(v).upper() == 'MULTI'}
+
+        def _title_for_row(r, _ml=_multi_libs_set):
+            if r['lib'] in _ml and r['original_title']:
+                return r['original_title'][:29]
+            return r['title'][:29] if r['title'] else '-'
+
+        if _movies_only and not has_filepath:
+            if not has_year:
+                extra_cols.append(('YEAR', 4, lambda r: str(r['year']) if r['year'] else '-'))
+            if not has_title:
+                extra_cols.append(('TITLE', 30, _title_for_row))
+
         if has_title:
-            extra_cols.append(('TITLE', 30, lambda r: r['title'][:29] if r['title'] else '-'))
+            extra_cols.append(('TITLE', 30, _title_for_row))
+        if has_originaltitle:
+            extra_cols.append(('ORIGINAL-TITLE', 30,
+                               lambda r: r['original_title'][:29] if r['original_title'] else '-'))
         if has_library:
             extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
@@ -16147,7 +16262,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if _hide and extra_cols:
             extra_cols = [(h, w, fn) for h, w, fn in extra_cols if h not in _hide]
         _hide_key = 'KEY' in _hide
-        _hide_filepath = 'FILEPATH' in _hide
+        # FILEPATH is hidden by default for movies-only results (replaced by
+        # YEAR + TITLE + ORIGINAL-TITLE above), unless the user opted in via
+        # the bare `path` / `filepath` / `file` Cat-C token, or explicitly
+        # hid it via `-file` (-file always hides regardless).
+        _hide_filepath = ('FILEPATH' in _hide) or (_movies_only and not has_filepath)
 
         # --- Generic column sanitizer ---
         # 1. Remove columns that are ALL empty ('-' or '') across all rows
@@ -18627,12 +18746,23 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG OPTIONS (in ~/.my-plex.conf):")
             print()
             print("  AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:")
-            print("    Auto-select language for specific libraries (used ONLY in --resolve mode).")
-            print("    List of tuples: (library_name, 2-letter ISO 639-1 code).")
-            print("    Items in listed libraries skip the interactive prompt.")
+            print("    Per-library audio language config — single source of truth.")
+            print("    List of (library_name, value) tuples. Two value kinds:")
+            print("      - 2-letter ISO 639-1 ('en','de','fr',…)  → autoresolve override")
+            print("      - 'MULTI'                                  → mixed-language library")
+            print("    Resolution order in --resolve:")
+            print("      1. value 'MULTI'         → always PROMPT")
+            print("      2. value is 2-letter ISO → use that code")
+            print("      3. no entry              → fall back to Plex library.language")
+            print("    Libraries marked 'MULTI' also auto-show the AUDIO column in --list.")
+            print("    See LANGUAGES column in --list-libraries to decide which libraries")
+            print("    to mark 'MULTI' (a library whose top language is well below 100% is")
+            print("    a strong candidate).")
             print("    Example:")
             print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [")
-            print("          ('movies.de', 'de'), ('movies.en', 'en'), ('movies.fr', 'fr'),")
+            print("          (',unsorted',   'MULTI'),")
+            print("          ('documentary', 'MULTI'),")
+            print("          ('movies.de',   'de'),")
             print("      ]")
             print()
             print("  EXTERNAL_TOOLS['SERVER']['mp4box']:")
@@ -20212,10 +20342,27 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --libraries")
             print()
             print("Lists all Plex libraries with stats: item counts, supported status,")
-            print("library type, agent, and language.")
+            print("library type, agent, language, audio-language distribution, and ratings.")
             print()
             print("Personal Media libraries (agent=none) are marked as unsupported")
             print("and excluded from all operations.")
+            print()
+            print("COLUMNS:")
+            print("  LIBRARY-NAME  Library title in Plex.")
+            print("  LANG          Plex's primary language for the library (library.language).")
+            print("  LANGUAGES     Actual audio-language distribution from cached items, with:")
+            print("                  *  = the code matches LANG (Plex's default)")
+            print("                  ** = the code matches the AUTO_RESOLVE override AND")
+            print("                       differs from LANG (so override is meaningful)")
+            print("                  [MULTI] = library is configured 'MULTI' in")
+            print("                       AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY (mixed-language)")
+            print("                Use this column to decide which libraries to mark 'MULTI'.")
+            print("  TYPE          Movie, Series, Music, or Other.")
+            print("  MY-PLEX       'yes' if my-plex supports this library, 'no' otherwise.")
+            print("  PLEX-MEDIA-INFO-SOURCE  Plex agent (TMDB / TVDB / IMDB / Personal Media …).")
+            print("  ITEMS         Number of cached items.")
+            print("  EPISODE-DATA-SOURCE  Source for --missing episode data (Series only).")
+            print("  RATINGS       Where the rating column data comes from.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -26122,6 +26269,50 @@ def execute_global_commands(args, cmd_args):
         agents = lib_stats.get('agent', {})
         languages = lib_stats.get('language', {})
         items_count = lib_stats.get('itemsCount', {})
+        lang_dist = lib_stats.get('language_distribution', {})
+
+        # Build per-library AUTO_RESOLVE lookup: {lib: 'MULTI' | '<2-letter>'}
+        _auto_resolve_map = {}
+        for _l, _v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
+            _auto_resolve_map[_l] = (str(_v).upper() if str(_v).upper() == 'MULTI'
+                                     else str(_v).lower()[:2])
+
+        def _format_language_distribution(lib_name):
+            """Render distribution as 'en* 79%, fr 15%, de 2% [MULTI]' with:
+              *  = matches Plex library.language for this library
+              ** = matches AUTO_RESOLVE override AND that override differs from Plex's lang
+              [MULTI] suffix = library is configured 'MULTI' in AUTO_RESOLVE.
+            Returns '-' when no audio metadata exists yet (run --update-cache)."""
+            lib_index = lang_dist.get(lib_name, {})
+            plex_primary = (languages.get(lib_name) or '').lower()[:2]
+            override = _auto_resolve_map.get(lib_name)
+            is_multi = override == 'MULTI'
+            override_code = None if is_multi else override
+
+            # Compute counts and percentages from the {code: [keys]} index
+            counts = {c: len(keys) for c, keys in lib_index.items()}
+            total = sum(counts.values())
+            if total == 0 and not is_multi and not override_code:
+                return '-'
+            ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:4]
+            parts = []
+            for code, n in ordered:
+                pct = round(100 * n / total) if total else 0
+                if pct < 1:
+                    continue
+                marker = ''
+                if code == plex_primary:
+                    marker = '*'
+                if override_code and code == override_code and override_code != plex_primary:
+                    marker = '**'
+                parts.append(f"{code}{marker} {pct}%")
+            # Override that is NOT in the actual distribution: append as 0%
+            if override_code and override_code not in counts and override_code != plex_primary:
+                parts.append(f"{override_code}** 0%")
+            out = ', '.join(parts) if parts else '-'
+            if is_multi:
+                out += ' [MULTI]'
+            return out
         AGENT_RATINGS = {
             # agent_id → (rating_source_label, supports_critics)
             'tv.plex.agents.movie':            ('IMDB / Rotten Tomatoes*', True),
@@ -26136,7 +26327,7 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.localmedia':   ('-',                       False),
         }
         _eps_col = 'EPISODE-MEDIA-FILES-META-DATA-SOURCE' if VRB else 'EPISODE-DATA-SOURCE'
-        print(f"LIBRARY-NAME\tLANG\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t{_eps_col}\tRATINGS")
+        print(f"LIBRARY-NAME\tLANG\tLANGUAGES\tTYPE\tMY-PLEX\tPLEX-MEDIA-INFO-SOURCE\tITEMS\t{_eps_col}\tRATINGS")
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
@@ -26188,7 +26379,18 @@ def execute_global_commands(args, cmd_args):
                 rating_col = f"{rating_src} + RT"
             else:
                 rating_col = rating_src
-            print(f"{lib_name}\t{lang}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}\t{rating_col}")
+            languages_col = _format_language_distribution(lib_name)
+            print(f"{lib_name}\t{lang}\t{languages_col}\t{l_type}\t{supported}\t{agent}\t{items}\t{missing_src}\t{rating_col}")
+        # Footnote explaining the markers
+        print()
+        print(" LANG       = primary language Plex was configured with for this library")
+        print("              (used for metadata fetching).")
+        print(" LANGUAGES  = actual distribution of audio languages across cached items:")
+        print("              code* 79%   * = matches Plex's LANG (default)")
+        print("              code** 5%  ** = matches AUTO_RESOLVE override AND differs from LANG")
+        print("              [MULTI]       library is set to 'MULTI' in AUTO_RESOLVE_AUDIO_")
+        print("                            LANGUAGE_BY_LIBRARY config (mixed-language library;")
+        print("                            --resolve always prompts and --list auto-shows AUDIO).")
 
     # Handle --list-labels command
     if safe_getattr(cmd_args, 'list_labels', False):
@@ -26725,7 +26927,7 @@ def main():
     # Cat-C: bare field name without operator/value — adds a display column, no filtering
     # Cat-C: bare field name — display-only column (superset of Cat-B fields + title, library, country, etc.)
     _CAT_C_TOKEN_RE = re.compile(
-        r'^(?P<field>title|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers|imdb|tmdb|tvdb)$',
+        r'^(?P<field>title|originaltitle|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers|imdb|tmdb|tvdb|path|filepath|file)$',
         re.IGNORECASE
     )
     # Negative Cat-C: -field removes a column from output (e.g. -file, -genre, -title)
