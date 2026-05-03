@@ -2396,6 +2396,8 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'write_episodes_err', 'read_episodes_err', 'clear_episodes_err',
                        'get_episodes_err_path', 'EPISODES_ERR_FILENAME',
                        'DISK_MAP_VARIABLES', 'validate_disk_map',
+                       'validate_disk_plex_map', 'compute_markers_dpm',
+                       'read_markers_from_disk',
                        'resolve_disk_map_variables', 'compute_markers',
                        'strip_our_markers', 'apply_markers',
                        'apply_markers_to_dir', 'strip_markers_from_dir',
