@@ -4899,8 +4899,15 @@ def apply_markers(clean_filename, markers):
     marker_parts = []
     for aspect in sorted(markers.keys()):
         val = markers[aspect]
-        if val:  # skip empty markers
-            bare = val.strip('[]')  # normalize: strip brackets if present
+        if not val:  # skip empty markers
+            continue
+        # v1.1 DPM list-valued plex_vars produce multi-bracket strings like
+        # '[de][en]'.  Pass those through as-is.  Legacy single-value markers
+        # are bare or single-bracketed; normalise via strip+rewrap.
+        if val.startswith('[') and val.endswith(']') and '][' in val:
+            marker_parts.append(val)
+        else:
+            bare = val.strip('[]')
             marker_parts.append(f'[{bare}]')
     if marker_parts:
         return name + ' ' + ' '.join(marker_parts) + ext
@@ -22800,6 +22807,146 @@ def _plex2disk_process_scope(scope_name, disk_map_config, items_with_paths, side
 
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
+def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
+                                  is_dir=False, apply_fn=None, strip_fn=None,
+                                  force=False, replace=False):
+    """v1.1 PLEX2DISK processor — consumes DISK_PLEX_MAP for one scope.
+
+    Args:
+        scope: 'file' | 'movie_dir' | 'series_dir' | 'season_dir'
+        items_with_paths: list of (path, cache_key, obj) tuples
+        sidecar: sidecar dict (mutated in place)
+        dry_run: if True, show changes without renaming
+        is_dir: True for directory scopes
+        apply_fn: apply_markers / apply_markers_to_dir
+        strip_fn: strip_our_markers / strip_markers_from_dir
+        force: --force; Plex authoritative even when empty
+        replace: --replace; remove all disk2plex-matching markers before writing
+                 the canonical plex2disk marker
+    """
+    if not DISK_PLEX_MAP:
+        return (0, 0, 0, 0, {})
+
+    renamed_count = 0
+    renames = {}
+    skipped_count = 0
+    warning_count = 0
+    error_count = 0
+
+    # Deduplicate paths — for dir scopes, prefer Season/Series/Movie owner objects
+    seen_paths = {}
+    for path, cache_key, obj in items_with_paths:
+        type_str = obj.get('type_str', '')
+        if path in seen_paths:
+            existing_type = seen_paths[path][1].get('type_str', '')
+            if scope == 'season_dir' and type_str == 'Season' and existing_type != 'Season':
+                seen_paths[path] = (cache_key, obj)
+            elif scope == 'series_dir' and type_str == 'Series' and existing_type != 'Series':
+                seen_paths[path] = (cache_key, obj)
+            continue
+        seen_paths[path] = (cache_key, obj)
+
+    # Pre-compile every disk2plex regex for this scope so --replace can strip
+    # non-canonical markers before writing.
+    _replace_patterns = []
+    if replace:
+        for plex_var, var_spec in DISK_PLEX_MAP.items():
+            scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
+            if scope not in scope_set:
+                continue
+            for plex_val, entry_or_list in (var_spec.get('values') or {}).items():
+                entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    for rg in _dpm_resolve_disk2plex(entry, scope):
+                        try:
+                            _replace_patterns.append(re.compile(rg, re.IGNORECASE))
+                        except re.error:
+                            pass
+
+    for path, (cache_key, obj) in seen_paths.items():
+        name = os.path.basename(path)
+        if name.startswith('.'):
+            skipped_count += 1
+            continue
+        parent = os.path.dirname(path)
+        lib = obj.get('library', '?')
+        prefix = f"{lib}|{cache_key}| "
+        sidecar_entry = sidecar.get(path)
+
+        # Strip markers we previously wrote (sidecar-tracked).
+        clean = strip_fn(name, sidecar_entry)
+        # If --replace, also strip every disk2plex match (non-canonical markers).
+        if replace and _replace_patterns:
+            stripped = clean
+            for pat in _replace_patterns:
+                stripped = pat.sub('', stripped)
+            # Tidy up double spaces / trailing spaces left behind.
+            stripped = re.sub(r'\s{2,}', ' ', stripped).strip()
+            if stripped and stripped != clean:
+                clean = stripped
+
+        # Compute new markers from Plex via the DPM engine.
+        plex_vars = resolve_disk_map_variables(obj, cache_key)
+        new_markers = compute_markers_dpm(DISK_PLEX_MAP, plex_vars, scope)
+        # Markers come back as {plex_var: marker_string}.  We feed plex_var
+        # as the "aspect" name so the sidecar can track per-plex_var.
+
+        # Merge with sidecar's previously-written markers (only relevant when
+        # not --replace and not --force).
+        if sidecar_entry and 'markers' in sidecar_entry and not (replace or force):
+            for aspect, old_val in sidecar_entry['markers'].items():
+                if old_val and not new_markers.get(aspect):
+                    new_markers[aspect] = old_val
+                    if VRB or dry_run:
+                        print(f"{prefix}Preserving [{aspect}] ({old_val}): {name}  (Plex empty; use --force to remove)")
+        elif sidecar_entry and 'markers' in sidecar_entry and force:
+            # --force: drop any aspect whose Plex value went empty
+            for aspect, old_val in sidecar_entry['markers'].items():
+                if old_val and not new_markers.get(aspect):
+                    print(f"{prefix}Removing [{aspect}] (was {old_val}): {name}")
+
+        # apply_fn / sidecar convention: store the BARE value (no outer brackets)
+        # for scalar markers (apply_fn re-wraps).  For list-valued plex_vars
+        # the value is already multi-bracketed (e.g. '[de][en]') and apply_fn
+        # passes it through.
+        sidecar_shape = {}
+        for aspect, marker in new_markers.items():
+            if not marker:
+                continue
+            sidecar_shape[aspect] = marker if '][' in marker else marker.strip('[]')
+
+        new_name = apply_fn(clean, sidecar_shape)
+        if new_name == name:
+            skipped_count += 1
+            continue
+        new_path = os.path.join(parent, new_name)
+
+        if dry_run:
+            print(f"{prefix}Rename: {path} → {new_name}")
+            renamed_count += 1
+            renames[path] = new_path
+        else:
+            success, _ = rename_file(path, new_name, PLEX_DB_REMOTE_HOST)
+            if success:
+                renamed_count += 1
+                renames[path] = new_path
+                update_sidecar_entry(sidecar, path, new_path, sidecar_shape, clean, is_dir=is_dir)
+                if is_dir:
+                    _update_sidecar_child_paths(sidecar, path, new_path)
+                    _update_cache_child_paths(path, new_path)
+                else:
+                    _update_cache_filepath(obj, path, new_path)
+                if VRB:
+                    print(f"{prefix}Rename: {path} → {new_name}")
+            else:
+                error_count += 1
+                print(f"{prefix}ERROR renaming: {path}")
+
+    return (renamed_count, skipped_count, warning_count, error_count, renames)
+
+
 def _update_cache_child_paths(old_dir, new_dir):
     """After renaming a directory, update all file paths in the cache that reference old_dir (exact match or children)."""
     old_prefix = old_dir + os.sep
@@ -22856,7 +23003,7 @@ def _update_sidecar_child_paths(sidecar, old_dir, new_dir):
         del sidecar[path]
     sidecar.update(updates)
 
-def cmd_plex2disk(target, dry_run=False, force=False):
+def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     """Sync Plex metadata to disk markers (files + directories) using DISK_MAP config.
 
     Processes 4 scopes in order: series dirs → season dirs → movie dirs → files.
@@ -22880,7 +23027,8 @@ def cmd_plex2disk(target, dry_run=False, force=False):
         dry_run: If True, show changes without renaming
         force: If True, Plex is authoritative — remove markers when Plex has no value
     """
-    any_config = DISK_MAP or DISK_MAP_MOVIE_DIR or DISK_MAP_SERIES_DIR or DISK_MAP_SEASON_DIR
+    any_config = (DISK_MAP or DISK_MAP_MOVIE_DIR or DISK_MAP_SERIES_DIR
+                  or DISK_MAP_SEASON_DIR or DISK_PLEX_MAP)
     if not any_config:
         print("ERROR: No DISK_MAP is configured.")
         print(f"  Configure it in your config file ({DISK_MAP_FILE.replace('/disk_map.json', '/my-plex.conf')})")
@@ -23006,6 +23154,28 @@ def cmd_plex2disk(target, dry_run=False, force=False):
                                                    strip_fn=strip_markers_from_dir, force=force)
             total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
             scope_stats.append(f"Movie dirs: {r} renamed, {s} unchanged (of {n_movies})")
+
+    # DISK_PLEX_MAP (NEW in v1.1) — runs after legacy passes; once user
+    # migrates conf, legacy passes are no-ops.
+    if DISK_PLEX_MAP:
+        for _scope, _items, _is_dir, _apply, _strip in [
+            ('file',        file_items,        False, apply_markers,        strip_our_markers),
+            ('season_dir',  season_dir_items,  True,  apply_markers_to_dir, strip_markers_from_dir),
+            ('series_dir',  series_dir_items,  True,  apply_markers_to_dir, strip_markers_from_dir),
+            ('movie_dir',   movie_dir_items,   True,  apply_markers_to_dir, strip_markers_from_dir),
+        ]:
+            if not _items:
+                continue
+            n_unique = len(set(p for p,_,_ in _items))
+            if VRB:
+                print(f"\n[DISK_PLEX_MAP] scope={_scope} ({n_unique} unique):")
+            r, s, w, e, _ = _plex2disk_process_scope_dpm(
+                _scope, _items, sidecar, dry_run,
+                is_dir=_is_dir, apply_fn=_apply, strip_fn=_strip,
+                force=force, replace=replace)
+            total_renamed += r; total_skipped += s; total_warnings += w; total_errors += e
+            if r or s or w or e:
+                scope_stats.append(f"DPM {_scope}: {r} renamed, {s} unchanged (of {n_unique})")
 
     # Save sidecar and cache
     if not dry_run and total_renamed > 0:
@@ -26744,11 +26914,12 @@ def execute_global_commands(args, cmd_args):
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force = args.force
         clean = safe_getattr(cmd_args, 'clean', False) or safe_getattr(cmd_args, 'map_from_filename', None) is not None
+        replace = safe_getattr(cmd_args, 'replace', False)
         target = plex2disk_target if plex2disk_target is not True else None
         if clean:
             cmd_plex2disk_clean(target, dry_run=dry_run)
         else:
-            cmd_plex2disk(target, dry_run=dry_run, force=force)
+            cmd_plex2disk(target, dry_run=dry_run, force=force, replace=replace)
         sys.exit(0)
 
     # Handle --map-from-filename alias (standalone, without --plex2disk)
@@ -27981,6 +28152,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
     GLOBAL_CMD_PARSER.add_argument('--clean', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
+    GLOBAL_CMD_PARSER.add_argument('--replace', action='store_true', default=False, help="Used with --plex2disk: also strip every disk2plex-matching marker (non-canonical aliases) before writing the canonical plex2disk marker. Use this to normalise filenames after adding new aliases (e.g. consolidating [german] -> [de] when [de] is the canonical form).")
     GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
     GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
