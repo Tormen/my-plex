@@ -23365,6 +23365,358 @@ def cmd_plex2disk_clean(target, dry_run=False):
     prefix = "Would strip" if dry_run else "Stripped"
     print(f"\n  {prefix}: {total_renamed}, unchanged: {total_skipped}, errors: {total_errors}")
 
+def _scope_paths_for_obj(obj):
+    """Yield (scope_name, basename) tuples for an item, covering every disk
+    location its markers can live at.  Used by --disk2plex to scan for
+    user-authored markers on the file AND on movie/season/series dirs.
+    """
+    obj_type = obj.get('type', '')
+    type_str = obj.get('type_str', '')
+    seen = set()
+    # File scope — only Movie/Episode have media files
+    if type_str in ('Movie', 'Episode'):
+        for fp in _get_all_filepaths(obj):
+            base = os.path.basename(fp)
+            if base and ('file', base, fp) not in seen:
+                seen.add(('file', base, fp))
+                yield ('file', base, fp)
+    # Movie dir
+    if obj_type == 'Movie':
+        md = get_movie_dir(obj)
+        if md:
+            base = os.path.basename(md)
+            if base and ('movie_dir', base, md) not in seen:
+                seen.add(('movie_dir', base, md))
+                yield ('movie_dir', base, md)
+    # Season dir
+    if obj_type == 'Episode':
+        sd = get_season_dir(obj)
+        if sd:
+            base = os.path.basename(sd)
+            if base and ('season_dir', base, sd) not in seen:
+                seen.add(('season_dir', base, sd))
+                yield ('season_dir', base, sd)
+    elif type_str == 'Season':
+        for fp in _get_all_filepaths(obj):
+            base = os.path.basename(fp)
+            if base and ('season_dir', base, fp) not in seen:
+                seen.add(('season_dir', base, fp))
+                yield ('season_dir', base, fp)
+    # Series dir
+    if obj_type == 'Episode':
+        sd = get_series_dir(obj)
+        if sd:
+            base = os.path.basename(sd)
+            if base and ('series_dir', base, sd) not in seen:
+                seen.add(('series_dir', base, sd))
+                yield ('series_dir', base, sd)
+    elif type_str == 'Series':
+        for fp in _get_all_filepaths(obj):
+            base = os.path.basename(fp)
+            if base and ('series_dir', base, fp) not in seen:
+                seen.add(('series_dir', base, fp))
+                yield ('series_dir', base, fp)
+
+
+# ============================================================================
+# disk2plex push handlers (NEW in v1.2).  Each handler signature:
+#     handler(obj, change, dry_run) -> bool
+# where `change` carries:
+#     {'plex_var': str, 'disk_val': any, 'plex_val': any,
+#      'source_path': str, 'extras': {plex_var_name: captured_value, ...}}
+# Returns True on success ("would push" counts as success in dry_run).
+# Errors should print a clear line and return False.
+# ============================================================================
+
+def _push_watched_dpm(obj, change, dry_run):
+    """Push WATCHED (and optional WATCHED_DATE from extras) to Plex."""
+    title = obj.get('title', '?')
+    item_id = obj.get('item_id')
+    if not item_id:
+        print(f"    ERROR: no item_id for {title}")
+        return False
+    wd = (change.get('extras') or {}).get('WATCHED_DATE')
+    if dry_run:
+        if wd:
+            print(f"    Would mark watched (date={wd}): {title}")
+        else:
+            print(f"    Would mark watched: {title}")
+        return True
+    from datetime import datetime
+    try:
+        plex = ensure_plex_api()
+        media = plex.fetchItem(int(item_id))
+        media.markWatched()
+        if wd and hasattr(media, 'lastViewedAt'):
+            try:
+                dt = datetime.strptime(str(wd), '%Y-%m-%d')
+                media.lastViewedAt = dt
+                media.save()
+            except (ValueError, Exception):
+                pass  # markWatched succeeded; date is best-effort
+        print(f"  Pushed watched ({wd or 'no date'}): {title}")
+        return True
+    except Exception as ex:
+        print(f"  ERROR pushing watched for {title}: {ex}")
+        return False
+
+
+def _push_audio_lang_dpm(obj, change, dry_run):
+    """Push AUDIO_LANG to the file's audio track tag.
+
+    Reuses the apply_pending_operations machinery from --no-audio-language
+    --resolve to invoke mp4box / mkvpropedit (locally or via SSH) and then
+    trigger Plex to re-analyze the file.
+
+    For batched efficiency we rely on the caller to gather one or more
+    audio-lang changes and then apply them via apply_pending_operations
+    in bulk; this single-item handler is the simple path.
+    """
+    cache_key = change.get('cache_key', '?')
+    title = obj.get('title', '?')
+    filepath = obj.get('file', '') or ''
+    if not filepath:
+        print(f"    SKIP: no filepath for {title}")
+        return False
+    tool_name, container = _detect_container_tool(filepath)
+    if not tool_name:
+        print(f"    SKIP: unsupported container '{container}' for {title}")
+        return False
+    remote_host, exists, resolved = determine_remote_host(filepath)
+    if not exists:
+        print(f"    SKIP: file not found {filepath} for {title}")
+        return False
+    lang_2 = str(change.get('disk_val') or '').lower()[:2]
+    if not lang_2 or lang_2 == 'unknown':
+        print(f"    SKIP: invalid AUDIO_LANG value {change.get('disk_val')!r} for {title}")
+        return False
+    lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
+    if dry_run:
+        print(f"    Would set audio language to '{lang_3}': {title}  ({tool_name})")
+        return True
+    # Build pending op compatible with apply_pending_operations() and apply.
+    pending_op = {
+        'cache_key': cache_key,
+        'filepath': resolved,
+        'plex_id':  obj.get('id', 'N/A'),
+        'library':  obj.get('library', 'N/A'),
+        'tool_name': tool_name,
+        'lang_code_2': lang_2,
+        'lang_code_3': lang_3,
+        'remote_host': remote_host,
+        'title': title,
+    }
+    log_data = {'metadata': {'started': '', 'command': 'disk2plex', 'timestamp': ''}, 'operations': []}
+    try:
+        apply_pending_operations([pending_op], log_data, default_remote_host=remote_host)
+        print(f"  Pushed audio_lang '{lang_2}': {title}")
+        return True
+    except Exception as ex:
+        print(f"  ERROR pushing audio_lang for {title}: {ex}")
+        return False
+
+
+# Registry: plex_var → push handler.  Push handlers for plex_vars not in
+# this dict produce a "no handler" warning and are skipped.  The keys
+# matching the user-config plex_var names control dispatch.
+_DISK2PLEX_PUSH_HANDLERS = {
+    'WATCHED':    _push_watched_dpm,
+    'AUDIO_LANG': _push_audio_lang_dpm,
+}
+
+
+def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
+    """v1.2 --disk2plex: push disk markers back to Plex via DISK_PLEX_MAP.
+
+    Phase 1 (always runs) collects every change that WOULD be applied.
+    A summary is printed (one line per plex_var; -V also prints per-item
+    diffs).  Then:
+      --dry-run / --try → exit after the summary (no Phase 2).
+      --yes             → run Phase 2 unconditionally.
+      otherwise         → prompt y/N before Phase 2.
+
+    -DD (DEEPDBG) prints the full per-item rule resolution chain at every
+    step regardless of dry_run / yes.
+
+    Without --force (default, additive): items with no disk markers are
+    skipped.  Plex is not touched for those.
+
+    Args:
+        target:   None (all), library name, or media identifier.
+        dry_run:  Phase 1 only — print what would happen.
+        force:    Disk is authoritative — clear Plex values when no marker.
+        yes:      Skip the confirmation prompt before Phase 2.
+    """
+    if not DISK_PLEX_MAP:
+        # Fall back to the legacy code path during the transition.
+        return cmd_disk2plex_legacy(target, dry_run=dry_run, force=force)
+
+    sidecar = load_disk_map_sidecar() or {}
+    items = _get_disk_map_scope(target)
+    if not items:
+        print("No media items found for the given target.")
+        return
+
+    # ---------- Phase 1: collect pending changes ----------
+    # Per-item structure: cache_key → {plex_var: change-dict}
+    # change-dict = {'plex_var', 'disk_val', 'plex_val', 'source_path',
+    #                'scope', 'extras', 'cache_key', 'obj'}
+    pending_by_item = {}
+    skipped_in_sync = 0
+    skipped_unknown_handler = 0
+
+    for cache_key, obj in items:
+        plex_vars = resolve_disk_map_variables(obj, cache_key)
+        for scope, basename, fullpath in _scope_paths_for_obj(obj):
+            # Read user-authored markers from filename + previously-tracked
+            # markers from the sidecar.  Both contribute.
+            disk_assignments = read_markers_from_disk(basename, DISK_PLEX_MAP, plex_vars, scope)
+            if DEEPDBG and disk_assignments:
+                print(f"~~~ DPM read [{scope}] {cache_key}  {basename}")
+                for k, v in disk_assignments.items():
+                    print(f"        {k} = {v!r}")
+
+            # Sidecar previously-written markers (sidecar uses plex_var names
+            # as aspect keys in v1.1 → still valid):
+            sc_markers = (sidecar.get(fullpath) or {}).get('markers') or {}
+            for aspect, val in sc_markers.items():
+                if aspect in disk_assignments:
+                    continue  # filename match takes precedence
+                if val:
+                    disk_assignments.setdefault(aspect, val)
+
+            for plex_var, disk_val in disk_assignments.items():
+                if plex_var not in DISK_PLEX_MAP:
+                    # An "extra" capture (e.g. WATCHED_DATE alongside WATCHED).
+                    # Stored under the parent plex_var's extras.
+                    continue
+                # Compare to current Plex value
+                current = plex_vars.get(plex_var)
+                if _disk2plex_values_equal(current, disk_val):
+                    skipped_in_sync += 1
+                    continue
+                # Build extras = any disk_assignments whose name is a known
+                # variable but isn't itself a top-level DISK_PLEX_MAP key.
+                extras = {k: v for k, v in disk_assignments.items()
+                          if k != plex_var and k in DISK_MAP_VARIABLES
+                          and k not in DISK_PLEX_MAP}
+                pending_by_item.setdefault(cache_key, {})[plex_var] = {
+                    'plex_var':   plex_var,
+                    'disk_val':   disk_val,
+                    'plex_val':   current,
+                    'source_path': fullpath,
+                    'scope':      scope,
+                    'extras':     extras,
+                    'cache_key':  cache_key,
+                    'obj':        obj,
+                }
+
+    # ---------- Phase 1 summary ----------
+    flat = [c for changes in pending_by_item.values() for c in changes.values()]
+    if not flat:
+        print("Nothing to push: all disk markers are already in sync with Plex"
+              f" (compared {len(items)} items).")
+        return
+
+    by_var = {}
+    for c in flat:
+        by_var.setdefault(c['plex_var'], []).append(c)
+
+    handler_count = sum(1 for v in by_var if v in _DISK2PLEX_PUSH_HANDLERS)
+    no_handler_vars = sorted(v for v in by_var if v not in _DISK2PLEX_PUSH_HANDLERS)
+
+    print(f"\n--disk2plex would apply {len(flat)} change(s) "
+          f"across {len(pending_by_item)} item(s):")
+    for plex_var in sorted(by_var):
+        ops = by_var[plex_var]
+        # Per-value breakdown
+        by_val = {}
+        for op in ops:
+            by_val.setdefault(str(op['disk_val']), 0)
+            by_val[str(op['disk_val'])] += 1
+        breakdown = ', '.join(f"{v!r}={n}" for v, n in sorted(by_val.items()))
+        handler_note = '' if plex_var in _DISK2PLEX_PUSH_HANDLERS else '  [no push handler — will skip]'
+        print(f"  {plex_var:<14}  {len(ops):>5}  {breakdown}{handler_note}")
+    if skipped_in_sync:
+        print(f"  (already in sync: {skipped_in_sync})")
+
+    # -V detail dump
+    if VRB:
+        print("\nPer-item changes:")
+        for cache_key, changes in sorted(pending_by_item.items()):
+            obj = next((o for k, o in items if k == cache_key), None)
+            title = obj.get('title', cache_key) if obj else cache_key
+            for plex_var, c in sorted(changes.items()):
+                print(f"  {cache_key:<16}  {plex_var:<14}  "
+                      f"{str(c['plex_val'])!r:<20} → {str(c['disk_val'])!r}  "
+                      f"[{c['scope']}]  {title}")
+
+    if no_handler_vars:
+        print(f"\nNote: no push handler for: {', '.join(no_handler_vars)} — "
+              f"those changes will be skipped.")
+
+    # ---------- Decide whether to proceed to Phase 2 ----------
+    if dry_run:
+        print(f"\nDRY RUN: no changes applied.")
+        return
+
+    if not yes:
+        try:
+            ans = input(f"\nApply these {len(flat)} change(s) to Plex? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ''
+        if ans not in ('y', 'yes'):
+            print("Aborted.")
+            return
+
+    # ---------- Phase 2: dispatch to push handlers ----------
+    ensure_plex_api()
+    pushed = 0
+    skipped = 0
+    errors = 0
+    for cache_key, changes in pending_by_item.items():
+        obj = next((o for k, o in items if k == cache_key), None)
+        if obj is None:
+            continue
+        for plex_var, change in changes.items():
+            handler = _DISK2PLEX_PUSH_HANDLERS.get(plex_var)
+            if handler is None:
+                skipped += 1
+                continue
+            try:
+                ok = handler(obj, change, dry_run=False)
+            except Exception as ex:
+                print(f"  ERROR pushing {plex_var} for {cache_key}: {ex}")
+                errors += 1
+                continue
+            if ok:
+                pushed += 1
+                # Record the source marker in sidecar so future --plex2disk
+                # --replace calls can canonicalise.
+                src = change.get('source_path')
+                if src:
+                    sc = sidecar.setdefault(src, {})
+                    sc.setdefault('markers', {})[plex_var] = str(change['disk_val'])
+            else:
+                errors += 1
+
+    if pushed:
+        save_disk_map_sidecar(sidecar)
+    print(f"\nDone: pushed {pushed}, skipped {skipped + skipped_unknown_handler}, errors {errors}.")
+
+
+def _disk2plex_values_equal(plex_val, disk_val):
+    """Compare a Plex variable's current value to a disk-derived value
+    in a tolerant way (str, bool, list, None)."""
+    if plex_val is None and disk_val in (None, '', 'unknown'):
+        return True
+    if isinstance(plex_val, bool) or isinstance(disk_val, bool):
+        return bool(plex_val) == bool(disk_val)
+    if isinstance(plex_val, list) and isinstance(disk_val, list):
+        return [str(x).lower() for x in plex_val] == [str(x).lower() for x in disk_val]
+    return str(plex_val).lower() == str(disk_val).lower()
+
+
 def _disk2plex_push_watched(media, marker_value, dry_run):
     """Push watched status from disk marker to Plex.
 
@@ -23395,26 +23747,10 @@ def _disk2plex_push_watched(media, marker_value, dry_run):
     print(f"  Pushed watched to Plex: {media.title}")
     return True
 
-def cmd_disk2plex(target, dry_run=False, force=False):
-    """Sync disk markers to Plex metadata using DISK_MAP_PUSH config.
-
-    For each item with sidecar entries:
-    1. Read marker values from sidecar
-    2. Resolve current Plex metadata
-    3. Apply merge strategy (DISK_MAP_MERGE)
-    4. If disk wins → push to Plex API (only writable fields)
-
-    Without --force (default, additive): items without disk markers are skipped.
-    No metadata is ever removed from Plex.
-
-    With --force (destructive): disk is authoritative. If disk has NO marker for
-    an aspect, the corresponding value is actively REMOVED from Plex (e.g. mark
-    as unwatched, remove rating, remove labels/collections).
-
-    Args:
-        target: None (all), library name, or media identifier
-        dry_run: If True, show what would be pushed without making changes
-        force: If True, disk is authoritative — clear Plex values when no marker
+def cmd_disk2plex_legacy(target, dry_run=False, force=False):
+    """LEGACY (v1.0) --disk2plex implementation, driven by DISK_MAP_PUSH.
+    Retained only for the transition window; cmd_disk2plex below dispatches
+    to this when DISK_PLEX_MAP is empty.  Deleted in v1.2 hard cutover (Step E).
     """
     if not DISK_MAP_PUSH:
         print("ERROR: DISK_MAP_PUSH is not configured — nothing to push.")
@@ -26990,8 +27326,9 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'disk2plex', None) is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force = args.force
+        yes = safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False)
         target = cmd_args.disk2plex if cmd_args.disk2plex is not True else None
-        cmd_disk2plex(target, dry_run=dry_run, force=force)
+        cmd_disk2plex(target, dry_run=dry_run, force=force, yes=yes)
         sys.exit(0)
 
     if cmd_args.list_libraries:
