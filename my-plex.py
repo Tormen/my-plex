@@ -16178,10 +16178,32 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_tmdb     = 'tmdb'     in _active_fields
         has_tvdb     = 'tvdb'     in _active_fields
 
+        # Determine column visibility BEFORE sorting so the watched-default
+        # sort can choose between TITLE / FILEPATH based on what the user
+        # will actually see.
+        _hide_set = getattr(PLEX_Media, '_REMOVE_COLS', set())
+        _movies_only_for_sort = bool(rows) and all(r['type'] == 'Movie' for r in rows)
+        # TITLE shows when explicitly requested OR auto-added in movies-only layout
+        _will_show_title = has_title or (_movies_only_for_sort and not has_filepath)
+        # FILEPATH shows by default unless the user hid it OR movies-only auto-replaces it
+        _will_show_filepath = ('FILEPATH' not in _hide_set
+                                and not (_movies_only_for_sort and not has_filepath))
+
         if has_bitrate:
             rows.sort(key=lambda r: r['bitrate'], reverse=True)
+        elif has_unwatched:
+            # Unwatched → highest-rated first ("what should I watch next?").
+            # Items without a rating sort to the bottom.
+            rows.sort(key=lambda r: (-(r['rating'] or 0), r['title'].lower()))
         elif has_watched:
-            rows.sort(key=lambda r: r['last_watched'], reverse=True)  # most recently watched first
+            # Watched → alphabetical by visible identity column.  Falls back
+            # to last-watched-desc when neither TITLE nor FILEPATH is shown.
+            if _will_show_title:
+                rows.sort(key=lambda r: r['title'].lower())
+            elif _will_show_filepath:
+                rows.sort(key=lambda r: r['filepath'].lower())
+            else:
+                rows.sort(key=lambda r: r['last_watched'], reverse=True)
         elif has_year:
             rows.sort(key=lambda r: r['year'], reverse=True)
         elif has_added:
