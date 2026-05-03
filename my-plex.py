@@ -27119,6 +27119,18 @@ def main():
             if DBG: print(f" ~~~ Shortcut '{arg}' → watched={_val}", file=sys.stderr)
             _i += 1
             continue
+
+        # Bare 'movie'/'movies' / 'series'/'show'/'shows' → type:movie / type:series.
+        # Allows: my-plex movie unwatched ...   my-plex series 'genre:Comedy' ...
+        _BARE_TYPE_MAP = {'movie': 'movie', 'movies': 'movie',
+                          'series': 'series', 'show': 'series', 'shows': 'series'}
+        if _bare_lc in _BARE_TYPE_MAP and arg == _bare_lc:
+            _type_val = _BARE_TYPE_MAP[_bare_lc]
+            _inject_flags += ['--type', _type_val]
+            _translations.append((arg, f"--type {_type_val}"))
+            if DBG: print(f" ~~~ Shortcut '{arg}' → --type {_type_val}", file=sys.stderr)
+            _i += 1
+            continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
         _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
