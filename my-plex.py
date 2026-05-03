@@ -26702,6 +26702,21 @@ def main():
             _new_argv.append(arg)
             _i += 1
             continue
+        # Bare 'unwatched' / 'watched' shortcuts → watched:no / watched:yes filter.
+        # '-unwatched' / '-watched' do the same filter AND hide the watch columns.
+        _bare_lc = arg.lower().lstrip('-')
+        if _bare_lc in ('unwatched', 'watched') and arg in (_bare_lc, f'-{_bare_lc}'):
+            _val = 'no' if _bare_lc == 'unwatched' else 'yes'
+            _filter_exprs.append(f"watched={_val}")
+            if arg.startswith('-'):
+                # Negative form: also hide the watch columns
+                _remove_cols.update(('WATCH#', 'LAST-PLAYED', 'PARTIAL-VIEW'))
+                _translations.append((arg, f"--list filter: watched={_val}  (and hide WATCH# columns)"))
+            else:
+                _translations.append((arg, f"--list filter: watched={_val}"))
+            if DBG: print(f" ~~~ Shortcut '{arg}' → watched={_val}", file=sys.stderr)
+            _i += 1
+            continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
         _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
