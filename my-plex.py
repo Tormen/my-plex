@@ -784,7 +784,7 @@ CONFIG_DEFAULTS = {
         },
     },
 
-    # Audio Language Resolution Configuration — single source of truth.
+    # Audio Language Resolution Configuration — per-library.
     # List of (library_name, value) tuples.  Two value kinds:
     #   - 2-letter ISO 639-1 code ('en','de','fr',…) — explicit autoresolve
     #     override for --no-audio-language --resolve (use when Plex's
@@ -792,11 +792,27 @@ CONFIG_DEFAULTS = {
     #   - 'MULTI' — library is mixed-language (Plex has no "mixed" flag).
     #     --resolve always PROMPTS for items in this library, and
     #     --list/--filter auto-shows the AUDIO column.
-    # Resolution order in --resolve:
-    #   1. 'MULTI'         → always PROMPT
-    #   2. 2-letter ISO    → use that code
-    #   3. no entry        → fall back to Plex library.language
+    # See full resolution order below.
     'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY': [],
+
+    # Audio Language Resolution by FILEPATH PATTERN — ground truth.
+    # List of (regex_pattern, 2-letter_ISO_code) tuples.  Each pattern is
+    # tested against the item's filepath (case-insensitive) — first match
+    # wins.  This is consulted BEFORE library-level rules: a filename hint
+    # is the most specific signal, so it overrides MULTI / library override
+    # / Plex library.language.
+    #
+    # Full resolution order in --no-audio-language --resolve:
+    #   1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN match → use code
+    #   2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI'  → PROMPT
+    #   3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use code
+    #   4. Plex library.language                                  → use code
+    #   5. (none of the above)                                    → PROMPT
+    #
+    # Empty by default — list patterns in your personal config (e.g.
+    # ~/.my-plex.conf) only.  Source code stays free of installation-specific
+    # patterns.
+    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN': [],
 
     # --info field visibility per type and verbosity level.
     # Each type has three keys: 'type' (default), 'type.v' (-V), 'type.vv' (-VV).
@@ -1132,7 +1148,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Audio Language Resolution Configuration
 ###############################################################################
 
-# Per-library audio language config — single source of truth.
+# Per-library audio language config.
 # List of (library_name, value) tuples.  Two value kinds:
 #   - 2-letter ISO 639-1 code ('en','de','fr',…) — explicit autoresolve
 #     override for --no-audio-language --resolve (when Plex's
@@ -1140,16 +1156,35 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   - 'MULTI' — library is mixed-language (Plex has no "mixed" flag).
 #     --resolve always PROMPTS for items in this library, and
 #     --list/--filter auto-shows the AUDIO column when results span it.
-# Resolution order in --resolve:
-#   1. value 'MULTI'         → always PROMPT
-#   2. value is 2-letter ISO → use that code
-#   3. no entry              → fall back to Plex library.language
 # Example:
 # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [
 #     (',unsorted',   'MULTI'),
 #     ('documentary', 'MULTI'),
 #     ('movies.de',   'de'),
 # ]
+
+# Filepath-pattern audio language hints — ground truth.
+# List of (regex, 2-letter_ISO_code) tuples.  Each regex is tested against
+# the item's filepath case-insensitively; first match wins and overrides
+# every library-level rule.  Use this for filename markers you trust
+# absolutely (e.g. release-name conventions or DVR recording schemes).
+# Example:
+# AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN = [
+#     (r'\\[de\\]',          'de'),
+#     (r'\\[german\\]',      'de'),
+#     (r'_TVOON_DE\\.',      'de'),
+#     (r'\\[fr\\]',          'fr'),
+#     (r'\\[french\\]',      'fr'),
+#     (r'\\[en\\]',          'en'),
+#     (r'\\[english\\]',     'en'),
+# ]
+#
+# FULL resolution order in --resolve (first match wins):
+#   1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN match → use that code
+#   2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI'  → PROMPT
+#   3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use that code
+#   4. Plex library.language                                  → use that code
+#   5. (none of the above)                                    → PROMPT
 
 ###############################################################################
 # Default Scope (DEFAULT_SCOPE)
@@ -1319,6 +1354,7 @@ DUPLICATE_FILE = CONFIG_DEFAULTS['DUPLICATE_FILE']
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBRARY_COMBINATIONS']
 EXTERNAL_TOOLS = CONFIG_DEFAULTS['EXTERNAL_TOOLS']
 AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']
+AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN']
 
 # Default output format for --list-media
 FORMAT = CONFIG_DEFAULTS['FORMAT']
@@ -7097,25 +7133,54 @@ def resolve_no_audio_language(obj_keys, args):
     }
     print(f"\n  Resolution log: {log_filename}\n")
 
-    # Build auto-resolve lookup: library_name -> 2-letter code.
-    # Resolution order:
-    #   1. entry value 'MULTI' → always PROMPT (never autoresolve)
-    #   2. entry value is a 2-letter ISO → use that code
-    #   3. no entry for the library → fall back to Plex's library.language
+    # Build auto-resolve lookups for the layered resolution.
+    # Resolution order (first hit wins; see _resolve_lang_for_item below):
+    #   1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN (ground truth)
+    #   2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI' → PROMPT
+    #   3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use code
+    #   4. Plex library.language                                  → use code
+    #   5. nothing matched                                        → PROMPT
     _multi_libs = set()
-    auto_resolve = {}
+    _lib_resolve = {}
     for lib_name, value in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
         if str(value).upper() == 'MULTI':
             _multi_libs.add(lib_name)
         else:
-            auto_resolve[lib_name] = str(value).lower()[:2]
+            _lib_resolve[lib_name] = str(value).lower()[:2]
     # Plex library.language fallback (only when not in config and not MULTI)
     for lib_name, plex_lang in CACHE.get('library_stats', {}).get('language', {}).items():
-        if lib_name in auto_resolve or lib_name in _multi_libs:
+        if lib_name in _lib_resolve or lib_name in _multi_libs:
             continue
         code = (plex_lang or '').lower()[:2]
         if code and code != 'xn':
-            auto_resolve[lib_name] = code
+            _lib_resolve[lib_name] = code
+
+    # Compile filepath patterns once (case-insensitive).  Invalid regexes
+    # are dropped with a warning so a typo in the user's config doesn't
+    # crash the whole wizard.
+    _filepath_patterns = []
+    for _pat, _code in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN or []):
+        try:
+            _filepath_patterns.append((re.compile(_pat, re.IGNORECASE),
+                                       str(_code).lower()[:2]))
+        except re.error as _e:
+            print(f"  WARNING: bad regex in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN: {_pat!r} ({_e})")
+
+    def _resolve_lang_for_item(filepath, library):
+        """Return (code, source) where code is a 2-letter ISO or None
+        (None means: prompt the user). source is a short label for the
+        user-facing 'Auto-resolve' line."""
+        # 1. Filepath pattern (ground truth)
+        for _re_obj, _code in _filepath_patterns:
+            if _re_obj.search(filepath or ''):
+                return _code, f"filepath pattern {_re_obj.pattern!r}"
+        # 2. MULTI library → prompt
+        if library in _multi_libs:
+            return None, "library is MULTI (prompt)"
+        # 3. Library override / 4. Plex library.language fallback
+        if library in _lib_resolve:
+            return _lib_resolve[library], f"library '{library}'"
+        return None, "no rule matched (prompt)"
 
     pending_operations = []
     total_items = len(obj_keys)
@@ -7154,11 +7219,13 @@ def resolve_no_audio_language(obj_keys, args):
             location = f"Remote ({remote_host})" if remote_host else "Local"
             print(f"  Location:  {location}")
 
-            # Check auto-resolve
-            if library in auto_resolve:
-                lang_2 = auto_resolve[library]
+            # Check auto-resolve via the layered resolver (filepath pattern
+            # is ground truth; MULTI libraries always prompt; library
+            # overrides and Plex library.language fall through after).
+            lang_2, _resolve_source = _resolve_lang_for_item(resolved_filepath, library)
+            if lang_2:
                 lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
-                print(f"  Auto-resolve: Setting audio language to '{lang_3}' (library '{library}' → '{lang_2}')")
+                print(f"  Auto-resolve: Setting audio language to '{lang_3}' ({_resolve_source} → '{lang_2}')")
                 pending_operations.append({
                     'cache_key': key,
                     'filepath': resolved_filepath,
@@ -18865,24 +18932,40 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG OPTIONS (in ~/.my-plex.conf):")
             print()
             print("  AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:")
-            print("    Per-library audio language config — single source of truth.")
+            print("    Per-library audio language config.")
             print("    List of (library_name, value) tuples. Two value kinds:")
             print("      - 2-letter ISO 639-1 ('en','de','fr',…)  → autoresolve override")
             print("      - 'MULTI'                                  → mixed-language library")
-            print("    Resolution order in --resolve:")
-            print("      1. value 'MULTI'         → always PROMPT")
-            print("      2. value is 2-letter ISO → use that code")
-            print("      3. no entry              → fall back to Plex library.language")
-            print("    Libraries marked 'MULTI' also auto-show the AUDIO column in --list.")
-            print("    See LANGUAGES column in --list-libraries to decide which libraries")
-            print("    to mark 'MULTI' (a library whose top language is well below 100% is")
-            print("    a strong candidate).")
+            print("    Libraries marked 'MULTI' auto-show the AUDIO column in --list and")
+            print("    always PROMPT in --resolve.  Use --list-libraries to decide which")
+            print("    libraries to mark 'MULTI' (a library whose top language is well")
+            print("    below 100% is a strong candidate).")
             print("    Example:")
             print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [")
             print("          (',unsorted',   'MULTI'),")
             print("          ('documentary', 'MULTI'),")
             print("          ('movies.de',   'de'),")
             print("      ]")
+            print()
+            print("  AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN  (ground truth):")
+            print("    List of (regex_pattern, 2-letter_ISO_code) tuples.  Each pattern")
+            print("    is tested against the item's filepath case-insensitively; the")
+            print("    first match wins and overrides every library-level rule.")
+            print("    Example:")
+            print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN = [")
+            print("          (r'\\[de\\]',      'de'),")
+            print("          (r'\\[german\\]',  'de'),")
+            print("          (r'_TVOON_DE\\.', 'de'),")
+            print("          (r'\\[fr\\]',      'fr'),")
+            print("          (r'\\[en\\]',      'en'),")
+            print("      ]")
+            print()
+            print("  FULL resolution order in --resolve (first match wins):")
+            print("    1. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN match → use code")
+            print("    2. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY value 'MULTI'  → PROMPT")
+            print("    3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use code")
+            print("    4. Plex library.language                                  → use code")
+            print("    5. (none of the above)                                    → PROMPT")
             print()
             print("  EXTERNAL_TOOLS['SERVER']['mp4box']:")
             print("  EXTERNAL_TOOLS['SERVER']['mkvpropedit']:")
@@ -26973,7 +27056,7 @@ def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORCE_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
-    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, EPISODE_NAME_PATTERN
+    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN, EPISODE_NAME_PATTERN
 
     # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
     # This allows us to use DBG/DEEPDBG during config file loading
