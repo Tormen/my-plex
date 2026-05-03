@@ -1534,6 +1534,38 @@ def _normalize_genres(genres):
     return [_normalize_genre(g) for g in (genres or [])]
 
 
+# ISO placeholder codes for "language is not known".  Plex uses these
+# inconsistently (or returns an empty list entirely) — my-plex normalises
+# all of them to a single user-facing 'unknown' so filters / display /
+# --no-audio-language all share one bucket.
+_AUDIO_LANG_UNKNOWN = 'unknown'
+_AUDIO_LANG_UNKNOWN_PLEX_CODES = frozenset({'und', 'mis', 'mul', 'zxx', ''})
+
+def _normalize_audio_languages(langs):
+    """Map Plex's audio-language list to my-plex's canonical form.
+
+    Rules:
+      - Empty list → ['unknown'].
+      - Each placeholder code (und / mis / mul / zxx / '') → 'unknown'.
+      - Real ISO codes are lowercased and kept.
+      - Order is preserved (so the FIRST track stays first — used by stats).
+      - Duplicates are deduped while preserving order.
+    """
+    if not langs:
+        return [_AUDIO_LANG_UNKNOWN]
+    seen = set()
+    out = []
+    for l in langs:
+        code = str(l).lower().strip()
+        if code in _AUDIO_LANG_UNKNOWN_PLEX_CODES:
+            code = _AUDIO_LANG_UNKNOWN
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out or [_AUDIO_LANG_UNKNOWN]
+
+
 HELP_SUFFIX="""
 usage:  my-plex [SCOPE] COMMAND [OPTIONS]    (order does not matter)
 
@@ -11186,9 +11218,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             PLEX_Media.cache_rebuild_lock.write_progress("Saving cache to disk...")
 
         # Rebuild library_object_counts after all updates are complete.
-        # In the same pass, build language_distribution: per-library
-        # {lang_code: [obj_keys]} index used for --list-libraries stats,
-        # MULTI-library AUDIO auto-show, and O(1) lang:<code> filtering.
+        # In the same pass, normalise each item's audio_languages (Plex is
+        # inconsistent with empty / 'und' / 'mis' / 'mul' / 'zxx' for "no
+        # language info" — collapse all of those to a single 'unknown' code)
+        # and build language_distribution: per-library {lang_code: [obj_keys]}
+        # index used for --list-libraries stats and MULTI-library AUDIO auto-show.
         # Plex sometimes returns 3-letter ISO 639-2 codes; normalise to 2-letter.
         _ISO_3_TO_2 = {'eng':'en','deu':'de','ger':'de','fra':'fr','fre':'fr',
                        'ita':'it','spa':'es','jpn':'ja','kor':'ko','zho':'zh',
@@ -11196,7 +11230,6 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                        'nor':'no','fin':'fi','pol':'pl','tur':'tr','ara':'ar',
                        'hin':'hi','ces':'cs','cze':'cs','heb':'he','ell':'el',
                        'gre':'el'}
-        _GARBAGE_CODES = {'und', 'mis', 'mul', 'zxx', ''}
         updated_library_object_counts = {}
         _lang_distribution = {}  # {lib: {code: [obj_keys]}}
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
@@ -11212,15 +11245,25 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 updated_library_object_counts[lib]['episodes'] = updated_library_object_counts[lib].get('episodes', 0) + 1
             elif obj_type == 'Movie':
                 updated_library_object_counts[lib]['movies'] = updated_library_object_counts[lib].get('movies', 0) + 1
-            # Tally first audio language for Movie/Episode items only
+            # Normalise audio_languages and tally the first track for stats.
+            # Movie/Episode are the only types with audio metadata.
             if obj_type in ('Movie', 'Episode'):
-                _langs = obj.get('audio_languages') or []
-                _code = (str(_langs[0]).lower().strip() if _langs else '')
-                _code = _ISO_3_TO_2.get(_code, _code)
-                # Drop unknown/garbage codes and Plex concatenations like 'engeng'
-                if _code in _GARBAGE_CODES or len(_code) > 3:
-                    continue
-                _lang_distribution.setdefault(lib, {}).setdefault(_code, []).append(key)
+                _raw = obj.get('audio_languages') or []
+                # First, lowercase + map 3-letter to 2-letter.  Then run through
+                # the canonical normaliser (collapses und/mis/mul/zxx/empty
+                # into 'unknown'). Drop concatenated garbage like 'engeng'.
+                _expanded = []
+                for _l in _raw:
+                    _c = str(_l).lower().strip()
+                    _c = _ISO_3_TO_2.get(_c, _c)
+                    if len(_c) > 3 and _c != _AUDIO_LANG_UNKNOWN:
+                        _c = ''  # garbage → will become 'unknown' via normaliser
+                    _expanded.append(_c)
+                obj['audio_languages'] = _normalize_audio_languages(_expanded)
+                # Stats: count the first (primary) track only — see legend in
+                # --list-libraries footnote.  'unknown' is now a regular code.
+                _primary = obj['audio_languages'][0]
+                _lang_distribution.setdefault(lib, {}).setdefault(_primary, []).append(key)
 
         if DBG:
             print(f"{DBGPFX}Saving cache with updated library_object_counts:")
@@ -14440,7 +14483,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def _list_no_audio_language(obj_keys, library_name):
-        """List items (Movie/Episode) with no audio language metadata."""
+        """List items (Movie/Episode) whose only audio language is 'unknown'.
+
+        Plex's inconsistent placeholders (und/mis/mul/zxx/empty) are collapsed
+        to the canonical 'unknown' code at --update-cache finalize time, so
+        this filter just checks for items whose audio_languages contains only
+        'unknown' (i.e. no actual ISO language is known for any track).
+        """
         count = 0
         for key in obj_keys:
             obj = PLEX_Media.OBJ_BY_ID.get(key)
@@ -14449,15 +14498,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             obj_type = obj.get('type')
             if obj_type not in ('Movie', 'Episode'):
                 continue
-            audio_languages = obj.get('audio_languages', [])
-            if not audio_languages:
+            audio_languages = obj.get('audio_languages', []) or []
+            if all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in audio_languages) \
+                    or not audio_languages:
                 count += 1
                 title = obj.get('title', '')
                 library = obj.get('library', '')
                 filepath = obj.get('file', '')
                 print(f"  {key:<17} {library:<20} {title[:45]:<45} {filepath}")
         if count:
-            print(f"\n  {count} item(s) with missing audio language.")
+            print(f"\n  {count} item(s) with unknown audio language.")
         return count
 
     @staticmethod
@@ -15781,7 +15831,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return count > 0 if _yes else count == 0
             return label, _watched_fn
 
-        # --- Lang (audio language: lang:de / lang:en / lang:fr) ---
+        # --- Lang (audio language: lang:de / lang:en / lang:fr / lang:unknown) ---
+        # Audio language codes are normalised at --update-cache finalize time
+        # (see _normalize_audio_languages).  The cache stores the canonical
+        # 'unknown' for any item Plex flagged as und/mis/mul/zxx or no-track.
         if field in ('lang', 'language'):
             lang_map = {'en': 'en', 'english': 'en', 'eng': 'en',
                         'de': 'de', 'german': 'de', 'deu': 'de', 'ger': 'de',
@@ -16058,7 +16111,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'writers':      ', '.join(str(w) for w in (obj.get('writers') or [])),
                 'actors':       ', '.join(str(a) for a in (obj.get('actors') or [])[:5]),
                 'content_rating': obj.get('contentRating', ''),
-                'audio_langs':  ', '.join(str(l) for l in (obj.get('audio_languages') or [])),
+                # audio_languages is normalised at --update-cache finalize
+                # time (see _normalize_audio_languages) — 'unknown' replaces
+                # Plex's und/mis/mul/zxx/empty.  No further mangling needed.
+                'audio_langs':  ', '.join(str(l) for l in (obj.get('audio_languages') or [_AUDIO_LANG_UNKNOWN])),
                 'sub_langs':    ', '.join(str(l) for l in (obj.get('subtitle_languages') or [])),
                 'genres':       ', '.join(str(g) for g in (obj.get('genres') or [])),
                 'imdb_id':      _ext_ids.get('imdb', '') or '',
@@ -17046,8 +17102,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if not audio_languages or audio_filter not in audio_languages:
                     continue
             if no_audio_language:
-                audio_languages = obj.get('audio_languages', [])
-                if audio_languages:
+                # Cache stores the canonical 'unknown' code (normalised at
+                # --update-cache finalize time) for any track Plex flagged
+                # as und/mis/mul/zxx or had no audio metadata for.
+                audio_languages = obj.get('audio_languages', []) or []
+                if audio_languages and not all(str(l).lower() == _AUDIO_LANG_UNKNOWN
+                                                for l in audio_languages):
                     continue
             filtered_keys.append(key)
 
