@@ -756,21 +756,21 @@ CONFIG_DEFAULTS = {
     # Each is a dict of aspect_name → Python expression (evaluated with metadata variables in scope).
     # Example: {'watched': "'vu@' + WATCHED_DATE if WATCHED else ''"}
     # Falsy results (empty string, None, 0, False) → marker skipped entirely.
-    'DISK_MAP': {},              # [LEGACY v7] Markers on media files
-    'DISK_MAP_MOVIE_DIR': {},    # [LEGACY v7] Markers on movie directories
-    'DISK_MAP_SERIES_DIR': {},   # [LEGACY v7] Markers on series directories
-    'DISK_MAP_SEASON_DIR': {},   # [LEGACY v7] Markers on season directories
+    'DISK_MAP': {},              # [LEGACY] Markers on media files
+    'DISK_MAP_MOVIE_DIR': {},    # [LEGACY] Markers on movie directories
+    'DISK_MAP_SERIES_DIR': {},   # [LEGACY] Markers on series directories
+    'DISK_MAP_SEASON_DIR': {},   # [LEGACY] Markers on season directories
     # Sidecar tracking file — records which [MARKER] segments were added to each file/dir
     'DISK_MAP_FILE': '.my-plex/disk_map.json',
     # Merge strategy per aspect: 'newer' (compare timestamps), 'plex' (Plex wins), 'disk' (disk wins)
-    # [LEGACY v7] superseded by per-plex_var 'merge' inside DISK_PLEX_MAP.
+    # [LEGACY] superseded by per-plex_var 'merge' inside DISK_PLEX_MAP.
     'DISK_MAP_MERGE': {'watched': 'newer'},
     # Push-to-Plex mapping: aspect name → Plex variable (for --disk2plex)
-    # [LEGACY v7] superseded by DISK_PLEX_MAP keying directly by plex_var.
+    # [LEGACY] superseded by DISK_PLEX_MAP keying directly by plex_var.
     'DISK_MAP_PUSH': {'watched': 'WATCHED'},
 
     # ============================================================================
-    # DISK_PLEX_MAP (NEW in v8) — unified, bidirectional disk ↔ Plex marker map.
+    # DISK_PLEX_MAP (NEW in v1.1) — unified, bidirectional disk ↔ Plex marker map.
     # ============================================================================
     # Top level: Plex variable name (one of DISK_MAP_VARIABLES).
     # Per plex_var:
@@ -1352,7 +1352,7 @@ DISK_MAP_SEASON_DIR = CONFIG_DEFAULTS['DISK_MAP_SEASON_DIR']
 DISK_MAP_FILE = CONFIG_DEFAULTS['DISK_MAP_FILE']
 DISK_MAP_MERGE = CONFIG_DEFAULTS['DISK_MAP_MERGE']
 DISK_MAP_PUSH = CONFIG_DEFAULTS['DISK_MAP_PUSH']
-DISK_PLEX_MAP = CONFIG_DEFAULTS['DISK_PLEX_MAP']  # NEW in v8
+DISK_PLEX_MAP = CONFIG_DEFAULTS['DISK_PLEX_MAP']  # NEW in v1.1
 
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
@@ -4322,21 +4322,21 @@ DISK_MAP_VARIABLES = {
     'ACTOR1_FN', 'ACTOR1_LN', 'ACTOR2_FN', 'ACTOR2_LN', 'ACTOR3_FN', 'ACTOR3_LN',
     'COUNTRY', 'COUNTRIES', 'GENRE', 'GENRES',
     'DIRECTOR', 'DIRECTORS', 'WRITER', 'WRITERS',
-    'LANG',                                 # [LEGACY v7] library.language
-    'LIBRARY_LANG',                         # NEW in v8 — replaces LANG
-    'AUDIO_LANG',                           # NEW in v8 — first audio track (str)
-    'AUDIO_LANGS',                          # NEW in v8 — comma-joined string
-    'AUDIO_LANGS_LIST',                     # NEW in v8 — Python list (for iter)
+    'LANG',                                 # [LEGACY] library.language
+    'LIBRARY_LANG',                         # NEW in v1.1 — replaces LANG
+    'AUDIO_LANG',                           # NEW in v1.1 — first audio track (str)
+    'AUDIO_LANGS',                          # NEW in v1.1 — comma-joined string
+    'AUDIO_LANGS_LIST',                     # NEW in v1.1 — Python list (for iter)
     'RESOLUTION', 'YEAR',
     'IMDB_ID', 'TMDB_ID', 'TVDB_ID',
     'TITLE', 'SERIES',
-    'FILENAME',                             # NEW in v8 — basename, lower-cased
-    'FILEPATH',                             # NEW in v8 — full path, lower-cased
+    'FILENAME',                             # NEW in v1.1 — basename, lower-cased
+    'FILEPATH',                             # NEW in v1.1 — full path, lower-cased
     'LABELS', 'COLLECTIONS',
 }
 
 def validate_disk_map(disk_map):
-    """Validate DISK_MAP config dict. Returns list of error strings (empty = valid).
+    """Validate legacy DISK_MAP config dict. Returns list of error strings (empty = valid).
 
     Each value must be a valid Python expression that compiles successfully.
     """
@@ -4355,6 +4355,115 @@ def validate_disk_map(disk_map):
         except SyntaxError as e:
             errors.append(f"DISK_MAP[{aspect!r}] = {expr!r} is not a valid Python expression: {e}")
     return errors
+
+
+# ============================================================================
+# DISK_PLEX_MAP (NEW in v1.1) — schema validator + helpers.
+# Schema is documented in CONFIG_DEFAULTS['DISK_PLEX_MAP'] comment.
+# ============================================================================
+_DISK_PLEX_SCOPES = ('file', 'movie_dir', 'series_dir', 'season_dir')
+_DISK_PLEX_DIRECTIONS = ('plex2disk', 'disk2plex')
+_DISK_PLEX_MERGE_POLICIES = ('newer', 'plex', 'disk', 'ignore', 'warn', 'fail')
+
+
+def _normalise_disk_plex_scope(scope):
+    """Coerce a 'scope' field into a tuple of canonical scope names.
+    Returns None on invalid input."""
+    if scope == 'all':
+        return _DISK_PLEX_SCOPES
+    if isinstance(scope, str):
+        return (scope,) if scope in _DISK_PLEX_SCOPES else None
+    if isinstance(scope, (list, tuple)):
+        out = tuple(scope)
+        return out if all(s in _DISK_PLEX_SCOPES for s in out) else None
+    return None
+
+
+def validate_disk_plex_map(cfg):
+    """Validate DISK_PLEX_MAP config dict. Returns list of error strings."""
+    errors = []
+    if not isinstance(cfg, dict):
+        return [f"DISK_PLEX_MAP must be a dict, got {type(cfg).__name__}"]
+
+    for plex_var, var_spec in cfg.items():
+        if not isinstance(plex_var, str) or not plex_var:
+            errors.append(f"DISK_PLEX_MAP key must be a non-empty string, got {plex_var!r}")
+            continue
+        if plex_var not in DISK_MAP_VARIABLES:
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}]: unknown plex variable. "
+                          f"Known: {sorted(DISK_MAP_VARIABLES)}")
+            continue
+        if not isinstance(var_spec, dict):
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}] must be a dict, got {type(var_spec).__name__}")
+            continue
+
+        # scope (default 'file')
+        if _normalise_disk_plex_scope(var_spec.get('scope', 'file')) is None:
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}].scope = {var_spec['scope']!r}: "
+                          f"must be one of {_DISK_PLEX_SCOPES}, 'all', or list of those.")
+
+        # merge (default 'newer')
+        merge = var_spec.get('merge', 'newer')
+        if merge not in _DISK_PLEX_MERGE_POLICIES:
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}].merge = {merge!r}: "
+                          f"must be one of {_DISK_PLEX_MERGE_POLICIES}.")
+
+        values = var_spec.get('values', {})
+        if not isinstance(values, dict):
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}].values must be a dict, got {type(values).__name__}")
+            continue
+
+        for plex_val, entry_or_list in values.items():
+            entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+            for ei, entry in enumerate(entries):
+                _ent_id = (f"DISK_PLEX_MAP[{plex_var!r}].values[{plex_val!r}]"
+                           + (f"[{ei}]" if isinstance(entry_or_list, list) else ""))
+                if not isinstance(entry, dict):
+                    errors.append(f"{_ent_id} must be a dict, got {type(entry).__name__}")
+                    continue
+                # Empty {} is valid: "recognised, does nothing".
+                for k, v in entry.items():
+                    direction = None
+                    if k in ('plex2disk', 'disk2plex', 'when'):
+                        direction = k if k in _DISK_PLEX_DIRECTIONS else None
+                    elif (isinstance(k, tuple) and len(k) == 2
+                          and k[0] in _DISK_PLEX_DIRECTIONS
+                          and k[1] in _DISK_PLEX_SCOPES):
+                        direction = k[0]
+                    else:
+                        errors.append(f"{_ent_id}: unknown key {k!r}. Allowed: "
+                                      f"'plex2disk', 'disk2plex', 'when', or "
+                                      f"tuple (direction, scope).")
+                        continue
+                    if direction == 'plex2disk':
+                        if not (isinstance(v, str) or callable(v)):
+                            errors.append(f"{_ent_id}[{k!r}]: must be str template or callable, "
+                                          f"got {type(v).__name__}")
+                    elif direction == 'disk2plex':
+                        if not isinstance(v, list):
+                            errors.append(f"{_ent_id}[{k!r}]: must be a list of regex strings, "
+                                          f"got {type(v).__name__}")
+                            continue
+                        for rg in v:
+                            if not isinstance(rg, str):
+                                errors.append(f"{_ent_id}[{k!r}]: each entry must be str, "
+                                              f"got {type(rg).__name__}")
+                                continue
+                            try:
+                                re.compile(rg, re.IGNORECASE)
+                            except re.error as e:
+                                errors.append(f"{_ent_id}[{k!r}]: regex {rg!r} does not compile: {e}")
+                    elif k == 'when':
+                        if not isinstance(v, str):
+                            errors.append(f"{_ent_id}.when must be a str (Python expression), "
+                                          f"got {type(v).__name__}")
+                            continue
+                        try:
+                            compile(v, '<config>', 'eval')
+                        except SyntaxError as e:
+                            errors.append(f"{_ent_id}.when = {v!r} is not a valid expression: {e}")
+    return errors
+
 
 def _actor_name_parts(actors, index):
     """Extract first/last name from actor at given 0-based index. Returns (first_name, last_name)."""
