@@ -732,6 +732,32 @@ CONFIG_DEFAULTS = {
     # Conversion: 1 Mbps = 450 MB/hour  (Mbps × 3600 ÷ 8)
     # 2 Mbps is a reasonable threshold for flagging over-encoded files.
     'REENCODE_THRESHOLD': {'mbps': 2.5},
+
+    # --- v1.4: --remux + extended --reencode (outdated containers) ---
+    # Container extensions considered "outdated".  Items in these
+    # containers are evaluated for --remux (codecs OK → safe stream-copy)
+    # or --reencode (codecs not OK → must re-encode anyway).  Modern
+    # containers (.mp4, .m4v, .mkv) are not in this set.
+    'OUTDATED_CONTAINERS': ('.avi', '.wmv', '.mpg', '.mpeg', '.ts',
+                            '.m2ts', '.vob', '.flv', '.ogm', '.rm',
+                            '.rmvb', '.asf', '.divx', '.3gp', '.mov'),
+    # Default target container for --remux.  One of {'mkv', 'mp4'}.
+    'REMUX_TARGET_CONTAINER': 'mkv',
+    # Codecs that are safe to stream-copy ('-c copy') into the target
+    # container.  An outdated-container file whose codec is OUTSIDE these
+    # lists is NOT a remux candidate — it falls into --reencode under
+    # reason 'needs_reencode_container'.
+    'REMUX_VIDEO_CODECS_OK': ('h264', 'hevc', 'mpeg4', 'mpeg2', 'mpeg1',
+                              'av1', 'vp9'),
+    'REMUX_AUDIO_CODECS_OK': ('aac', 'ac3', 'mp3', 'dts', 'opus',
+                              'flac', 'vorbis', 'eac3'),
+    # When True, --remux requires that an audio language is known
+    # (Plex audio_languages OR a DPM disk2plex regex match) before
+    # remuxing.  No language → no point remuxing.
+    'REMUX_REQUIRE_LANGUAGE': True,
+    # When True, --remux trashes the original file via rename_file
+    # after a successful migration.  False keeps the original alongside.
+    'REMUX_TRASH_ORIGINAL': True,
     'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
 
     # On-disk label markers embedded in filenames / directory names
@@ -1508,6 +1534,14 @@ _candidates = []
 if 'mbps'         in _reencode_threshold: _candidates.append(float(_reencode_threshold['mbps']))
 if 'mb_per_hour'  in _reencode_threshold: _candidates.append(float(_reencode_threshold['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
 REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 2.5  # if both given, use lower (stricter)
+
+# v1.4: --remux + extended --reencode (see CONFIG_DEFAULTS comments above).
+OUTDATED_CONTAINERS      = tuple(s.lower() for s in CONFIG_DEFAULTS.get('OUTDATED_CONTAINERS', ()))
+REMUX_TARGET_CONTAINER   = str(CONFIG_DEFAULTS.get('REMUX_TARGET_CONTAINER', 'mkv')).lstrip('.').lower()
+REMUX_VIDEO_CODECS_OK    = tuple(s.lower() for s in CONFIG_DEFAULTS.get('REMUX_VIDEO_CODECS_OK', ()))
+REMUX_AUDIO_CODECS_OK    = tuple(s.lower() for s in CONFIG_DEFAULTS.get('REMUX_AUDIO_CODECS_OK', ()))
+REMUX_REQUIRE_LANGUAGE   = bool(CONFIG_DEFAULTS.get('REMUX_REQUIRE_LANGUAGE', True))
+REMUX_TRASH_ORIGINAL     = bool(CONFIG_DEFAULTS.get('REMUX_TRASH_ORIGINAL', True))
 
 # On-disk label markers
 ONDISK_LABEL_START_MARKER = CONFIG_DEFAULTS.get('ONDISK_LABEL_START_MARKER', '[')
@@ -2444,6 +2478,9 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'cmd_plex2disk', 'cmd_disk2plex', 'rename_file_siblings',
                        'finalize_disk_plex_map_uniform_fields',
                        '_disk_plex_map_promoted_vars',
+                       '_classify_migration_action',
+                       '_resolve_audio_lang_from_filename',
+                       '_resolve_target_to_cache_keys_via_filepath',
                        'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
@@ -22844,6 +22881,133 @@ def cmd_missing(series_ref, source_override=None):
 # ---------------------------------------------------------------------------
 # --plex2disk / --disk2plex commands (aliases: --map-to-filename, --map-from-filename)
 # ---------------------------------------------------------------------------
+
+def _resolve_audio_lang_from_filename(filename):
+    """Try to resolve a 2-letter audio-language code from a filename via
+    DISK_PLEX_MAP['AUDIO_LANG']['values'][*]['disk2plex'] regexes.
+
+    Mirrors the disk-side logic in resolve_no_audio_language (--resolve)
+    but operates on a basename only and returns just the code (or None).
+    """
+    cfg = (DISK_PLEX_MAP or {}).get('AUDIO_LANG', {})
+    if not cfg:
+        return None
+    base = os.path.basename(filename or '')
+    for plex_val, entry_or_list in (cfg.get('values') or {}).items():
+        entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for rg in _dpm_resolve_disk2plex(entry, 'file'):
+                try:
+                    m = re.search(rg, base, re.IGNORECASE)
+                except re.error:
+                    continue
+                if not m:
+                    continue
+                if plex_val == '*':
+                    captured = m.groupdict().get('AUDIO_LANG')
+                    if captured:
+                        return str(captured).lower()[:2]
+                    continue
+                return str(plex_val).lower()[:2]
+    return None
+
+
+def _classify_migration_action(obj, version=None):
+    """Classify a single media-file version's migration need.
+
+    Args:
+        obj: cache entry dict from PLEX_Media.OBJ_BY_ID
+        version: key into obj['files'] selecting which version to classify;
+                 None = use obj['file'] / obj['files'] auto-pick (first)
+
+    Returns dict:
+        action:       'none' | 'remux' | 'reencode'
+        reasons:      list[str] — empty for 'none' / 'remux';
+                      subset of {'high_bitrate', 'needs_reencode_container',
+                                 'no_language', 'unknown_duration'} for the
+                      cases where it's informative.
+        lang:         2-letter ISO code if known (from cache or filename
+                      regex), else None.
+        filepath:     resolved filepath classified (or '').
+        version:      the version key chosen.
+        bitrate_mbps: float or None (None if duration unavailable).
+        ext:          lowercased extension including dot, or ''.
+    """
+    type_str = obj.get('type_str', '')
+    if type_str not in ('Movie', 'Episode'):
+        return {'action': 'none', 'reasons': [], 'lang': None,
+                'filepath': '', 'version': None, 'bitrate_mbps': None, 'ext': ''}
+
+    files_dict = obj.get('files', {}) or {}
+    if version is None:
+        # Auto-pick first version
+        version = next(iter(files_dict), None)
+    if not version or version not in files_dict:
+        return {'action': 'none', 'reasons': [], 'lang': None,
+                'filepath': obj.get('file', ''), 'version': version,
+                'bitrate_mbps': None, 'ext': ''}
+    file_info = files_dict[version] or {}
+    filepath = file_info.get('filepath') or obj.get('file', '') or ''
+    ext = os.path.splitext(filepath)[1].lower()
+
+    duration_ms = obj.get('duration') or 0
+    filesize = file_info.get('filesize') or 0
+    bitrate_mbps = None
+    if duration_ms and filesize:
+        bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
+
+    is_outdated = ext in OUTDATED_CONTAINERS
+    is_modern_target = ext.lstrip('.') == REMUX_TARGET_CONTAINER
+    is_high_bitrate = bool(bitrate_mbps and bitrate_mbps > REENCODE_THRESHOLD_MBPS)
+
+    video_codec = str(obj.get('video_codec') or '').lower()
+    audio_codec = str(obj.get('audio_codec') or '').lower()
+    codecs_safe = (video_codec in REMUX_VIDEO_CODECS_OK
+                   and audio_codec in REMUX_AUDIO_CODECS_OK)
+
+    # Resolve language: prefer Plex audio_languages, fallback to filename regex
+    lang = None
+    audio_langs = file_info.get('audio_languages') or obj.get('audio_languages') or []
+    if audio_langs and audio_langs[0] not in ('', 'unknown'):
+        lang = audio_langs[0]
+    if lang is None:
+        lang = _resolve_audio_lang_from_filename(filepath)
+
+    reasons = []
+
+    # Decision: high_bitrate ALWAYS wins → reencode
+    if is_high_bitrate:
+        reasons.append('high_bitrate')
+        if is_outdated and not codecs_safe:
+            reasons.append('needs_reencode_container')
+        return {'action': 'reencode', 'reasons': reasons, 'lang': lang,
+                'filepath': filepath, 'version': version,
+                'bitrate_mbps': bitrate_mbps, 'ext': ext}
+
+    # Outdated container, unsafe codecs → reencode
+    if is_outdated and not codecs_safe:
+        reasons.append('needs_reencode_container')
+        return {'action': 'reencode', 'reasons': reasons, 'lang': lang,
+                'filepath': filepath, 'version': version,
+                'bitrate_mbps': bitrate_mbps, 'ext': ext}
+
+    # Outdated container, safe codecs → remux candidate (if language known)
+    if is_outdated and codecs_safe:
+        if not lang and REMUX_REQUIRE_LANGUAGE:
+            return {'action': 'none', 'reasons': ['no_language'], 'lang': None,
+                    'filepath': filepath, 'version': version,
+                    'bitrate_mbps': bitrate_mbps, 'ext': ext}
+        return {'action': 'remux', 'reasons': [], 'lang': lang,
+                'filepath': filepath, 'version': version,
+                'bitrate_mbps': bitrate_mbps, 'ext': ext}
+
+    # Modern container, fine bitrate → no action
+    return {'action': 'none', 'reasons': [], 'lang': lang,
+            'filepath': filepath, 'version': version,
+            'bitrate_mbps': bitrate_mbps, 'ext': ext}
+
 
 def _resolve_target_to_cache_keys_via_filepath(target):
     """If target looks like a filepath, resolve it to a list of cache_keys
