@@ -64,6 +64,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - `--plex2disk` — sync Plex metadata → disk (add `[marker]` tags to filenames/directories)
   - `--disk2plex` — sync disk markers → Plex (push watched status, ratings, labels back)
   - `--plex-disk-sync` — bidirectional: disk→plex first, then plex→disk
+  - `--remux` — stream-copy outdated-container files (e.g. `.avi`) to `.mkv`, attaching the resolved audio language as track metadata. Default: PREVIEW only; `--yes` commits. Combine with `--no-audio-language` to bulk-fix files where Plex has no audio language yet (e.g. German DVR recordings with `[TVOON]` filename hints).
 - **4 scopes**: media files, movie directories, series directories, season directories
 - **Python expressions** for marker values — fully configurable, no hardcoded labels
 - **Merge strategies**: `newer` (compare timestamps), `plex` (Plex wins), `disk` (disk wins)
