@@ -13684,6 +13684,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
             _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
             _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
+            _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
             _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None) or 0
             # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
             _pc_tsv      = len(_TSV_FAILED_SHOWS)
@@ -13700,6 +13701,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'potential_mismatch':_pc_mismatch,
                 'numbering_issues':  _pc_numbering,
                 'reencode':          _pc_reencode,
+                'remux':             _pc_remux,
                 'missing_episodes':  _pc_missing,
             }
         else:
@@ -14245,18 +14247,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 mismatch_count = _run_check_item(PLEX_Media._list_potential_mismatches, item_keys, None) or 0
                 numbering_count = _run_check_item(PLEX_Media._list_episode_numbering_issues, item_keys, None) or 0
                 reencode_count = _run_check_item(PLEX_Media._list_reencode_candidates, item_keys, None) or 0
+                remux_count    = _run_check_item(PLEX_Media._count_remux_candidates, item_keys, None) or 0
                 renumber_count = _run_check_item(PLEX_Media._list_renumber_candidates, item_keys, None) or 0
                 renumber_nodata = _run_check_item(PLEX_Media._list_renumber_lack_of_data, item_keys, None) or 0
                 renumber_season = _run_check_item(PLEX_Media._list_renumber_season_mismatch, item_keys, None) or 0
                 renumber_abs = _run_check_item(PLEX_Media._list_renumber_abs_mismatch, item_keys, None) or 0
                 total = (broken_count + excess_entry_count + tsv_count + unmatched_count
-                         + unsorted_count + mismatch_count + numbering_count + reencode_count
+                         + unsorted_count + mismatch_count + numbering_count + reencode_count + remux_count
                          + renumber_count + renumber_nodata + renumber_season + renumber_abs)
                 live_problems = {
                     'broken': broken_count, 'excess_versions': {'entries': excess_entry_count, 'files': excess_file_count},
                     'tsv': tsv_count, 'unmatched': unmatched_count, 'unsorted': unsorted_count,
                     'potential_mismatch': mismatch_count, 'numbering_issues': numbering_count,
-                    'reencode': reencode_count, 'renumber': renumber_count,
+                    'reencode': reencode_count, 'remux': remux_count, 'renumber': renumber_count,
                     'renumber_nodata': renumber_nodata, 'renumber_season': renumber_season, 'renumber_abs': renumber_abs,
                 }
                 _print_problem_warnings(live_problems)
@@ -15586,6 +15589,30 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(issues)
 
     @staticmethod
+    @staticmethod
+    def _count_remux_candidates(obj_keys, library_name):
+        """Count file versions whose migration action is 'remux' (outdated
+        container + safe stream-copy codecs + lang resolved).  Mirrors the
+        signature of _list_reencode_candidates so it slots into the same
+        --problems / --update-cache finalize plumbing.
+
+        Returns total count of remux-candidate file versions."""
+        n = 0
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            if PLEX_Media._is_multi_ep_non_leader(key, obj):
+                continue
+            files_dict = obj.get('files', {}) or {}
+            for version in files_dict:
+                cls = _classify_migration_action(obj, version=version)
+                if cls['action'] == 'remux':
+                    n += 1
+        return n
+
     def _list_reencode_candidates(obj_keys, library_name):
         """List media files whose avg bitrate exceeds REENCODE_THRESHOLD_MBPS.
         For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
@@ -26853,6 +26880,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
         print(f"  >> ⚠ {problems['reencode']} reencode candidates   →  my-plex{lib_arg} --reencode")
+    if problems.get('remux', 0):
+        print(f"  >> ⚠ {problems['remux']} remux candidates   →  my-plex{lib_arg} --remux")
     if problems.get('missing_episodes', 0):
         print(f"  >> ⚠ {problems['missing_episodes']} missing episodes   →  my-plex{lib_arg} --missing <SERIES>")
     if problems.get('renumber', 0):
@@ -27999,6 +28028,11 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Reencode Candidates{lib_label}")
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
+            # 8a. Remux candidates (counted only — full list via --remux)
+            remux_count = _run_check(PLEX_Media._count_remux_candidates, obj_keys, problems_library)
+            if remux_count:
+                print(f"  >> {remux_count} remux candidate(s)  →  my-plex --remux")
+
             # 9. Missing episodes (cache-only — reads episodes.tsv from disk)
             print(f"  >> Missing Episodes{lib_label}")
             missing_count = _run_check(PLEX_Media._list_missing_episodes, obj_keys, problems_library)
@@ -28021,7 +28055,8 @@ def execute_global_commands(args, cmd_args):
 
         # Closing milestone with total
         total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
-                          + noaudio_count + unsorted_count + mismatch_count + numbering_count + reencode_count
+                          + noaudio_count + unsorted_count + mismatch_count + numbering_count
+                          + reencode_count + remux_count
                           + missing_count + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
@@ -28035,6 +28070,7 @@ def execute_global_commands(args, cmd_args):
             'potential_mismatch':mismatch_count  if not tsv_only else 0,
             'numbering_issues':  numbering_count,
             'reencode':          reencode_count  if not tsv_only else 0,
+            'remux':             remux_count     if not tsv_only else 0,
             'missing_episodes':  missing_count   if not tsv_only else 0,
             'renumber':          renumber_count  if not tsv_only else 0,
             'renumber_nodata':   renumber_nodata_count if not tsv_only else 0,
