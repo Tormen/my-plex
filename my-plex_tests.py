@@ -7628,6 +7628,100 @@ class TestDiskMap(unittest.TestCase):
                                      {'AUDIO_LANG': None}, 'movie_dir')
         self.assertEqual(out, {})
 
+    # --- v1.2.1: sibling rename (.nfo / .srt / etc.) ---
+
+    def test_rename_file_siblings_basic(self):
+        """rename_file_siblings renames every sibling matching old basename."""
+        from unittest.mock import patch
+        old_path = '/fake/dir/Movie.mkv'
+        new_path = '/fake/dir/Movie [en].mkv'
+        listing = ['/fake/dir/Movie.mkv',
+                   '/fake/dir/Movie.nfo',
+                   '/fake/dir/Movie.srt',
+                   '/fake/dir/Movie.en.srt',
+                   '/fake/dir/SomeoneElse.nfo']  # not a sibling
+        renamed_calls = []
+        def _fake_op(op, path, host=None, **kw):
+            if op == 'LIST_DIR':
+                return (True, listing)
+            return (True, None)
+        def _fake_rename(src, new_filename, remote_host=None):
+            renamed_calls.append((src, new_filename))
+            return (True, os.path.join(os.path.dirname(src), new_filename))
+        main_mod = sys.modules[rename_file_siblings.__module__]
+        with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
+             patch.object(main_mod, 'rename_file', _fake_rename):
+            r, e = rename_file_siblings(old_path, new_path, remote_host=None,
+                                        dry_run=False)
+        self.assertEqual(e, 0)
+        self.assertEqual(r, 3)  # .nfo, .srt, .en.srt
+        renamed_basenames = sorted([(os.path.basename(s), n) for s, n in renamed_calls])
+        self.assertEqual(renamed_basenames, [
+            ('Movie.en.srt', 'Movie [en].en.srt'),
+            ('Movie.nfo',    'Movie [en].nfo'),
+            ('Movie.srt',    'Movie [en].srt'),
+        ])
+
+    def test_rename_file_siblings_dry_run(self):
+        """dry_run prints 'Sibling:' lines and doesn't call rename_file."""
+        from unittest.mock import patch
+        from io import StringIO
+        old_path = '/fake/dir/Movie.mkv'
+        new_path = '/fake/dir/Movie [en].mkv'
+        listing = ['/fake/dir/Movie.mkv', '/fake/dir/Movie.nfo']
+        rename_calls = []
+        def _fake_op(op, path, host=None, **kw):
+            return (True, listing) if op == 'LIST_DIR' else (True, None)
+        def _fake_rename(src, new, remote_host=None):
+            rename_calls.append((src, new))
+            return (True, src)
+        main_mod = sys.modules[rename_file_siblings.__module__]
+        buf = StringIO()
+        import contextlib
+        with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
+             patch.object(main_mod, 'rename_file', _fake_rename), \
+             contextlib.redirect_stdout(buf):
+            r, e = rename_file_siblings(old_path, new_path, remote_host=None,
+                                        dry_run=True, log_prefix='PFX| ')
+        self.assertEqual(rename_calls, [], "rename_file must not be called in dry_run")
+        self.assertEqual(r, 1)
+        self.assertIn('PFX| Sibling: Movie.nfo → Movie [en].nfo', buf.getvalue())
+
+    def test_rename_file_siblings_no_change(self):
+        """If old_path == new_path stem, nothing is done (skip listing too)."""
+        from unittest.mock import patch
+        listing_calls = []
+        def _fake_op(op, path, host=None, **kw):
+            listing_calls.append(op)
+            return (True, [])
+        main_mod = sys.modules[rename_file_siblings.__module__]
+        with patch.object(main_mod, 'my_plex_file_operation', _fake_op):
+            r, e = rename_file_siblings('/x/A.mkv', '/x/A.mkv')
+        self.assertEqual((r, e), (0, 0))
+        self.assertEqual(listing_calls, [], "no LIST_DIR when stems match")
+
+    def test_rename_file_siblings_skips_unrelated(self):
+        """A file whose name happens to start similarly but with no '.' boundary
+        is NOT a sibling."""
+        from unittest.mock import patch
+        old_path = '/fake/Foo.mkv'
+        new_path = '/fake/Foo [en].mkv'
+        listing = ['/fake/Foo.mkv', '/fake/Foo.nfo',
+                   '/fake/Foo bar.mkv',         # different file, not a sibling
+                   '/fake/FooFighters.nfo']     # name prefix but no '.' separator
+        renamed = []
+        def _fake_op(op, path, host=None, **kw):
+            return (True, listing) if op == 'LIST_DIR' else (True, None)
+        def _fake_rename(src, new, remote_host=None):
+            renamed.append((src, new))
+            return (True, src)
+        main_mod = sys.modules[rename_file_siblings.__module__]
+        with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
+             patch.object(main_mod, 'rename_file', _fake_rename):
+            r, e = rename_file_siblings(old_path, new_path)
+        self.assertEqual(r, 1)  # only Foo.nfo
+        self.assertEqual([os.path.basename(s) for s, _ in renamed], ['Foo.nfo'])
+
     # --- v1.2: cmd_disk2plex two-phase / handler-registry source-presence ---
 
     def test_disk2plex_has_push_handler_registry(self):
