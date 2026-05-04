@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.3"
+SCRIPT_VERSION = "v1.4"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -458,6 +458,7 @@ _my-plex() {
         '--sort-new[Sort unsorted recordings (shortcut for --unsorted --fix)]'
         '--plex2disk[Sync Plex metadata to disk markers]'
         '--disk2plex[Sync disk markers to Plex metadata]'
+        '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--clean[With --plex2disk: strip all markers from disk]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
@@ -20940,6 +20941,70 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'remux':
+            print()
+            print("=" * 76)
+            print("REMUX HELP  (NEW in v1.4)")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex SCOPE --remux              # PREVIEW only (default)")
+            print("       my-plex SCOPE --remux --yes        # commit (after preview)")
+            print("       my-plex --no-audio-language --remux [--yes]   # bulk filter")
+            print()
+            print("Stream-copies outdated-container files (e.g. .avi/.mpg/.wmv) to the")
+            print(f"configured target container (default: .{REMUX_TARGET_CONTAINER}) and attaches")
+            print("the resolved audio language as track metadata.  No video / audio")
+            print("re-encoding — just `ffmpeg -c copy -map 0 -metadata:s:a:0 language=...`")
+            print("on the Plex server via SSH.")
+            print()
+            print("DEFAULT: ALWAYS PREVIEW.  --yes commits.")
+            print("  Unlike most commands, --remux defaults to a dry-run preview even")
+            print("  WITHOUT --try.  Re-run with --yes to execute the ffmpeg pipeline.")
+            print("  --try is accepted as a synonym for the default preview.")
+            print()
+            print("CANDIDATE CRITERIA (all must hold):")
+            print()
+            print("  1. Container ∈ OUTDATED_CONTAINERS (.avi/.mpg/.wmv/...)")
+            print("  2. Video codec ∈ REMUX_VIDEO_CODECS_OK")
+            print(f"     (default: {', '.join(REMUX_VIDEO_CODECS_OK)})")
+            print("  3. Audio codec ∈ REMUX_AUDIO_CODECS_OK")
+            print(f"     (default: {', '.join(REMUX_AUDIO_CODECS_OK)})")
+            print("  4. Bitrate ≤ REENCODE_THRESHOLD")
+            print("     (high-bitrate items go to --reencode, not --remux)")
+            print("  5. Audio language is known: either Plex's audio_languages, or a")
+            print("     DPM disk2plex regex match on the filename (e.g. \\bTVOON\\b → 'de')")
+            print("  6. Container duration is known")
+            print()
+            print("EXCLUSION REASONS (printed in the preview Excluded: section):")
+            print("  high_bitrate         →  use --reencode")
+            print("  unsafe_codecs        →  use --reencode")
+            print("  language unknown     →  use --no-audio-language --resolve first")
+            print("  unknown duration     →  --update-cache --force-metadata")
+            print("  modern container     →  no action (already MKV/MP4/M4V)")
+            print("  language already known  (only when --no-audio-language --remux)")
+            print()
+            print("UNIVERSAL SCOPE (per feedback_universal_scope):")
+            print("  my-plex --remux                       # all candidates")
+            print("  my-plex movies.de --remux             # one library")
+            print("  my-plex 'Tagesschau' --remux          # one series")
+            print("  my-plex Series:2047 --remux           # by cache key")
+            print("  my-plex Episode:2603 --remux          # one episode")
+            print("  my-plex /Volumes/2/.../foo.avi --remux  # by full filepath")
+            print("  my-plex /j2/.../foo.avi --remux       # alt root form (same item)")
+            print("  my-plex --no-audio-language --remux   # only items missing lang")
+            print()
+            print("INTEGRATION WITH --no-audio-language --resolve:")
+            print("  When --resolve hits an unsupported-container item that ALSO")
+            print("  qualifies for --remux, the menu offers an inline `r` option to")
+            print("  remux that single file immediately (with the resolved language).")
+            print()
+            print("CONFIG (in ~/.my-plex.conf):")
+            print("  OUTDATED_CONTAINERS, REMUX_TARGET_CONTAINER, REMUX_VIDEO_CODECS_OK,")
+            print("  REMUX_AUDIO_CODECS_OK, REMUX_REQUIRE_LANGUAGE, REMUX_TRASH_ORIGINAL")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'map-from-filename' | 'map_from_filename':
             # Redirect to plex2disk help (--map-from-filename is now --plex2disk --clean)
             print()
@@ -28445,6 +28510,7 @@ def main():
         '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
+        '--remux': 'remux',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
