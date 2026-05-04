@@ -22969,8 +22969,10 @@ def _classify_migration_action(obj, version=None):
         bitrate_mbps: float or None (None if duration unavailable).
         ext:          lowercased extension including dot, or ''.
     """
-    type_str = obj.get('type_str', '')
-    if type_str not in ('Movie', 'Episode'):
+    type_str = obj.get('type_str', '') or obj.get('type', '')
+    # Multi-version items have '*' suffix on type_str (e.g. 'Episode*');
+    # accept both forms.
+    if type_str not in ('Movie', 'Movie*', 'Episode', 'Episode*'):
         return {'action': 'none', 'reasons': [], 'lang': None,
                 'filepath': '', 'version': None, 'bitrate_mbps': None, 'ext': ''}
 
@@ -24131,6 +24133,273 @@ def _update_cache_filepath(obj, old_path, new_path):
                 file_info['filepath'] = new_path
             elif file_info == old_path:
                 files[version_str] = new_path
+
+def cmd_remux(target, yes=False, no_audio_language_only=False):
+    """v1.4: --remux — migrate outdated-container files to MKV via ffmpeg
+    stream-copy, attaching the resolved audio language as track metadata.
+
+    Default UX (no --yes): always print Phase-1 preview and exit.  Only
+    --yes commits Phase 2.  --try is treated as a no-op synonym for the
+    default preview behavior.
+
+    Args:
+        target: scope target (None, library, cache key, ID, type filter,
+                lang filter, full filepath including ALTERNATIVE_ROOTPATHS
+                forms — see _get_disk_map_scope).
+        yes: when True, run Phase 2 after the preview.
+        no_audio_language_only: when True (set by --no-audio-language
+                --remux), restrict candidates to items whose Plex
+                audio_languages is empty/unknown.
+
+    Returns: tuple (n_remuxed, n_skipped, n_errors).  In preview mode
+        (no --yes), all three are 0 and the function returns after Phase 1.
+    """
+    items = _get_disk_map_scope(target)
+    if not items:
+        print("No media items found for the given target.")
+        return (0, 0, 0)
+
+    # ---- Phase 1: build remux plan ----
+    plan = []          # list of (cache_key, obj, version, classification, file_info)
+    excluded = {       # buckets for the exclusion summary
+        'modern_container': 0,
+        'high_bitrate':     0,
+        'unsafe_codecs':    0,
+        'no_language':      0,
+        'unknown_duration': 0,
+        'has_language':     0,  # used only when no_audio_language_only=True
+    }
+
+    for cache_key, obj in items:
+        files_dict = obj.get('files', {}) or {}
+        if not files_dict:
+            continue
+        for version, file_info in files_dict.items():
+            cls = _classify_migration_action(obj, version=version)
+            action = cls['action']
+            ext = cls['ext']
+
+            # --no-audio-language --remux filter: skip items where Plex
+            # already has a real audio language for this version.
+            if no_audio_language_only:
+                al = (file_info.get('audio_languages')
+                      or obj.get('audio_languages') or [])
+                if al and al[0] not in ('', 'unknown'):
+                    excluded['has_language'] += 1
+                    continue
+
+            if action == 'remux':
+                plan.append((cache_key, obj, version, cls, file_info))
+                continue
+
+            # Bucket the exclusion reason — disjoint, keyed primarily on
+            # container kind so 'unknown_duration' only fires for outdated-
+            # container items that genuinely lack metadata.
+            ext_lc = ext.lower() if ext else ''
+            is_outdated = ext_lc in OUTDATED_CONTAINERS
+            if action == 'reencode':
+                if 'high_bitrate' in cls['reasons']:
+                    excluded['high_bitrate'] += 1
+                else:
+                    excluded['unsafe_codecs'] += 1
+            elif 'no_language' in cls['reasons']:
+                excluded['no_language'] += 1
+            elif is_outdated and not cls['bitrate_mbps']:
+                excluded['unknown_duration'] += 1
+            else:
+                # Modern container, or outdated-but-uninteresting (e.g.
+                # missing codecs metadata).  Bucket as modern_container
+                # since action='none' here means "no remux needed".
+                excluded['modern_container'] += 1
+
+    # ---- Phase 1: print preview ----
+    print()
+    print("=" * 76)
+    print("--remux preview")
+    print("=" * 76)
+    if not plan:
+        print("\n  Nothing to remux: no candidates in scope.")
+    else:
+        print(f"\n  {len(plan)} version(s) ready to remux to .{REMUX_TARGET_CONTAINER}:")
+        print()
+        # Header
+        print(f"  {'KEY':<18}  {'EXT':<5}  {'LANG':<4}  {'CODECS':<14}  {'SIZE':<8}  {'TITLE / FILE'}")
+        print(f"  {'-'*18}  {'-'*5}  {'-'*4}  {'-'*14}  {'-'*8}  {'-'*40}")
+        for cache_key, obj, version, cls, file_info in plan[:200]:
+            title = obj.get('title', '?') or ''
+            vc = (obj.get('video_codec') or '?')[:6]
+            ac = (obj.get('audio_codec') or '?')[:6]
+            sz = format_filesize(file_info.get('filesize') or 0).replace(' ', '')
+            fp = cls['filepath']
+            new_name = os.path.splitext(os.path.basename(fp))[0] + f".{REMUX_TARGET_CONTAINER}"
+            print(f"  {cache_key:<18}  {cls['ext']:<5}  {cls['lang'] or '?':<4}  {(vc+'+'+ac):<14}  {sz:<8}  {title}")
+            print(f"  {'':<18}  {'':<5}  {'':<4}  {'':<14}  {'':<8}  → {new_name}")
+        if len(plan) > 200:
+            print(f"\n  …and {len(plan)-200} more (truncated for preview).")
+
+    # Exclusion summary
+    excl_lines = []
+    if excluded['high_bitrate']:
+        excl_lines.append(f"    {excluded['high_bitrate']:>5}  high bitrate     →  use --reencode")
+    if excluded['unsafe_codecs']:
+        excl_lines.append(f"    {excluded['unsafe_codecs']:>5}  unsafe codecs    →  use --reencode")
+    if excluded['no_language']:
+        excl_lines.append(f"    {excluded['no_language']:>5}  language unknown →  use --no-audio-language --resolve first")
+    if excluded['unknown_duration']:
+        excl_lines.append(f"    {excluded['unknown_duration']:>5}  unknown duration →  --update-cache --force-metadata")
+    if excluded['modern_container']:
+        excl_lines.append(f"    {excluded['modern_container']:>5}  modern container →  no action")
+    if excluded['has_language']:
+        excl_lines.append(f"    {excluded['has_language']:>5}  language already known →  filtered out by --no-audio-language")
+    if excl_lines:
+        print(f"\n  Excluded:")
+        for line in excl_lines:
+            print(line)
+
+    # Decide on Phase 2
+    if not plan:
+        return (0, 0, 0)
+    if not yes:
+        print()
+        print("  Re-run with --yes to execute.")
+        return (0, 0, 0)
+
+    # ---- Phase 2: execute ----
+    print()
+    print("=" * 76)
+    print("--remux executing (--yes given)")
+    print("=" * 76)
+    n_remuxed = 0
+    n_skipped = 0
+    n_errors = 0
+    for cache_key, obj, version, cls, file_info in plan:
+        ok = _remux_one_file(cache_key, obj, version, cls, file_info)
+        if ok is True:
+            n_remuxed += 1
+        elif ok is None:
+            n_skipped += 1
+        else:
+            n_errors += 1
+
+    # Persist cache after a successful run
+    if n_remuxed > 0 and not READ_ONLY_MODE:
+        update_and_save_cache(CACHE)
+
+    print(f"\nDone: remuxed {n_remuxed}, skipped {n_skipped}, errors {n_errors}.")
+    return (n_remuxed, n_skipped, n_errors)
+
+
+def _remux_one_file(cache_key, obj, version, classification, file_info):
+    """Run the ffmpeg stream-copy pipeline for one file version.
+
+    Tri-state return (matches the disk2plex push-handler convention):
+      True   → file successfully remuxed and cache updated
+      None   → legitimate skip (e.g. tool missing, source unreachable)
+      False  → real error (e.g. ffmpeg failure, atomic-move failure)
+    """
+    title = obj.get('title') or cache_key
+    src_path = classification['filepath']
+    if not src_path:
+        print(f"  SKIP: no filepath for {cache_key} ({title})")
+        return None
+    lang_2 = classification.get('lang') or ''
+    if not lang_2:
+        print(f"  SKIP: no language resolved for {cache_key} ({title})")
+        return None
+    lang_3 = ISO_639_1_TO_2.get(lang_2.lower()[:2], lang_2.lower()[:3])
+
+    # Resolve remote host + verify file exists
+    remote_host, exists, resolved = determine_remote_host(src_path)
+    if not exists:
+        print(f"  SKIP: source not found {src_path} ({title})")
+        return None
+
+    # Build target path (same dir, new extension)
+    parent = os.path.dirname(resolved)
+    src_base = os.path.splitext(os.path.basename(resolved))[0]
+    new_name = f"{src_base}.{REMUX_TARGET_CONTAINER}"
+    new_path = os.path.join(parent, new_name)
+    staging_path = os.path.join(parent, f".{src_base}.remux-staging.{REMUX_TARGET_CONTAINER}")
+
+    # ffmpeg invocation
+    ffmpeg_args = [
+        '-hide_banner', '-nostdin', '-y',
+        '-i', resolved,
+        '-c', 'copy', '-map', '0',
+        '-metadata:s:a:0', f'language={lang_3}',
+        '-metadata:s:a:0', 'title=',
+        staging_path,
+    ]
+    print(f"  Remuxing {cache_key}: {os.path.basename(resolved)} → {new_name}  (lang={lang_2})")
+    res = run_tool_on_PLEX_server('ffmpeg', ffmpeg_args, remote_host=remote_host, timeout=1800)
+    if res is None:
+        print(f"    ERROR: ffmpeg not found on {remote_host or 'local'}")
+        return False
+    if res.returncode != 0:
+        print(f"    ERROR: ffmpeg exit={res.returncode}")
+        if res.stderr:
+            print(f"    {res.stderr[-500:]}")
+        # Best-effort cleanup of staging
+        try:
+            run_tool_on_PLEX_server('rm', ['-f', staging_path], remote_host=remote_host, timeout=10)
+        except Exception:
+            pass
+        return False
+
+    # Verify output exists (cheap stat check via ssh / local)
+    chk_ok, _ = my_plex_file_operation('CHECK', staging_path, remote_host)
+    if not chk_ok:
+        print(f"    ERROR: staging file missing after ffmpeg: {staging_path}")
+        return False
+
+    # Atomic move staging → target (target is in the same dir)
+    mv_ok, _ = rename_file(staging_path, new_name, remote_host=remote_host)
+    if not mv_ok:
+        print(f"    ERROR: atomic move failed: {staging_path} → {new_name}")
+        return False
+
+    # Trash original via rename_file move-to-Trashes (or leave as-is)
+    if REMUX_TRASH_ORIGINAL:
+        trash_ok, _ = my_plex_file_operation('TRASH', resolved, remote_host)
+        if not trash_ok:
+            print(f"    WARNING: failed to trash original {resolved}")
+
+    # Update in-memory cache for this version: filepath flips to new_path,
+    # extension flips, audio_languages updated to include the new language,
+    # filesize/duration left for next --update-cache to refresh exactly.
+    file_info['filepath'] = new_path
+    cur_al = list(file_info.get('audio_languages') or [])
+    if lang_2 in cur_al:
+        cur_al.remove(lang_2)
+    cur_al.insert(0, lang_2)
+    cur_al = [a for a in cur_al if a not in ('unknown', '')]
+    file_info['audio_languages'] = cur_al
+    fmd = file_info.setdefault('file_metadata', {})
+    fmd['file_type'] = REMUX_TARGET_CONTAINER
+
+    # If this version is the canonical obj['file'], flip that too
+    if obj.get('file') == src_path or obj.get('file') == resolved:
+        obj['file'] = new_path
+    # Refresh top-level audio_languages with set-union of all version langs
+    union = []
+    for fi in (obj.get('files') or {}).values():
+        for a in (fi.get('audio_languages') or []):
+            if a and a not in union:
+                union.append(a)
+    if union:
+        obj['audio_languages'] = union
+
+    # OBJ_BY_FILEPATH bookkeeping
+    if src_path in PLEX_Media.OBJ_BY_FILEPATH:
+        keys = PLEX_Media.OBJ_BY_FILEPATH.pop(src_path)
+        PLEX_Media.OBJ_BY_FILEPATH.setdefault(new_path, []).extend(keys)
+    if resolved != src_path and resolved in PLEX_Media.OBJ_BY_FILEPATH:
+        keys = PLEX_Media.OBJ_BY_FILEPATH.pop(resolved)
+        PLEX_Media.OBJ_BY_FILEPATH.setdefault(new_path, []).extend(keys)
+
+    print(f"    OK")
+    return True
+
 
 def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None):
     """Transfer disk map markers from one file to another (for duplicate resolution).
@@ -27435,6 +27704,17 @@ def execute_global_commands(args, cmd_args):
             cmd_plex2disk(target, dry_run=dry_run, force=force, replace=replace)
         sys.exit(0)
 
+    # Handle --remux command
+    remux_target = safe_getattr(cmd_args, 'remux', None)
+    if remux_target is not None:
+        target = remux_target if remux_target is not True else None
+        yes = safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False)
+        # --no-audio-language --remux filter (flag is on the global args)
+        no_audio_lang_only = (bool(safe_getattr(args, 'no_audio_language', False))
+                              or bool(safe_getattr(cmd_args, 'no_audio_language', False)))
+        cmd_remux(target, yes=yes, no_audio_language_only=no_audio_lang_only)
+        sys.exit(0)
+
     # Handle --map-from-filename alias (standalone, without --plex2disk)
     if safe_getattr(cmd_args, 'map_from_filename', None) is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
@@ -28658,6 +28938,7 @@ def main():
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -28738,6 +29019,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
+    GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter. Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
@@ -29177,6 +29459,15 @@ def main():
             remaining_args.insert(1, '--plex2disk')
         else:
             remaining_args.insert(0, '--plex2disk')
+
+    # Re-inject --remux into remaining_args
+    # Supports: --remux [TARGET], <TARGET> --remux, bare --remux
+    if safe_getattr(args, 'remux', None) is not None:
+        if args.remux is not True and args.remux:
+            remaining_args.insert(0, args.remux)
+            remaining_args.insert(1, '--remux')
+        else:
+            remaining_args.insert(0, '--remux')
 
     # Re-inject --disk2plex into remaining_args
     # Supports: --disk2plex [TARGET], <TARGET> --disk2plex, bare --disk2plex
