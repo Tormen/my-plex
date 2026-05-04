@@ -436,6 +436,8 @@ _my-plex() {
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--test[Run regression tests]'
         '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
+        '--config[Print current config (no arg) or use FILE (with arg)]::file:_files'
+        '--create-config[Print default config (no arg) or write to FILE (with arg)]::file:_files'
         '(-T --try --dry --dry-run -n)'{-T,--try,--dry,--dry-run,-n}'[Dry-run: show what would change, write nothing]'
         '--yes[Auto-yes to all prompts]'
         '--no[Auto-no to all prompts]'
@@ -1589,6 +1591,8 @@ PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_T
 HELP_COMPACT="""
 OPTIONS:
   -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)
+  --config [FILE]          Print current config (no arg) or use FILE (with arg)
+  --create-config [FILE]   Print default config to stdout (no arg) or write to FILE
   -O, --offline            Cache-only mode — skip SSH / PLEX DB / PLEX API access (see --help offline)
   -V, --verbose            Verbose output  (-VV for extra verbose)
   -D, --debug              Debug output    (-DD for deep debug)
@@ -19377,6 +19381,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("GENERAL:")
             print("  -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)")
+            print("  --config [FILE]          Print current config (no arg) or use FILE (with arg)")
+            print("  --create-config [FILE]   Print default config to stdout (no arg) or write to FILE")
             print("  -O, --offline            Cache-only mode — skip SSH / PLEX DB / PLEX API access (see --help offline)")
             print("  -H, --help COMMAND/OPTION  Full documentation for any command or option")
             print()
@@ -21015,9 +21021,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex -C FILE                   # Use specific config file")
-            print("       my-plex --config-file FILE         # Same")
-            print("       my-plex --config-file FILE --create  # Create default config at FILE")
+            print("Usage: my-plex --config                  # Print current (active) config")
+            print("       my-plex --config FILE              # Use specific config file")
+            print("       my-plex --config-file FILE         # Same as --config FILE")
+            print("       my-plex -C FILE                    # Same (short form)")
+            print("       my-plex --create-config            # Print default config to stdout")
+            print("       my-plex --create-config FILE       # Write default config to FILE (refuses overwrite)")
+            print("       my-plex --config-file FILE --create  # Legacy: same as --create-config FILE")
             print()
             print("Config file: Python syntax, loaded via exec().")
             print("Default location: ~/.my-plex/my-plex.conf")
@@ -21044,8 +21054,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
+            print("  my-plex --config                       # Print current active config")
             print("  my-plex -C ~/alt-config.conf           # Use alternate config")
-            print("  my-plex --config-file ~/.my-plex.conf --create  # Create default config")
+            print("  my-plex --create-config                # Print default config to stdout")
+            print("  my-plex --create-config ~/.my-plex.conf  # Write default config to file")
+            print("  my-plex --create-config > my.conf      # Pipe default config into a file")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -27842,7 +27855,8 @@ def main():
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
         '--media': 'media', '--scope': 'media', '--query': 'media',
-        '--config-file': 'config', '-C': 'config', '--offline': 'offline', '-O': 'offline',
+        '--config-file': 'config', '-C': 'config', '--config': 'config', '--create-config': 'config',
+        '--offline': 'offline', '-O': 'offline',
         '--verbose': 'verbose', '-V': 'verbose', '--debug': 'verbose', '-D': 'verbose',
         '--try': 'try', '--dry-run': 'try', '--dry': 'try', '-T': 'try', '-n': 'try',
         '--yes': 'yes', '--no': 'no', '-Y': 'yes', '-N': 'no',
@@ -28051,7 +28065,8 @@ def main():
             # Keep as CMD_OR_PLEXOBJECT if it looks like: flag, library, path, cache key, Plex ID
             # Flags whose next positional arg is NOT a filter token
             _VALUE_FLAGS = {'--type', '--info', '--format', '-f', '--help', '-H',
-                            '--config-file', '-C', '--source', '--rename',
+                            '--config-file', '-C', '--config', '--create-config',
+                            '--source', '--rename',
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
                             '--test', '--unittest', '--complete'}
@@ -28159,33 +28174,92 @@ def main():
                 if DBG: print(f" ~~~ Injected --list before filter expr '{_fa}': {sys.argv}", file=sys.stderr)
             break  # only check first positional arg
 
-    # Early argument parsing for --config-file option
+    # Early argument parsing for --config / --config-file / --create-config options
+    _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
+    _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)}). Use with --create to generate a new config file with default values.")
-    config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden option, documented in --config-file help
+    config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
+                               help="Without arg: print current config (path + contents) and exit. With FILE: use that config file (same as --config-file).")
+    config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
+                               help="Without arg: print default config to stdout. With FILE: write default config to FILE (refuses to overwrite).")
+    config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden legacy: use with --config-file
     config_args, _ = config_parser.parse_known_args()
 
-    # Handle --create option
-    if config_args.create:
-        if not config_args.config_file:
-            print("Error: --create requires --config-file <path> to be specified", file=sys.stderr)
+    # Resolve --config: with FILE behaves like --config-file; bare --config triggers print-current after load.
+    _print_current_config = False
+    if config_args.config is not None:
+        if config_args.config == _CFG_PRINT_SENTINEL:
+            _print_current_config = True
+        else:
+            if config_args.config_file and config_args.config_file != config_args.config:
+                print(f"Error: --config and --config-file both given with different paths", file=sys.stderr)
+                sys.exit(1)
+            config_args.config_file = config_args.config
+
+    # If user is asking for help, defer all early-exit config actions to the help dispatcher.
+    _asking_help = ('--help' in sys.argv) or ('-h' in sys.argv) or ('-H' in sys.argv)
+
+    # Handle --create-config (new flag, takes optional FILE)
+    if not _asking_help and config_args.create_config is not None:
+        config_content = generate_default_config()
+        if config_args.create_config == _CREATE_STDOUT_SENTINEL:
+            sys.stdout.write(config_content)
+            sys.exit(0)
+        target = os.path.expanduser(config_args.create_config)
+        if os.path.exists(target):
+            print(f"Error: refusing to overwrite existing file: {target}", file=sys.stderr)
             sys.exit(1)
-
-        # Create config file with defaults
         try:
-            # Generate config content from defaults
-            config_content = generate_default_config()
-
-            # Write to specified file
-            with open(config_args.config_file, 'w') as f:
+            with open(target, 'w') as f:
                 f.write(config_content)
-
-            print(f"Created config file: {config_args.config_file}")
+            print(f"Created config file: {target}")
             print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
             sys.exit(0)
         except Exception as e:
-            print(f"Error creating config file '{config_args.config_file}': {e}", file=sys.stderr)
+            print(f"Error creating config file '{target}': {e}", file=sys.stderr)
             sys.exit(1)
+
+    # Handle legacy --create option (requires --config-file)
+    if not _asking_help and config_args.create:
+        if not config_args.config_file:
+            print("Error: --create requires --config-file <path> to be specified (or use --create-config FILE)", file=sys.stderr)
+            sys.exit(1)
+        target = os.path.expanduser(config_args.config_file)
+        if os.path.exists(target):
+            print(f"Error: refusing to overwrite existing file: {target}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            config_content = generate_default_config()
+            with open(target, 'w') as f:
+                f.write(config_content)
+            print(f"Created config file: {target}")
+            print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error creating config file '{target}': {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Handle bare --config: print current (active) config file path + contents and exit
+    if _print_current_config and not _asking_help:
+        # Resolve which config file would be loaded
+        search = [os.path.expanduser(config_args.config_file)] if config_args.config_file else [os.path.expanduser(p) for p in CONFIG_FILE_PATHS]
+        active = None
+        for _p in search:
+            if os.path.exists(_p) and os.path.isfile(os.path.realpath(_p)):
+                active = _p
+                break
+        if not active:
+            print("# No config file found. Searched:", file=sys.stderr)
+            for _p in search:
+                print(f"#   {_p}", file=sys.stderr)
+            print("# Run --create-config FILE to create one (or --create-config alone to print defaults).", file=sys.stderr)
+            sys.exit(1)
+        real = os.path.realpath(active)
+        print(f"# Active config file: {active}" + (f"  ->  {real}" if real != active else ""))
+        with open(real, 'r') as f:
+            sys.stdout.write(f.read())
+        sys.exit(0)
 
     # Load configuration file
     loaded_config = load_config_file(config_args.config_file)
@@ -28680,7 +28754,7 @@ def main():
         # Check if this is a missing config file issue
         if not loaded_config and "PLEX_DB_PATH not configured" in validation_errors:
             print(f"\nNo configuration file found. Create one with:", file=sys.stderr)
-            print(f"  my-plex --create --config-file ~/.my-plex.conf", file=sys.stderr)
+            print(f"  my-plex --create-config ~/.my-plex.conf", file=sys.stderr)
         else:
             print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
         sys.exit(1)
