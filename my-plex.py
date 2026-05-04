@@ -22845,16 +22845,52 @@ def cmd_missing(series_ref, source_override=None):
 # --plex2disk / --disk2plex commands (aliases: --map-to-filename, --map-from-filename)
 # ---------------------------------------------------------------------------
 
+def _resolve_target_to_cache_keys_via_filepath(target):
+    """If target looks like a filepath, resolve it to a list of cache_keys
+    via PLEX_Media.OBJ_BY_FILEPATH (which maps filepath → list of keys,
+    since one file can be linked to multiple cache entries — multi-episode
+    files, multi-version Movies, etc).  Honours ALTERNATIVE_ROOTPATHS so
+    any equivalent path form (e.g. /Volumes/2/foo vs /j2/foo) finds the
+    same item.  Returns the list of cache_keys, or [] if no match.
+
+    Per `feedback_scope_filepath_universal`: every scope helper must
+    accept full filepaths.  Reuse this helper from any new scope
+    resolver — do NOT re-implement.
+    """
+    if not isinstance(target, str) or not target.startswith('/'):
+        return []
+    # Direct lookup first
+    keys = PLEX_Media.OBJ_BY_FILEPATH.get(target)
+    if keys:
+        return list(keys)
+    # Try every alternative path form
+    for alt in get_alternative_paths(target, including_path=False):
+        keys = PLEX_Media.OBJ_BY_FILEPATH.get(alt)
+        if keys:
+            return list(keys)
+    return []
+
+
 def _get_disk_map_scope(target):
     """Determine which cache entries to process for --map-to-filename / --map-from-filename.
 
     Args:
-        target: None (all), library name (string), or media identifier
+        target: None (all), library name, full filepath, or media identifier
 
     Returns:
         list of (cache_key, obj_dict) tuples
     """
     items = []
+    # Filepath scope — if the target is a path string, resolve via
+    # OBJ_BY_FILEPATH first so it's not shadowed by title-search.  Honours
+    # ALTERNATIVE_ROOTPATHS (per feedback_scope_filepath_universal).
+    fp_keys = _resolve_target_to_cache_keys_via_filepath(target)
+    if fp_keys:
+        for k in fp_keys:
+            o = PLEX_Media.OBJ_BY_ID.get(k)
+            if o and (o.get('file') or o.get('files')):
+                items.append((k, o))
+        return items
     if target is None:
         # All media items with files
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
