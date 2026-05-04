@@ -7628,6 +7628,198 @@ class TestDiskMap(unittest.TestCase):
                                      {'AUDIO_LANG': None}, 'movie_dir')
         self.assertEqual(out, {})
 
+    # --- v1.3: series_strategy='bottom_up' uniform promotion ---
+
+    def test_validate_dpm_series_strategy_bottom_up(self):
+        """series_strategy='bottom_up' validates."""
+        cfg = {'AUDIO_LANG': {'scope': ['series_dir', 'season_dir', 'file'],
+                              'series_strategy': 'bottom_up',
+                              'values': {'de': {'plex2disk': '[de]'}}}}
+        self.assertEqual(validate_disk_plex_map(cfg), [])
+
+    def test_validate_dpm_series_strategy_bad(self):
+        cfg = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'lol', 'values': {}}}
+        errs = validate_disk_plex_map(cfg)
+        self.assertTrue(any('series_strategy' in e for e in errs), errs)
+
+    def test_promoted_vars_helper(self):
+        cfg = {
+            'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'bottom_up', 'values': {}},
+            'WATCHED':    {'scope': 'file', 'values': {}},  # default flat
+        }
+        self.assertEqual(_disk_plex_map_promoted_vars(cfg), ['AUDIO_LANG'])
+
+    def _stub_series_for_promotion(self, series_key, seasons_episodes_audio):
+        """Build a stub PLEX_Media cache for promotion tests.
+
+        seasons_episodes_audio = {S_str: {E_str: [audio_languages_lists]}}
+            e.g. {'S01': {'E01': [['en']], 'E02': [['en']]},
+                  'S02': {'E01': [['en']], 'E02': [['de']]}}
+
+        Populates OBJ_BY_ID with Series/Season/Episode entries, OBJ_BY_SERIES,
+        OBJ_BY_SERIES_EPISODES.  Returns the main module so the test can
+        restore PLEX_Media after.
+        """
+        main_mod = sys.modules[finalize_disk_plex_map_uniform_fields.__module__]
+        # Snapshot
+        saved = (dict(main_mod.PLEX_Media.OBJ_BY_ID),
+                 dict(main_mod.PLEX_Media.OBJ_BY_SERIES),
+                 dict(main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES))
+        # Reset
+        main_mod.PLEX_Media.OBJ_BY_ID = {}
+        main_mod.PLEX_Media.OBJ_BY_SERIES = {}
+        main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES = {}
+        # Build
+        series_obj = {'type_str': 'Series', 'title': 'Test'}
+        main_mod.PLEX_Media.OBJ_BY_ID[series_key] = series_obj
+        seasons_map = {}
+        episodes_map = {}
+        for S_str, eps in seasons_episodes_audio.items():
+            season_key = f'Season:{series_key}:{S_str}'
+            main_mod.PLEX_Media.OBJ_BY_ID[season_key] = {
+                'type_str': 'Season', 'series_key': series_key, 'season': S_str,
+            }
+            seasons_map[S_str] = season_key
+            episodes_map[S_str] = {}
+            for E_str, audio_lists in eps.items():
+                episodes_map[S_str][E_str] = {}
+                for i, audio in enumerate(audio_lists):
+                    ep_key = f'Episode:{series_key}:{S_str}:{E_str}:{i}'
+                    # Real cache shape: episode has 'series_key' + 'season'
+                    # (the season number); season_key is derived via
+                    # OBJ_BY_SERIES[series_key][S_str].
+                    season_num = int(S_str.lstrip('S')) if S_str.lstrip('S').isdigit() else 0
+                    main_mod.PLEX_Media.OBJ_BY_ID[ep_key] = {
+                        'type_str': 'Episode',
+                        'series_key': series_key,
+                        'season': season_num,
+                        'audio_languages': audio,
+                    }
+                    episodes_map[S_str][E_str][f'v{i}'] = [ep_key]
+        main_mod.PLEX_Media.OBJ_BY_SERIES[series_key] = seasons_map
+        main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key] = episodes_map
+        return main_mod, saved
+
+    def _restore_series(self, main_mod, saved):
+        main_mod.PLEX_Media.OBJ_BY_ID = saved[0]
+        main_mod.PLEX_Media.OBJ_BY_SERIES = saved[1]
+        main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES = saved[2]
+
+    def test_finalize_uniform_series_all_en(self):
+        """Series with every episode 'en' → series uniform='en', seasons uniform='en'."""
+        main_mod, saved = self._stub_series_for_promotion('Series:1', {
+            'S01': {'E01': [['en']], 'E02': [['en']]},
+            'S02': {'E01': [['en']]},
+        })
+        try:
+            cfg = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'bottom_up',
+                                  'values': {'en': {'plex2disk': '[en]'}}}}
+            saved_dpm = main_mod.DISK_PLEX_MAP
+            main_mod.DISK_PLEX_MAP = cfg
+            try:
+                finalize_disk_plex_map_uniform_fields(cfg)
+            finally:
+                main_mod.DISK_PLEX_MAP = saved_dpm
+            self.assertEqual(main_mod.PLEX_Media.OBJ_BY_ID['Series:1'].get('AUDIO_LANG_uniform'), 'en')
+            self.assertEqual(main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:1:S01'].get('AUDIO_LANG_uniform'), 'en')
+            self.assertEqual(main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:1:S02'].get('AUDIO_LANG_uniform'), 'en')
+        finally:
+            self._restore_series(main_mod, saved)
+
+    def test_finalize_uniform_mixed_seasons(self):
+        """Series with S01 all en, S02 mixed → series uniform=None, S01 uniform='en', S02 uniform=None."""
+        main_mod, saved = self._stub_series_for_promotion('Series:2', {
+            'S01': {'E01': [['en']], 'E02': [['en']]},
+            'S02': {'E01': [['en']], 'E02': [['de']]},
+        })
+        try:
+            cfg = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'bottom_up',
+                                  'values': {'en': {'plex2disk': '[en]'}}}}
+            saved_dpm = main_mod.DISK_PLEX_MAP
+            main_mod.DISK_PLEX_MAP = cfg
+            try:
+                finalize_disk_plex_map_uniform_fields(cfg)
+            finally:
+                main_mod.DISK_PLEX_MAP = saved_dpm
+            self.assertIsNone(main_mod.PLEX_Media.OBJ_BY_ID['Series:2'].get('AUDIO_LANG_uniform'))
+            self.assertEqual(main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:2:S01'].get('AUDIO_LANG_uniform'), 'en')
+            self.assertIsNone(main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:2:S02'].get('AUDIO_LANG_uniform'))
+        finally:
+            self._restore_series(main_mod, saved)
+
+    def test_finalize_uniform_unknown_blocks(self):
+        """A single 'unknown' (empty audio_languages) blocks uniformity."""
+        main_mod, saved = self._stub_series_for_promotion('Series:3', {
+            'S01': {'E01': [['en']], 'E02': [[]]},  # E02 = unknown
+        })
+        try:
+            cfg = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'bottom_up',
+                                  'values': {'en': {'plex2disk': '[en]'}}}}
+            saved_dpm = main_mod.DISK_PLEX_MAP
+            main_mod.DISK_PLEX_MAP = cfg
+            try:
+                finalize_disk_plex_map_uniform_fields(cfg)
+            finally:
+                main_mod.DISK_PLEX_MAP = saved_dpm
+            self.assertIsNone(main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:3:S01'].get('AUDIO_LANG_uniform'))
+            self.assertIsNone(main_mod.PLEX_Media.OBJ_BY_ID['Series:3'].get('AUDIO_LANG_uniform'))
+        finally:
+            self._restore_series(main_mod, saved)
+
+    def test_resolve_promotion_episode_suppressed(self):
+        """Episode resolves AUDIO_LANG='unknown' (mute) when parent Series uniform."""
+        main_mod, saved = self._stub_series_for_promotion('Series:4', {
+            'S01': {'E01': [['en']], 'E02': [['en']]},
+        })
+        try:
+            cfg = {'AUDIO_LANG': {'scope': ['series_dir','season_dir','file'],
+                                  'series_strategy': 'bottom_up',
+                                  'values': {'en': {'plex2disk': '[en]'}}}}
+            saved_dpm = main_mod.DISK_PLEX_MAP
+            main_mod.DISK_PLEX_MAP = cfg
+            try:
+                finalize_disk_plex_map_uniform_fields(cfg)
+                ep = main_mod.PLEX_Media.OBJ_BY_ID['Episode:Series:4:S01:E01:0']
+                ep_vars = resolve_disk_map_variables(ep, 'Episode:Series:4:S01:E01:0')
+                # Series uniform → episode marker muted
+                self.assertEqual(ep_vars['AUDIO_LANG'], 'unknown')
+
+                season = main_mod.PLEX_Media.OBJ_BY_ID['Season:Series:4:S01']
+                season_vars = resolve_disk_map_variables(season, 'Season:Series:4:S01')
+                # Series uniform → season marker also muted
+                self.assertEqual(season_vars['AUDIO_LANG'], 'unknown')
+
+                series = main_mod.PLEX_Media.OBJ_BY_ID['Series:4']
+                series_vars = resolve_disk_map_variables(series, 'Series:4')
+                self.assertEqual(series_vars['AUDIO_LANG'], 'en')
+            finally:
+                main_mod.DISK_PLEX_MAP = saved_dpm
+        finally:
+            self._restore_series(main_mod, saved)
+
+    def test_resolve_promotion_falls_through_when_mixed(self):
+        """When neither series nor season uniform, episode keeps its own AUDIO_LANG."""
+        main_mod, saved = self._stub_series_for_promotion('Series:5', {
+            'S01': {'E01': [['en']], 'E02': [['de']]},
+        })
+        try:
+            cfg = {'AUDIO_LANG': {'scope': ['series_dir','season_dir','file'],
+                                  'series_strategy': 'bottom_up',
+                                  'values': {'en': {'plex2disk': '[en]'},
+                                             'de': {'plex2disk': '[de]'}}}}
+            saved_dpm = main_mod.DISK_PLEX_MAP
+            main_mod.DISK_PLEX_MAP = cfg
+            try:
+                finalize_disk_plex_map_uniform_fields(cfg)
+                ep_en = main_mod.PLEX_Media.OBJ_BY_ID['Episode:Series:5:S01:E01:0']
+                ep_de = main_mod.PLEX_Media.OBJ_BY_ID['Episode:Series:5:S01:E02:0']
+                self.assertEqual(resolve_disk_map_variables(ep_en, 'k')['AUDIO_LANG'], 'en')
+                self.assertEqual(resolve_disk_map_variables(ep_de, 'k')['AUDIO_LANG'], 'de')
+            finally:
+                main_mod.DISK_PLEX_MAP = saved_dpm
+        finally:
+            self._restore_series(main_mod, saved)
+
     # --- v1.2.1: sibling rename (.nfo / .srt / etc.) ---
 
     def test_rename_file_siblings_basic(self):
