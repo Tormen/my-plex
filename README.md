@@ -105,8 +105,10 @@ git clone https://github.com/Tormen/my-plex.git
 ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex   # or anywhere in your PATH
 
 # Configure
-my-plex --config-file ~/.my-plex.conf --create
+my-plex --create-config ~/.my-plex.conf      # Write default config to file
+# Or: my-plex --create-config > ~/.my-plex.conf   # Same via stdout
 # Edit ~/.my-plex.conf with your Plex DB path and SSH host
+# Inspect the active config any time:  my-plex --config
 ```
 
 That's it. On first run, the `my-plex` shell wrapper automatically:
