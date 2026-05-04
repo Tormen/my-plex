@@ -2424,7 +2424,7 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        '_extract_legacy_vu_marker', '_migrate_legacy_vu_sidecar',
                        '_check_all_children_watched', '_update_cache_child_paths',
                        'transfer_disk_map_markers_dir',
-                       'cmd_plex2disk', 'cmd_disk2plex',
+                       'cmd_plex2disk', 'cmd_disk2plex', 'rename_file_siblings',
                        'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
@@ -4363,6 +4363,60 @@ def rename_file(src_path, new_filename, remote_host=None):
         Tuple (success: bool, new_path: str) - new_path is the full path after rename
     """
     return my_plex_file_operation('RENAME', src_path, remote_host, new_filename=new_filename)
+
+
+def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, log_prefix=''):
+    """Rename sibling files alongside a renamed media file.
+
+    Sibling = any file in the same directory whose name starts with the old
+    file's basename-without-extension followed by a '.' (e.g. .nfo, .srt,
+    .en.srt, .nfo.bak).  Each is renamed so its prefix matches the new
+    file's basename-without-extension.
+
+    Args:
+        old_path:    Full path to the original file (already renamed on disk)
+        new_path:    Full path to the renamed file
+        remote_host: SSH host for remote operations, or None for local
+        dry_run:     If True, only print what would be done
+        log_prefix:  Prefix to prepend to log lines (e.g. 'movies.en|Movie:11411| ')
+
+    Returns:
+        tuple: (renamed_count, error_count)
+    """
+    base_no_ext = os.path.splitext(old_path)[0]
+    new_base_no_ext = os.path.splitext(new_path)[0]
+    if base_no_ext == new_base_no_ext:
+        return (0, 0)
+    current_dir = os.path.dirname(old_path)
+    ok, listing = my_plex_file_operation('LIST_DIR', current_dir, remote_host, maxdepth=1)
+    if not ok or not listing:
+        return (0, 0)
+    renamed = 0
+    errors = 0
+    for sib in listing:
+        if sib == old_path or sib == new_path:
+            continue
+        if not sib.startswith(base_no_ext + '.'):
+            continue
+        sib_suffix = sib[len(base_no_ext):]
+        sib_new_basename = os.path.basename(new_base_no_ext + sib_suffix)
+        if dry_run:
+            print(f"{log_prefix}Sibling: {os.path.basename(sib)} → {sib_new_basename}")
+            renamed += 1
+            continue
+        sib_ok, _ = rename_file(sib, sib_new_basename, remote_host=remote_host)
+        if sib_ok:
+            renamed += 1
+            sib_actual = os.path.join(current_dir, sib_new_basename)
+            if sib in PLEX_Media.OBJ_BY_FILEPATH:
+                sib_key = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
+                PLEX_Media.OBJ_BY_FILEPATH[sib_actual] = sib_key
+            print(f"{log_prefix}Sibling renamed: {os.path.basename(sib)} → {sib_new_basename}")
+        else:
+            errors += 1
+            print(f"{log_prefix}ERROR renaming sibling: {sib}")
+    return (renamed, errors)
+
 
 ###########################################################################################
 #### DISK MAP — configurable metadata-to-disk mapping (Python expressions)
@@ -22886,6 +22940,10 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
             print(f"{prefix}Rename: {path} → {new_name}")
             renamed_count += 1
             renames[path] = new_path
+            # Preview sibling renames too (file-scope only — dirs have no siblings).
+            if not is_dir:
+                rename_file_siblings(path, new_path, PLEX_DB_REMOTE_HOST,
+                                     dry_run=True, log_prefix=prefix)
         else:
             success, _ = rename_file(path, new_name, PLEX_DB_REMOTE_HOST)
             if success:
@@ -22897,6 +22955,8 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
                     _update_cache_child_paths(path, new_path)
                 else:
                     _update_cache_filepath(obj, path, new_path)
+                    rename_file_siblings(path, new_path, PLEX_DB_REMOTE_HOST,
+                                         dry_run=False, log_prefix=prefix)
                 if VRB:
                     print(f"{prefix}Rename: {path} → {new_name}")
             else:
@@ -23142,12 +23202,18 @@ def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
             print(f"  {name}")
             print(f"    → {clean}")
             renamed += 1
+            if not is_dir:
+                rename_file_siblings(path, new_path, PLEX_DB_REMOTE_HOST,
+                                     dry_run=True, log_prefix='    ')
         else:
             success, _ = rename_file(path, clean, PLEX_DB_REMOTE_HOST)
             if success:
                 renamed += 1
                 if is_dir:
                     _update_sidecar_child_paths(sidecar, path, new_path)
+                else:
+                    rename_file_siblings(path, new_path, PLEX_DB_REMOTE_HOST,
+                                         dry_run=False, log_prefix='  ')
                 if path in sidecar:
                     del sidecar[path]
                 if VRB:
