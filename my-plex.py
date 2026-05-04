@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.2"
+SCRIPT_VERSION = "v1.3"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -2425,6 +2425,8 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        '_check_all_children_watched', '_update_cache_child_paths',
                        'transfer_disk_map_markers_dir',
                        'cmd_plex2disk', 'cmd_disk2plex', 'rename_file_siblings',
+                       'finalize_disk_plex_map_uniform_fields',
+                       '_disk_plex_map_promoted_vars',
                        'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
@@ -4461,6 +4463,7 @@ DISK_MAP_VARIABLES = {
 _DISK_PLEX_SCOPES = ('file', 'movie_dir', 'series_dir', 'season_dir')
 _DISK_PLEX_DIRECTIONS = ('plex2disk', 'disk2plex')
 _DISK_PLEX_MERGE_POLICIES = ('newer', 'plex', 'disk', 'ignore', 'warn', 'fail')
+_DISK_PLEX_SERIES_STRATEGIES = ('flat', 'bottom_up')
 
 
 def _normalise_disk_plex_scope(scope):
@@ -4504,6 +4507,21 @@ def validate_disk_plex_map(cfg):
         if merge not in _DISK_PLEX_MERGE_POLICIES:
             errors.append(f"DISK_PLEX_MAP[{plex_var!r}].merge = {merge!r}: "
                           f"must be one of {_DISK_PLEX_MERGE_POLICIES}.")
+
+        # series_strategy: 'flat' (default) or 'bottom_up'.  Controls how
+        # this plex_var's value is computed for the Series/Season/Episode
+        # hierarchy.  'flat' renders independently at every configured scope.
+        # 'bottom_up' computes the uniform value at --update-cache time and
+        # promotes the marker to the highest level whose descendants all
+        # share the same value (Series wins over Season; Season wins over
+        # individual Episode files).  Any non-uniform descendant — including
+        # a single 'unknown' — blocks promotion at that level and falls
+        # through to per-child markers below it.
+        ssh_strategy = var_spec.get('series_strategy', 'flat')
+        if ssh_strategy not in _DISK_PLEX_SERIES_STRATEGIES:
+            errors.append(f"DISK_PLEX_MAP[{plex_var!r}].series_strategy = "
+                          f"{ssh_strategy!r}: must be one of "
+                          f"{_DISK_PLEX_SERIES_STRATEGIES}.")
 
         values = var_spec.get('values', {})
         if not isinstance(values, dict):
@@ -4574,6 +4592,91 @@ def _actor_name_parts(actors, index):
         return (parts[0], '')
     return (parts[0], parts[-1])
 
+
+# ============================================================================
+# series_strategy='bottom_up' — uniform-value detection across the
+# Series/Season/Episode hierarchy.  Run at --update-cache finalize time so
+# resolve_disk_map_variables() can read the result without recomputing.
+#
+# For each plex_var with series_strategy='bottom_up' in DISK_PLEX_MAP:
+#   - Per Episode: raw plex_var value (no suppression).
+#   - Per Season:  uniform = that value if every episode of the season
+#                  resolves to it AND none is 'unknown'/'' ; else None.
+#                  Stored on the Season cache entry as
+#                  obj['<plex_var>_uniform'].
+#   - Per Series:  uniform = that value if every season has the same
+#                  non-None uniform; else None.  Stored on the Series
+#                  cache entry the same way.
+# ============================================================================
+_PROMOTION_BLOCKS = ('', 'unknown', None)
+
+def _disk_plex_map_promoted_vars(disk_plex_map):
+    """Return list of plex_var names whose series_strategy is 'bottom_up'."""
+    return [p for p, spec in (disk_plex_map or {}).items()
+            if isinstance(spec, dict) and spec.get('series_strategy', 'flat') == 'bottom_up']
+
+
+def finalize_disk_plex_map_uniform_fields(disk_plex_map):
+    """Compute and store '<plex_var>_uniform' on every Series and Season cache
+    entry for each plex_var with series_strategy='bottom_up'.
+
+    Idempotent — safe to call repeatedly.  Reads OBJ_BY_SERIES,
+    OBJ_BY_SERIES_EPISODES, OBJ_BY_ID; mutates Series and Season entries
+    in OBJ_BY_ID."""
+    promoted = _disk_plex_map_promoted_vars(disk_plex_map)
+    if not promoted:
+        return
+
+    for series_key, series_seasons in PLEX_Media.OBJ_BY_SERIES.items():
+        # series_seasons = {S_str: season_cache_key}
+        series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+        if not series_obj:
+            continue
+        # season_uniform_per_var[plex_var][season_key] = uniform_or_None
+        season_uniform_per_var = {p: {} for p in promoted}
+
+        ep_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
+        for S_str, season_key in series_seasons.items():
+            season_obj = PLEX_Media.OBJ_BY_ID.get(season_key)
+            if not season_obj:
+                continue
+            # Walk every episode in this season, collect per-var values.
+            per_var_values = {p: set() for p in promoted}
+            ep_count = 0
+            for E_str, versions in (ep_data.get(S_str) or {}).items():
+                for version, ep_keys in versions.items():
+                    for ep_key in ep_keys:
+                        ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                        if not ep_obj:
+                            continue
+                        ep_count += 1
+                        # Resolve raw episode plex_vars (no suppression — pass
+                        # _bottom_up_pass=True so resolve doesn't try to
+                        # suppress based on partially-computed uniforms).
+                        ep_vars = resolve_disk_map_variables(ep_obj, ep_key,
+                                                             _bottom_up_pass=True)
+                        for p in promoted:
+                            per_var_values[p].add(ep_vars.get(p))
+            for p in promoted:
+                vals = per_var_values[p]
+                # Uniform iff exactly one value AND not in {'', 'unknown', None}
+                if ep_count > 0 and len(vals) == 1:
+                    only = next(iter(vals))
+                    uniform = only if only not in _PROMOTION_BLOCKS else None
+                else:
+                    uniform = None
+                season_obj[f'{p}_uniform'] = uniform
+                season_uniform_per_var[p][season_key] = uniform
+
+        # Series uniform: all season uniforms must agree and be non-None.
+        for p in promoted:
+            uniforms = list(season_uniform_per_var[p].values())
+            if uniforms and all(u is not None for u in uniforms) and len(set(uniforms)) == 1:
+                series_obj[f'{p}_uniform'] = uniforms[0]
+            else:
+                series_obj[f'{p}_uniform'] = None
+
+
 def _check_all_children_watched(obj, type_str):
     """Check if all child episodes of a Show or Season are watched.
 
@@ -4639,12 +4742,17 @@ def _check_all_children_watched(obj, type_str):
         return False, None
     return all_watched, max_last_viewed
 
-def resolve_disk_map_variables(obj, cache_key=None):
+def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     """Build variable dict from an OBJ_BY_ID cache entry for disk map substitution.
 
     Args:
         obj: Cache entry dict from PLEX_Media.OBJ_BY_ID
         cache_key: Optional cache key (unused, for future use)
+        _bottom_up_pass: Internal flag set by finalize_disk_plex_map_uniform_fields()
+                        when computing per-episode raw values.  Suppression
+                        of child markers based on parent uniformity is
+                        SKIPPED in this mode (otherwise the finalize pass
+                        would read uniforms it hasn't computed yet).
 
     Returns:
         dict: Maps variable names to their resolved values (mixed types for eval() engine).
@@ -4773,7 +4881,65 @@ def resolve_disk_map_variables(obj, cache_key=None):
     collections = obj.get('collections', []) or []
     var['COLLECTIONS'] = ', '.join(collections) if collections else ''
 
+    # series_strategy='bottom_up' — promote markers to the highest uniform
+    # level of the Series/Season/Episode hierarchy.  Skipped during the
+    # finalize pass that computes the uniform fields themselves.
+    if not _bottom_up_pass:
+        _apply_bottom_up_promotion(obj, type_str, var)
+
     return var
+
+
+def _apply_bottom_up_promotion(obj, type_str, var):
+    """For each plex_var with series_strategy='bottom_up' in DISK_PLEX_MAP,
+    rewrite var[plex_var] in line with the uniform fields stored on the
+    Series and Season cache entries.
+
+      - Series: var[plex_var] = its own '<plex_var>_uniform' (or 'unknown'
+        when None) — that's the value rendered on the series_dir.
+      - Season: 'unknown' when the parent Series is uniform (parent already
+        covers it); else its own uniform; else 'unknown'.
+      - Episode: 'unknown' when the parent Series OR Season is uniform
+        (parent covers it); else leaves the per-episode AUDIO_LANG alone.
+      - Movie: untouched (no hierarchy)."""
+    promoted = _disk_plex_map_promoted_vars(globals().get('DISK_PLEX_MAP', {}))
+    if not promoted or type_str not in ('Series', 'Season', 'Episode'):
+        return
+
+    if type_str == 'Series':
+        for p in promoted:
+            uniform = obj.get(f'{p}_uniform')
+            var[p] = uniform if uniform else 'unknown'
+        return
+
+    series_key = obj.get('series_key', '')
+    series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {}
+
+    if type_str == 'Season':
+        for p in promoted:
+            if series_obj.get(f'{p}_uniform') is not None:
+                var[p] = 'unknown'   # parent series uniform → mute
+                continue
+            uniform = obj.get(f'{p}_uniform')
+            var[p] = uniform if uniform else 'unknown'
+        return
+
+    # Episode — derive season_key from series_key + season number.
+    # Episodes don't store season_key directly; OBJ_BY_SERIES maps
+    # series_key → {'S<NN>': season_cache_key}.
+    season_obj = {}
+    season_raw = str(obj.get('season', ''))
+    season_match = re.search(r'(\d+)', season_raw)
+    if series_key and season_match:
+        s_str = f"S{int(season_match.group(1)):02d}"
+        season_key = (PLEX_Media.OBJ_BY_SERIES.get(series_key) or {}).get(s_str)
+        if season_key:
+            season_obj = PLEX_Media.OBJ_BY_ID.get(season_key, {}) or {}
+    for p in promoted:
+        if (series_obj.get(f'{p}_uniform') is not None
+                or season_obj.get(f'{p}_uniform') is not None):
+            var[p] = 'unknown'   # parent uniform → episode marker muted
+
 
 def _dpm_entry_active(entry, plex_vars):
     """Evaluate the entry's optional 'when' predicate.  True = entry applies."""
@@ -13438,6 +13604,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Update progress for cache rebuild
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
+
+        # DISK_PLEX_MAP series_strategy='bottom_up' — compute & store
+        # '<plex_var>_uniform' on every Series and Season cache entry.
+        # Cheap (one preferred-aware resolve per episode); enables the
+        # marker-promotion logic in --plex2disk without per-call recompute.
+        finalize_disk_plex_map_uniform_fields(globals().get('DISK_PLEX_MAP', {}))
 
         # Run all problem checks (pure cache walks, ~1s) and store counts in cache
         # so --problems can show cached counts and --update-cache summary can report all issues
@@ -23051,6 +23223,10 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
               "  Configure DISK_PLEX_MAP in ~/.my-plex.conf "
               "(see `my-plex --help plex2disk`).")
 
+    # series_strategy='bottom_up' — lazy compute of uniform fields if missing
+    # from cache (e.g. user upgraded to v1.3 without running --update-cache).
+    _ensure_disk_plex_map_uniforms_computed()
+
     items = _get_disk_map_scope(target)
     if not items:
         print("No media items found for the given target.")
@@ -23454,6 +23630,31 @@ _DISK2PLEX_PUSH_HANDLERS = {
 }
 
 
+def _ensure_disk_plex_map_uniforms_computed():
+    """If any DISK_PLEX_MAP plex_var has series_strategy='bottom_up' AND any
+    Series cache entry is missing the corresponding '<plex_var>_uniform' key,
+    run finalize_disk_plex_map_uniform_fields() once to backfill.  Idempotent
+    and cheap when uniforms are already present."""
+    promoted = _disk_plex_map_promoted_vars(DISK_PLEX_MAP)
+    if not promoted:
+        return
+    needs_compute = False
+    for k, o in PLEX_Media.OBJ_BY_ID.items():
+        if not k.startswith('Series:'):
+            continue
+        if any(f'{p}_uniform' not in o for p in promoted):
+            needs_compute = True
+            break
+    if needs_compute:
+        if VRB:
+            print(f"~~ Computing series_strategy=bottom_up uniform fields "
+                  f"for {len(promoted)} plex_var(s): {promoted}")
+        finalize_disk_plex_map_uniform_fields(DISK_PLEX_MAP)
+        # Persist so the next invocation skips the recompute.
+        if not READ_ONLY_MODE:
+            update_and_save_cache(CACHE)
+
+
 def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
     """v1.2 --disk2plex: push disk markers back to Plex via DISK_PLEX_MAP.
 
@@ -23480,6 +23681,8 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
         err(2, "DISK_PLEX_MAP is empty — nothing to push.\n"
               "  Configure DISK_PLEX_MAP in ~/.my-plex.conf "
               "(see `my-plex --help disk2plex`).")
+
+    _ensure_disk_plex_map_uniforms_computed()
 
     sidecar = load_disk_map_sidecar() or {}
     items = _get_disk_map_scope(target)
