@@ -19868,6 +19868,8 @@ def main_print_help(args, remaining_args, main_parser):
             print('  my-plex "Tagesschau"       title search (substring)')
             print("  my-plex KEY:Movie:123      exact cache key")
             print("  my-plex ID:456             exact Plex rating key")
+            print("  my-plex /Volumes/2/...mkv  full filepath  (any form: /Volumes/2/...")
+            print("                              or /j2/... — ALTERNATIVE_ROOTPATHS aware)")
             print()
             print("SELECTING MULTIPLE ITEMS (filter tokens — combine freely, all AND):")
             print()
