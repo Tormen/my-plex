@@ -23582,19 +23582,19 @@ def _push_audio_lang_dpm(obj, change, dry_run):
     filepath = obj.get('file', '') or ''
     if not filepath:
         print(f"    SKIP: no filepath for {title}")
-        return False
+        return None
     tool_name, container = _detect_container_tool(filepath)
     if not tool_name:
         print(f"    SKIP: unsupported container '{container}' for {title}")
-        return False
+        return None
     remote_host, exists, resolved = determine_remote_host(filepath)
     if not exists:
         print(f"    SKIP: file not found {filepath} for {title}")
-        return False
+        return None
     lang_2 = str(change.get('disk_val') or '').lower()[:2]
     if not lang_2 or lang_2 == 'unknown':
         print(f"    SKIP: invalid AUDIO_LANG value {change.get('disk_val')!r} for {title}")
-        return False
+        return None
     lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
     if dry_run:
         print(f"    Would set audio language to '{lang_3}': {title}  ({tool_name})")
@@ -23822,7 +23822,11 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
                 print(f"  ERROR pushing {plex_var} for {cache_key}: {ex}")
                 errors += 1
                 continue
-            if ok:
+            if ok is None:
+                # Handler-side legitimate skip (e.g. unsupported container,
+                # missing file).  Already logged as 'SKIP: …' by the handler.
+                skipped += 1
+            elif ok:
                 pushed += 1
                 # Record the source marker in sidecar so future --plex2disk
                 # --replace calls can canonicalise.
