@@ -414,7 +414,7 @@ _my-plex() {
         '--broken[Show only potentially truncated/broken files]'
         '--excess-versions[List entries with too many file versions]:limit:'
         '--problems[Run all problem detection checks (add -V for details)]'
-        '--reencode[List media files with unreasonably high bitrate (reencode candidates)]'
+        '--reencode[List media files that need reencode: high bitrate, or outdated container with codecs that cannot stream-copy]'
         '--mark[Detect high-bitrate candidates and write on-disk labels (use with --reencode; respects --try)]'
         '--detect[Deprecated alias for --reencode (candidates are now always listed)]'
         '--force[With --reencode --mark: also remove labels from items below threshold]'
@@ -15621,9 +15621,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 filesize = file_info.get('filesize') or 0
                 if not filesize:
                     continue
-                bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
-                if bitrate_mbps < threshold:
+                # v1.4: classifier-driven gating — listed only when the
+                # action is 'reencode' (high_bitrate or
+                # needs_reencode_container).  Outdated-container files
+                # with safe codecs go to --remux instead, NOT here
+                # (per feedback_reencode_minimal).
+                _cls = _classify_migration_action(obj, version=version)
+                if _cls['action'] != 'reencode':
                     continue
+                bitrate_mbps = _cls['bitrate_mbps'] or 0
+                reasons_str = ','.join(_cls['reasons']) or 'high_bitrate'
                 filepath = file_info.get('filepath', '')
                 if REENCODE_EXCLUDE_FILEPATH_CONTAINS and any(s in filepath for s in REENCODE_EXCLUDE_FILEPATH_CONTAINS):
                     continue
@@ -15635,7 +15642,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     movie_dir = os.path.dirname(filepath) if filepath else ''
                     labeled = (labeltext in parse_ondisk_labels(os.path.basename(filepath)) or
                                labeltext in parse_ondisk_labels(os.path.basename(movie_dir)))
-                    flagged_movies.append((bitrate_mbps, filesize, duration_ms, lib, title, year, key, filepath, version, labeled))
+                    flagged_movies.append((bitrate_mbps, filesize, duration_ms, lib, title, year, key, filepath, version, labeled, reasons_str))
                 else:
                     series_key = obj.get('series_key', '')
                     if not series_key:
@@ -15648,7 +15655,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         series_meta[series_key] = (obj.get('series', series_key), lib)
                     # Store filepath for level-specific labeled checks at render time
                     flagged_ep_by_series[series_key].setdefault(s_str, {}).setdefault(e_str, []).append(
-                        (bitrate_mbps, filesize, duration_ms, key, ep_title, filepath, version, None)
+                        (bitrate_mbps, filesize, duration_ms, key, ep_title, filepath, version, None, reasons_str)
                     )
 
         total_file_count = len(flagged_movies) + sum(
@@ -15701,11 +15708,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # --- MOVIES ---
         if flagged_movies:
             flagged_movies.sort(key=lambda x: (-x[0], x[3].lower(), x[4].lower()))
-            print(f"\n  MOVIES  ({len(flagged_movies)} file(s) above {threshold} Mbps)")
+            print(f"\n  MOVIES  ({len(flagged_movies)} file(s) — high bitrate ≥{threshold} Mbps OR outdated container with unsafe codecs)")
             print(hdr)
             print(sep)
-            for br, sz, dur_ms, lib, title, year, cache_key, filepath, version, labeled in flagged_movies:
-                _row(cache_key, _fmt_item(br, sz, dur_ms), labeled, filepath)
+            for br, sz, dur_ms, lib, title, year, cache_key, filepath, version, labeled, reasons_str in flagged_movies:
+                # Append REASON to details when it's not the implicit
+                # high_bitrate-only case (so the simple bitrate column
+                # stays readable for the common path).
+                _details = _fmt_item(br, sz, dur_ms)
+                if reasons_str and reasons_str != 'high_bitrate':
+                    _details = f"{_details} [{reasons_str}]"
+                _row(cache_key, _details, labeled, filepath)
 
         # --- SERIES: rollup logic ---
         if flagged_ep_by_series:
@@ -15715,7 +15728,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 for season in s.values()
                 for eps in season.values()
             )
-            print(f"\n  SERIES  ({total_ep_files} episode file(s) across {len(flagged_ep_by_series)} series above {threshold} Mbps)")
+            print(f"\n  SERIES  ({total_ep_files} episode file(s) across {len(flagged_ep_by_series)} series — high bitrate ≥{threshold} Mbps OR outdated container with unsafe codecs)")
             print(hdr)
             print(sep)
 
@@ -15763,10 +15776,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 avg_dur  = sum(i[2] for i in items) / len(items)
                                 ep_key   = items[0][3]
                                 ep_fp    = items[0][5]
+                                ep_reasons = items[0][8] if len(items[0]) > 8 else ''
                                 labeled  = _labeled_at_file(ep_fp)   # labeled only if EPISODE FILE has the label
-                                _row(ep_key, _fmt_item(avg_br, avg_sz, avg_dur), labeled, ep_fp, indent=1)
+                                _details = _fmt_item(avg_br, avg_sz, avg_dur)
+                                if ep_reasons and ep_reasons != 'high_bitrate':
+                                    _details = f"{_details} [{ep_reasons}]"
+                                _row(ep_key, _details, labeled, ep_fp, indent=1)
 
-        print(f"\n  Total: {total_file_count} file(s) above {threshold} Mbps")
+        print(f"\n  Total: {total_file_count} file(s) needing reencode (bitrate ≥{threshold} Mbps or container/codec migration)")
         return total_file_count
 
     # Regex to extract S0xE0x from a filename (case-insensitive, any padding)
@@ -20288,8 +20305,25 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex --reencode [LIBRARY]")
             print("       my-plex --reencode [LIBRARY] --mark [--try] [--force]")
             print()
-            print("Lists media items with average bitrate above the configured threshold.")
-            print("Episodes roll up to season/series level when all items in a group exceed it.")
+            print("Lists media items that NEED REENCODE.  Two reasons trigger inclusion:")
+            print()
+            print("  1. high_bitrate            avg bitrate above REENCODE_THRESHOLD")
+            print("                              (default 2.5 Mbps)")
+            print("  2. needs_reencode_container outdated container (e.g. .avi/.wmv/.mpg)")
+            print("                              AND codecs that cannot stream-copy into")
+            print("                              the target container (so a real re-encode")
+            print("                              is needed, not just a remux).")
+            print()
+            print("Files in outdated containers WITH safe stream-copy codecs do NOT appear")
+            print("here — they are remux candidates and belong under `my-plex --remux`.")
+            print("This keeps the --reencode list MINIMAL: only items that genuinely need")
+            print("a re-encode (which is destructive and CPU-expensive).")
+            print()
+            print("Episodes roll up to season/series level when all items in a group qualify.")
+            print()
+            print("REASON column: shown as `[needs_reencode_container]` next to the bitrate")
+            print("info when an item is flagged for the container reason; pure-bitrate")
+            print("flags omit the column for back-compat readability.")
             print()
             print("ROLLUP DISPLAY:")
             print("  Individual episodes   → shown per episode")
@@ -28677,7 +28711,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, default=None, help=f"List high-bitrate reencode candidates (≥ {REENCODE_THRESHOLD_MBPS} Mbps). Use --mark to write on-disk labels.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
