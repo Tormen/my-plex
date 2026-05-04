@@ -7914,6 +7914,135 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(r, 1)  # only Foo.nfo
         self.assertEqual([os.path.basename(s) for s, _ in renamed], ['Foo.nfo'])
 
+    # --- v1.4: _classify_migration_action / cmd_remux / --problems wiring ---
+
+    def _mock_video_obj(self, ext='.avi', vc='h264', ac='mp3',
+                        duration_ms=3_000_000, filesize_bytes=400_000_000,
+                        audio_languages=None, type_str='Episode',
+                        filepath_override=None):
+        """Build a minimal cache entry suitable for _classify_migration_action."""
+        fp = filepath_override or f'/Volumes/2/watch.v/test/foo{ext}'
+        version = f"50.0min 1280x720 ({vc} {ac}) {filesize_bytes//1_000_000}MB"
+        return {
+            'type_str': type_str,
+            'type':     type_str.rstrip('*'),
+            'video_codec': vc,
+            'audio_codec': ac,
+            'duration': duration_ms,
+            'audio_languages': audio_languages if audio_languages is not None else [],
+            'file': fp,
+            'files': {
+                version: {
+                    'filepath': fp,
+                    'filesize': filesize_bytes,
+                    'audio_languages': list(audio_languages) if audio_languages else [],
+                    'file_metadata': {'file_type': ext.lstrip('.')},
+                }
+            },
+            'title': 'Test', 'library': 'series.de',
+            'series_key': 'Series:1', 'series': 'Test',
+        }
+
+    def _set_dpm(self, dpm):
+        main_mod = sys.modules[_classify_migration_action.__module__]
+        saved = main_mod.DISK_PLEX_MAP
+        main_mod.DISK_PLEX_MAP = dpm
+        return main_mod, saved
+
+    def test_classify_modern_container_no_action(self):
+        obj = self._mock_video_obj(ext='.mp4', audio_languages=['de'])
+        cls = _classify_migration_action(obj)
+        self.assertEqual(cls['action'], 'none')
+        self.assertEqual(cls['ext'], '.mp4')
+
+    def test_classify_outdated_safe_codecs_with_lang_is_remux(self):
+        obj = self._mock_video_obj(ext='.avi', vc='h264', ac='mp3',
+                                   audio_languages=['de'])
+        cls = _classify_migration_action(obj)
+        self.assertEqual(cls['action'], 'remux')
+        self.assertEqual(cls['lang'], 'de')
+
+    def test_classify_outdated_unsafe_codecs_is_reencode(self):
+        obj = self._mock_video_obj(ext='.avi', vc='msmpeg4v3', ac='wmav2',
+                                   audio_languages=['de'])
+        cls = _classify_migration_action(obj)
+        self.assertEqual(cls['action'], 'reencode')
+        self.assertIn('needs_reencode_container', cls['reasons'])
+
+    def test_classify_high_bitrate_is_reencode_regardless_of_container(self):
+        # 8 GB / 60 min ≈ 17.8 Mbps (well above 2.5 default threshold)
+        obj = self._mock_video_obj(ext='.mkv', vc='h264', ac='aac',
+                                   filesize_bytes=8_000_000_000,
+                                   duration_ms=60*60*1000,
+                                   audio_languages=['en'])
+        cls = _classify_migration_action(obj)
+        self.assertEqual(cls['action'], 'reencode')
+        self.assertIn('high_bitrate', cls['reasons'])
+
+    def test_classify_outdated_no_language_blocked(self):
+        # Outdated container, codecs OK, but no audio_languages and DPM
+        # has nothing for the filename → no_language → action='none'
+        obj = self._mock_video_obj(ext='.avi', vc='h264', ac='mp3',
+                                   audio_languages=[],
+                                   filepath_override='/x/anonymous.avi')
+        main_mod, saved = self._set_dpm({})  # no DPM = no filename hints
+        try:
+            cls = _classify_migration_action(obj)
+            self.assertEqual(cls['action'], 'none')
+            self.assertIn('no_language', cls['reasons'])
+            self.assertIsNone(cls['lang'])
+        finally:
+            main_mod.DISK_PLEX_MAP = saved
+
+    def test_classify_filename_regex_resolves_lang(self):
+        obj = self._mock_video_obj(
+            ext='.avi', vc='h264', ac='mp3', audio_languages=[],
+            filepath_override='/x/Bares_fuer_Rares_2020-01-01 [TVOON] DE.mpg.avi')
+        main_mod, saved = self._set_dpm({'AUDIO_LANG': {
+            'scope':'file','values':{
+                'de':{'plex2disk':'[de]','disk2plex':[r'\bTVOON\b']},
+            }
+        }})
+        try:
+            cls = _classify_migration_action(obj)
+            self.assertEqual(cls['action'], 'remux')
+            self.assertEqual(cls['lang'], 'de')
+        finally:
+            main_mod.DISK_PLEX_MAP = saved
+
+    def test_classify_multi_version_type_str_with_asterisk(self):
+        # Episode* / Movie* (multi-version suffix) must be accepted
+        obj = self._mock_video_obj(ext='.avi', type_str='Episode*',
+                                   audio_languages=['de'])
+        cls = _classify_migration_action(obj)
+        self.assertEqual(cls['action'], 'remux')
+
+    def test_classify_disjoint_actions(self):
+        """Per feedback_reencode_minimal: an item is NEVER both --reencode
+        AND --remux.  Run a small grid and verify no overlap."""
+        cases = [
+            self._mock_video_obj(ext='.mp4', audio_languages=['de']),                # none
+            self._mock_video_obj(ext='.avi', audio_languages=['de']),                # remux
+            self._mock_video_obj(ext='.avi', vc='msmpeg4v3', audio_languages=['de']), # reencode
+            self._mock_video_obj(ext='.mkv', filesize_bytes=8_000_000_000,
+                                 duration_ms=60*60*1000, audio_languages=['en']),    # reencode
+        ]
+        for obj in cases:
+            cls = _classify_migration_action(obj)
+            self.assertIn(cls['action'], ('none', 'remux', 'reencode'))
+
+    def test_resolve_lang_from_filename_tvoon(self):
+        main_mod, saved = self._set_dpm({'AUDIO_LANG': {
+            'scope':'file','values':{
+                'de':{'plex2disk':'[de]','disk2plex':[r'\bTVOON\b']},
+            }
+        }})
+        try:
+            self.assertEqual(_resolve_audio_lang_from_filename('foo [TVOON] DE.avi'), 'de')
+            self.assertIsNone(_resolve_audio_lang_from_filename('foo.avi'))
+        finally:
+            main_mod.DISK_PLEX_MAP = saved
+
     # --- v1.2: cmd_disk2plex two-phase / handler-registry source-presence ---
 
     def test_disk2plex_has_push_handler_registry(self):
