@@ -7833,7 +7833,35 @@ def resolve_no_audio_language(obj_keys, args):
             # Detect container type
             tool_name, container = _detect_container_tool(filepath)
             if not tool_name:
+                # v1.4: container can't be tagged in-place by mp4box /
+                # mkvpropedit, but if codecs are stream-copy-safe we can
+                # remux to the target container.  Offer interactive `r`
+                # before skipping.  Auto-resolve the language up-front
+                # so we have something to write into the new file.
+                _cls = _classify_migration_action(obj)
+                _auto_lang, _resolve_source = _resolve_lang_for_item(filepath, library)
+                if _cls['action'] == 'remux' and _auto_lang:
+                    _lang_3 = ISO_639_1_TO_2.get(_auto_lang, _auto_lang)
+                    print(f"\n[{item_idx}/{total_items}] {title} — unsupported container '{container}' for in-place tagging,")
+                    print(f"   but qualifies for --remux to .{REMUX_TARGET_CONTAINER} (codecs OK; lang '{_lang_3}' from {_resolve_source}).")
+                    print(f"   r = Remux this one file now")
+                    print(f"   s = Skip this item")
+                    print(f"   q = Quit resolve")
+                    print(f"\n   Your choice: ", end='', flush=True)
+                    _choice = readchar.readchar()
+                    print(_choice)
+                    if _choice.lower() == 'r':
+                        cmd_remux(key, yes=True)
+                        continue
+                    if _choice.lower() == 'q':
+                        print("Exiting resolution mode.")
+                        return
+                    # default: skip
+                    continue
+                # Original skip path (no remux option available)
                 print(f"\n[{item_idx}/{total_items}] Skipping {title} — unsupported container '{container}'")
+                if _cls['action'] == 'remux':
+                    print(f"   (remux candidate — no language yet; run `--no-audio-language --resolve` first or `--remux` directly with hints)")
                 continue
 
             # Determine if local or remote
