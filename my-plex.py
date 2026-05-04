@@ -24363,29 +24363,45 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
         return None
     lang_3 = ISO_639_1_TO_2.get(lang_2.lower()[:2], lang_2.lower()[:3])
 
-    # Resolve remote host + verify file exists
-    remote_host, exists, resolved = determine_remote_host(src_path)
+    # Verify file exists (allow local mount lookup), but force remote_host
+    # for the WRITE operations below — per feedback_ssh_for_writes the
+    # remux pipeline must always SSH to the Plex server even when the
+    # path happens to be reachable via a locally-mounted volume (Mac
+    # ~/.Trash would receive the original instead of the server's
+    # .Trashes folder; ffmpeg might run on a slower local install).
+    _local_remote_host, exists, resolved = determine_remote_host(src_path)
     if not exists:
         print(f"  SKIP: source not found {src_path} ({title})")
         return None
+    remote_host = PLEX_DB_REMOTE_HOST  # force SSH for all WRITE ops
 
-    # Build target path (same dir, new extension)
-    parent = os.path.dirname(resolved)
-    src_base = os.path.splitext(os.path.basename(resolved))[0]
+    # Server-side path: when the source was found via a local-mount alias
+    # (e.g. /Volumes/2/...) but we want to operate on the SERVER, translate
+    # back to the server-native path via ALTERNATIVE_ROOTPATHS.
+    server_src = resolved
+    if _local_remote_host is None:
+        # local mount was used; resolve back to server-native form
+        for alt in get_alternative_paths(resolved, including_path=False):
+            server_src = alt
+            break
+
+    # Build target path (same dir, new extension) — on the server
+    parent = os.path.dirname(server_src)
+    src_base = os.path.splitext(os.path.basename(server_src))[0]
     new_name = f"{src_base}.{REMUX_TARGET_CONTAINER}"
     new_path = os.path.join(parent, new_name)
     staging_path = os.path.join(parent, f".{src_base}.remux-staging.{REMUX_TARGET_CONTAINER}")
 
-    # ffmpeg invocation
+    # ffmpeg invocation (always on the Plex server)
     ffmpeg_args = [
         '-hide_banner', '-nostdin', '-y',
-        '-i', resolved,
+        '-i', server_src,
         '-c', 'copy', '-map', '0',
         '-metadata:s:a:0', f'language={lang_3}',
         '-metadata:s:a:0', 'title=',
         staging_path,
     ]
-    print(f"  Remuxing {cache_key}: {os.path.basename(resolved)} → {new_name}  (lang={lang_2})")
+    print(f"  Remuxing {cache_key} on {remote_host}: {os.path.basename(server_src)} → {new_name}  (lang={lang_2})")
     res = run_tool_on_PLEX_server('ffmpeg', ffmpeg_args, remote_host=remote_host, timeout=1800)
     if res is None:
         print(f"    ERROR: ffmpeg not found on {remote_host or 'local'}")
@@ -24401,23 +24417,23 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
             pass
         return False
 
-    # Verify output exists (cheap stat check via ssh / local)
+    # Verify output exists (server-side check)
     chk_ok, _ = my_plex_file_operation('CHECK', staging_path, remote_host)
     if not chk_ok:
         print(f"    ERROR: staging file missing after ffmpeg: {staging_path}")
         return False
 
-    # Atomic move staging → target (target is in the same dir)
+    # Atomic move staging → target (target is in the same dir, on server)
     mv_ok, _ = rename_file(staging_path, new_name, remote_host=remote_host)
     if not mv_ok:
         print(f"    ERROR: atomic move failed: {staging_path} → {new_name}")
         return False
 
-    # Trash original via rename_file move-to-Trashes (or leave as-is)
+    # Trash original on the SERVER (.Trashes folder there, not Mac ~/.Trash)
     if REMUX_TRASH_ORIGINAL:
-        trash_ok, _ = my_plex_file_operation('TRASH', resolved, remote_host)
+        trash_ok, _ = my_plex_file_operation('TRASH', server_src, remote_host)
         if not trash_ok:
-            print(f"    WARNING: failed to trash original {resolved}")
+            print(f"    WARNING: failed to trash original {server_src}")
 
     # Update in-memory cache for this version: filepath flips to new_path,
     # extension flips, audio_languages updated to include the new language,
