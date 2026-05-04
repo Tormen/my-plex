@@ -806,6 +806,29 @@ CONFIG_DEFAULTS = {
     # See full resolution order below.
     'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY': [],
 
+    # Preferred / primary / main / favorite audio languages (ordered list of
+    # 2-letter ISO 639-1 codes).  Controls how the scalar AUDIO_LANG plex_var
+    # is computed for items with multiple audio tracks:
+    #
+    #   - Empty list (default): AUDIO_LANG = audio_languages[0] (Plex's first
+    #     track, which is typically the file container's track 0).
+    #   - Non-empty list: AUDIO_LANG = the first preferred-list entry that
+    #     also appears in the file's tracks; falls back to audio_languages[0]
+    #     when none of the preferred languages is present.
+    #
+    # Use this when your collection is mostly English/German/French content
+    # but some files happen to ship with track 0 in Chinese / Russian / etc.
+    # Setting PREFERRED_AUDIO_LANGUAGES = ['en','de','fr'] makes such files
+    # show up as AUDIO_LANG='en' (or 'de'/'fr'), matching how you'd actually
+    # play them, instead of as 'zh'/'ru' just because the muxer picked an
+    # exotic track 0.
+    #
+    # AUDIO_LANGS_LIST always contains the FULL list of tracks in original
+    # order — only the scalar AUDIO_LANG is affected by this preference.
+    # The lang:<code> filter still matches against any track in the file
+    # regardless of this setting.
+    'PREFERRED_AUDIO_LANGUAGES': [],
+
     # Filepath-pattern audio-language hints live in
     # DISK_PLEX_MAP['AUDIO_LANG']['values'][<code>]['disk2plex'] — the legacy
     # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN was removed in v1.2.
@@ -906,6 +929,29 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # NOTE: SSH access to the Plex server is required. Database is accessed via:
 #   ssh PLEX_DB_REMOTE_HOST "sqlite3 '<PLEX_DB_PATH>' '<query>'"
+
+###############################################################################
+# Preferred / Primary / Main / Favorite Audio Languages  ⚠ EVERYONE: review this
+###############################################################################
+# Ordered list of 2-letter ISO 639-1 codes.  Drives how the scalar AUDIO_LANG
+# plex_var is computed when a file has multiple audio tracks.
+#
+#   - Empty (default): AUDIO_LANG = first track in the file (Plex's track 0).
+#   - Non-empty:       AUDIO_LANG = first preferred-list entry that exists
+#                      in the file's tracks; falls back to first track when
+#                      none of the preferred languages is present.
+#
+# Use this when most of your collection is in a small set of languages but a
+# few files happen to have track 0 in some unrelated language.  Setting
+#   PREFERRED_AUDIO_LANGUAGES = ['en','de','fr']
+# makes a [zh, en, ru] file resolve as AUDIO_LANG='en' instead of 'zh',
+# matching how you'd actually play it.
+#
+# AUDIO_LANGS_LIST always contains the FULL track list in original order —
+# only the scalar AUDIO_LANG is affected.  The lang:<code> filter still
+# matches against any track regardless of this setting.
+#
+# PREFERRED_AUDIO_LANGUAGES = {CONFIG_DEFAULTS['PREFERRED_AUDIO_LANGUAGES']!r}
 
 ###############################################################################
 # Path Configuration
@@ -1395,6 +1441,7 @@ DUPLICATE_FILE = CONFIG_DEFAULTS['DUPLICATE_FILE']
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBRARY_COMBINATIONS']
 EXTERNAL_TOOLS = CONFIG_DEFAULTS['EXTERNAL_TOOLS']
 AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']
+PREFERRED_AUDIO_LANGUAGES = CONFIG_DEFAULTS['PREFERRED_AUDIO_LANGUAGES']
 
 # Default output format for --list-media
 FORMAT = CONFIG_DEFAULTS['FORMAT']
@@ -4630,11 +4677,21 @@ def resolve_disk_map_variables(obj, cache_key=None):
     var['LANG'] = lang  # legacy
 
     # Per-item audio languages (after _normalize_audio_languages).
-    # AUDIO_LANG       = first track (scalar, e.g. 'de' or 'unknown')
+    # AUDIO_LANG       = primary language (scalar).  Default: first track.
+    #                    With PREFERRED_AUDIO_LANGUAGES configured: first
+    #                    preferred-list entry that exists in this file's
+    #                    track list, else first track.
     # AUDIO_LANGS      = comma-joined string for printing (e.g. 'de, en')
-    # AUDIO_LANGS_LIST = Python list (for plex_var auto-iteration)
+    # AUDIO_LANGS_LIST = full track list, original order (unaffected by prefs)
     _alangs = obj.get('audio_languages') or []
-    var['AUDIO_LANG']       = _alangs[0] if _alangs else 'unknown'
+    _primary = ''
+    for _pref in (PREFERRED_AUDIO_LANGUAGES or []):
+        if _pref in _alangs:
+            _primary = _pref
+            break
+    if not _primary:
+        _primary = _alangs[0] if _alangs else 'unknown'
+    var['AUDIO_LANG']       = _primary
     var['AUDIO_LANGS']      = ', '.join(str(_l) for _l in _alangs) if _alangs else 'unknown'
     var['AUDIO_LANGS_LIST'] = list(_alangs)
 
@@ -27463,7 +27520,7 @@ def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORCE_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
     global LIST_MEDIA_DEFAULT_TSV_FORMAT, DBGPFX, PRINTPFX, VRBPFX, AUTO_YES, AUTO_NO
-    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, EPISODE_NAME_PATTERN, DISK_PLEX_MAP
+    global EXTERNAL_TOOLS, AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY, PREFERRED_AUDIO_LANGUAGES, EPISODE_NAME_PATTERN, DISK_PLEX_MAP
 
     # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
     # This allows us to use DBG/DEEPDBG during config file loading

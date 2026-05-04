@@ -6681,6 +6681,72 @@ class TestDiskMap(unittest.TestCase):
         obj.update(overrides)
         return obj
 
+    # --- PREFERRED_AUDIO_LANGUAGES ---
+
+    def _with_preferred(self, prefs):
+        """Context-manager-like helper: temporarily set PREFERRED_AUDIO_LANGUAGES."""
+        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        return main_mod, main_mod.PREFERRED_AUDIO_LANGUAGES, prefs
+
+    def test_preferred_audio_lang_default_first_track(self):
+        """Empty PREFERRED_AUDIO_LANGUAGES → AUDIO_LANG = first track (current behavior)."""
+        main_mod, saved, _ = self._with_preferred([])
+        try:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = []
+            obj = self._mock_obj(audio_languages=['zh', 'en', 'ru'])
+            var = resolve_disk_map_variables(obj)
+            self.assertEqual(var['AUDIO_LANG'], 'zh')
+            self.assertEqual(var['AUDIO_LANGS_LIST'], ['zh', 'en', 'ru'])
+        finally:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = saved
+
+    def test_preferred_audio_lang_picks_preferred_match(self):
+        """When a preferred lang is present in tracks, it becomes AUDIO_LANG."""
+        main_mod, saved, _ = self._with_preferred(['en', 'de', 'fr'])
+        try:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = ['en', 'de', 'fr']
+            obj = self._mock_obj(audio_languages=['zh', 'en', 'ru'])
+            var = resolve_disk_map_variables(obj)
+            self.assertEqual(var['AUDIO_LANG'], 'en')
+            # AUDIO_LANGS_LIST stays in original order
+            self.assertEqual(var['AUDIO_LANGS_LIST'], ['zh', 'en', 'ru'])
+        finally:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = saved
+
+    def test_preferred_audio_lang_respects_preference_order(self):
+        """First entry in PREFERRED_AUDIO_LANGUAGES that matches wins (not file order)."""
+        main_mod, saved, _ = self._with_preferred(['de', 'en'])
+        try:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = ['de', 'en']
+            # File has [en, de] but DE is preferred first → DE wins
+            obj = self._mock_obj(audio_languages=['en', 'de'])
+            var = resolve_disk_map_variables(obj)
+            self.assertEqual(var['AUDIO_LANG'], 'de')
+        finally:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = saved
+
+    def test_preferred_audio_lang_fallback_when_no_match(self):
+        """No preferred lang in tracks → falls back to first track."""
+        main_mod, saved, _ = self._with_preferred(['en', 'de'])
+        try:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = ['en', 'de']
+            obj = self._mock_obj(audio_languages=['zh', 'ru', 'ja'])
+            var = resolve_disk_map_variables(obj)
+            self.assertEqual(var['AUDIO_LANG'], 'zh')
+        finally:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = saved
+
+    def test_preferred_audio_lang_empty_tracks(self):
+        """Empty audio_languages → 'unknown' regardless of preferences."""
+        main_mod, saved, _ = self._with_preferred(['en'])
+        try:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = ['en']
+            obj = self._mock_obj(audio_languages=[])
+            var = resolve_disk_map_variables(obj)
+            self.assertEqual(var['AUDIO_LANG'], 'unknown')
+        finally:
+            main_mod.PREFERRED_AUDIO_LANGUAGES = saved
+
     # --- resolve_disk_map_variables ---
 
     def test_resolve_variables_basic(self):
