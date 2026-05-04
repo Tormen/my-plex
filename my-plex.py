@@ -27634,9 +27634,12 @@ def main():
 
         # Bare 'movie'/'movies' / 'series'/'show'/'shows' → type:movie / type:series.
         # Allows: my-plex movie unwatched ...   my-plex series 'genre:Comedy' ...
+        # But: when prev arg is --type, the bare word is already the explicit
+        # --type value, not a shortcut — leave it alone (else argparse sees
+        # `--type --type movie` and complains about a missing value).
         _BARE_TYPE_MAP = {'movie': 'movie', 'movies': 'movie',
                           'series': 'series', 'show': 'series', 'shows': 'series'}
-        if _bare_lc in _BARE_TYPE_MAP and arg == _bare_lc:
+        if _bare_lc in _BARE_TYPE_MAP and arg == _bare_lc and _prev_arg != '--type':
             _type_val = _BARE_TYPE_MAP[_bare_lc]
             _inject_flags += ['--type', _type_val]
             _translations.append((arg, f"--type {_type_val}"))
