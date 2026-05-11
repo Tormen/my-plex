@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.5"
+SCRIPT_VERSION = "v1.6"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -78,6 +78,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
+from typing import Any, NoReturn
 
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
@@ -459,6 +460,7 @@ _my-plex() {
         '--plex2disk[Sync Plex metadata to disk markers]'
         '--disk2plex[Sync disk markers to Plex metadata]'
         '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
+        '(--mv --move --mv-to --move-to)'{--mv,--move,--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv DEST_LIB \[SCOPE\]. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--clean[With --plex2disk: strip all markers from disk]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
@@ -1610,7 +1612,7 @@ EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'ep
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
 
 GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
-PLEX_SERVER = None # server instance will be set where needed
+PLEX_SERVER: Any = None # server instance will be set where needed
 
 # MAIN DICT used by this script(s command-line parser) to perform it's actions:
 PARSER = 'arg-parser'
@@ -1867,7 +1869,7 @@ def prompt_yes_no(question):
         response = input(f"{question} (yes/no): ").strip().lower()
         return response in ['yes', 'y']
 
-def err(err_code, err_msg=""):
+def err(err_code, err_msg="") -> NoReturn:
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
     print(f"\nERROR #{err_code}: {err_msg}\n")
     sys.exit(1)
@@ -2716,7 +2718,7 @@ def get_alternative_paths(path, including_path=False, path_2nd=None):
     return res
 
 
-def resolve_path(filepath, remote_host=None, check='file'):
+def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
     """Resolve a path by checking all ALTERNATIVE_ROOTPATHS and returning the first existing one.
 
     This is the SINGLE function for resolving any path (file or directory) across
@@ -2827,8 +2829,8 @@ def get_library_stats(supported=True):
         if DBG: print(f"{DBGPFX}get_library_stats(): batch DB count failed: {e}")
         # Fallback: individual queries per library
         for title, library in libraries_list:
+            safe_title = title.replace("'", "''")
             try:
-                safe_title = title.replace("'", "''")
                 if library.type == 'movie':
                     query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL"
                 elif library.type == 'show':
@@ -5793,7 +5795,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                         break
 
                 if version_to_remove:
-                    del files_dict[version_str]
+                    del files_dict[version_to_remove]
                     # Format file size for display
                     if removed_filesize:
                         size_mb = removed_filesize / (1024 * 1024)
@@ -5892,7 +5894,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                         break
 
                 if version_to_remove:
-                    del files_dict[version_str]
+                    del files_dict[version_to_remove]
                     # Format file size for display
                     if removed_filesize:
                         size_mb = removed_filesize / (1024 * 1024)
@@ -7213,7 +7215,6 @@ def undo_operation(operation_log, remote_host=None):
 
                         # Use plex_retry_operation to get fresh library data
                         # Match by basename (filename) instead of full path, since volume paths may change
-                        import os
                         restored_basename = os.path.basename(restored_file_path)
 
                         # Debug: Show what we're looking for and what Plex has
@@ -8279,8 +8280,10 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         # Strategy: Always prefer to trash the directory, but check if there are other video files first
         lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 else None
 
-        # Get the movie directory
+        # Get the movie directories for both files (movie_dir2 is needed when transferring markers from [1] -> [2])
         movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
+        lib2 = PLEX_Media.OBJ_BY_ID[keys[1]]['library'] if keys and len(keys) > 1 and keys[1] in PLEX_Media.OBJ_BY_ID else None
+        movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
 
         # Check if there are other video files in the directory
         has_other_videos = has_other_video_files_in_dir(movie_dir1, file1, remote_host)
@@ -8425,8 +8428,10 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
 
         lib2 = PLEX_Media.OBJ_BY_ID[cache_key]['library'] if cache_key and cache_key in PLEX_Media.OBJ_BY_ID else None
 
-        # Get the movie directory
+        # Get the movie directories for both files (movie_dir1 is needed when transferring markers from [2] -> [1])
         movie_dir2 = get_movie_dir_from_path(file2, lib2) if lib2 else os.path.dirname(file2)
+        lib1 = PLEX_Media.OBJ_BY_ID[keys[0]]['library'] if keys and len(keys) > 0 and keys[0] in PLEX_Media.OBJ_BY_ID else None
+        movie_dir1 = get_movie_dir_from_path(file1, lib1) if lib1 else os.path.dirname(file1)
 
         # Check if there are other video files in the directory
         has_other_videos = has_other_video_files_in_dir(movie_dir2, file2, remote_host)
@@ -9492,6 +9497,7 @@ for line in sys.stdin:
         else:
             cmd = [sys.executable, '-c', collector_script]
 
+        proc = None
         try:
             proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
 
@@ -9515,7 +9521,7 @@ for line in sys.stdin:
             t.join(timeout=5)
             returncode = proc.returncode
         except sp.TimeoutExpired:
-            proc.kill()
+            if proc is not None: proc.kill()
             print(f"{w_prefix}| ✗ TIMEOUT after {max(60, partition_size * 2)}s", flush=True)
             return '', 1, ['TIMEOUT']
 
@@ -11633,6 +11639,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # For series libraries: compare series count AND episode count to detect new episodes
         # in existing series (series count alone won't change when episodes are added)
+        old_series_count = 0
+        old_episode_count = 0
+        current_episode_count = 0
+        old_movie_count = 0
         if lib_type == 'Series':
             old_series_count = old_counts.get('series', 0)
             old_episode_count = old_counts.get('episodes', 0)
@@ -11725,6 +11735,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Differentiate between Movie and Series libraries
         completed = True  # Assume completed unless function returns False
+        result = None
         try:
             match library.type:  # ATTENTION the library.type is LOWERCASE
                 case 'movie':   result = update_movie_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
@@ -11775,6 +11786,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # For partitioned libraries (FORCE mode only): only run when ALL partitions are complete
         if completed:
             should_check_removals = False
+            objects_before_key = None
             if completion_key in PLEX_Media.library_objects_before:
                 if completion_key == title:
                     # Non-partitioned library - check immediately
@@ -12127,7 +12139,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                 for lib_info in libraries:
                     # Create library object using anonymous class (no need for separate class definition)
-                    lib_obj = type('Library', (), {
+                    lib_obj: Any = type('Library', (), {
                         'id': lib_info['id'],
                         'title': lib_info['name'],
                         'type': lib_info['type'],
@@ -13184,14 +13196,32 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     cache_rebuild_lock = None  # Will hold the lock during cache rebuild
     items_processed = 0  # Counter for checkpoint saves during rebuild
     # Current progress tracking for checkpoint messages
-    current_library = None  # Current library being processed
+    current_library: "str | None" = None  # Current library being processed
     current_item_idx = 0  # Current item index (movie or show)
     current_item_total = 0  # Total items in current library
-    current_item_type = None  # 'movies' or 'series'
+    current_item_type: "str | None" = None  # 'movies' or 'series'
     # Retry statistics tracking
     retry_count = 0  # Total number of retries during cache rebuild
     retry_wait_time = 0  # Total seconds spent waiting in retries
     retry_by_level = {}  # Dict: key=retry_level (1-4), value={'count': N, 'wait_time': seconds}
+    # Cache-rebuild scratch state (set dynamically during --update-cache)
+    _cache_missing_guid: bool = False
+    _preserved_file_metadata: dict = {}
+    _reloaded_objects: set = set()
+    _REMOVE_COLS: set = set()
+    completed_libraries: set = set()
+    library_delta_counters: dict = {}
+    library_delta_details: dict = {}
+    library_objects_before: dict = {}
+    library_partition_info: dict = {}
+    library_server_ids: dict = {}
+    library_start_times: dict = {}
+    library_timings: dict = {}
+    last_metadata_batch_processed = 0
+    last_metadata_batch_success = 0
+    last_metadata_batch_total = 0
+    last_metadata_broken_count = 0
+    last_metadata_broken_details: list = []
 
     @staticmethod
     def init():
@@ -13418,6 +13448,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     PLEX_Media.OBJ_BY_LIBRARY[ obj['library'] ][ obj['type'] ] = [ key ]
 
             # collect data ...
+            S_count = 0
+            E_count = 0
+            members = []
+            versions = []
             match obj['type']:
                 case "Movie":
                     versions = list(PLEX_Media.OBJ_BY_MOVIE[key].keys())
@@ -18776,7 +18810,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if labeled: v = f"{k}:{v}"
 
             # ensure for instance for 'tsv' format, that we do NOT have tabs in the value:
-            if replace_w_bar is not None: v.replace(replace_w_bar, '|')
+            if replace_w_bar is not None: v = str(v).replace(replace_w_bar, '|')
 
             var[k] = v
 
@@ -19222,12 +19256,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         plex = ensure_plex_api()
 
         # Get real plexapi library object (cache objects lack fetchItem)
-        try: library = plex.library.section( obj['library'] )
-        except Exception as e: err(1013, f"section with library name not found: {e}\nOBJ = {obj}") if must_exist else next
+        try:
+            library = plex.library.section( obj['library'] )
+        except Exception as e:
+            if must_exist: err(1013, f"section with library name not found: {e}\nOBJ = {obj}")
+            return (None, None)
 
-        try: item = library.fetchItem( int(obj['item_id']) )
-        except Exception as e: err(1014, f"Item with ID not found: {e}\nOBJ = {obj}") if must_exist else next
-        #except Exception as e: err(xxxx, f"Item with ID {obj['item_id']} not found: {e}\nOBJ = {obj}")
+        try:
+            item = library.fetchItem( int(obj['item_id']) )
+        except Exception as e:
+            if must_exist: err(1014, f"Item with ID not found: {e}\nOBJ = {obj}")
+            return (None, None)
 
         obj_media_id = int(obj['media_id'])
         obj_part_id = int(obj['part_id'])
@@ -19386,7 +19425,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -21007,6 +21046,74 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'mv' | 'move':
+            print()
+            print("=" * 76)
+            print("MOVE HELP  (--mv / --move / --mv-to / --move-to)   NEW in v1.6")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --mv DEST_LIB [SCOPE]              # PREVIEW only (default)")
+            print("       my-plex --mv DEST_LIB [SCOPE] --yes        # commit (after preview)")
+            print("       my-plex --mv DEST_LIB [SCOPE] --force --yes  # auto-overwrite duplicates")
+            print("       my-plex --mv DEST_LIB [SCOPE] --try        # dry-run preview only")
+            print()
+            print("Moves Plex media — Movies, whole Series, whole Seasons, individual")
+            print("Episodes — and their sibling files (.nfo, .srt, posters, ...) from")
+            print("their current Plex library to DEST_LIB.  Series and Season scopes are")
+            print("expanded to all underlying Episodes automatically, so a single")
+            print("`--mv DEST_LIB Series:NNN` invocation moves every season + episode")
+            print("of that series in one go.")
+            print()
+            print("Files keep their relative directory structure under the new library's")
+            print("rootpath (e.g. movie sub-folder, series/season folders for episodes).")
+            print()
+            print("DEFAULT: ALWAYS PREVIEW.  --yes commits.")
+            print("  Like --remux, --mv defaults to a dry-run preview even WITHOUT --try.")
+            print("  Re-run with --yes to execute the moves.")
+            print()
+            print("UNIVERSAL SCOPE (per feedback_universal_scope) — every Plex type the")
+            print("cache knows about is accepted; Series / Season auto-expand to episodes:")
+            print("  my-plex --mv movies.fr Movie:12345         # one movie (all versions)")
+            print("  my-plex --mv movies.fr 'Le Samouraï'       # by title")
+            print("  my-plex --mv movies.fr movies.unsorted     # whole source library")
+            print("  my-plex --mv movies.fr /path/to/file.mkv   # by full filepath")
+            print("  my-plex --mv series.de Series:42           # WHOLE SERIES → all eps")
+            print("  my-plex --mv series.de Season:99           # WHOLE SEASON → all eps")
+            print("  my-plex --mv series.de Episode:17740       # single episode")
+            print("  my-plex --mv movies.fr                     # global: ALL movies")
+            print()
+            print("TYPE COMPATIBILITY:")
+            print("  Movie libraries accept only Movies.")
+            print("  Series libraries accept only Episodes (use series/season scope).")
+            print("  Cross-type moves are rejected with a fatal error.")
+            print()
+            print("DUPLICATE DETECTION (in destination library):")
+            print("  Matches by (Plex title + originalTitle + year).  When a match exists:")
+            print("    [s]  skip this one")
+            print("    [o]  overwrite this one (rm dst, then mv)")
+            print("    [S]  skip ALL remaining duplicates")
+            print("    [O]  overwrite ALL remaining duplicates")
+            print("    [q]  quit (no further moves)")
+            print("  --force        : auto-overwrite all duplicates (no prompts)")
+            print()
+            print("SIBLINGS:")
+            print("  Files in the same directory sharing the same basename (e.g. foo.nfo,")
+            print("  foo.en.srt, foo-poster.jpg next to foo.mkv) move alongside the main")
+            print("  video file (per feedback_rename_siblings).")
+            print()
+            print("PLEX SYNC:")
+            print("  After all moves, triggers lib.update() on BOTH the source and the")
+            print("  destination libraries so Plex picks up the new file locations.")
+            print()
+            print("CACHE UPDATE:")
+            print("  Cross-library moves cause Plex to assign NEW IDs to the moved items.")
+            print("  The old cache entries are removed from the in-memory cache. Run")
+            print("  `my-plex --update-cache` afterwards to repopulate the cache with the")
+            print("  new entries in the destination library.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'map-from-filename' | 'map_from_filename':
             # Redirect to plex2disk help (--map-from-filename is now --plex2disk --clean)
             print()
@@ -21646,8 +21753,9 @@ def read_episodes_tsv(tsv_path):
                 ep['sender_original'] = row.get('sender_original', '')
                 episodes.append(ep)
     finally:
-        if hasattr(lines_iter, 'close'):
-            lines_iter.close()
+        _close = getattr(lines_iter, 'close', None)
+        if callable(_close):
+            _close()
 
     return metadata, episodes
 
@@ -22331,6 +22439,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
     }
 
     # Step 1: Get series details to find number of seasons
+    import urllib.error
     url = f'https://api.themoviedb.org/3/tv/{tmdb_id}'
     req = urllib.request.Request(url, headers=headers)
 
@@ -24678,6 +24787,351 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
 
 VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv', '.mov'}
 
+
+def cmd_move(args_list, dry_run=False, force=False, yes=False):
+    """v1.6: --mv / --move — move media files (and siblings) to another Plex library.
+
+    Args:
+        args_list: list of 1-2 strings:
+                   args_list[0] = DEST_LIB (required)
+                   args_list[1] = SCOPE (optional; omitted = global / all media)
+                   SCOPE can be ANY Plex type the cache knows about — Movie, Series,
+                   Season, Episode, library name, title, cache key, or full filepath.
+                   Series and Season scopes auto-expand to their underlying Episodes
+                   via _get_disk_map_scope(), so e.g. `--mv series.de Series:42`
+                   moves every season + episode of that series in one invocation.
+        dry_run:   preview only (no file changes, no cache changes)
+        force:     auto-overwrite duplicates in destination (skip interactive prompt)
+        yes:       commit phase (without --yes, behaves like --remux: preview, then prompt to re-run)
+
+    Strategy:
+      1. Validate destination library exists and resolve its rootpath.
+      2. Resolve SCOPE via _get_disk_map_scope() — Series/Season scopes are expanded
+         to their constituent Episodes automatically.
+      3. Filter to Movie/Episode items that have files and live in another library
+         (parent Series / Season objects have no files of their own and are skipped;
+         their child Episodes are what actually get moved).
+      4. For each item, check for duplicates in DEST_LIB by (title + originalTitle + year).
+         If duplicate found and not --force: prompt user (skip / overwrite / skip-all /
+         overwrite-all / quit).
+      5. Move each file with SSH `mv` to DEST_LIB rootpath, preserving the relative
+         directory structure under the source library root.  Sibling files (.nfo, .srt
+         etc., same basename) move alongside.
+      6. Update cache: remove old OBJ_BY_FILEPATH / OBJ_BY_LIBRARY / OBJ_BY_ID / type-
+         specific indices (Plex assigns a new ID after the cross-library scan; user
+         runs --update-cache to repopulate destination entries).
+      7. Trigger Plex library scans (lib.update()) on source AND destination libraries.
+
+    Returns: tuple (n_moved, n_skipped, n_errors).
+    """
+    global VRB
+    if not args_list:
+        err(1100, "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE]\n  Use --help mv for details.")
+    if len(args_list) > 2:
+        err(1101, f"--mv accepts at most 2 args (DEST_LIB and SCOPE), got {len(args_list)}: {args_list!r}\n  Use --help mv for details.")
+    dest_lib = args_list[0]
+    scope_target = args_list[1] if len(args_list) > 1 else None
+
+    # Validate destination library
+    if dest_lib not in PLEX_Library.OBJ_DICT:
+        available = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+        err(1102, f"--mv: destination library '{dest_lib}' not found.\n\nAvailable libraries: {available}")
+
+    dest_lib_type = PLEX_Library.OBJ_DICT_TYPE.get(dest_lib, '')
+    dest_locations = CACHE.get('library_stats', {}).get('locations', {}).get(dest_lib, [])
+    if not dest_locations:
+        err(1103, f"--mv: destination library '{dest_lib}' has no known rootpath in cache.\n  Run --update-cache first.")
+    dest_root = dest_locations[0].rstrip('/')
+
+    # Resolve scope
+    items = _get_disk_map_scope(scope_target)
+    if not items:
+        print(f"--mv: no media items found for scope: {scope_target!r}")
+        print("Possible reasons:")
+        print(f"  - Scope '{scope_target}' did not match any library / cache key / title / filepath")
+        print(f"  - Run --update-cache if the cache is stale")
+        return (0, 0, 0)
+
+    # Collect movable items (Movies / Episodes that actually have files)
+    movables = []
+    for cache_key, obj in items:
+        type_str = obj.get('type_str', '') or obj.get('type', '')
+        if type_str not in ('Movie', 'Episode'):
+            continue
+        src_lib = obj.get('library', '')
+        if not src_lib:
+            continue
+        if src_lib == dest_lib:
+            if DBG: print(f"{DBGPFX}cmd_move: skipping {cache_key} (already in destination library {dest_lib})")
+            continue
+        # Type compatibility
+        if dest_lib_type == 'Movie' and type_str != 'Movie':
+            err(1104, f"--mv: cannot move {type_str} '{obj.get('title','?')}' ({cache_key}) into Movie library '{dest_lib}'.\n  Movie libraries only accept Movies. Use a Series-type destination library for Episodes.")
+        if dest_lib_type == 'Series' and type_str != 'Episode':
+            err(1104, f"--mv: cannot move {type_str} '{obj.get('title','?')}' ({cache_key}) into Series library '{dest_lib}'.\n  Series libraries only accept Episodes. Pick a Movie-type destination library for Movies.")
+        filepaths = _get_all_filepaths(obj)
+        if not filepaths:
+            continue
+        movables.append((cache_key, obj, src_lib, type_str, filepaths))
+
+    if not movables:
+        print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode files found in libraries other than '{dest_lib}').")
+        return (0, 0, 0)
+
+    # ---- Phase 1: preview ----
+    print()
+    print("=" * 76)
+    print(f"--mv preview  →  destination library: {dest_lib}  ({dest_lib_type})")
+    print(f"                rootpath: {dest_root}")
+    print("=" * 76)
+    print(f"  {'KEY':<18}  {'TYPE':<7}  {'FROM-LIBRARY':<20}  TITLE")
+    print(f"  {'-'*18}  {'-'*7}  {'-'*20}  {'-'*40}")
+    plan_total_files = 0
+    for cache_key, obj, src_lib, type_str, filepaths in movables[:200]:
+        title = (obj.get('title','?') or '')
+        year  = obj.get('year','') or ''
+        title_disp = f"{title} ({year})" if year else title
+        print(f"  {cache_key:<18}  {type_str:<7}  {src_lib:<20}  {title_disp}")
+        for fp in filepaths:
+            print(f"  {'':<18}  {'':<7}  {'':<20}  → {fp}")
+            plan_total_files += 1
+    if len(movables) > 200:
+        print(f"\n  …and {len(movables)-200} more item(s) (truncated for preview).")
+
+    if dry_run:
+        print()
+        print(f"[DRY-RUN] {len(movables)} item(s) / {plan_total_files} file(s) would be moved to '{dest_lib}'.")
+        return (0, 0, 0)
+    if not yes:
+        print()
+        print(f"  {len(movables)} item(s) / {plan_total_files} file(s) ready to move to '{dest_lib}'.")
+        print(f"  Re-run with --yes to execute.")
+        return (0, 0, 0)
+
+    # ---- Phase 2: execute ----
+    print()
+    print("=" * 76)
+    print(f"--mv executing  →  {dest_lib}   (--yes given)")
+    print("=" * 76)
+
+    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {})
+    interactive_choice = None   # 'skip-all' or 'overwrite-all'
+    n_moved = n_skipped = n_errors = 0
+    affected_libs = {dest_lib}
+
+    for cache_key, obj, src_lib, type_str, filepaths in movables:
+        title = obj.get('title','?') or ''
+        original_title = obj.get('originalTitle','') or ''
+        year = obj.get('year','') or ''
+
+        # Duplicate check (Plex title + originalTitle + year, within dest lib)
+        dup_keys = []
+        for k in PLEX_Media.OBJ_BY_LIBRARY.get(dest_lib, {}).get(type_str, []):
+            o = PLEX_Media.OBJ_BY_ID.get(k)
+            if not o:
+                continue
+            if (o.get('title','') == title
+                and o.get('originalTitle','') == original_title
+                and str(o.get('year','')) == str(year)):
+                dup_keys.append(k)
+
+        action = 'move'
+        if dup_keys:
+            if force:
+                action = 'overwrite'
+                print(f"  ⚠ DUPLICATE in {dest_lib}: '{title}' ({year}) — --force: OVERWRITING ({len(dup_keys)} match)")
+            elif interactive_choice == 'skip-all':
+                action = 'skip'
+            elif interactive_choice == 'overwrite-all':
+                action = 'overwrite'
+                print(f"  ⚠ DUPLICATE in {dest_lib}: '{title}' ({year}) — overwrite-all: OVERWRITING")
+            else:
+                print()
+                print(f"  ⚠  DUPLICATE in '{dest_lib}': '{title}' ({year}) matches:")
+                for k in dup_keys[:5]:
+                    o = PLEX_Media.OBJ_BY_ID.get(k, {})
+                    print(f"      {k}   file: {o.get('file','?')}")
+                if len(dup_keys) > 5:
+                    print(f"      … and {len(dup_keys)-5} more")
+                print(f"    [s]kip this   [o]verwrite this   [S]kip-all   [O]verwrite-all   [q]uit")
+                print(f"    Your choice: ", end='', flush=True)
+                try:
+                    ch = readchar.readchar()
+                except Exception:
+                    ch = 's'
+                print(ch)
+                if ch == 's':
+                    action = 'skip'
+                elif ch == 'o':
+                    action = 'overwrite'
+                elif ch == 'S':
+                    interactive_choice = 'skip-all'
+                    action = 'skip'
+                elif ch == 'O':
+                    interactive_choice = 'overwrite-all'
+                    action = 'overwrite'
+                elif ch in ('q', 'Q', '\x03'):
+                    print(f"\nAborted at user request. Moved so far: {n_moved}, skipped: {n_skipped}, errors: {n_errors}")
+                    if n_moved > 0 and not READ_ONLY_MODE:
+                        update_and_save_cache(CACHE)
+                    return (n_moved, n_skipped, n_errors)
+                else:
+                    print(f"  (unrecognized choice {ch!r} — defaulting to skip)")
+                    action = 'skip'
+
+        if action == 'skip':
+            n_skipped += 1
+            print(f"  ⊘ SKIP  {cache_key}  '{title}' ({year})")
+            continue
+
+        # Resolve source library rootpath (pick the one a filepath lives under)
+        src_locations = locations_by_lib.get(src_lib, [])
+        src_root = None
+        for loc in src_locations:
+            loc_norm = loc.rstrip('/')
+            for fp in filepaths:
+                if fp.startswith(loc_norm + '/'):
+                    src_root = loc_norm
+                    break
+            if src_root:
+                break
+        if src_root is None and src_locations:
+            src_root = src_locations[0].rstrip('/')
+        if not src_root:
+            print(f"  ✗ ERROR {cache_key}: cannot resolve source rootpath for library '{src_lib}'")
+            n_errors += 1
+            continue
+
+        # Move each file (preserve relative directory structure under src_root)
+        item_failed = False
+        moved_filepaths = []
+        for fp in filepaths:
+            try:
+                rel_path = os.path.relpath(fp, src_root)
+            except Exception:
+                rel_path = os.path.basename(fp)
+            if rel_path.startswith('..'):
+                rel_path = os.path.basename(fp)
+            new_path = os.path.join(dest_root, rel_path)
+            new_dir = os.path.dirname(new_path)
+
+            if action == 'overwrite':
+                exists, _ = my_plex_file_operation('CHECK', new_path, PLEX_DB_REMOTE_HOST)
+                if exists:
+                    rm_ok, _ = my_plex_file_operation('REMOVE', new_path, PLEX_DB_REMOTE_HOST)
+                    if not rm_ok:
+                        print(f"  ✗ ERROR overwrite: failed to remove existing {new_path}")
+                        item_failed = True
+                        break
+
+            # mkdir -p the destination directory on the Plex host
+            if PLEX_DB_REMOTE_HOST:
+                esc_dir = escape_path_for_ssh(new_dir)
+                mkdir_cmd = ["ssh", PLEX_DB_REMOTE_HOST, f"mkdir -p \"{esc_dir}\""]
+                r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}")
+                    print(f"    stderr: {r.stderr.strip()}")
+                    item_failed = True
+                    break
+            else:
+                try:
+                    os.makedirs(new_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"  ✗ ERROR mkdir local: {new_dir} — {e}")
+                    item_failed = True
+                    break
+
+            ok, actual = my_plex_file_operation('MOVE', fp, PLEX_DB_REMOTE_HOST, dest_path=new_path)
+            if not ok:
+                print(f"  ✗ ERROR move: {fp} → {new_path}")
+                item_failed = True
+                break
+            actual_new = actual or new_path
+            moved_filepaths.append((fp, actual_new))
+            print(f"  ✓ MOVE  {cache_key}  ({type_str}, {src_lib} → {dest_lib})")
+            print(f"          {fp}")
+            print(f"       →  {actual_new}")
+
+            # Move siblings (.nfo, .srt, etc., same basename prefix)
+            src_dir = os.path.dirname(fp)
+            base_no_ext = os.path.splitext(fp)[0]
+            new_base_no_ext = os.path.splitext(actual_new)[0]
+            okls, listing = my_plex_file_operation('LIST_DIR', src_dir, PLEX_DB_REMOTE_HOST, maxdepth=1)
+            if okls and listing:
+                for sib in listing:
+                    if sib == fp or sib == actual_new:
+                        continue
+                    if sib.startswith(base_no_ext + '.'):
+                        sib_ext = sib[len(base_no_ext):]
+                        sib_new = new_base_no_ext + sib_ext
+                        ok_sib, _ = my_plex_file_operation('MOVE', sib, PLEX_DB_REMOTE_HOST, dest_path=sib_new)
+                        if ok_sib:
+                            print(f"          + sibling: {os.path.basename(sib)} → {os.path.basename(sib_new)}")
+                            if sib in PLEX_Media.OBJ_BY_FILEPATH:
+                                PLEX_Media.OBJ_BY_FILEPATH[sib_new] = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
+                        else:
+                            print(f"          ! sibling move failed: {sib}")
+
+        if item_failed:
+            n_errors += 1
+            continue
+
+        # ----- Cache update (cross-library: Plex will assign new ID after scan) -----
+        # Mirrors the existing precedent at line ~6017 for cross-library moves.
+        obj_type_str = type_str
+        for old_fp, _new_fp in moved_filepaths:
+            if old_fp in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[old_fp]
+        if src_lib in PLEX_Media.OBJ_BY_LIBRARY and obj_type_str in PLEX_Media.OBJ_BY_LIBRARY[src_lib]:
+            try:
+                PLEX_Media.OBJ_BY_LIBRARY[src_lib][obj_type_str].remove(cache_key)
+            except ValueError:
+                pass
+        if obj_type_str == 'Movie' and cache_key in PLEX_Media.OBJ_BY_MOVIE:
+            del PLEX_Media.OBJ_BY_MOVIE[cache_key]
+        if cache_key in PLEX_Media.OBJ_BY_ID:
+            del PLEX_Media.OBJ_BY_ID[cache_key]
+
+        affected_libs.add(src_lib)
+        n_moved += 1
+
+    # ----- Trigger Plex library scans -----
+    if n_moved > 0:
+        print()
+        print(f"Triggering Plex library scans on: {', '.join(sorted(affected_libs))}")
+        try:
+            plex = ensure_plex_api()
+            api_libs = {lib.title: lib for lib in plex.library.sections()}
+            for libname in sorted(affected_libs):
+                if libname in api_libs:
+                    try:
+                        api_libs[libname].update()
+                        print(f"  ✓ Scan triggered: {libname}")
+                    except Exception as e:
+                        print(f"  ! Could not trigger scan for {libname}: {e}")
+                else:
+                    print(f"  ! Library not found in Plex API: {libname}")
+        except Exception as e:
+            print(f"  ! Could not connect to Plex API to trigger scans: {e}")
+        if not READ_ONLY_MODE:
+            update_and_save_cache(CACHE)
+
+    print()
+    print("=" * 76)
+    print(f"SUMMARY  --mv  →  {dest_lib}")
+    print(f"  moved   : {n_moved} item(s)")
+    print(f"  skipped : {n_skipped}")
+    print(f"  errors  : {n_errors}")
+    if n_moved > 0:
+        print()
+        print(f"  NOTE: Plex assigns NEW IDs for cross-library moves. The OLD cache entries")
+        print(f"        have been removed from the cache.  Run `my-plex --update-cache` to")
+        print(f"        index the new entries in destination library '{dest_lib}'.")
+    print("=" * 76)
+    return (n_moved, n_skipped, n_errors)
+
+
 def cmd_sort_new(args, dry_run=False, target=None):
     """Sort unsorted recordings into season directories for all series.
 
@@ -25887,6 +26341,7 @@ def show_system_info():
 
         # 4. TMDB API
         if TMDB_API_KEY:
+            import urllib.request, urllib.error
             try:
                 req = urllib.request.Request(
                     'https://api.themoviedb.org/3/configuration',
@@ -27406,6 +27861,7 @@ def show_item_info(identifier, table_only=False):
         # Check if any item has multiple versions
         has_multi = any(len(obj.get('files', {})) > 1 for _, obj in found_items)
         # Calculate title column width only if we need the versions column
+        col_title = 0
         if has_multi:
             col_title = max(len(obj.get('title', '')) for _, obj in found_items)
             col_title = max(col_title, 5)
@@ -27855,6 +28311,17 @@ def execute_global_commands(args, cmd_args):
         cmd_remux(target, yes=yes, no_audio_language_only=no_audio_lang_only)
         sys.exit(0)
 
+    # Handle --mv / --move command (cross-library file move)
+    mv_args = safe_getattr(cmd_args, 'mv', None)
+    if mv_args is not None:
+        if not isinstance(mv_args, list):
+            mv_args = [mv_args]
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        force = bool(safe_getattr(args, 'force', False) or safe_getattr(cmd_args, 'force', False))
+        yes = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
+        cmd_move(mv_args, dry_run=dry_run, force=force, yes=yes)
+        sys.exit(0)
+
     # Handle --map-from-filename alias (standalone, without --plex2disk)
     if safe_getattr(cmd_args, 'map_from_filename', None) is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
@@ -28085,6 +28552,7 @@ def execute_global_commands(args, cmd_args):
         unsorted_count = 0
         mismatch_count = 0
         reencode_count = 0
+        remux_count = 0
         missing_count = 0
         renumber_count = 0
         renumber_nodata_count = 0
@@ -28140,7 +28608,7 @@ def execute_global_commands(args, cmd_args):
             reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
 
             # 8a. Remux candidates (counted only — full list via --remux)
-            remux_count = _run_check(PLEX_Media._count_remux_candidates, obj_keys, problems_library)
+            remux_count = _run_check(PLEX_Media._count_remux_candidates, obj_keys, problems_library) or 0
             if remux_count:
                 print(f"  >> {remux_count} remux candidate(s)  →  my-plex --remux")
 
@@ -28513,6 +28981,7 @@ def main():
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--remux': 'remux',
+        '--mv': 'mv', '--move': 'mv', '--mv-to': 'mv', '--move-to': 'mv',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
@@ -28696,6 +29165,7 @@ def main():
             field = _mnb.group('field').lower()
             op    = _mnb.group('op')
             val   = _mnb.group('val')
+            expr  = ''
             if field == 'type':
                 # type is Cat-A: translate to --type flag, then mark column hidden
                 _inject_flags += ['--type', val]
@@ -28758,7 +29228,8 @@ def main():
             _CMDS = {'--list','--filter','--list-duplicates','--problems','--broken',
                      '--duplicates','--reencode','--rename','--missing','--sort-new',
                      '--info','--scan','--collections','--list-labels','--list-label',
-                     '--no-audio-language','--no-language','--watched','--unwatched'}
+                     '--no-audio-language','--no-language','--watched','--unwatched',
+                     '--mv','--move','--mv-to','--move-to','--remux'}
             if not any(a in _CMDS for a in sys.argv):
                 sys.argv += ['--list']
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
@@ -29087,6 +29558,7 @@ def main():
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -29168,6 +29640,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter. Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
+    GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv DEST_LIB [SCOPE]. SCOPE can be a library name, cache key, Plex ID, title, or filepath (omitted = all items). On duplicate title+originalTitle+year matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
@@ -29285,6 +29758,10 @@ def main():
                 '--map-to-filename':         'plex2disk',
                 '--map-from-filename':       'plex2disk',
                 '--rename':                  'rename',
+                '--mv':                      'mv',
+                '--move':                    'mv',
+                '--mv-to':                   'mv',
+                '--move-to':                 'mv',
                 '--problems':                'problems',
                 '--tsv':                     'problems',
                 '--scrape':                  'problems',
@@ -29616,6 +30093,15 @@ def main():
             remaining_args.insert(1, '--remux')
         else:
             remaining_args.insert(0, '--remux')
+
+    # Re-inject --mv into remaining_args
+    # --mv takes 1 or 2 positionals: DEST_LIB [SCOPE]
+    if safe_getattr(args, 'mv', None) is not None:
+        _mv_args = args.mv if isinstance(args.mv, list) else [args.mv]
+        # Insert in original order: --mv DEST [SCOPE]
+        for _i, _v in enumerate(_mv_args):
+            remaining_args.insert(_i + 1, _v)
+        remaining_args.insert(0, '--mv')
 
     # Re-inject --disk2plex into remaining_args
     # Supports: --disk2plex [TARGET], <TARGET> --disk2plex, bare --disk2plex

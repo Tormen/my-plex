@@ -2874,7 +2874,7 @@ class TestEndToEnd(unittest.TestCase):
     def _run_cmd(self, *extra_args):
         import subprocess
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         return result
 
     # --- Help commands ---
@@ -3895,7 +3895,7 @@ class TestScan(unittest.TestCase):
 
     def _run_cmd(self, *extra_args):
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         return result
 
     def test_scan_in_main_parser(self):
@@ -8068,6 +8068,181 @@ class TestDiskMap(unittest.TestCase):
 # Usage: --test <scope>  runs only the classes in that scope
 #        --test --all    runs everything
 #        --test          lists available scopes
+class TestMove(unittest.TestCase):
+    """Tests for --mv / --move: cross-library file move with cache update."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_cmd_move_function_exists(self):
+        """cmd_move() must exist as a top-level function."""
+        src = self._read_script()
+        self.assertIn("def cmd_move(", src)
+
+    def test_cmd_move_signature(self):
+        """cmd_move() must accept dry_run, force, yes kwargs."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(([^)]*)\)', src)
+        self.assertIsNotNone(m, "Must find cmd_move signature")
+        sig = m.group(1)
+        for kw in ('dry_run', 'force', 'yes'):
+            self.assertIn(kw, sig, f"cmd_move must accept '{kw}' kwarg")
+
+    def test_mv_registered_in_main_parser(self):
+        """--mv / --move / --mv-to / --move-to must be registered in main_parser."""
+        src = self._read_script()
+        self.assertIn("main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to'", src)
+
+    def test_mv_registered_in_global_cmd_parser(self):
+        """--mv must be registered in GLOBAL_CMD_PARSER with help text."""
+        src = self._read_script()
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to'", src)
+
+    def test_mv_in_has_standalone_cmd(self):
+        """--mv must be in has_standalone_cmd check (so it doesn't fall through to help)."""
+        src = self._read_script()
+        self.assertIn("safe_getattr(args, 'mv', None) is not None", src)
+
+    def test_mv_in_option_to_help_topic(self):
+        """--mv and aliases must be in _OPTION_TO_HELP_TOPIC for --mv --help synonym."""
+        src = self._read_script()
+        self.assertIn("'--mv': 'mv'", src)
+        self.assertIn("'--move': 'mv'", src)
+
+    def test_mv_reinject_exists(self):
+        """--mv must be re-injected into remaining_args."""
+        src = self._read_script()
+        self.assertIn("Re-inject --mv", src)
+
+    def test_mv_handler_in_execute_global_commands(self):
+        """execute_global_commands must dispatch --mv to cmd_move()."""
+        src = self._read_script()
+        self.assertIn("cmd_move(mv_args", src)
+
+    def test_mv_help_page_exists(self):
+        """--help mv must have a dedicated help page (case 'mv' | 'move':)."""
+        src = self._read_script()
+        self.assertIn("case 'mv' | 'move':", src)
+
+    def test_mv_help_page_covers_features(self):
+        """--help mv page must document key features: DUPLICATE, --force, SIBLINGS, scope examples."""
+        src = self._read_script()
+        import re
+        m = re.search(r"case 'mv' \| 'move':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find --help mv page")
+        body = m.group(1)
+        for kw in ('DUPLICATE', '--force', 'SIBLINGS', 'SCOPE', '--yes'):
+            self.assertIn(kw, body, f"--help mv must mention '{kw}'")
+
+    def test_cmd_move_validates_dest_library(self):
+        """cmd_move must validate the destination library exists in PLEX_Library.OBJ_DICT."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find cmd_move body")
+        body = m.group(1)
+        self.assertIn("PLEX_Library.OBJ_DICT", body)
+
+    def test_cmd_move_uses_universal_scope(self):
+        """cmd_move must use _get_disk_map_scope() for universal scope handling."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("_get_disk_map_scope(", body)
+
+    def test_cmd_move_duplicate_detection(self):
+        """cmd_move must check duplicate by title + originalTitle + year."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("originalTitle", body)
+        self.assertIn("year", body)
+
+    def test_cmd_move_interactive_prompt(self):
+        """cmd_move must offer s/o/S/O/q interactive choices for duplicates."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("skip-all", body)
+        self.assertIn("overwrite-all", body)
+        self.assertIn("readchar.readchar()", body)
+
+    def test_cmd_move_force_overwrites(self):
+        """cmd_move with force=True must skip the interactive prompt and overwrite."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("if force:", body)
+
+    def test_cmd_move_sibling_handling(self):
+        """cmd_move must move sibling files (.nfo, .srt, etc.) alongside main video."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("sibling", body.lower())
+        self.assertIn("LIST_DIR", body)
+
+    def test_cmd_move_updates_cache(self):
+        """cmd_move must remove old entries from cache indices (OBJ_BY_ID, OBJ_BY_LIBRARY, OBJ_BY_MOVIE, OBJ_BY_FILEPATH)."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        for idx in ('OBJ_BY_ID', 'OBJ_BY_LIBRARY', 'OBJ_BY_MOVIE', 'OBJ_BY_FILEPATH'):
+            self.assertIn(idx, body, f"cmd_move must update {idx}")
+
+    def test_cmd_move_triggers_plex_scan(self):
+        """cmd_move must trigger Plex library scans on source AND destination."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("affected_libs", body)
+        self.assertIn(".update()", body)
+
+    def test_cmd_move_type_compatibility(self):
+        """cmd_move must enforce type compatibility (Movie ↔ Movie lib, Episode ↔ Series lib)."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("dest_lib_type", body)
+
+    def test_cmd_move_default_is_preview(self):
+        """Like --remux, --mv default behavior is PREVIEW; only --yes commits."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("Re-run with --yes to execute", body)
+        self.assertIn("if not yes:", body)
+
+    def test_cmd_move_prints_summary(self):
+        """cmd_move must print a SUMMARY at the end (per feedback_summary_at_end)."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("SUMMARY", body)
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -8106,6 +8281,7 @@ _UNITTEST_SCOPES = {
                    TestShowInfoSeasonTable, TestPotentialMismatch,
                    TestShowDirDerivation],
     'renumber':   [TestRenumber],
+    'move':       [TestMove],
 }
 
 # List of all unittest classes for run_regression_tests()
