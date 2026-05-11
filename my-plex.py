@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.7"
+SCRIPT_VERSION = "v1.8"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -461,6 +461,7 @@ _my-plex() {
         '--disk2plex[Sync disk markers to Plex metadata]'
         '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
         '(--mv --move --mv-to --move-to)'{--mv,--move,--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv DEST_LIB \[SCOPE\]. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
+        '(--original-languages --collect-original-languages)'{--original-languages,--collect-original-languages}'[Backfill obj.original_language from TMDB API for cached Movies/Series. Required for original_lang: / originallang: filter tokens. Optional SCOPE.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--clean[With --plex2disk: strip all markers from disk]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
@@ -5401,6 +5402,257 @@ def move_file(src_path, dst_dir, remote_host=None):
     except Exception as e:
         print(f"ERROR: Failed to move file: {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# ISO 639-1 (language) and ISO 3166-1 (country) bidirectional mapping.
+# Used by the `country:` / `originallang:` filter tokens so users can write
+# either the 2-letter code (fr, us) or the English name (france, french).
+# Plex / TMDB store country names as English strings ("France", "United States")
+# and original_language as ISO 639-1 codes ("fr", "en") — we normalise both.
+# ---------------------------------------------------------------------------
+_ISO639_1_NAME_TO_CODE = {
+    'english':'en','french':'fr','german':'de','italian':'it','spanish':'es','portuguese':'pt',
+    'dutch':'nl','swedish':'sv','norwegian':'no','danish':'da','finnish':'fi','polish':'pl',
+    'russian':'ru','ukrainian':'uk','czech':'cs','slovak':'sk','hungarian':'hu','romanian':'ro',
+    'greek':'el','turkish':'tr','arabic':'ar','hebrew':'he','hindi':'hi','japanese':'ja',
+    'chinese':'zh','mandarin':'zh','cantonese':'zh','korean':'ko','vietnamese':'vi','thai':'th',
+    'indonesian':'id','malay':'ms','catalan':'ca','basque':'eu','galician':'gl','irish':'ga',
+    'welsh':'cy','icelandic':'is','bulgarian':'bg','serbian':'sr','croatian':'hr','bosnian':'bs',
+    'slovenian':'sl','macedonian':'mk','albanian':'sq','lithuanian':'lt','latvian':'lv',
+    'estonian':'et','persian':'fa','farsi':'fa','urdu':'ur','bengali':'bn','tamil':'ta',
+    'telugu':'te','marathi':'mr','punjabi':'pa','tagalog':'tl','filipino':'tl','swahili':'sw',
+    'afrikaans':'af','zulu':'zu','esperanto':'eo','latin':'la',
+}
+_ISO639_1_CODE_TO_NAME = {v: k for k, v in _ISO639_1_NAME_TO_CODE.items() if v not in ('zh','tl','fa')}
+_ISO639_1_CODE_TO_NAME.update({'zh':'chinese','tl':'tagalog','fa':'persian'})
+
+# Common ISO 639-2/B (Plex sometimes uses these) → ISO 639-1
+_ISO639_2_TO_1 = {
+    'eng':'en','fre':'fr','fra':'fr','ger':'de','deu':'de','ita':'it','spa':'es','por':'pt',
+    'dut':'nl','nld':'nl','swe':'sv','nor':'no','dan':'da','fin':'fi','pol':'pl','rus':'ru',
+    'cze':'cs','ces':'cs','slk':'sk','slo':'sk','hun':'hu','rum':'ro','ron':'ro',
+    'gre':'el','ell':'el','tur':'tr','ara':'ar','heb':'he','hin':'hi','jpn':'ja','chi':'zh',
+    'zho':'zh','kor':'ko','vie':'vi','tha':'th','ind':'id','may':'ms','msa':'ms',
+}
+
+_ISO3166_NAME_TO_CODE = {
+    # Common names (lowercased, no spaces/underscores) → ISO 3166-1 alpha-2 (lowercase).
+    'france':'fr','germany':'de','italy':'it','spain':'es','portugal':'pt','netherlands':'nl',
+    'belgium':'be','luxembourg':'lu','switzerland':'ch','austria':'at',
+    'unitedkingdom':'gb','uk':'gb','britain':'gb','greatbritain':'gb','england':'gb',
+    'unitedstates':'us','usa':'us','america':'us',
+    'canada':'ca','quebec':'ca','mexico':'mx','brazil':'br','argentina':'ar','chile':'cl',
+    'japan':'jp','china':'cn','korea':'kr','southkorea':'kr','northkorea':'kp',
+    'india':'in','pakistan':'pk','bangladesh':'bd','indonesia':'id','thailand':'th','vietnam':'vn',
+    'russia':'ru','ukraine':'ua','poland':'pl','czechrepublic':'cz','czechia':'cz',
+    'slovakia':'sk','hungary':'hu','romania':'ro','bulgaria':'bg','greece':'gr','turkey':'tr',
+    'sweden':'se','norway':'no','denmark':'dk','finland':'fi','iceland':'is','ireland':'ie',
+    'serbia':'rs','croatia':'hr','bosnia':'ba','slovenia':'si','macedonia':'mk','albania':'al',
+    'lithuania':'lt','latvia':'lv','estonia':'ee',
+    'australia':'au','newzealand':'nz','southafrica':'za',
+    'israel':'il','egypt':'eg','morocco':'ma','algeria':'dz','tunisia':'tn',
+    'iran':'ir','iraq':'iq','saudi':'sa','saudiarabia':'sa','uae':'ae',
+}
+_ISO3166_CODE_TO_NAME = {v: k for k, v in _ISO3166_NAME_TO_CODE.items()
+                         if v not in ('gb','us','ca','cz','kr')}
+_ISO3166_CODE_TO_NAME.update({
+    'gb':'unitedkingdom','us':'unitedstates','ca':'canada','cz':'czechia','kr':'southkorea',
+})
+
+# Plex sometimes stores country names with spaces / variants — accept those too.
+_COUNTRY_ALIASES = {
+    'united kingdom':'gb','united states':'us','united states of america':'us',
+    'south korea':'kr','north korea':'kp','czech republic':'cz','great britain':'gb',
+    'saudi arabia':'sa','united arab emirates':'ae','new zealand':'nz','south africa':'za',
+    'hong kong':'hk','soviet union':'su',
+}
+
+
+def _normalize_lang_name_or_code(token):
+    """Return canonical lowercase ISO 639-1 code for a language token.
+
+    Accepts: 'fr', 'fre', 'fra', 'french', 'French', 'FR' → 'fr'.
+    Returns the token lowercased if no mapping is known (so unusual codes still
+    flow through and match literal cache values).
+    """
+    if not token:
+        return ''
+    t = token.strip().lower()
+    if t in _ISO639_1_NAME_TO_CODE:
+        return _ISO639_1_NAME_TO_CODE[t]
+    if t in _ISO639_2_TO_1:
+        return _ISO639_2_TO_1[t]
+    if len(t) == 2:
+        return t
+    return t
+
+
+def _normalize_country_name_or_code(token):
+    """Return canonical lowercase ISO 3166-1 alpha-2 country code for a token.
+
+    Accepts: 'fr' → 'fr', 'France' → 'fr', 'united states' → 'us', 'USA' → 'us'.
+    Returns the token lowercased if no mapping is known.
+    """
+    if not token:
+        return ''
+    t = token.strip().lower()
+    if t in _COUNTRY_ALIASES:
+        return _COUNTRY_ALIASES[t]
+    flat = t.replace(' ', '').replace('_', '').replace('-', '').replace('.', '')
+    if flat in _ISO3166_NAME_TO_CODE:
+        return _ISO3166_NAME_TO_CODE[flat]
+    if len(flat) == 2:
+        return flat
+    return t
+
+
+def _country_matches(country_token, obj_countries):
+    """True iff any country in obj_countries matches the user's country token.
+
+    Matches by ISO 3166-1 code if available, else by case-insensitive substring
+    over the stored English name.
+    """
+    if not obj_countries:
+        return False
+    code = _normalize_country_name_or_code(country_token)
+    needle_lc = (country_token or '').strip().lower()
+    for c in obj_countries:
+        cs = str(c).strip()
+        cs_lc = cs.lower()
+        cs_code = _normalize_country_name_or_code(cs)
+        if code and cs_code and code == cs_code:
+            return True
+        if needle_lc and needle_lc in cs_lc:
+            return True
+    return False
+
+
+def fetch_original_language_from_tmdb(tmdb_id, media_type='movie'):
+    """Fetch `original_language` for one item from TMDB API v3.
+
+    Args:
+        tmdb_id:    TMDB id (string or int)
+        media_type: 'movie' or 'tv'
+
+    Returns:
+        str (ISO 639-1 lowercase, e.g. 'fr') on success, or None on any error
+        (no key configured, HTTP failure, missing field, etc.).
+    """
+    global TMDB_API_KEY
+    if not TMDB_API_KEY or not tmdb_id:
+        return None
+    import urllib.request, json as _json
+    endpoint = 'tv' if media_type in ('tv', 'series', 'Series', 'Episode') else 'movie'
+    url = f'https://api.themoviedb.org/3/{endpoint}/{tmdb_id}'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode('utf-8'))
+        lang = data.get('original_language')
+        if lang:
+            return str(lang).lower().strip()
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}fetch_original_language_from_tmdb({tmdb_id},{media_type}): {e}")
+    return None
+
+
+def cmd_original_languages(target=None, dry_run=False):
+    """v1.8: --original-languages — backfill obj['original_language'] from TMDB.
+
+    Walks the cache (optionally scoped) and for every Movie/Series with a
+    cached TMDB external_id but no `original_language` field set, queries
+    TMDB and stores the ISO 639-1 code in the cache.
+
+    Args:
+        target:  universal scope (None = all). Pass a library / cache key /
+                 title / filepath to limit the backfill.
+        dry_run: print what would be fetched, no API calls, no cache writes.
+    """
+    if not TMDB_API_KEY:
+        err(1110, "--original-languages requires TMDB_API_KEY in config.\n"
+                  "  Sign up at https://www.themoviedb.org/settings/api (free)\n"
+                  "  then add: TMDB_API_KEY = 'your-bearer-token-here' to your config.")
+
+    items = _get_disk_map_scope(target) if target else [
+        (k, o) for k, o in PLEX_Media.OBJ_BY_ID.items()
+        if o.get('type_str') in ('Movie', 'Series')
+    ]
+
+    # Reduce to one entry per cache key (scope may include episodes whose series we want)
+    work = []
+    seen = set()
+    for k, o in items:
+        type_str = o.get('type_str', '')
+        if type_str == 'Episode':
+            # Use the parent series for episodes
+            sk = o.get('series_key', '')
+            so = PLEX_Media.OBJ_BY_ID.get(sk)
+            if not so or sk in seen:
+                continue
+            k, o, type_str = sk, so, 'Series'
+        if type_str not in ('Movie', 'Series'):
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        if o.get('original_language'):
+            continue   # already cached
+        ext = o.get('external_ids') or {}
+        if not ext.get('tmdb'):
+            continue
+        work.append((k, o, type_str))
+
+    if not work:
+        print(">>> --original-languages: nothing to backfill (every in-scope item already has original_language or no TMDB id).")
+        return (0, 0, 0)
+
+    print()
+    print("=" * 76)
+    print(f"--original-languages backfill plan: {len(work)} item(s) need TMDB lookup")
+    print("=" * 76)
+    print(f"  {'KEY':<18}  {'TYPE':<7}  {'TMDB-ID':<10}  TITLE")
+    print(f"  {'-'*18}  {'-'*7}  {'-'*10}  {'-'*40}")
+    for k, o, ts in work[:50]:
+        print(f"  {k:<18}  {ts:<7}  {(o.get('external_ids') or {}).get('tmdb',''):<10}  {o.get('title','?')}")
+    if len(work) > 50:
+        print(f"  …and {len(work)-50} more")
+
+    if dry_run:
+        print()
+        print(f"[DRY-RUN] Would fetch original_language from TMDB for {len(work)} item(s).")
+        return (0, 0, 0)
+
+    print()
+    n_ok = n_fail = 0
+    import time as _t
+    for i, (k, o, type_str) in enumerate(work, 1):
+        tmdb_id = (o.get('external_ids') or {}).get('tmdb')
+        endpoint = 'tv' if type_str == 'Series' else 'movie'
+        lang = fetch_original_language_from_tmdb(tmdb_id, media_type=endpoint)
+        if lang:
+            o['original_language'] = lang
+            n_ok += 1
+            print(f"  [{i}/{len(work)}] {k}  →  original_language = {lang}    ({o.get('title','?')})")
+        else:
+            n_fail += 1
+            print(f"  [{i}/{len(work)}] {k}  →  TMDB lookup FAILED               ({o.get('title','?')})")
+        _t.sleep(0.05)   # gentle rate-limit (TMDB allows ~50 req/s)
+
+    if not READ_ONLY_MODE:
+        update_and_save_cache(CACHE)
+
+    print()
+    print("=" * 76)
+    print(f"SUMMARY  --original-languages")
+    print(f"  fetched : {n_ok}")
+    print(f"  failed  : {n_fail}")
+    print("=" * 76)
+    return (n_ok, n_fail, 0)
+
 
 def format_duration(duration_ms, unit='m'):
     """Convert duration from milliseconds to specified unit
@@ -16446,6 +16698,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                   'country', 'countries', 'director', 'directors',
                                   'actor', 'actors', 'contentrating', 'writer', 'writers',
                                   'imdb', 'tmdb', 'tvdb',
+                                  'originallang', 'original_lang', 'original_language',
                                   'path', 'filepath', 'file'):
                 return f"+{_display_field}", lambda obj, fi: True
 
@@ -16513,7 +16766,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -16691,6 +16944,39 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _n in langs
             return label_str, _lang_fn
 
+        # --- Country (country of production: country:france / country:fr / countries:usa) ---
+        # Matches obj['countries'] (list of English country names from Plex).
+        # Accepts ISO 3166-1 alpha-2 codes (fr, us, gb) AND English names (France,
+        # United States, UK) via _normalize_country_name_or_code().
+        if field in ('country', 'countries'):
+            label_str = f"country:{val}"
+            def _country_fn(obj, fi, _v=val):
+                return _country_matches(_v, obj.get('countries') or [])
+            return label_str, _country_fn
+
+        # --- Original language (original_lang:fr / originallang:french / original_language:de) ---
+        # Matches obj['original_language'] (ISO 639-1 lowercase, populated by
+        # --original-languages via TMDB).  Accepts ISO codes ('fr', 'fre', 'fra')
+        # and English names ('french') via _normalize_lang_name_or_code().
+        if field in ('original_language', 'originallang', 'original_lang'):
+            needle = _normalize_lang_name_or_code(val)
+            label_str = f"originallang:{needle or val}"
+            def _origlang_fn(obj, fi, _n=needle):
+                ol = (obj.get('original_language') or '').lower()
+                if not ol:
+                    # For episodes, inherit from parent series
+                    sk = obj.get('series_key', '')
+                    if sk:
+                        so = PLEX_Media.OBJ_BY_ID.get(sk, {})
+                        ol = (so.get('original_language') or '').lower()
+                if not ol:
+                    return False
+                if _n and ol == _n:
+                    return True
+                # Normalise stored value too (in case Plex/TMDB ever returns ISO 639-2)
+                return _normalize_lang_name_or_code(ol) == _n
+            return label_str, _origlang_fn
+
         # --- Subs (subtitle language: subs:de / sub:en) ---
         if field in ('subs', 'sub', 'subtitle', 'subtitles'):
             lang_map = {'en': 'en', 'english': 'en', 'eng': 'en',
@@ -16858,6 +17144,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'library': 'library',
             'path': 'filepath', 'filepath': 'filepath', 'file': 'filepath',
             'country': 'country', 'countries': 'country',
+            'originallang': 'originallang', 'original_lang': 'originallang', 'original_language': 'originallang',
             'director': 'director', 'directors': 'director',
             'writer': 'writer', 'writers': 'writer',
             'actor': 'actor', 'actors': 'actor',
@@ -16952,6 +17239,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'original_title': obj.get('originalTitle', '') or '',
                 'library':      lib,
                 'countries':    ', '.join(str(c) for c in (obj.get('countries') or [])),
+                'original_language': (obj.get('original_language')
+                                      or (PLEX_Media.OBJ_BY_ID.get(obj.get('series_key',''), {}) or {}).get('original_language')
+                                      or ''),
                 'directors':    ', '.join(str(d) for d in (obj.get('directors') or [])),
                 'writers':      ', '.join(str(w) for w in (obj.get('writers') or [])),
                 'actors':       ', '.join(str(a) for a in (obj.get('actors') or [])[:5]),
@@ -16997,6 +17287,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         has_filepath = 'filepath' in _active_fields  # explicit `path` / `filepath` / `file` token
         has_library  = 'library'  in _active_fields
         has_country  = 'country'  in _active_fields
+        has_originallang = 'originallang' in _active_fields
         has_director = 'director' in _active_fields
         has_writer   = 'writer'   in _active_fields
         has_actor    = 'actor'    in _active_fields
@@ -17173,6 +17464,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('LABELS', 14, lambda r: r['labels'] or '-'))
         if has_country:
             extra_cols.append(('COUNTRY', 10, lambda r: r['countries'] if r['countries'] else '-'))
+        if has_originallang:
+            extra_cols.append(('ORIG-LANG', 9, lambda r: (r.get('original_language') or '-')))
         if has_director:
             extra_cols.append(('DIRECTOR', 18, lambda r: r['directors'] if r['directors'] else '-'))
         if has_writer:
@@ -19438,7 +19731,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -21055,6 +21348,53 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG (in ~/.my-plex.conf):")
             print("  OUTDATED_CONTAINERS, REMUX_TARGET_CONTAINER, REMUX_VIDEO_CODECS_OK,")
             print("  REMUX_AUDIO_CODECS_OK, REMUX_REQUIRE_LANGUAGE, REMUX_TRASH_ORIGINAL")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'original-languages' | 'original_languages' | 'originallang' | 'original_lang':
+            print()
+            print("=" * 76)
+            print("ORIGINAL LANGUAGES HELP   NEW in v1.8")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --original-languages [SCOPE]       # backfill from TMDB")
+            print("       my-plex --original-languages --try         # dry-run preview only")
+            print("       my-plex --original-languages 'movies.fr'   # scoped backfill")
+            print()
+            print("Walks the cache and, for every Movie / Series that has a cached TMDB")
+            print("external_id but no `original_language` field yet, queries the TMDB API")
+            print("for the `original_language` value (ISO 639-1, e.g. 'fr', 'en', 'ja')")
+            print("and stores it in the cache.  Once populated, the field powers two new")
+            print("filter / scope tokens:")
+            print()
+            print("  original_lang:fr        → matches obj.original_language == 'fr'")
+            print("  originallang:french     → same (English-name accepted via map)")
+            print("  original_language:de    → long-form synonym")
+            print()
+            print("COMPANION TOKEN — country:")
+            print("  country:france          → matches obj.countries (English names)")
+            print("  country:fr              → ISO 3166-1 alpha-2 code (mapped to 'France')")
+            print("  country:usa             → same as country:us  → 'United States'")
+            print("  (country data is already in the cache — no backfill needed.)")
+            print()
+            print("REQUIREMENTS:")
+            print("  TMDB_API_KEY must be set in ~/.my-plex.conf (free at themoviedb.org).")
+            print("  Items without a cached `external_ids.tmdb` value are silently skipped.")
+            print("  Run `my-plex --update-cache` first if you've never built the cache.")
+            print()
+            print("RATE LIMITING:")
+            print("  ~20 requests/second (50ms inter-request sleep).  TMDB allows ~50 r/s")
+            print("  so this is comfortably within their limit and finishes a 1000-movie")
+            print("  library in ~1 minute.  Subsequent runs are no-ops (cached values are")
+            print("  preserved unless you explicitly clear them).")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --original-languages                # backfill all movies+series")
+            print("  my-plex --original-languages movies.fr      # one library only")
+            print("  my-plex --original-languages Movie:115547   # one item (test)")
+            print("  my-plex ,unsorted original_lang:fr          # filter (after backfill)")
+            print("  my-plex movies.fr -- country:france         # all French-country movies")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -28329,6 +28669,14 @@ def execute_global_commands(args, cmd_args):
         cmd_remux(target, yes=yes, no_audio_language_only=no_audio_lang_only)
         sys.exit(0)
 
+    # Handle --original-languages command (TMDB backfill for original_language field)
+    olang_target = safe_getattr(cmd_args, 'original_languages', None)
+    if olang_target is not None:
+        target = olang_target if olang_target is not True else None
+        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+        cmd_original_languages(target=target, dry_run=dry_run)
+        sys.exit(0)
+
     # Handle --mv / --move command (cross-library file move)
     mv_args = safe_getattr(cmd_args, 'mv', None)
     if mv_args is not None:
@@ -28999,6 +29347,7 @@ def main():
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--remux': 'remux',
         '--mv': 'mv', '--move': 'mv', '--mv-to': 'mv', '--move-to': 'mv',
+        '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
@@ -29042,14 +29391,14 @@ def main():
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
     # Cat-C: bare field name without operator/value — adds a display column, no filtering
     # Cat-C: bare field name — display-only column (superset of Cat-B fields + title, library, country, etc.)
     _CAT_C_TOKEN_RE = re.compile(
-        r'^(?P<field>title|originaltitle|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|director|directors|actor|actors|contentrating|writer|writers|imdb|tmdb|tvdb|path|filepath|file)$',
+        r'^(?P<field>title|originaltitle|library|bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|country|countries|original_language|originallang|original_lang|director|directors|actor|actors|contentrating|writer|writers|imdb|tmdb|tvdb|path|filepath|file)$',
         re.IGNORECASE
     )
     # Negative Cat-C: -field removes a column from output (e.g. -file, -genre, -title)
@@ -29067,6 +29416,7 @@ def main():
         'subs': 'SUBS', 'sub': 'SUBS', 'subtitle': 'SUBS', 'subtitles': 'SUBS',
         'watched': 'WATCH#', 'watch': 'WATCH#',
         'country': 'COUNTRY', 'countries': 'COUNTRY',
+        'originallang': 'ORIG-LANG', 'original_lang': 'ORIG-LANG', 'original_language': 'ORIG-LANG',
         'director': 'DIRECTOR', 'directors': 'DIRECTOR',
         'writer': 'WRITER', 'writers': 'WRITER',
         'actor': 'ACTORS', 'actors': 'ACTORS',
@@ -29576,6 +29926,7 @@ def main():
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -29658,6 +30009,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter. Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv DEST_LIB [SCOPE]. SCOPE can be a library name, cache key, Plex ID, title, or filepath (omitted = all items). On duplicate title+originalTitle+year matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
+    GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
@@ -29779,6 +30131,8 @@ def main():
                 '--move':                    'mv',
                 '--mv-to':                   'mv',
                 '--move-to':                 'mv',
+                '--original-languages':         'original-languages',
+                '--collect-original-languages': 'original-languages',
                 '--problems':                'problems',
                 '--tsv':                     'problems',
                 '--scrape':                  'problems',
@@ -30110,6 +30464,14 @@ def main():
             remaining_args.insert(1, '--remux')
         else:
             remaining_args.insert(0, '--remux')
+
+    # Re-inject --original-languages into remaining_args
+    if safe_getattr(args, 'original_languages', None) is not None:
+        if args.original_languages is not True and args.original_languages:
+            remaining_args.insert(0, args.original_languages)
+            remaining_args.insert(1, '--original-languages')
+        else:
+            remaining_args.insert(0, '--original-languages')
 
     # Re-inject --mv into remaining_args
     # --mv takes 1 or 2 positionals: DEST_LIB [SCOPE]

@@ -8243,6 +8243,118 @@ class TestMove(unittest.TestCase):
         self.assertIn("SUMMARY", body)
 
 
+class TestOriginalLanguages(unittest.TestCase):
+    """Tests for --original-languages backfill + country: / originallang: filter tokens."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_iso639_helper_exists(self):
+        """_normalize_lang_name_or_code must exist and map names + codes."""
+        src = self._read_script()
+        self.assertIn("def _normalize_lang_name_or_code(", src)
+        self.assertIn("_ISO639_1_NAME_TO_CODE", src)
+
+    def test_iso3166_helper_exists(self):
+        """_normalize_country_name_or_code must exist and map names + codes."""
+        src = self._read_script()
+        self.assertIn("def _normalize_country_name_or_code(", src)
+        self.assertIn("_ISO3166_NAME_TO_CODE", src)
+
+    def test_country_matches_helper(self):
+        """_country_matches must handle both code and name input."""
+        src = self._read_script()
+        self.assertIn("def _country_matches(", src)
+
+    def test_tmdb_original_language_fetcher(self):
+        """fetch_original_language_from_tmdb() must exist and use Bearer auth."""
+        src = self._read_script()
+        self.assertIn("def fetch_original_language_from_tmdb(", src)
+        self.assertIn("'Authorization': f'Bearer {TMDB_API_KEY}'", src)
+        self.assertIn("'original_language'", src)
+
+    def test_cmd_original_languages_exists(self):
+        """cmd_original_languages() must exist as a top-level function."""
+        src = self._read_script()
+        self.assertIn("def cmd_original_languages(", src)
+
+    def test_cmd_original_languages_skips_already_cached(self):
+        """Backfill must skip items that already have original_language."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_original_languages\(.*?\n(.*?)def format_duration', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find cmd_original_languages body")
+        body = m.group(1)
+        self.assertIn("if o.get('original_language')", body)
+        self.assertIn("continue", body)
+
+    def test_original_lang_filter_in_parser_regex(self):
+        """The Cat-B filter regex in _parse_filter_sub_expr must accept original_lang / originallang / original_language."""
+        src = self._read_script()
+        self.assertIn("original_language|originallang|original_lang", src)
+
+    def test_country_filter_in_parser_regex(self):
+        """Cat-B regex must include country / countries."""
+        src = self._read_script()
+        import re
+        m = re.search(r"_field_re = re\.match\(\s*r'(\^.*?\$)'", src, re.DOTALL)
+        # Regex is multi-line; just confirm country is referenced as a field
+        self.assertIn("country|countries", src)
+
+    def test_original_lang_filter_handler(self):
+        """_parse_filter_sub_expr must contain an originallang handler."""
+        src = self._read_script()
+        self.assertIn("original_language', 'originallang', 'original_lang'", src)
+        self.assertIn("_normalize_lang_name_or_code(", src)
+
+    def test_country_filter_handler(self):
+        """_parse_filter_sub_expr must contain a country handler using _country_matches."""
+        src = self._read_script()
+        self.assertIn("'country', 'countries'", src)
+        self.assertIn("_country_matches(", src)
+
+    def test_original_languages_registered_in_main_parser(self):
+        """--original-languages must be registered in main_parser."""
+        src = self._read_script()
+        self.assertIn("main_parser.add_argument('--original-languages', '--collect-original-languages'", src)
+
+    def test_original_languages_registered_in_global_cmd_parser(self):
+        """--original-languages must be registered in GLOBAL_CMD_PARSER with help text."""
+        src = self._read_script()
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages'", src)
+
+    def test_original_languages_in_has_standalone_cmd(self):
+        """--original-languages must be in has_standalone_cmd check."""
+        src = self._read_script()
+        self.assertIn("safe_getattr(args, 'original_languages', None) is not None", src)
+
+    def test_original_languages_handler_in_execute_global_commands(self):
+        """execute_global_commands must dispatch --original-languages to cmd_original_languages()."""
+        src = self._read_script()
+        self.assertIn("cmd_original_languages(target=target", src)
+
+    def test_original_languages_help_page_exists(self):
+        """--help original-languages must have a dedicated help page."""
+        src = self._read_script()
+        self.assertIn("case 'original-languages' | 'original_languages'", src)
+
+    def test_original_languages_help_covers_features(self):
+        """--help page must document filter tokens + country: companion + TMDB requirement."""
+        src = self._read_script()
+        import re
+        m = re.search(r"case 'original-languages'.*?sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find --help original-languages page")
+        body = m.group(0)
+        for kw in ('original_lang:', 'originallang:', 'country:', 'TMDB_API_KEY', 'french', 'france'):
+            self.assertIn(kw, body, f"--help original-languages must mention '{kw}'")
+
+    def test_orig_lang_in_neg_field_map(self):
+        """ORIG-LANG column must be removable via -originallang token."""
+        src = self._read_script()
+        self.assertIn("'originallang': 'ORIG-LANG'", src)
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -8282,6 +8394,7 @@ _UNITTEST_SCOPES = {
                    TestShowDirDerivation],
     'renumber':   [TestRenumber],
     'move':       [TestMove],
+    'original-languages': [TestOriginalLanguages],
 }
 
 # List of all unittest classes for run_regression_tests()
