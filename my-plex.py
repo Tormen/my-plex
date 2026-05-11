@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.6"
+SCRIPT_VERSION = "v1.7"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -1611,7 +1611,7 @@ EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'ep
 #   - O(1) lang:<code> filtering in _list_filtered
 EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
 
-GLOBAL_CMD_PARSER = None # will hold the global_cmd_parser
+GLOBAL_CMD_PARSER: Any = None # will hold the global_cmd_parser
 PLEX_SERVER: Any = None # server instance will be set where needed
 
 # MAIN DICT used by this script(s command-line parser) to perform it's actions:
@@ -1904,7 +1904,7 @@ def _get_worker_prefix():
     except (ValueError, IndexError):
         return ""  # Can't parse worker number, skip prefix
 
-def plex_retry_operation(operation, *args, context=None, library=None, **kwargs):
+def plex_retry_operation(operation, *args, context=None, library=None, **kwargs) -> Any:
     """
     Generic retry wrapper for any PLEX operation with exponential backoff.
     Handles connection throttling/timeouts. During cache update mode, will reduce
@@ -2420,7 +2420,7 @@ def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
 def print_obj(obj, var_name=None, prefix="", intro=None, width=80, depth=None):
     if intro is not None: print(intro, end='')
     if var_name is not None:
-        pfx = prefix if intro.endswith('\n') else ''
+        pfx = prefix if (intro is not None and intro.endswith('\n')) else ''
         print(f"{pfx}{var_name} = {type(obj)}")
     if prefix is None: prefix=""
 
@@ -2453,6 +2453,7 @@ import unittest
 
 from importlib.util import spec_from_file_location, module_from_spec as _mfs
 _test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.abspath(__file__)), "my-plex_tests.py"))
+assert _test_spec is not None and _test_spec.loader is not None, "my-plex_tests.py not found next to my-plex.py"
 _test_mod = _mfs(_test_spec)
 _test_spec.loader.exec_module(_test_mod)
 _UNITTEST_CLASSES = _test_mod._UNITTEST_CLASSES
@@ -2528,7 +2529,7 @@ def parse_plex_xml_url(xml_url):
         err(1061, f"Failed to parse Plex XML URL: {e}")
 
 # Connect to Plex server API
-def ensure_plex_api(required=True):
+def ensure_plex_api(required=True) -> Any:
     """Infrastructure for all API-dependent write/mutate operations.
     Ensure PLEX_SERVER is connected. Lazily connects on first call.
     If required=True (default), raises error when API is unavailable.
@@ -2655,7 +2656,7 @@ def connect_to_plex(plex_url, plex_token):
                 self.timeout = timeout
                 super().__init__(*args, **kwargs)
 
-            def send(self, request, **kwargs):
+            def send(self, request, **kwargs):  # type: ignore[override]
                 # Force timeout on every request to prevent hanging on dead connections
                 kwargs['timeout'] = kwargs.get('timeout') or self.timeout
                 return super().send(request, **kwargs)
@@ -2683,7 +2684,7 @@ def connect_to_plex(plex_url, plex_token):
         err(1016, f"Failed to connect to PLEX Server: {plex_url=} {plex_token=} {PLEX_TIMEOUT=}: {e}")
 
 
-def get_alternative_paths(path, including_path=False, path_2nd=None):
+def get_alternative_paths(path, including_path=False, path_2nd=None) -> list:
     """ if path_2nd is provided, returns a LIST of TUPLES (alternative_path, alternative_path_2nd)
             (if only ONE of them matched, the other will be None)
         else: returns a LIST of alternative paths of path """
@@ -3454,6 +3455,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         elif operation == 'RENAME':
             # Rename file/dir in ONE shot: check exists && move && echo success
             new_filename = kwargs.get('new_filename')
+            if not new_filename: err(1097, "RENAME operation requires kwargs['new_filename']")
             src_dir = os.path.dirname(filepath)
             dst_path = os.path.join(src_dir, new_filename)
             escaped_dst = escape_path_for_ssh(dst_path)
@@ -3553,6 +3555,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
         elif operation == 'RENAME':
             new_filename = kwargs.get('new_filename')
+            if not new_filename: err(1098, "RENAME operation requires kwargs['new_filename']")
             src_dir = os.path.dirname(filepath)
             dst_path = os.path.join(src_dir, new_filename)
 
@@ -3566,6 +3569,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
         elif operation == 'MOVE':
             dest_path = kwargs.get('dest_path')
+            if not dest_path: err(1099, "MOVE operation requires kwargs['dest_path']")
             try:
                 shutil.move(filepath, dest_path)
                 print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
@@ -5575,7 +5579,7 @@ def display_duplicate_details(nr, obj):
                         print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
                         print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
 
-def determine_remote_host(filepath):
+def determine_remote_host(filepath) -> tuple:
     """Determine if file is local or on remote SSH host
 
     Args:
@@ -8412,7 +8416,8 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         "error": "Could not move to trash"
                     })
                     operation_log["result"] = "failed"
-                    resolution_log_data["operations"].append(operation_log)
+                    if resolution_log_data is not None:
+                        resolution_log_data["operations"].append(operation_log)
                 return False
 
     elif choice == '4':
@@ -8665,7 +8670,8 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         "error": "Could not move to trash"
                     })
                     operation_log["result"] = "failed"
-                    resolution_log_data["operations"].append(operation_log)
+                    if resolution_log_data is not None:
+                        resolution_log_data["operations"].append(operation_log)
                 return False
 
     elif choice in ('5', '6'):
@@ -8734,7 +8740,8 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     "renamed": len(renamed_files),
                     "failed": len(failed_files)
                 }
-                resolution_log_data["operations"].append(operation_log)
+                if resolution_log_data is not None:
+                    resolution_log_data["operations"].append(operation_log)
             if renamed_files:
                 print("⚠ Some files were renamed. You may need to manually fix the failed ones.")
             return False
@@ -9497,7 +9504,7 @@ for line in sys.stdin:
         else:
             cmd = [sys.executable, '-c', collector_script]
 
-        proc = None
+        proc: Any = None
         try:
             proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
 
@@ -9514,6 +9521,7 @@ for line in sys.stdin:
 
             # Write stdin and read stdout separately (not communicate())
             # communicate() races with relay_stderr for the stderr pipe
+            assert proc.stdin is not None and proc.stdout is not None  # stdin=PIPE/stdout=PIPE guarantees these
             proc.stdin.write(filepaths_input)
             proc.stdin.close()
             stdout_data = proc.stdout.read()
@@ -10733,7 +10741,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
             needs_scrape = True  # No TSV or empty/corrupt — must scrape
         if needs_scrape:
             source = _determine_episode_source(series_dict)
-            external_ids = series_dict.get('external_ids', {})
+            external_ids = series_dict.get('external_ids') or {}
             if VRB:
                 reason = "missing" if not tsv_episodes else ("forced" if FROM_SCRATCH else "empty/corrupt")
                 print(f"{VRBPFX}Scraping episodes.tsv for '{series_title}' ({reason})...")
@@ -11223,6 +11231,7 @@ def get_media_list_from_PLEX_OBJ_list( obj_list ):
     mediae = []
     for obj in obj_list:
         media,part = PLEX_Media.retrieve_media_and_part(obj, must_exist=True)
+        assert media is not None  # must_exist=True guarantees this
         match obj["type"]:
             case "Movie":    print(f"File '{obj['file']}' found as movie '{media.title}' ({media.year})")
             case "Movie*":   print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of movie '{media.title}' ({media.year})")
@@ -11404,14 +11413,14 @@ class PLEX_OBJ_TYPE_ABC(ABC):
 
     @staticmethod
     @abstractmethod
-    def detect_if_of_OBJ_TYPE(args, obj):
-        pass
+    def detect_if_of_OBJ_TYPE(args, obj) -> bool:
+        ...
 
     # The cmd(s) to exeucte will be provided via 'obj_args'
     @staticmethod
     @abstractmethod
-    def execute_cmd(args, obj, obj_args):
-        pass
+    def execute_cmd(args, obj, obj_args) -> None:
+        ...
 
 def add_PLEX_OBJ_TYPE(obj_class):
     PLEXOBJ[PARSER][obj_class.TYPE_STR] = obj_class.argparser;
@@ -12130,6 +12139,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if DBG: print(f"{DBGPFX}update_cache(): Fetching libraries from database...")
             try:
                 libraries = get_library_sections_from_database()
+                if libraries is None:
+                    err(1095, "Failed to fetch libraries from Plex database.")
                 if DBG: print(f"{DBGPFX}update_cache(): Found {len(libraries)} libraries in database")
 
                 # Clear and repopulate OBJ_DICT
@@ -13097,6 +13108,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         res[alternative_path] = [section.title]
         return res
 
+    @staticmethod
     def get_filtered_OBJ_DICT(library_names):
         return {key: value for key, value in PLEX_Library.OBJ_DICT.items() if key in library_names}
 
@@ -15676,6 +15688,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     n += 1
         return n
 
+    @staticmethod
     def _list_reencode_candidates(obj_keys, library_name):
         """List media files whose avg bitrate exceeds REENCODE_THRESHOLD_MBPS.
         For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
@@ -16475,7 +16488,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         ) if not _title_re else None
         if _title_re or _ep_title_re or sub.startswith('~'):
             _ep_only = bool(_ep_title_re)
-            needle = ((_ep_title_re or _title_re).group('val') if (_ep_title_re or _title_re) else sub[1:]).strip().strip("'\"").lower()
+            _matched = _ep_title_re or _title_re
+            needle = (_matched.group('val') if _matched else sub[1:]).strip().strip("'\"").lower()
             label = f"{'ep' if _ep_only else 'title'}~{needle}"
             # Pre-build set of series keys whose title matches (for fast episode lookup)
             _matching_series = set()
@@ -17586,18 +17600,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if library_name:
             labeled_keys = {k for k in labeled_keys
                             if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('library') == library_name}
-        above_keys = set(k for k, _, _ in flagged_movies) | set(
-            key for s in flagged_ep_by_series.values()
-            for s in series_seasons.values() for key in [
-                next((k for k in labeled_keys
-                      if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('series_key') == sk
-                      and (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('S_str') == ss
-                      and (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('E_str') == es), None)
-                for sk, series_seasons in flagged_ep_by_series.items()
-                for ss, s_eps in series_seasons.items()
-                for es in s_eps
-            ] if key
-        )
+        above_keys = {k for k, _, _ in flagged_movies}
+        for sk, seasons in flagged_ep_by_series.items():
+            for ss, eps in seasons.items():
+                for es in eps:
+                    for k in labeled_keys:
+                        o = PLEX_Media.OBJ_BY_ID.get(k) or {}
+                        if (o.get('series_key') == sk
+                                and o.get('S_str') == ss
+                                and o.get('E_str') == es):
+                            above_keys.add(k)
+                            break
         # Simpler: keys in labeled_keys that are NOT above threshold
         flagged_obj_keys = set()
         for key in set(obj_keys):
@@ -17977,7 +17990,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return filtered_keys
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None):
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None):  # pyright: ignore[reportGeneralTypeIssues]
         global FORMAT
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
 
@@ -21970,7 +21983,7 @@ def get_local_path(server_path):
     return resolved
 
 
-def get_server_path(local_path):
+def get_server_path(local_path) -> str:
     """Translate a local path to server path using ALTERNATIVE_ROOTPATHS.
     Returns the first alternative path, or the original path."""
     import os
@@ -22004,6 +22017,9 @@ def _load_custom_date_extractors():
 
     try:
         spec = importlib.util.spec_from_file_location("custom_date_extractors", module_path)
+        if spec is None or spec.loader is None:
+            print(f"WARNING: Could not load CUSTOM_DATE_EXTRACTORS module: {module_path}")
+            return
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         if hasattr(mod, 'EXTRACTORS') and isinstance(mod.EXTRACTORS, dict):
@@ -22017,7 +22033,7 @@ def _load_custom_date_extractors():
 
 
 # Built-in extractors registry
-_BUILTIN_EXTRACTORS = {
+_BUILTIN_EXTRACTORS: dict[str, Any] = {
     'TVOON': None,  # filled after function definitions below
     'ISO': None,
 }
@@ -22208,6 +22224,7 @@ def scrape_episodes(series_title, series_dir, source=None, force=False, external
     return metadata, new_episodes
 
 
+_tvdb_state: dict = {}  # module-level cache for _tvdb_login token and _scrape_tvdb series_name
 def _tvdb_login(api_key):
     """Authenticate with TVDB v4 API and return bearer token.
 
@@ -22220,8 +22237,8 @@ def _tvdb_login(api_key):
         return None
 
     # Cache token on module level
-    if hasattr(_tvdb_login, '_cached_token') and _tvdb_login._cached_token:
-        return _tvdb_login._cached_token
+    if _tvdb_state.get('cached_token'):
+        return _tvdb_state['cached_token']
 
     url = 'https://api4.thetvdb.com/v4/login'
     payload = json.dumps({'apikey': api_key}).encode('utf-8')
@@ -22232,7 +22249,7 @@ def _tvdb_login(api_key):
             data = json.loads(resp.read().decode('utf-8'))
             token = data.get('data', {}).get('token')
             if token:
-                _tvdb_login._cached_token = token
+                _tvdb_state['cached_token'] = token
                 return token
             err(1100, "TVDB login succeeded but no token in response.\n"
                 "  Possible reasons:\n"
@@ -22331,9 +22348,9 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
         if page == 0:
             series_info = data.get('data', {}).get('series', {})
             if series_info and isinstance(series_info, dict):
-                _scrape_tvdb._series_name = series_info.get('name', '')
+                _tvdb_state['series_name'] = series_info.get('name', '')
             else:
-                _scrape_tvdb._series_name = ''
+                _tvdb_state['series_name'] = ''
 
         for ep in episodes_data:
             season_num = ep.get('seasonNumber')
@@ -22365,8 +22382,8 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
 
     new_metadata = {'tvdb_id': str(tvdb_id)}
     # Store the series title as reported by TVDB (may differ from Plex title)
-    if hasattr(_scrape_tvdb, '_series_name') and _scrape_tvdb._series_name:
-        new_metadata['series_title'] = _scrape_tvdb._series_name
+    if _tvdb_state.get('series_name'):
+        new_metadata['series_title'] = _tvdb_state['series_name']
     max_s = max(ep['season'] for ep in all_episodes)
     if max_s:
         new_metadata['latest_season'] = str(max_s)
@@ -22997,7 +23014,7 @@ def cmd_missing(series_ref, source_override=None):
 
     # Determine episode source for this series
     source = _determine_episode_source(series_dict, source_override)
-    external_ids = series_dict.get('external_ids', {})
+    external_ids = series_dict.get('external_ids') or {}
 
     print(f" >>> MISSING EPISODES: {series_title}")
     print(f"  >> Show:      {series_key} — {series_title}")
@@ -23032,7 +23049,7 @@ def cmd_missing(series_ref, source_override=None):
             print(f"  >> Create {tsv_path} or ensure the series exists on {source}.")
         return
 
-    print(f"  >> TSV:       {len(all_episodes)} episodes (source: {metadata.get('source', '?')})")
+    print(f"  >> TSV:       {len(all_episodes)} episodes (source: {(metadata or {}).get('source', '?')})")
 
     # Get cached episodes from OBJ_BY_SERIES_EPISODES
     cached_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
@@ -23504,6 +23521,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
     """
     if not DISK_PLEX_MAP:
         return (0, 0, 0, 0, {})
+    assert apply_fn is not None and strip_fn is not None, "apply_fn/strip_fn required"
 
     renamed_count = 0
     renames = {}
@@ -25218,7 +25236,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         # Determine episode source for this series
         source = _determine_episode_source(series_dict)
-        external_ids = series_dict.get('external_ids', {})
+        external_ids = series_dict.get('external_ids') or {}
 
         # Load / update episodes.tsv (reads via local path or SSH)
         tsv_path = get_episodes_tsv_path(series_dir_local if use_local else series_dir_server)
@@ -28877,7 +28895,6 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     cmd_args, unparsed = GLOBAL_CMD_PARSER.parse_known_args( [arg] + remaining_args )
                 except Exception as e:
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP GLOBAL_CMD_PARSER.parse_args() FAILED: '{e}'" )
-                    None
                 else:
                     # Check if the arg was actually consumed (recognized) by the parser
                     # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
@@ -29182,8 +29199,8 @@ def main():
                 if field in ('watched', 'watch'):
                     _remove_cols.update(('WATCH#', 'LAST-PLAYED', 'PARTIAL-VIEW'))
             if DBG: print(f" ~~~ Negative filter token '{arg}' → filter '{expr if field != 'type' else f'type={val}'}' + hide {_hidden_col}", file=sys.stderr)
-        elif _NEG_CAT_C_RE.match(arg):
-            _nf = _NEG_CAT_C_RE.match(arg).group('field').lower()
+        elif (_negc := _NEG_CAT_C_RE.match(arg)) is not None:
+            _nf = _negc.group('field').lower()
             _remove_cols.add(_NEG_FIELD_MAP[_nf])
             # Also remove synonyms: -file removes both FILEPATH, -watched removes WATCH# + PARTIAL-VIEW
             if _nf in ('file', 'filepath', 'path'):
