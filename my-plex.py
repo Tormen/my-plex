@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.1"
+SCRIPT_VERSION = "v2.2"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -24748,9 +24748,13 @@ def _resolve_scope_filter_expr(expr):
     has_type_filter = any(
         re.match(r'^type[:=]', leaf, re.IGNORECASE) for leaf in leaves
     )
+    has_layout_filter = any(
+        re.match(r'^layout[:=]', leaf, re.IGNORECASE) for leaf in leaves
+    )
 
     items = []
     seen = set()
+    # 1) Cached Plex objects.
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         obj_type = obj.get('type_str') or obj.get('type', '')
         if not has_type_filter:
@@ -24766,6 +24770,47 @@ def _resolve_scope_filter_expr(expr):
                     seen.add(key)
                     items.append((key, obj))
                 break
+
+    # 2) UNCATALOGUED top-level folders — emitted ONLY when a `layout:`
+    # filter is part of the expression.  Rationale: `layout:` describes
+    # ON-DISK shape, NOT cache state, so the filter must be able to see
+    # folders Plex never matched.  Layout data comes from CACHE['layout_index']
+    # when present (--offline safe), live SSH `find` otherwise.  Other
+    # metadata-based filters (country:, lang:, year>…) naturally evaluate
+    # False on these synthetic objects, so a compound expression like
+    # `layout:series country:de` automatically excludes uncatalogued folders.
+    if has_layout_filter:
+        layout_index = _build_layout_index()
+        known_paths = _get_known_filepaths_from_plex_db()
+        locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+        for lib_name, rootpaths in locations_by_lib.items():
+            for rp in rootpaths:
+                rp_norm = rp.rstrip('/')
+                lib_idx = layout_index.get(rp_norm, {})
+                for entry_base, entry_layout in lib_idx.items():
+                    entry_path = f'{rp_norm}/{entry_base}'
+                    # Skip catalogued wrappers — they're already represented
+                    # by their cached items in the loop above.
+                    prefix = entry_path + '/'
+                    if any(p == entry_path or p.startswith(prefix) for p in known_paths):
+                        continue
+                    pseudo_key = f'Folder:{entry_path}'
+                    if pseudo_key in seen:
+                        continue
+                    pseudo_obj = {
+                        'type_str':      'Folder',
+                        'type':          'Folder',
+                        'file':          entry_path,
+                        'files':         {'1': {'filepath': entry_path}},
+                        'library':       lib_name,
+                        'title':         entry_base,
+                        '_uncatalogued': True,
+                        '_layout':       entry_layout,
+                    }
+                    fi = {'filepath': entry_path}
+                    if combined_fn(pseudo_obj, fi):
+                        seen.add(pseudo_key)
+                        items.append((pseudo_key, pseudo_obj))
     return items
 
 
@@ -24812,6 +24857,15 @@ def _get_universal_scope(scope_tokens):
     # be written explicitly as `library:NAME`.
     _OPERATORS = {'AND', 'OR', '(', ')'}
     if any(t in _OPERATORS for t in real_tokens):
+        return _resolve_scope_filter_expr(real_tokens)
+
+    # v2.2: `layout:` tokens describe ON-DISK shape — including folders
+    # Plex never catalogued.  Per-token set-intersection only sees cached
+    # cache keys, so a query like `,unsorted layout:series` would miss the
+    # uncatalogued series-shaped wrappers in ,unsorted.  Route the WHOLE
+    # token list through the compound filter pipeline (which natively
+    # surfaces uncatalogued folders when layout: is present).
+    if any(re.match(r'^layout[:=]', t, re.IGNORECASE) for t in real_tokens):
         return _resolve_scope_filter_expr(real_tokens)
 
     # Multi-token: intersect per-token key sets.
@@ -26411,10 +26465,28 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         print(f"  - Run --update-cache if the cache is stale")
         return (0, 0, 0)
 
-    # Collect movable items (Movies / Episodes that actually have files)
+    # Collect movable items (Movies / Episodes from cache, plus uncatalogued
+    # Folder entries from the layout-aware filter — see _resolve_scope_filter_expr).
     movables = []
     for cache_key, obj in items:
         type_str = obj.get('type_str', '') or obj.get('type', '')
+        # v2.2: uncatalogued top-level folders (synthesized by layout: filter)
+        # — moved as whole directories via SSH `mv`, no cache update needed
+        # because they were never in the cache to begin with.
+        if type_str == 'Folder':
+            src_lib = obj.get('library', '')
+            if src_lib == dest_lib:
+                if DBG: print(f"{DBGPFX}cmd_move: skipping {cache_key} (already in destination library {dest_lib})")
+                continue
+            folder_path = obj.get('file', '')
+            if not folder_path:
+                continue
+            # Folders bypass the Movie/Series type-compat check — they're
+            # raw filesystem content, no Plex type yet.  Plex will classify
+            # them after the post-move scan based on the destination library
+            # type.
+            movables.append((cache_key, obj, src_lib, type_str, [folder_path]))
+            continue
         if type_str not in ('Movie', 'Episode'):
             continue
         src_lib = obj.get('library', '')
@@ -26434,7 +26506,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         movables.append((cache_key, obj, src_lib, type_str, filepaths))
 
     if not movables:
-        print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode files found in libraries other than '{dest_lib}').")
+        print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode/Folder content found in libraries other than '{dest_lib}').")
         return (0, 0, 0)
 
     # ---- Phase 1: preview ----
@@ -26479,6 +26551,47 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     affected_libs = {dest_lib}
 
     for cache_key, obj, src_lib, type_str, filepaths in movables:
+        # ----- v2.2: uncatalogued FOLDER move (SSH `mv` on Plex host) -----
+        # Whole top-level wrapper relocated as one atomic rename when src
+        # and dst share a filesystem (BSD/GNU mv handles dirs without -r).
+        # No cache update: the folder was never in Plex DB, so nothing to
+        # invalidate.  After moves complete, lib.update() on both libs
+        # asks Plex to re-scan and ingest the relocated content fresh.
+        if type_str == 'Folder':
+            folder_path = obj.get('file', '')
+            folder_base = os.path.basename(folder_path.rstrip('/'))
+            new_path = os.path.join(dest_root, folder_base)
+            if PLEX_DB_REMOTE_HOST:
+                esc_dst_root = escape_path_for_ssh(dest_root)
+                mkdir_cmd = ["ssh", PLEX_DB_REMOTE_HOST, f"mkdir -p \"{esc_dst_root}\""]
+                r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}")
+                    n_errors += 1
+                    continue
+            ok, actual = my_plex_file_operation('MOVE', folder_path, PLEX_DB_REMOTE_HOST, dest_path=new_path)
+            if not ok:
+                print(f"  ✗ ERROR move folder: {folder_path} → {new_path}")
+                n_errors += 1
+                continue
+            actual_new = actual or new_path
+            print(f"  ✓ MOVE  {cache_key}  (Folder/uncatalogued: {obj.get('_layout','?')}-shaped, {src_lib} → {dest_lib})")
+            print(f"          {folder_path}")
+            print(f"       →  {actual_new}")
+            affected_libs.add(src_lib)
+            n_moved += 1
+            # Invalidate the in-memory layout-index entry so subsequent calls
+            # in this session don't double-count the folder.
+            global _LAYOUT_INDEX_CACHE
+            if _LAYOUT_INDEX_CACHE is not None:
+                # Remove from old library's index
+                old_rp = src_lib
+                for rp_norm, entries in _LAYOUT_INDEX_CACHE.items():
+                    if folder_base in entries and folder_path.startswith(rp_norm + '/'):
+                        del entries[folder_base]
+                        break
+            continue
+
         title = obj.get('title','?') or ''
         original_title = obj.get('originalTitle','') or ''
         year = obj.get('year','') or ''

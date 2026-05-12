@@ -8575,6 +8575,71 @@ class TestCompoundFilter(unittest.TestCase):
             self.assertIn(kw, body, f"--help scope must mention '{kw}'")
 
 
+class TestUncataloguedFolderMove(unittest.TestCase):
+    """v2.2: layout: filter must surface UNCATALOGUED top-level folders too,
+    and cmd_move must move them via SSH `mv` (no cache update, since they
+    were never in the cache to begin with)."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_resolve_scope_emits_folder_entries(self):
+        """_resolve_scope_filter_expr must emit synthetic Folder entries when layout: filter is present."""
+        src = self._read_script()
+        self.assertIn("has_layout_filter", src)
+        # Synthetic pseudo-key naming convention
+        self.assertIn("f'Folder:{entry_path}'", src)
+        self.assertIn("'type_str':      'Folder'", src)
+        self.assertIn("'_uncatalogued': True", src)
+
+    def test_uncatalogued_folders_filtered_against_known_paths(self):
+        """Folder entries are emitted only if NO cached path lives under them
+        (cached wrappers are already represented by their cached items)."""
+        src = self._read_script()
+        import re
+        m = re.search(r'if has_layout_filter:(.*?)return items', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find the uncatalogued-folder loop")
+        body = m.group(1)
+        self.assertIn("known_paths = _get_known_filepaths_from_plex_db()", body)
+        self.assertIn("p == entry_path or p.startswith(prefix)", body)
+
+    def test_get_universal_scope_routes_layout_to_compound(self):
+        """_get_universal_scope must route layout:-bearing token lists to the compound parser
+        (otherwise per-token set-intersection would miss uncatalogued folders)."""
+        src = self._read_script()
+        self.assertIn("any(re.match(r'^layout[:=]', t, re.IGNORECASE) for t in real_tokens)", src)
+
+    def test_cmd_move_handles_folder_type(self):
+        """cmd_move must branch on type_str=='Folder' and SSH-mv the whole directory."""
+        src = self._read_script()
+        self.assertIn("if type_str == 'Folder':", src)
+        # No cache update for Folders (they were never in cache)
+        self.assertIn("(Folder/uncatalogued:", src)
+        # The folder bypass in the collection loop must also exist
+        self.assertIn("v2.2: uncatalogued top-level folders", src)
+
+    def test_folder_move_uses_my_plex_file_operation(self):
+        """Folder moves must go through the existing SSH-aware MOVE primitive
+        (not a custom ssh subprocess), so they honor PLEX_DB_REMOTE_HOST."""
+        src = self._read_script()
+        import re
+        # Look for the Folder branch's MOVE call
+        m = re.search(
+            r"if type_str == 'Folder':(.*?)(?=if type_str not in \('Movie', 'Episode'\):|^\s*title = obj\.get)",
+            src, re.DOTALL | re.MULTILINE
+        )
+        # Just check the helper call is present in the file
+        self.assertIn("my_plex_file_operation('MOVE', folder_path, PLEX_DB_REMOTE_HOST,", src)
+
+    def test_folder_move_invalidates_layout_index(self):
+        """After moving a folder, the session layout-index entry must be removed
+        so subsequent calls don't double-count the moved folder."""
+        src = self._read_script()
+        self.assertIn("_LAYOUT_INDEX_CACHE", src)
+        self.assertIn("del entries[folder_base]", src)
+
+
 class TestLayoutFilter(unittest.TestCase):
     """Tests for the layout: scope token (orthogonal to type:).
 
@@ -8880,7 +8945,7 @@ _UNITTEST_SCOPES = {
     'original-languages': [TestOriginalLanguages],
     'scope':              [TestUniversalScope],
     'unrecognized':       [TestUnrecognized],
-    'layout':             [TestLayoutFilter],
+    'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
 }
 
