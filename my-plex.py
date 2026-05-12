@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.14"
+SCRIPT_VERSION = "v2.15"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -701,6 +701,11 @@ CONFIG_DEFAULTS = {
     # the runner-up's score.  Below the threshold, the interactive picker
     # is shown.  Default 90 = very conservative.
     'UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT': 90,
+
+    # EDITOR — used by --unmatched --resolve (and any future interactive
+    # bulk-edit prompts) so the user can review/modify the queued operations
+    # before they execute.  Defaults to $EDITOR env var if set, else 'vim'.
+    'EDITOR': None,
 
     # UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME — after the bulk rename, run
     # `library.update()` on each affected library so Plex re-scans the
@@ -1514,6 +1519,7 @@ TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
 UNMATCHED_RESOLVE_LOOKUP_ENGINES = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_LOOKUP_ENGINES']
 UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT']
 UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']
+EDITOR = CONFIG_DEFAULTS['EDITOR']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -6289,24 +6295,103 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         print(f"\nNothing to rename. Skipped: {len(skipped)}.  Bye.")
         return
 
-    print(f"\n──────────────────────────────────────────────────────────────────────────")
-    print(f">>> {len(rename_queue)} rename operation(s) queued:")
-    print()
-    for key, _obj, src, dst, year, tmdb_id in rename_queue:
-        print(f"  {key:<18} {year}  {src}")
-        print(f"  {'':>18}        → {dst}")
-    print()
+    # v2.15: dedupe + conflict-detect.  Two cache items can point at the
+    # SAME wrapper (e.g. Short Circuit 1 & 2 — two Movie entries sharing
+    # one folder).  Renaming the same src twice → second mv hits ENOENT.
+    #   - same src AND same dst → keep one (silent dedupe).
+    #   - same src AND different dsts → conflict; drop ALL, warn user.
+    _by_src = {}
+    for entry in rename_queue:
+        _by_src.setdefault(entry[2], []).append(entry)
+    deduped_queue = []
+    conflicts = []
+    for src, group in _by_src.items():
+        dests = {e[3] for e in group}
+        if len(dests) == 1:
+            deduped_queue.append(group[0])
+            if len(group) > 1 and VRB:
+                keys = ', '.join(e[0] for e in group)
+                print(f"  (dedup: {keys} share wrapper {src!r} — single mv)")
+        else:
+            conflicts.append((src, group))
+    if conflicts:
+        print(f"\n⚠ {len(conflicts)} conflict(s): wrapper holds multiple matched items with DIFFERENT target names — skipping (you'll have to split or rename manually):")
+        for src, group in conflicts:
+            print(f"    {src}")
+            for key, _obj, _src, dst, year, _tmdb in group:
+                print(f"      {key:<18} {year}  → {dst}")
+    rename_queue = deduped_queue
+    if not rename_queue:
+        print(f"\nNothing to rename after conflict pruning. Bye.")
+        return
+
+    def _print_queue(queue):
+        print(f"\n──────────────────────────────────────────────────────────────────────────")
+        print(f">>> {len(queue)} rename operation(s) queued:")
+        print()
+        for key, _obj, src, dst, year, tmdb_id in queue:
+            print(f"  {key:<18} {year}  {src}")
+            print(f"  {'':>18}        → {dst}")
+        print()
+    _print_queue(rename_queue)
 
     if dry_run:
         print(">>> --try / --dry-run: no renames performed.")
         return
 
     if not yes:
-        try:
-            confirm = input(f"Execute {len(rename_queue)} rename(s) via SSH? [yes/no] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            confirm = 'no'
-        if confirm not in ('y', 'yes'):
+        # Edit-or-confirm loop: 'e' opens the queue in $EDITOR (default vim)
+        # for fine-tuning before execution.  Format: each rename is two
+        # consecutive lines (SRC then DEST, both absolute paths).  Lines
+        # starting with '#' are ignored.  Delete a SRC+DEST pair to skip
+        # that rename; edit DEST to change the target.
+        while True:
+            try:
+                confirm = input(f"Execute {len(rename_queue)} rename(s) via SSH? [yes/no/edit] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                confirm = 'no'
+            if confirm in ('y', 'yes'):
+                break
+            if confirm in ('e', 'edit'):
+                import tempfile, subprocess as _sp
+                editor = EDITOR or os.environ.get('EDITOR') or 'vim'
+                with tempfile.NamedTemporaryFile('w', suffix='.my-plex-renames', delete=False) as tf:
+                    tf.write("# my-plex --unmatched --resolve: edit queue before execution.\n")
+                    tf.write("# - Lines starting with '#' are ignored.\n")
+                    tf.write("# - Each rename is two consecutive non-comment lines: SRC then DEST.\n")
+                    tf.write("# - Delete both lines of a pair to SKIP that rename.\n")
+                    tf.write("# - Change the DEST line to use a different target path.\n")
+                    tf.write("# - Save and quit when done; abort by saving an empty file.\n\n")
+                    for key, _obj, src, dst, year, _tmdb in rename_queue:
+                        tf.write(f"# {key:<16} {year}\n")
+                        tf.write(f"{src}\n")
+                        tf.write(f"{dst}\n\n")
+                    tmp_path = tf.name
+                try:
+                    _sp.call([editor, tmp_path])
+                    with open(tmp_path) as rf:
+                        edited_lines = [ln.rstrip('\n') for ln in rf
+                                        if ln.strip() and not ln.lstrip().startswith('#')]
+                finally:
+                    try: os.remove(tmp_path)
+                    except OSError: pass
+                # Parse pairs.  Map original src→entry so we preserve key/year/tmdb_id.
+                by_src = {e[2]: e for e in rename_queue}
+                new_queue = []
+                for i in range(0, len(edited_lines) - 1, 2):
+                    s, d = edited_lines[i], edited_lines[i + 1]
+                    if s in by_src:
+                        key, obj, _osrc, _odst, yr, tmdb = by_src[s]
+                        new_queue.append((key, obj, s, d, yr, tmdb))
+                    else:
+                        # User edited the SRC line too — treat as a free-form rename.
+                        new_queue.append(('?', None, s, d, None, None))
+                if not new_queue:
+                    print("Empty queue after edit — aborted.")
+                    return
+                rename_queue = new_queue
+                _print_queue(rename_queue)
+                continue
             print("Aborted.")
             return
 
@@ -13579,11 +13664,43 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                        'gre':'el'}
         updated_library_object_counts = {}
         _lang_distribution = {}  # {lib: {code: [obj_keys]}}
+        # v2.15: per-library rootpath table for file_segments derivation.
+        _lib_roots = {ln: [r.rstrip('/') for r in (rp or [])]
+                      for ln, rp in (current_library_stats.get('locations', {}) or {}).items()}
+        _SEGMENT_WORD_RE = re.compile(r'[\s._\-]+')
+        def _file_segments(filepath, lib_name):
+            """Return path segments (list[str]) under the library root.  Empty
+            list if the path doesn't fall under any known root for this lib."""
+            if not filepath:
+                return []
+            for r in _lib_roots.get(lib_name, ()):
+                if filepath.startswith(r + '/'):
+                    return filepath[len(r) + 1:].split('/')
+            return []
+        def _segment_words_per_segment(filepath, lib_name):
+            """Pre-tokenised form for title-search path-fallback.  Returns a
+            list[list[str]] — one lowercase word list per segment.  Computing
+            once at --update-cache time saves ~10× over re-splitting on every
+            query (`re.split` was the hot path in cProfile)."""
+            return [[w for w in _SEGMENT_WORD_RE.split(s.lower()) if w]
+                    for s in _file_segments(filepath, lib_name)]
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             lib = obj['library']
             obj_type = obj['type']
             if lib not in updated_library_object_counts:
                 updated_library_object_counts[lib] = {}
+            # v2.15: precompute path-segment WORD LISTS for fast title-search
+            # path-fallback (the dotted-needle case like `war.einmal`).
+            # Storing tokens (not just segments) so the hot filter doesn't
+            # call re.split per object per query — was the cProfile #1 cost.
+            _fp_obj = obj.get('file', '')
+            if _fp_obj:
+                obj['file_segment_words'] = _segment_words_per_segment(_fp_obj, lib)
+            for _fi in (obj.get('files', {}) or {}).values():
+                if isinstance(_fi, dict):
+                    _vfp = _fi.get('filepath') or ''
+                    if _vfp:
+                        _fi['file_segment_words'] = _segment_words_per_segment(_vfp, lib)
             if obj_type == 'Series':
                 updated_library_object_counts[lib]['series'] = updated_library_object_counts[lib].get('series', 0) + 1
             elif obj_type == 'Season':
@@ -18237,7 +18354,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _sot = (_sobj.get('originalTitle') or '').lower()
                     if needle in _st or needle in _sot:
                         _matching_series.add(_sk2)
-            def _component_match(filepath, lib_name, _nw=_needle_words):
+            # v2.15: hot-path uses precomputed obj['file_segment_words']
+            # (list[list[str]]) populated at --update-cache finalize time.
+            # No re.split on the per-query path — ~30× faster than v2.13.
+            # Pre-v2.15 cache (no file_segment_words on objs) falls back to
+            # on-the-fly tokenisation; first --update-cache backfills.
+            _seg_word_re = re.compile(r'[\s._\-]+')
+            def _segwords_match(segwords, _nw=_needle_words):
+                """segwords: list[list[str]] — match if any segment's words
+                cover every needle word (substring-on-word)."""
+                for cw in segwords or ():
+                    if all(any(nw in w for w in cw) for nw in _nw):
+                        return True
+                return False
+            def _filepath_match_live(filepath, lib_name, _nw=_needle_words, _rx=_seg_word_re):
                 if not filepath or not _nw:
                     return False
                 rel = filepath
@@ -18248,35 +18378,39 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         rel = filepath[len(rn) + 1:]
                         break
                 for component in rel.split('/'):
-                    cw = [w for w in re.split(r'[\s._\-]+', component.lower()) if w]
-                    # Every needle word must appear as a substring of SOME
-                    # word in this path component (so `war.einmal` matches
-                    # `es.war.einmal.das.leben`, and `einmal.leb` matches it
-                    # too because 'leb' ⊂ 'leben').
-                    if all(any(nw in word for word in cw) for nw in _nw):
+                    cw = [w for w in _rx.split(component.lower()) if w]
+                    if all(any(nw in w for w in cw) for nw in _nw):
                         return True
                 return False
             def _title_fn(obj, fi, _n=needle, _ep_only=_ep_only, _ms=_matching_series,
-                          _pf=_path_fallback, _cm=_component_match):
+                          _pf=_path_fallback, _swm=_segwords_match, _lpm=_filepath_match_live):
                 t = (obj.get('title') or '').lower()
                 ot = (obj.get('originalTitle') or '').lower()
                 if _n in t or _n in ot:
                     return True
-                # For episodes: also match parent series title (unless ep: search)
                 if not _ep_only and _ms and obj.get('series_key', '') in _ms:
                     return True
-                # NEW: path-component fallback for dotted/underscored needles.
-                if _pf:
-                    lib_name = obj.get('library', '')
-                    # Check obj['file'] (Series/Season have a dir here; Movie/Episode
-                    # have the primary file).
-                    f = obj.get('file', '')
-                    if f and _cm(f, lib_name):
+                if not _pf:
+                    return False
+                # Hot path: precomputed segment-words on obj and per-version.
+                _sw = obj.get('file_segment_words')
+                if _sw is not None:
+                    if _swm(_sw):
                         return True
-                    # Check every version's filepath for Movie/Episode.
                     for _fi in (obj.get('files', {}) or {}).values():
-                        if isinstance(_fi, dict) and _cm(_fi.get('filepath', ''), lib_name):
-                            return True
+                        if isinstance(_fi, dict):
+                            _vsw = _fi.get('file_segment_words')
+                            if _vsw is not None and _swm(_vsw):
+                                return True
+                    return False
+                # Slow fallback (pre-v2.15 cache): live tokenise.
+                lib_name = obj.get('library', '')
+                f = obj.get('file', '')
+                if f and _lpm(f, lib_name):
+                    return True
+                for _fi in (obj.get('files', {}) or {}).values():
+                    if isinstance(_fi, dict) and _lpm(_fi.get('filepath', ''), lib_name):
+                        return True
                 return False
             return label, _title_fn
 
