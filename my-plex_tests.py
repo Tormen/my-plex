@@ -8243,6 +8243,93 @@ class TestMove(unittest.TestCase):
         self.assertIn("SUMMARY", body)
 
 
+class TestUniversalScope(unittest.TestCase):
+    """Tests for the universal scope resolver (_get_disk_map_scope + _get_universal_scope).
+
+    Verifies that every SCOPE-taking command (--mv, --remux, --plex2disk, etc.)
+    can accept filter expressions and compound (multi-token) scopes uniformly.
+    """
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_universal_scope_helper_exists(self):
+        """_get_universal_scope() must exist and accept a list of tokens."""
+        src = self._read_script()
+        self.assertIn("def _get_universal_scope(", src)
+
+    def test_is_scope_filter_token_helper_exists(self):
+        """_is_scope_filter_token() must classify filter expressions."""
+        src = self._read_script()
+        self.assertIn("def _is_scope_filter_token(", src)
+        self.assertIn("_SCOPE_FILTER_FIELDS", src)
+        self.assertIn("_SCOPE_FILTER_RE", src)
+
+    def test_scope_filter_fields_includes_originallang(self):
+        """The filter-field whitelist must include original-language tokens."""
+        src = self._read_script()
+        for kw in ("'original_language'", "'originallang'", "'original_lang'",
+                   "'country'", "'lang'", "'year'"):
+            self.assertIn(kw, src, f"_SCOPE_FILTER_FIELDS must include {kw}")
+
+    def test_resolve_scope_filter_expr_helper_exists(self):
+        """_resolve_scope_filter_expr() must delegate to _parse_filter_sub_expr."""
+        src = self._read_script()
+        self.assertIn("def _resolve_scope_filter_expr(", src)
+        self.assertIn("PLEX_Media._parse_filter_sub_expr", src)
+
+    def test_get_disk_map_scope_delegates_to_filter_resolver(self):
+        """_get_disk_map_scope must dispatch filter-expression targets to _resolve_scope_filter_expr."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
+        body = m.group(1)
+        self.assertIn("_is_scope_filter_token(", body)
+        self.assertIn("_resolve_scope_filter_expr(", body)
+
+    def test_universal_scope_intersects_multiple_tokens(self):
+        """_get_universal_scope must AND-combine (intersect) multiple token results."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def _get_universal_scope\(scope_tokens\).*?\n(.*?)def _get_disk_map_scope', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _get_universal_scope body")
+        body = m.group(1)
+        self.assertIn("set.intersection", body)
+        self.assertIn("per_token_keysets", body)
+
+    def test_cmd_move_uses_universal_scope_for_variadic(self):
+        """cmd_move must consume args_list[1:] variadically via _get_universal_scope."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("scope_tokens", body)
+        self.assertIn("_get_universal_scope(", body)
+
+    def test_argv_normalization_skips_variadic_window(self):
+        """Tokens after --mv (and other variadic flags) must NOT be rewritten as --list filter exprs."""
+        src = self._read_script()
+        self.assertIn("_VARIADIC_SCOPE_FLAGS", src)
+        self.assertIn("_in_variadic_window", src)
+        # Every variadic-scope flag must appear in the set
+        for flag in ("'--mv'", "'--move'", "'--mv-to'", "'--move-to'",
+                     "'--original-languages'", "'--add-label'", "'--remove-label'"):
+            self.assertIn(flag, src, f"_VARIADIC_SCOPE_FLAGS must include {flag}")
+
+    def test_help_mv_documents_compound_scope(self):
+        """--help mv must document the COMPOUND SCOPE section with country: / original_lang: examples."""
+        src = self._read_script()
+        import re
+        m = re.search(r"case 'mv' \| 'move':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        for kw in ('COMPOUND SCOPE', 'country:france', 'original_lang:fr', 'AND-combine'):
+            self.assertIn(kw, body, f"--help mv must mention '{kw}'")
+
+
 class TestOriginalLanguages(unittest.TestCase):
     """Tests for --original-languages backfill + country: / originallang: filter tokens."""
 
@@ -8395,6 +8482,7 @@ _UNITTEST_SCOPES = {
     'renumber':   [TestRenumber],
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
+    'scope':              [TestUniversalScope],
 }
 
 # List of all unittest classes for run_regression_tests()
