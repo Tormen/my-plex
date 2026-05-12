@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.2"
+SCRIPT_VERSION = "v2.3"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -20978,11 +20978,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("    my-plex library:library1 year>2020 lib8")
             print("              # titles containing 'lib8' in library1, post-2020")
             print()
-            print("OR / AND / PARENS (v2.1):")
-            print("  `OR` and `AND` are CASE-SENSITIVE operators — must be uppercase.")
-            print("  Lowercase `and` / `or` stay literal (so titles containing them parse).")
-            print("  `(` and `)` MUST be SPACE-SEPARATED CLI tokens (own argv elements).")
-            print("  Precedence:  AND binds tighter than OR.  Use parens to override.")
+            print("OR / AND / NOT / PARENS (v2.1+):")
+            print("  `OR`, `AND`, `NOT` are CASE-SENSITIVE operators — must be uppercase.")
+            print("  Lowercase `and` / `or` / `not` stay literal (so titles containing them")
+            print("  parse).  `(` and `)` MUST be SPACE-SEPARATED CLI tokens (own argv args).")
+            print("  Precedence:  NOT  >  AND  >  OR.  Use parens to override.")
+            print()
+            print("    NOT original_lang:de            # not originally German")
+            print("    ( libA OR libB ) AND year>2020")
+            print("    original_lang:en OR ( NOT original_lang:de AND lang:en )")
+            print("      # ↑ \"originally English OR (not-originally-German AND has-EN-audio)\"")
+            print("      # Useful for fallback rules: prefer original_lang, else lang:.")
             print()
             print("    my-plex library1 country:france OR country:italy")
             print("              # FR-country OR IT-country items in library1")
@@ -24528,10 +24534,10 @@ def _is_scope_filter_token(token):
     """
     if not isinstance(token, str) or not token:
         return False
-    if token in ('(', ')', 'AND', 'OR'):
+    if token in ('(', ')', 'AND', 'OR', 'NOT'):
         return True
     # Operators / parens visible inside the string
-    if re.search(r'\bAND\b|\bOR\b', token):
+    if re.search(r'\bAND\b|\bOR\b|\bNOT\b', token):
         return True
     if '(' in token or ')' in token:
         return True
@@ -24647,21 +24653,30 @@ def _parse_compound_filter(expr_or_tokens):
         return ('OR', children)
 
     def _parse_and():
-        node = _parse_atom()
+        node = _parse_not()
         children = [node]
         while True:
             t = _peek()
             if t == 'AND':
                 _consume()
-                children.append(_parse_atom())
+                children.append(_parse_not())
             elif t in (None, 'OR', ')'):
                 break
             else:
                 # Two atoms adjacent without operator → implicit AND
-                children.append(_parse_atom())
+                children.append(_parse_not())
         if len(children) == 1:
             return node
         return ('AND', children)
+
+    def _parse_not():
+        # v2.3: NOT prefix — higher precedence than AND.  `NOT atom`.
+        # Chained `NOT NOT atom` is allowed (rare but logical).
+        if _peek() == 'NOT':
+            _consume()
+            inner = _parse_not()
+            return ('NOT', inner)
+        return _parse_atom()
 
     def _parse_atom():
         t = _peek()
@@ -24674,7 +24689,7 @@ def _parse_compound_filter(expr_or_tokens):
                 err(1101, f"Filter expression: expected ')' but got {_peek()!r}.")
             _consume()
             return inner
-        if t in ('AND', 'OR', ')'):
+        if t in ('AND', 'OR', 'NOT', ')'):
             err(1101, f"Filter expression: unexpected operator {t!r}.")
         _consume()
         leaves.append(t)
@@ -24706,6 +24721,12 @@ def _parse_compound_filter(expr_or_tokens):
                       f"  watched / lang / subs / director / country / original_lang /\n"
                       f"  type / layout / library / title / originaltitle\n"
                       f"  Bare library names are auto-promoted to `library:NAME`.")
+        if kind == 'NOT':
+            inner_label, inner_fn = _compile(node[1])
+            label = f"NOT {inner_label}"
+            def _not_fn(obj, fi, _inner=inner_fn):
+                return not _inner(obj, fi)
+            return (label, _not_fn)
         if kind == 'AND':
             children = [_compile(c) for c in node[1]]
             label = ' AND '.join(c[0] for c in children)
@@ -24855,7 +24876,7 @@ def _get_universal_scope(scope_tokens):
     # compound filter expression (with operator precedence: AND > OR; parens
     # override).  Bare library names embedded in such expressions need to
     # be written explicitly as `library:NAME`.
-    _OPERATORS = {'AND', 'OR', '(', ')'}
+    _OPERATORS = {'AND', 'OR', 'NOT', '(', ')'}
     if any(t in _OPERATORS for t in real_tokens):
         return _resolve_scope_filter_expr(real_tokens)
 
@@ -30898,7 +30919,8 @@ def main():
         # through to _filter_exprs in original order so the compound parser
         # in _resolve_scope_filter_expr / _list_filtered sees them.  `(` and
         # `)` MUST be their own CLI args (space-separated from neighbours).
-        if arg in ('AND', 'OR', '(', ')'):
+        # v2.3: NOT joins AND/OR as a CASE-SENSITIVE (uppercase-only) operator.
+        if arg in ('AND', 'OR', 'NOT', '(', ')'):
             _filter_exprs.append(arg)
             _translations.append((arg, f"--list operator: {arg}"))
             if DBG: print(f" ~~~ Filter operator '{arg}' preserved", file=sys.stderr)
@@ -30923,7 +30945,7 @@ def main():
         #       filter-eval time (works for valid library names; errors
         #       cleanly for invalid ones).
         if _paren_depth > 0:
-            if _CAT_B_TOKEN_RE.match(arg) or arg in ('AND', 'OR', '(', ')'):
+            if _CAT_B_TOKEN_RE.match(arg) or arg in ('AND', 'OR', 'NOT', '(', ')'):
                 _filter_exprs.append(arg)
                 _translations.append((arg, f"--list atom (inside parens): {arg}"))
             elif _explicit_library_used:
