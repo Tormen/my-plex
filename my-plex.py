@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.0"
+SCRIPT_VERSION = "v2.1"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -17255,7 +17255,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type|layout)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type|layout|library)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -17469,6 +17469,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return layout == _t
             return label_str, _layout_fn
 
+        # --- Library (case-sensitive exact match against obj.library) ---
+        # Enables OR-ing libraries: `library:movies.fr OR library:movies.de`.
+        # For AND-style "in this library", a bare library name as a separate
+        # SCOPE token already works via the universal-scope resolver — this
+        # filter form is mainly for use INSIDE compound (OR/parens) expressions.
+        if field == 'library':
+            needle = val
+            label_str = f"library:{val}"
+            def _library_fn(obj, fi, _n=needle):
+                return (obj.get('library') or '') == _n
+            return label_str, _library_fn
+
         # --- Type (Plex media type) — distinguished per the user's mental model:
         #     type:movie               → Movie objects   (leaves, have files)
         #     type:series / show / tv  → Series objects  (full-fledged series:
@@ -17679,18 +17691,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if media_type == 'Series':
                 media_type = 'Series'
 
-        # Parse all sub-expressions (expr may be None/'' = no filter)
-        sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr or '', flags=re.IGNORECASE) if s.strip()]
-        filters = []  # list of (label, fn(obj, fi)->bool)
-        for sub in sub_exprs:
-            parsed = PLEX_Media._parse_filter_sub_expr(sub)
-            if not parsed:
-                err(1100, f"Cannot parse filter sub-expression: '{sub}'\n"
-                          f"  Supported: bitrate<1  resolution:1080p  codec:h265  year>2015\n"
-                          f"             label:reencode  genre:action  size>1gb  duration>2h\n"
-                          f"             watched:no  lang:de  rating>8  added>2024")
-                return
-            filters.append(parsed)
+        # v2.1: parse via compound expression parser (supports AND / OR /
+        # parens with precedence — AND > OR; parens override).  The parser
+        # returns a single combined fn + a list of leaf-atom strings (used
+        # below for smart-column detection).
+        combined_label, combined_fn, leaf_atoms = _parse_compound_filter(expr or '')
+
+        # Build a per-leaf (label, fn) list — needed only for legacy code
+        # paths that still iterate `filters`.  Smart-column extraction reads
+        # leaf_atoms; row evaluation uses combined_fn.
+        filters = []
+        for atom in leaf_atoms:
+            _p = PLEX_Media._parse_filter_sub_expr(atom)
+            if _p:
+                filters.append(_p)
 
         # Determine which fields are active (for smart column selection)
         # Map label prefixes returned by _parse_filter_sub_expr to canonical field names
@@ -17723,15 +17737,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if watched_only:  _active_fields.add('watched')
         if unwatched_only: _active_fields.add('unwatched')
 
-        # Build active filter label string
-        active_labels = [lbl for lbl, _ in filters]
-        if media_type:    active_labels.insert(0, f"type={media_type.lower()}")
-        if audio_filter:  active_labels.append(f"lang={audio_filter}")
-        if watched_only:   active_labels.append("watched")
-        if unwatched_only: active_labels.append("unwatched")
+        # Build active filter label string — preserve OR/parens structure
+        # from the compound parser (combined_label) rather than flattening.
+        extra_labels = []
+        if media_type:    extra_labels.append(f"type={media_type.lower()}")
+        if audio_filter:  extra_labels.append(f"lang={audio_filter}")
+        if watched_only:   extra_labels.append("watched")
+        if unwatched_only: extra_labels.append("unwatched")
+        label_parts = []
+        if combined_label:
+            label_parts.append(combined_label)
+        label_parts.extend(extra_labels)
         scope = f" in '{library_name}'" if library_name else ""
         # Metadata goes to stderr — keeps stdout clean for piping/head/grep
-        if VRB: print(f" >>> Filter: {' AND '.join(active_labels)}{scope}")
+        if VRB and label_parts: print(f" >>> Filter: {' AND '.join(label_parts)}{scope}")
 
         rows = []
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
@@ -17761,7 +17780,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             matched_fi = None
             for fi in file_matches:
-                if all(fn(obj, fi) for _, fn in filters):
+                # v2.1: evaluate the compound filter (AND / OR / parens) as
+                # one combined fn rather than ALL-of-AND-list.
+                if combined_fn is None or combined_fn(obj, fi):
                     matched_fi = fi
                     break
             if matched_fi is None:
@@ -20934,9 +20955,26 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --remux ,unsorted lang:de codec:mpeg2     # filter & remux")
             print("  my-plex --reencode movies.de bitrate>2 year>2015")
             print()
-            print("EVERY token AND-combines via set-intersection — no special ordering,")
-            print("no precedence, no parens.  `lib lang:fr year>2020` is read as")
-            print("`(library = lib) AND (audio = fr) AND (year > 2020)`.")
+            print("Tokens AND-combine by default — `,unsorted lang:fr year>2020`")
+            print("means `library=,unsorted AND lang=fr AND year>2020`.")
+            print()
+            print("OR / AND / PARENS (v2.1):")
+            print("  `OR` and `AND` are CASE-SENSITIVE operators — must be uppercase.")
+            print("  Lowercase `and` / `or` stay literal (so titles containing them parse).")
+            print("  `(` and `)` MUST be SPACE-SEPARATED CLI tokens (own argv elements).")
+            print("  Precedence:  AND binds tighter than OR.  Use parens to override.")
+            print()
+            print("  my-plex ,unsorted country:france OR country:italy")
+            print("                     # FR-country OR IT-country movies in ,unsorted")
+            print("  my-plex ,unsorted ( country:france OR country:italy ) AND year>2020")
+            print("                     # ↑ note: each paren is its OWN argv arg")
+            print("  my-plex --mv-to series.en ,unsorted \\")
+            print("                  ( original_lang:fr OR original_lang:it ) type:movie")
+            print("                     # also works for action commands")
+            print()
+            print("  Inside a compound expression, bare library names auto-promote to")
+            print("  `library:NAME` so `,unsorted ( country:fr OR country:it )` works.")
+            print("  Use the explicit form `library:NAME` if you prefer.")
             print()
             print("BARE-FIELD TOKENS — add a column without filtering:")
             print("  my-plex ,unsorted countries        # show COUNTRY column")
@@ -24419,7 +24457,7 @@ _SCOPE_FILTER_FIELDS = (
     'subs', 'sub', 'subtitle', 'subtitles', 'director', 'directors',
     'country', 'countries', 'original_language', 'originallang', 'original_lang',
     'writer', 'writers', 'actor', 'actors', 'title', 'originaltitle',
-    'type', 'layout',
+    'type', 'layout', 'library',
 )
 _SCOPE_FILTER_RE = re.compile(
     r'^(?P<field>' + '|'.join(_SCOPE_FILTER_FIELDS) + r')'
@@ -24429,62 +24467,246 @@ _SCOPE_FILTER_RE = re.compile(
 
 
 def _is_scope_filter_token(token):
-    """True iff `token` is a Cat-B filter expression (lang:fr, year>2020, ' AND ' chains, etc.).
+    """True iff `token` is a Cat-B filter expression (lang:fr, year>2020,
+    or a compound `AND` / `OR` / paren expression).
 
-    A token is a filter expression iff it starts with a known filter field
-    name followed by an operator (`:`, `=`, `<`, `>`, `~`, `!`).  This is
-    deliberately conservative — Plex cache keys (`Movie:115547`) are NOT
-    matched because `Movie` is not in `_SCOPE_FILTER_FIELDS`.
+    A token is a filter expression iff one of:
+      - contains uppercase AND or OR with word boundaries
+      - is a literal `(` or `)`
+      - starts with `(` or contains ` (` (opening of a paren group)
+      - starts with a known filter field name followed by an operator
+        (`:`, `=`, `<`, `>`, `~`, `!`).
+
+    Plex cache keys (`Movie:115547`) are deliberately NOT matched because
+    `Movie` is not in `_SCOPE_FILTER_FIELDS`.
     """
     if not isinstance(token, str) or not token:
         return False
-    if re.search(r'\bAND\b', token, re.IGNORECASE):
+    if token in ('(', ')', 'AND', 'OR'):
+        return True
+    # Operators / parens visible inside the string
+    if re.search(r'\bAND\b|\bOR\b', token):
+        return True
+    if '(' in token or ')' in token:
         return True
     return bool(_SCOPE_FILTER_RE.match(token.strip()))
+
+
+def _tokenize_filter_expr_string(expr):
+    """Lex a filter-expression STRING into a flat list of tokens.
+
+    Tokens are: '(', ')', 'AND' (uppercase only), 'OR' (uppercase only),
+    or arbitrary atoms (e.g. 'country:france', 'year>2020', 'title~lord').
+    Quotes are preserved verbatim inside atoms.  Whitespace separates
+    tokens.  Bare-paren tokens MUST have whitespace on at least one side
+    in the string form too — `(country:france OR country:italy)` would
+    be ONE atom token; the user must write `( country:france OR ... )`.
+    """
+    tokens = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        c = expr[i]
+        if c.isspace():
+            i += 1
+            continue
+        # Standalone paren ONLY when surrounded by whitespace (or string edge).
+        # Otherwise treat as part of an atom (rare but lets values like
+        # `genre:action(extended)` survive — though we don't actually emit such).
+        if c in '()':
+            before = (i == 0) or expr[i - 1].isspace()
+            after = (i + 1 >= n) or expr[i + 1].isspace()
+            if before and after:
+                tokens.append(c)
+                i += 1
+                continue
+        start = i
+        in_quote = None
+        while i < n:
+            ch = expr[i]
+            if in_quote:
+                if ch == in_quote:
+                    in_quote = None
+                i += 1
+                continue
+            if ch in ('"', "'"):
+                in_quote = ch
+                i += 1
+                continue
+            if ch.isspace():
+                break
+            i += 1
+        tokens.append(expr[start:i])
+    return tokens
+
+
+def _parse_compound_filter(expr_or_tokens):
+    """Parse a compound filter expression with AND / OR / parens precedence.
+
+    Grammar:
+        orexpr  = andexpr (OR andexpr)*
+        andexpr = atom (AND? atom)*       # AND is optional between adjacent atoms
+        atom    = LEAF | '(' orexpr ')'
+
+    AND has HIGHER precedence than OR (standard / SQL convention).  So
+    `a OR b AND c` means `a OR (b AND c)`.  Use parens to override:
+    `( a OR b ) AND c`.
+
+    Operators are CASE-SENSITIVE — only `AND` / `OR` in uppercase are
+    operators.  Lowercase `and` / `or` are treated as atoms (so titles
+    or genres containing these words still parse).
+
+    Args:
+        expr_or_tokens: either a string (will be lexed) or a list of
+                        already-tokenized strings (one token per item,
+                        as produced by argparse for a variadic CLI flag).
+
+    Returns:
+        (label_str, fn, leaf_atoms) tuple where
+          label_str  — human-readable expression rebuild
+          fn         — callable(obj, fi) → bool
+          leaf_atoms — list of every LEAF atom string (for `--list`
+                       smart-column detection)
+        OR (None, None, []) if expr is empty.
+    """
+    if isinstance(expr_or_tokens, str):
+        if not expr_or_tokens.strip():
+            return (None, None, [])
+        tokens = _tokenize_filter_expr_string(expr_or_tokens)
+    else:
+        # Already a token list (from a variadic CLI flag).  Filter out empties.
+        tokens = [str(t) for t in expr_or_tokens if t is not None and str(t) != '']
+    if not tokens:
+        return (None, None, [])
+
+    pos = [0]
+    leaves = []
+
+    def _peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+    def _consume():
+        t = _peek()
+        if t is not None:
+            pos[0] += 1
+        return t
+
+    def _parse_or():
+        node = _parse_and()
+        children = [node]
+        while _peek() == 'OR':
+            _consume()
+            children.append(_parse_and())
+        if len(children) == 1:
+            return node
+        return ('OR', children)
+
+    def _parse_and():
+        node = _parse_atom()
+        children = [node]
+        while True:
+            t = _peek()
+            if t == 'AND':
+                _consume()
+                children.append(_parse_atom())
+            elif t in (None, 'OR', ')'):
+                break
+            else:
+                # Two atoms adjacent without operator → implicit AND
+                children.append(_parse_atom())
+        if len(children) == 1:
+            return node
+        return ('AND', children)
+
+    def _parse_atom():
+        t = _peek()
+        if t is None:
+            err(1101, "Filter expression: unexpected end of input.")
+        if t == '(':
+            _consume()
+            inner = _parse_or()
+            if _peek() != ')':
+                err(1101, f"Filter expression: expected ')' but got {_peek()!r}.")
+            _consume()
+            return inner
+        if t in ('AND', 'OR', ')'):
+            err(1101, f"Filter expression: unexpected operator {t!r}.")
+        _consume()
+        leaves.append(t)
+        return ('LEAF', t)
+
+    tree = _parse_or()
+    if pos[0] < len(tokens):
+        err(1101, f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
+
+    def _compile(node):
+        kind = node[0]
+        if kind == 'LEAF':
+            atom = node[1]
+            parsed = PLEX_Media._parse_filter_sub_expr(atom)
+            if parsed:
+                return parsed
+            # v2.1 ergonomics: auto-promote bare library names to library:NAME
+            # inside compound expressions, so users can write
+            #   ,unsorted ( country:france OR country:italy )
+            # instead of
+            #   library:,unsorted ( country:france OR country:italy )
+            if atom in PLEX_Media.OBJ_BY_LIBRARY:
+                parsed = PLEX_Media._parse_filter_sub_expr(f'library:{atom}')
+                if parsed:
+                    return parsed
+            err(1102, f"Cannot parse filter sub-expression: {atom!r}\n"
+                      f"  Supported fields: bitrate / resolution / codec / year / label /\n"
+                      f"  genre / size / duration / rating / stars / critics / added /\n"
+                      f"  watched / lang / subs / director / country / original_lang /\n"
+                      f"  type / layout / library / title / originaltitle\n"
+                      f"  Bare library names are auto-promoted to `library:NAME`.")
+        if kind == 'AND':
+            children = [_compile(c) for c in node[1]]
+            label = ' AND '.join(c[0] for c in children)
+            def _and_fn(obj, fi, _cs=children):
+                return all(c[1](obj, fi) for c in _cs)
+            return (label, _and_fn)
+        # OR
+        children = [_compile(c) for c in node[1]]
+        label = '(' + ' OR '.join(c[0] for c in children) + ')'
+        def _or_fn(obj, fi, _cs=children):
+            return any(c[1](obj, fi) for c in _cs)
+        return (label, _or_fn)
+
+    label, fn = _compile(tree)
+    return (label, fn, leaves)
 
 
 def _resolve_scope_filter_expr(expr):
     """Return list of (key, obj) satisfying a filter expression.
 
-    Delegates each sub-expression (split on ' AND ') to
-    PLEX_Media._parse_filter_sub_expr(), then iterates OBJ_BY_ID and keeps
-    items where ALL sub-expressions evaluate true for at least one file
-    version (mirrors the semantics of --list).
+    Delegates parsing to `_parse_compound_filter()` — supports AND / OR /
+    parens with normal precedence (AND > OR).  Operators are uppercase-only.
 
     Two modes of iteration:
       * No explicit `type:` filter   → iterate file-owning types only
                                        (Movie / Episode).  Default for
                                        country: / lang: / year>… etc.
       * Explicit `type:` filter      → iterate ALL types (so type:series
-                                       matches Series objects, type:season
-                                       matches Season objects, etc.).
+                                       matches Series objects, etc.).
 
     PURE type-filter semantics: returns objects of EXACTLY the matched
-    Plex type — no expansion.  `type:series` → Series objects; `type:season`
-    → Season objects; `type:episode` → Episode objects; `type:movie` →
-    Movie objects.  For action commands needing file-owners, use
-    `type:episode` (or pass an explicit Series:NNN / Season:NNN cache key,
-    which `_get_disk_map_scope` auto-expands as before).
+    Plex type — no expansion.  For action commands needing file-owners,
+    use `type:episode` (or pass an explicit Series:NNN / Season:NNN cache
+    key, which `_get_disk_map_scope` auto-expands as before).
     """
-    items = []
-    sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
-    filter_fns = []
-    has_type_filter = False
-    for sub in sub_exprs:
-        parsed = PLEX_Media._parse_filter_sub_expr(sub)
-        if parsed and parsed[1] is not None:
-            filter_fns.append(parsed[1])
-            if parsed[0].lower().startswith('type:'):
-                has_type_filter = True
-    if not filter_fns:
-        return items
+    _label, combined_fn, leaves = _parse_compound_filter(expr)
+    if combined_fn is None:
+        return []
 
-    raw_matches = []
+    has_type_filter = any(
+        re.match(r'^type[:=]', leaf, re.IGNORECASE) for leaf in leaves
+    )
+
+    items = []
+    seen = set()
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         obj_type = obj.get('type_str') or obj.get('type', '')
-        # Without an explicit type filter, restrict iteration to file-owning
-        # items (Movie / Episode) — keeps the original behaviour for the
-        # 95% case where the caller is filtering by country / language / year.
         if not has_type_filter:
             if obj_type not in ('Movie', 'Episode', 'Movie*', 'Episode*'):
                 continue
@@ -24493,21 +24715,11 @@ def _resolve_scope_filter_expr(expr):
         files_dict = obj.get('files', {}) or {}
         file_matches = list(files_dict.values()) if files_dict else [{}]
         for fi in file_matches:
-            if all(fn(obj, fi) for fn in filter_fns):
-                raw_matches.append((key, obj))
+            if combined_fn(obj, fi):
+                if key not in seen:
+                    seen.add(key)
+                    items.append((key, obj))
                 break
-
-    # PURE type-filter semantics (per user spec): return objects of exactly
-    # the matched type — no expansion.  type:series → Series objects only,
-    # type:season → Season objects only, type:episode → Episode objects only.
-    # For action commands that need file-owners, use `type:episode` (or pass
-    # an explicit Series:NNN / Season:NNN cache key, which `_get_disk_map_scope`
-    # auto-expands as before).
-    seen = set()
-    for key, obj in raw_matches:
-        if key not in seen:
-            seen.add(key)
-            items.append((key, obj))
     return items
 
 
@@ -24546,6 +24758,15 @@ def _get_universal_scope(scope_tokens):
         return _get_disk_map_scope(None)
     if len(real_tokens) == 1:
         return _get_disk_map_scope(real_tokens[0])
+
+    # v2.1: compound expressions — when the user includes `AND`, `OR`, `(`,
+    # or `)` among the scope tokens, treat the WHOLE token list as one
+    # compound filter expression (with operator precedence: AND > OR; parens
+    # override).  Bare library names embedded in such expressions need to
+    # be written explicitly as `library:NAME`.
+    _OPERATORS = {'AND', 'OR', '(', ')'}
+    if any(t in _OPERATORS for t in real_tokens):
+        return _resolve_scope_filter_expr(real_tokens)
 
     # Multi-token: intersect per-token key sets.
     per_token_keysets = []
@@ -30361,7 +30582,7 @@ def main():
         re.IGNORECASE
     )
     _CAT_B_TOKEN_RE = re.compile(
-        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang)'
+        r'^(?P<field>bitrate|resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type|layout|library)'
         r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
         re.IGNORECASE
     )
@@ -30502,6 +30723,16 @@ def main():
             if DBG: print(f" ~~~ Shortcut '{arg}' → --type {_type_val}", file=sys.stderr)
             _i += 1
             continue
+        # v2.1: filter-expression OPERATORS as standalone CLI tokens.  Pass
+        # through to _filter_exprs in original order so the compound parser
+        # in _resolve_scope_filter_expr / _list_filtered sees them.  `(` and
+        # `)` MUST be their own CLI args (space-separated from neighbours).
+        if arg in ('AND', 'OR', '(', ')'):
+            _filter_exprs.append(arg)
+            _translations.append((arg, f"--list operator: {arg}"))
+            if DBG: print(f" ~~~ Filter operator '{arg}' preserved", file=sys.stderr)
+            _i += 1
+            continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
         _mb = _CAT_B_TOKEN_RE.match(arg)
         _mc = _CAT_C_TOKEN_RE.match(arg) if not _mb else None
@@ -30589,7 +30820,14 @@ def main():
     if _inject_flags or _filter_exprs or _remove_cols:
         sys.argv = _new_argv + _inject_flags
         if _filter_exprs:
-            combined = ' AND '.join(_filter_exprs)
+            # v2.1: if any operator token is present, space-join (preserving
+            # user-written structure).  Otherwise the legacy ` AND `-join
+            # keeps every existing single-AND-chain test green.
+            _has_op = any(t in ('AND', 'OR', '(', ')') for t in _filter_exprs)
+            if _has_op:
+                combined = ' '.join(_filter_exprs)
+            else:
+                combined = ' AND '.join(_filter_exprs)
             sys.argv += [f'--list={combined}']  # use = form to avoid positional arg ambiguity
         elif _inject_flags:
             # Cat-A tokens only (e.g. type:series) — inject --list if no command present
