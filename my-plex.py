@@ -452,6 +452,7 @@ _my-plex() {
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatch[Potential title / dirname mismatch candidates]'
         '--multi-movie-folder[Wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder)]'
+        '--library-language-mismatch[Items whose audio language disagrees with their library convention]'
         '--unsorted[Series with episodes not in season subdirs]'
         '--missing[Missing episodes — scraped data vs Plex cache]'
         '--renumber[Episodes with incorrect S0xE0x in filename]'
@@ -6498,25 +6499,47 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     for _key, obj, src, dst, _yr, _tmdb in rename_queue:
         libs_affected.add(obj.get('library', ''))
 
-    # ----- Trigger Plex scan(s) -----
+    # ----- Trigger Plex scan(s) + per-item metadata re-match -----
+    # A simple library.update() detects the rename but Plex DOES NOT re-query
+    # the metadata agent for items it already marked 'local://'.  To force
+    # a re-match (the whole point of --resolve), we ALSO call item.refresh()
+    # on every renamed item — that re-runs the matching pipeline and, with
+    # the new wrapper name carrying a year, Plex usually flips the guid
+    # from 'local://…' to 'plex://movie/…' within seconds.
     if UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME:
-        if _detect_plex_auto_scan_enabled():
-            print(">>> Plex auto-update-on-disk-change is enabled — skipping manual scan.")
+        plex = None
+        try:
+            plex = ensure_plex_api(required=False)
+        except Exception as e:
+            print(f"  ⚠ Plex API connect failed: {e}")
+        if plex:
+            # 1. library.update() once per affected library (unless Plex's
+            #    filesystem watcher will do it anyway).
+            if _detect_plex_auto_scan_enabled():
+                print(">>> Plex auto-update-on-disk-change is enabled — skipping manual lib.update().")
+            else:
+                for lib_name in sorted(libs_affected):
+                    try:
+                        plex.library.section(lib_name).update()
+                        print(f"  ✓ triggered Plex scan of '{lib_name}'")
+                    except Exception as e:
+                        print(f"  ⚠ scan of '{lib_name}' failed: {e}")
+            # 2. item.refresh() per renamed item — re-runs metadata match
+            #    and is what actually flips guid from 'local://' to a real
+            #    plex://… for the items we renamed.
+            print(f">>> Re-matching {len(rename_queue)} item(s) via item.refresh()…")
+            for key, obj, _src, _dst, _yr, tmdb_id in rename_queue:
+                try:
+                    rk = int(obj.get('id', 0)) if obj else 0
+                    if not rk:
+                        continue
+                    item = plex.fetchItem(rk)
+                    item.refresh()
+                    print(f"  ✓ refresh queued: {key}  {obj.get('title','?')!r}")
+                except Exception as e:
+                    print(f"  ⚠ refresh failed for {key}: {e}")
         else:
-            try:
-                plex = ensure_plex_api(required=False)
-                if plex:
-                    for lib_name in sorted(libs_affected):
-                        try:
-                            lib = plex.library.section(lib_name)
-                            lib.update()
-                            print(f"  ✓ triggered Plex scan of '{lib_name}'")
-                        except Exception as e:
-                            print(f"  ⚠ scan of '{lib_name}' failed: {e}")
-                else:
-                    print(">>> Plex API not configured — please trigger a library scan manually.")
-            except Exception as e:
-                print(f"  ⚠ scan trigger failed: {e}")
+            print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
 
@@ -13262,6 +13285,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="List items where Plex title doesn't match directory name. Use --help mismatch for details.")
     argparser.add_argument('--multi-movie-folder', action='store_true', help="List wrappers that host >=2 distinct Plex Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
+    argparser.add_argument('--library-language-mismatch', action='store_true', help="List items whose audio language disagrees with their library's configured language. Use --help library-language-mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     argparser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --unsorted
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --unsorted --fix
@@ -15575,6 +15599,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
         _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
         _pc_mmf      = _silent(PLEX_Media._list_multi_movie_folder, all_obj_keys, None) or 0
+        _pc_llm      = _silent(PLEX_Media._list_library_language_mismatch, all_obj_keys, None) or 0
+        # v2.18: backfill renumber* + unrecognized — these were printed by
+        # the summary but never populated, so they always displayed as 0
+        # (i.e. never).  Audit by user.
+        _pc_renumber       = _silent(PLEX_Media._list_renumber_candidates, all_obj_keys, None) or 0
+        _pc_renumber_nodata= _silent(PLEX_Media._list_renumber_lack_of_data, all_obj_keys, None) or 0
+        _pc_renumber_season= _silent(PLEX_Media._list_renumber_season_mismatch, all_obj_keys, None) or 0
+        _pc_renumber_abs   = _silent(PLEX_Media._list_renumber_abs_mismatch, all_obj_keys, None) or 0
+        try:
+            _pc_unrecognized = _count_unrecognized_top_level()
+        except Exception:
+            _pc_unrecognized = 0
         _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
         _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
         _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
@@ -15593,6 +15629,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'unsorted':          _pc_unsorted,
             'potential_mismatch':_pc_mismatch,
             'multi_movie_folder':_pc_mmf,
+            'library_language_mismatch':_pc_llm,
+            'renumber':          _pc_renumber,
+            'renumber_nodata':   _pc_renumber_nodata,
+            'renumber_season':   _pc_renumber_season,
+            'renumber_abs':      _pc_renumber_abs,
+            'unrecognized':      _pc_unrecognized,
             'numbering_issues':  _pc_numbering,
             'reencode':          _pc_reencode,
             'remux':             _pc_remux,
@@ -17356,6 +17398,84 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 best_ratio = ratio
                 matched = label
         return best_ratio, matched
+
+    @staticmethod
+    def _list_library_language_mismatch(obj_keys, library_name):
+        """List Movies/Episodes whose audio_language doesn't match the
+        configured language of the library they live in.
+
+        Sources of truth:
+          - audio_languages (the COMPLETED view: Plex + filename + library
+            fallbacks).  In the special `library` step of completion we
+            inject the library's configured language when nothing else
+            had a hint — so for this check we use audio_languages_plex
+            (the PURE Plex view, untouched by completion) when present.
+            That way an item that ONLY has the language because the
+            library completion filled it in doesn't pollute the check.
+          - AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY: the per-library
+            convention.  Single-code entries are the targets; 'MULTI'
+            libraries are excluded (mixed-language by design).
+
+        Flag an item when:
+          - its library has a single-code language X configured, AND
+          - it carries a real audio language Y (not 'unknown'), AND
+          - Y != X.
+
+        Typical case: a TVOON_DE recording sitting in `movies.en`."""
+        # Build library → expected-language map (only single-code entries).
+        _lib_expected = {}
+        for _lname, _lval in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY or []):
+            if str(_lval).upper() == 'MULTI':
+                continue
+            _lib_expected[_lname] = str(_lval).lower()
+        if not _lib_expected:
+            return 0   # no library has a configured language → nothing to flag
+        flagged = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj or obj.get('type') not in ('Movie', 'Episode'):
+                continue
+            lib = obj.get('library', '')
+            if library_name and lib != library_name:
+                continue
+            expected = _lib_expected.get(lib)
+            if not expected:
+                continue
+            # Use the PURE Plex view to avoid library-completion echoing
+            # the expected language back at us.  Fall back to audio_languages
+            # on pre-v2.9 caches that lack _plex.
+            al = obj.get('audio_languages_plex')
+            if al is None:
+                al = obj.get('audio_languages') or []
+            if not al:
+                continue
+            if all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al):
+                continue
+            # Match by primary track; AUDIO_LANG is the first track.
+            primary = str(al[0]).lower()
+            if primary == expected:
+                continue
+            flagged.append((key, obj, primary, expected))
+        if not flagged:
+            return 0
+        flagged.sort(key=lambda t: (t[1].get('library', ''), t[1].get('title') or ''))
+        if VRB:
+            print(f"  {'KEY':<16}  {'LIBRARY':<14}  {'EXP':<4}  {'GOT':<4}  TITLE  /  FILE")
+            print(f"  {'-'*16}  {'-'*14}  ----  ----  ---------------------")
+        for key, obj, got, expected in flagged:
+            lib   = obj.get('library', '')
+            title = obj.get('title') or '?'
+            fp    = obj.get('file', '') or ''
+            print(f"  {key:<16}  {lib:<14}  {expected:<4}  {got:<4}  {title}  /  {fp}")
+        print(f"\n  {len(flagged)} item(s) with audio language mismatching their library convention.")
+        if VRB:
+            print(f"  Fix: move them to the library matching their audio language")
+            print(f"  (e.g. my-plex <KEY> --mv-to movies.{flagged[0][2]} for one of them).")
+        return len(flagged)
 
     @staticmethod
     def _list_multi_movie_folder(obj_keys, library_name):
@@ -21633,7 +21753,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -22835,6 +22955,47 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --problems                    # Includes this in full report")
             print()
             print("  --potential-mismatch is an alias for --mismatch.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'library-language-mismatch' | 'library_language_mismatch':
+            print()
+            print("=" * 76)
+            print("LIBRARY-LANGUAGE MISMATCH HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex [SCOPE] --library-language-mismatch")
+            print()
+            print("Lists Movies/Episodes whose audio language disagrees with the")
+            print("CONFIGURED language of the library they live in.  Typical case:")
+            print("a German recording (filename ...TVOON_DE...) sitting in movies.en.")
+            print()
+            print("DETECTION:")
+            print("  - Per-library expected language comes from")
+            print("    AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY (single-code entries —")
+            print("    'MULTI' libraries are excluded since they're mixed by design).")
+            print("  - Item audio language read from `audio_languages_plex` (the PURE")
+            print("    Plex view, never extended by completion).  Falls back to")
+            print("    `audio_languages` on pre-v2.9 caches.  Items with only")
+            print("    'unknown' audio are skipped (no signal).")
+            print("  - Flag when primary track ≠ library's configured language.")
+            print()
+            print("EXAMPLES OF MISMATCHES:")
+            print("  Movie:19864  movies.en  audio=de  Emmanuelle 2 Garten Der Liebe")
+            print("    /Volumes/2/watch.v/movies.en/emmanuelle_2_garten_der_liebe...TVOON_DE.avi")
+            print()
+            print("HOW TO FIX:")
+            print("  Move the item to the matching-language library:")
+            print("    my-plex Movie:19864 --mv-to movies.de")
+            print("  (The wrapper directory moves as a UNIT — all artifacts stay together.)")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --library-language-mismatch                # All libraries")
+            print("  my-plex MOVIE_LIB --library-language-mismatch      # One library")
+            print("  my-plex --library-language-mismatch -V             # With column header")
+            print("  my-plex --problems                                 # Includes this count")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -28074,6 +28235,30 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     interactive_choice = None   # 'skip-all' or 'overwrite-all'
     n_moved = n_skipped = n_errors = 0
     affected_libs = {dest_lib}
+    # v2.18: session log — every per-item outcome recorded for audit history.
+    # Written to /tmp/my-plex.move-log.<UTC-ISO>.json at the end of cmd_move.
+    from datetime import datetime as _dtm
+    _move_log = {
+        'started_at':  _dtm.now().isoformat(timespec='seconds'),
+        'dest_lib':    dest_lib,
+        'dry_run':     bool(dry_run),
+        'force':       bool(force),
+        'yes':         bool(yes),
+        'ops':         [],   # list of dicts: key/type/src_lib/dest_lib/src/dest/status/error
+    }
+    def _log_op(status, cache_key='', obj=None, src='', dest='', error=''):
+        _move_log['ops'].append({
+            'ts':       _dtm.now().isoformat(timespec='seconds'),
+            'key':      cache_key,
+            'type':     (obj or {}).get('type', '') if isinstance(obj, dict) else '',
+            'title':    (obj or {}).get('title', '') if isinstance(obj, dict) else '',
+            'src_lib':  (obj or {}).get('library', '') if isinstance(obj, dict) else '',
+            'dest_lib': dest_lib,
+            'src':      src,
+            'dest':     dest,
+            'status':   status,    # 'moved' / 'skipped' / 'error'
+            'error':    error,
+        })
 
     for cache_key, obj, src_lib, type_str, filepaths in movables:
         # ----- v2.2: uncatalogued FOLDER move (SSH `mv` on Plex host) -----
@@ -28093,11 +28278,13 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 if r.returncode != 0:
                     print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}")
                     n_errors += 1
+                    _log_op('error', cache_key, obj, src=folder_path, dest=new_path, error=f"mkdir-failed: {r.stderr.strip()}")
                     continue
             ok, actual = my_plex_file_operation('MOVE', folder_path, PLEX_DB_REMOTE_HOST, dest_path=new_path)
             if not ok:
                 print(f"  ✗ ERROR move folder: {folder_path} → {new_path}")
                 n_errors += 1
+                _log_op('error', cache_key, obj, src=folder_path, dest=new_path, error='folder-move-failed')
                 continue
             actual_new = actual or new_path
             print(f"  ✓ MOVE  {cache_key}  (Folder/uncatalogued: {obj.get('_layout','?')}-shaped, {src_lib} → {dest_lib})")
@@ -28105,6 +28292,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             print(f"       →  {actual_new}")
             affected_libs.add(src_lib)
             n_moved += 1
+            _log_op('moved', cache_key, obj, folder_path, actual_new)
             # Invalidate the in-memory layout-index entry so subsequent calls
             # in this session don't double-count the folder.
             global _LAYOUT_INDEX_CACHE
@@ -28179,6 +28367,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         if action == 'skip':
             n_skipped += 1
             print(f"  ⊘ SKIP  {cache_key}  '{title}' ({year})")
+            _log_op('skipped', cache_key, obj, src=(filepaths[0] if filepaths else ''), error='duplicate-skip')
             continue
 
         # Resolve source library rootpath (pick the one a filepath lives under)
@@ -28339,6 +28528,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
         if item_failed:
             n_errors += 1
+            _log_op('error', cache_key, obj, src=(filepaths[0] if filepaths else ''), error='move-failed')
             continue
 
         # ----- Cache update (cross-library: Plex will assign new ID after scan) -----
@@ -28359,6 +28549,9 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
         affected_libs.add(src_lib)
         n_moved += 1
+        # Record the move(s) for the session log — one op per moved file.
+        for _sf, _df in moved_filepaths:
+            _log_op('moved', cache_key, obj, _sf, _df)
 
     # ----- Trigger Plex library scans -----
     if n_moved > 0:
@@ -28392,6 +28585,22 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         print(f"  NOTE: Plex assigns NEW IDs for cross-library moves. The OLD cache entries")
         print(f"        have been removed from the cache.  Run `my-plex --update-cache` to")
         print(f"        index the new entries in destination library '{dest_lib}'.")
+    # v2.18: write session log to /tmp/my-plex.move-log.<UTC-ISO>.json so
+    # the user can audit history of cross-library moves later.
+    if _move_log['ops']:
+        try:
+            import json as _json
+            _move_log['finished_at'] = _dtm.now().isoformat(timespec='seconds')
+            _move_log['n_moved'] = n_moved
+            _move_log['n_skipped'] = n_skipped
+            _move_log['n_errors'] = n_errors
+            _ts = _dtm.now().strftime('%Y-%m-%dT%H-%M-%S')
+            _path = f'/tmp/my-plex.move-log.{_ts}.json'
+            with open(_path, 'w') as _f:
+                _json.dump(_move_log, _f, indent=2, default=str)
+            print(f"  log     : {_path}")
+        except Exception as _e:
+            print(f"  log     : (failed to write — {_e})")
     print("=" * 76)
     return (n_moved, n_skipped, n_errors)
 
@@ -30731,6 +30940,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['potential_mismatch']} potential mismatches   →  my-plex{lib_arg} --mismatch")
     if problems.get('multi_movie_folder', 0):
         print(f"  >> ⚠ {problems['multi_movie_folder']} wrapper(s) shared by >=2 Movies   →  my-plex{lib_arg} --multi-movie-folder")
+    if problems.get('library_language_mismatch', 0):
+        print(f"  >> ⚠ {problems['library_language_mismatch']} items in the wrong-language library   →  my-plex{lib_arg} --library-language-mismatch")
     if problems.get('numbering_issues', 0):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
@@ -32056,6 +32267,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_multi_movie_folder(obj_keys, library_name)
         return
 
+    # Handle --library-language-mismatch [SCOPE]: items in the wrong language library
+    llm_val = safe_getattr(cmd_args, 'library_language_mismatch', None)
+    if llm_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(llm_val, media_type=media_type)
+        print(f"\n--- Library-Language Mismatches{scope} (audio language ≠ library convention) ---")
+        PLEX_Media._list_library_language_mismatch(obj_keys, library_name)
+        return
+
     # Handle --episode-numbering-issues [SCOPE]: list series with Plex vs scraped numbering conflicts
     numbering_val = safe_getattr(cmd_args, 'episode_numbering_issues', None)
     if numbering_val is not None:
@@ -32340,6 +32560,7 @@ def main():
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
         '--multi-movie-folder': 'multi-movie-folder',
+        '--library-language-mismatch': 'library-language-mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--remux': 'remux',
@@ -32478,6 +32699,7 @@ def main():
         '--broken', '--unmatched', '--unsorted',
         '--mismatch', '--potential-mismatch',
         '--multi-movie-folder',
+        '--library-language-mismatch',
         '--missing', '--reencode', '--problems',
     }
     _in_variadic_window = False
@@ -33058,6 +33280,7 @@ def main():
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -33127,6 +33350,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
+    GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
@@ -33476,6 +33700,7 @@ def main():
     _reinject_variadic('unsorted',                  '--unsorted')
     _reinject_variadic('potential_mismatch',        '--mismatch')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
+    _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
     _reinject_variadic('reencode',                  '--reencode')
 
