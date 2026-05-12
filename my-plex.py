@@ -451,6 +451,7 @@ _my-plex() {
         '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatch[Potential title / dirname mismatch candidates]'
+        '--multi-movie-folder[Wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder)]'
         '--unsorted[Series with episodes not in season subdirs]'
         '--missing[Missing episodes — scraped data vs Plex cache]'
         '--renumber[Episodes with incorrect S0xE0x in filename]'
@@ -13260,6 +13261,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unsorted', action='store_true', help="List series with episodes directly in series dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="List items where Plex title doesn't match directory name. Use --help mismatch for details.")
+    argparser.add_argument('--multi-movie-folder', action='store_true', help="List wrappers that host >=2 distinct Plex Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     argparser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --unsorted
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --unsorted --fix
@@ -15572,6 +15574,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_noaudio  = _silent(PLEX_Media._list_no_audio_language, all_obj_keys, None) or 0
         _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
         _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
+        _pc_mmf      = _silent(PLEX_Media._list_multi_movie_folder, all_obj_keys, None) or 0
         _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
         _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
         _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
@@ -15589,6 +15592,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'no_audio_language': _pc_noaudio,
             'unsorted':          _pc_unsorted,
             'potential_mismatch':_pc_mismatch,
+            'multi_movie_folder':_pc_mmf,
             'numbering_issues':  _pc_numbering,
             'reencode':          _pc_reencode,
             'remux':             _pc_remux,
@@ -17352,6 +17356,56 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 best_ratio = ratio
                 matched = label
         return best_ratio, matched
+
+    @staticmethod
+    def _list_multi_movie_folder(obj_keys, library_name):
+        """List wrappers that host MULTIPLE distinct Plex Movies.
+
+        Plex expects one Movie per wrapper directory.  When two films share
+        a wrapper (e.g. `short.circuit.1&2.xvid/` containing both Short
+        Circuit (1986) and Short Circuit 2 (1988)), every per-item operation
+        gets confused — `--unmatched --resolve` can't pick a single target
+        name for the shared wrapper, scrapers attribute one set of metadata
+        to the wrong file, and Plex's own matcher often gives up.
+
+        Returns the count of distinct wrappers flagged.
+
+        Detection: group Movies by `_derive_wrapper_path(obj)` and flag
+        any wrapper holding ≥2 distinct Movie ratingKeys.
+        """
+        wrapper_to_movies = {}
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj or obj.get('type') != 'Movie':
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            wrapper = _derive_wrapper_path(obj)
+            if not wrapper:
+                continue
+            wrapper_to_movies.setdefault(wrapper, []).append((key, obj))
+        flagged = [(w, items) for w, items in wrapper_to_movies.items() if len(items) >= 2]
+        if not flagged:
+            return 0
+        flagged.sort(key=lambda p: p[0])
+        # Header on -V, plain rows on default — same convention as the
+        # other problem listings.
+        if VRB:
+            print(f"  {'WRAPPER':<60}  ITEMS  TITLES")
+            print(f"  {'-'*60}  -----  ------")
+        for wrapper, items in flagged:
+            keys_str = ', '.join(k for k, _ in items)
+            titles = ' / '.join(f"{(o.get('title') or '?')} ({o.get('year') or '----'})" for _, o in items)
+            print(f"  {wrapper:<60}  {len(items):>5}  {keys_str}: {titles}")
+        print(f"\n  {len(flagged)} wrapper(s) shared by >=2 distinct Movies.")
+        if VRB:
+            print(f"  Plex expects one Movie per directory.  Split the wrapper into")
+            print(f"  one folder per film and re-scan (or use Plex Fix Match).")
+        return len(flagged)
 
     @staticmethod
     def _list_potential_mismatches(obj_keys, library_name):
@@ -21579,7 +21633,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -22781,6 +22835,63 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --problems                    # Includes this in full report")
             print()
             print("  --potential-mismatch is an alias for --mismatch.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'multi-movie-folder' | 'multi_movie_folder':
+            print()
+            print("=" * 76)
+            print("MULTI-MOVIE FOLDER HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --multi-movie-folder [SCOPE]")
+            print("       my-plex [SCOPE] --multi-movie-folder")
+            print()
+            print("Lists wrapper directories that host MORE THAN ONE distinct Plex")
+            print("Movie.  Plex expects exactly one Movie per wrapper directory;")
+            print("when two films share a folder, Plex's matcher and every per-item")
+            print("operation gets confused.")
+            print()
+            print("EXAMPLES OF MULTI-MOVIE FOLDERS:")
+            print("  short.circuit.1&2.xvid/      → Short Circuit (1986) + Short Circuit 2 (1988)")
+            print("  hoodwinked/                  → Hoodwinked! (2005) + Hoodwinked Too! (2011)")
+            print("  nanny.mcphee.1.+.2/          → Nanny McPhee (2005) + Nanny McPhee Returns (2010)")
+            print()
+            print("Each row reports:")
+            print("  WRAPPER                            ITEMS  TITLES")
+            print("  movies.en/short.circuit.1&2.xvid/      2  Movie:12051: Short Circuit 2 (1988) /")
+            print("                                            Movie:12053: Short Circuit (1986)")
+            print()
+            print("WHY THIS MATTERS:")
+            print("  - Plex's metadata agent matches the FOLDER, not individual files.")
+            print("    Two films in one folder → at most one gets correctly matched,")
+            print("    the other becomes 'local://' (unmatched).")
+            print("  - --unmatched --resolve can't pick a single target name for the")
+            print("    shared wrapper — it shows a dedupe/conflict warning instead.")
+            print("  - Per-item moves / labels / rename operations all operate on the")
+            print("    wrapper as a unit (see feedback_item_path_is_a_unit memory) and")
+            print("    can't address one film without dragging the other along.")
+            print()
+            print("HOW TO FIX:")
+            print("  Split the folder into one directory per film:")
+            print("    mkdir 'short.circuit.(1986)'   # year hint helps Plex match")
+            print("    mkdir 'short.circuit.2.(1988)'")
+            print("    mv short.circuit.1.* short.circuit.(1986)/")
+            print("    mv short.circuit.2.* short.circuit.2.(1988)/")
+            print("  Then trigger a Plex library scan and re-run --update-cache.")
+            print()
+            print("DETECTION:")
+            print("  Groups Movies by `_derive_wrapper_path(obj)` (the directory under")
+            print("  the library rootpath that contains the indexed video file) and")
+            print("  flags any wrapper holding ≥2 distinct Movie ratingKeys.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --multi-movie-folder              # All libraries")
+            print("  my-plex MOVIE_LIB --multi-movie-folder    # One library")
+            print("  my-plex --multi-movie-folder -V           # With column header + fix hint")
+            print("  my-plex --problems                        # Includes this count")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -30618,6 +30729,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['unsorted']} unsorted series   →  my-plex{lib_arg} --unsorted")
     if problems.get('potential_mismatch', 0):
         print(f"  >> ⚠ {problems['potential_mismatch']} potential mismatches   →  my-plex{lib_arg} --mismatch")
+    if problems.get('multi_movie_folder', 0):
+        print(f"  >> ⚠ {problems['multi_movie_folder']} wrapper(s) shared by >=2 Movies   →  my-plex{lib_arg} --multi-movie-folder")
     if problems.get('numbering_issues', 0):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
@@ -31934,6 +32047,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_potential_mismatches(obj_keys, library_name)
         return
 
+    # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
+    mmf_val = safe_getattr(cmd_args, 'multi_movie_folder', None)
+    if mmf_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(mmf_val, media_type=media_type)
+        print(f"\n--- Multi-Movie Folders{scope} (one wrapper hosting >=2 distinct Movies) ---")
+        PLEX_Media._list_multi_movie_folder(obj_keys, library_name)
+        return
+
     # Handle --episode-numbering-issues [SCOPE]: list series with Plex vs scraped numbering conflicts
     numbering_val = safe_getattr(cmd_args, 'episode_numbering_issues', None)
     if numbering_val is not None:
@@ -32217,6 +32339,7 @@ def main():
         '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
+        '--multi-movie-folder': 'multi-movie-folder',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--remux': 'remux',
@@ -32354,6 +32477,7 @@ def main():
         # v2.0 (Phase E): listing / problem-detection commands also variadic
         '--broken', '--unmatched', '--unsorted',
         '--mismatch', '--potential-mismatch',
+        '--multi-movie-folder',
         '--missing', '--reencode', '--problems',
     }
     _in_variadic_window = False
@@ -32933,6 +33057,7 @@ def main():
     main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -33001,6 +33126,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
@@ -33349,6 +33475,7 @@ def main():
     _reinject_variadic('unmatched',                 '--unmatched')
     _reinject_variadic('unsorted',                  '--unsorted')
     _reinject_variadic('potential_mismatch',        '--mismatch')
+    _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
     _reinject_variadic('reencode',                  '--reencode')
 
