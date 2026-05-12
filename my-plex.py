@@ -20891,8 +20891,9 @@ def main_print_help(args, remaining_args, main_parser):
         case 'scope':
             print()
             print("=" * 76)
-            print("SCOPE is universal for my-plex (covers EVERY scope-taking command)")
+            print("SCOPE HELP")
             print("=" * 76)
+            print("SCOPE is universal for my-plex (covers EVERY scope-taking command):")
             print()
             print("Used by:  --list, --mv-to, --remux, --plex2disk, --disk2plex,")
             print("          --rename, --renumber, --reencode, --broken, --unmatched,")
