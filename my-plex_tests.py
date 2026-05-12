@@ -1501,8 +1501,8 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
         match = re.search(r'(def query_plex_database\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("'ssh', PLEX_DB_REMOTE_HOST", func_body,
-            "Must have SSH path for remote execution")
+        self.assertIn("_ssh_args(PLEX_DB_REMOTE_HOST)", func_body,
+            "Must have SSH path for remote execution (via _ssh_args helper)")
         self.assertIn("'sqlite3',", func_body,
             "Must have local sqlite3 path for direct execution")
 
@@ -8915,6 +8915,41 @@ class TestOriginalLanguages(unittest.TestCase):
         self.assertIn("'originallang': 'ORIG-LANG'", src)
 
 
+class TestAudioLangCacheBuildFallback(unittest.TestCase):
+    """v2.7: filename-based audio_language fallback must be wired into the
+    --update-cache normalization path, not only the --remux flow.
+
+    Plex-known languages take precedence; the regex map fills the gap when
+    Plex's metadata is empty or 'unknown'."""
+
+    def _read_script(self):
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'my-plex.py'), 'r') as f:
+            return f.read()
+
+    def test_fallback_called_during_cache_build(self):
+        src = self._read_script()
+        # The cache-build normalization assigns audio_languages and then,
+        # if empty/unknown, must consult _resolve_audio_lang_from_filename.
+        import re
+        m = re.search(
+            r"obj\['audio_languages'\]\s*=\s*_normalize_audio_languages\([^)]*\)"
+            r".*?_resolve_audio_lang_from_filename\(",
+            src, re.DOTALL)
+        self.assertIsNotNone(m, "cache build must call "
+            "_resolve_audio_lang_from_filename after _normalize_audio_languages "
+            "to fill empty/unknown audio_language from filename markers")
+
+    def test_fallback_respects_plex_known_languages(self):
+        src = self._read_script()
+        # Guard: the fallback only runs when audio_languages is empty or
+        # equals [_AUDIO_LANG_UNKNOWN] — Plex data must take precedence.
+        self.assertRegex(src,
+            r"if not obj\['audio_languages'\]\s+or\s+"
+            r"obj\['audio_languages'\]\s*==\s*\[_AUDIO_LANG_UNKNOWN\]\s*:")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -8942,7 +8977,7 @@ _UNITTEST_SCOPES = {
     'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
-                   TestDbQueriesUseLibraryName],
+                   TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback],
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
