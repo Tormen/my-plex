@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.7"
+SCRIPT_VERSION = "v2.8"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -12799,9 +12799,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         """Save cache to disk, restore READ_ONLY_MODE, and print summary."""
         global CACHE, READ_ONLY_MODE
 
-        # PERFORMANCE OPTIMIZATION: Save cache only ONCE at the end instead of after each library
-        # NOTE: We always save cache (not just when cache_needs_save) to ensure library_stats
-        # and itemsCount_by_item_id are persisted even when no libraries were updated
+        # Fast path: nothing changed → no recompute, no save.
+        # Non-update commands hit this path and must not pay the
+        # ~40MB pickle round-trip just to re-persist library_stats.
+        if not cache_needs_save and not FORCE_CACHE_UPDATE:
+            if DBG: print(f"{DBGPFX}_finalize_and_save_cache(): nothing changed — skip save")
+            if old_read_only is not None:
+                READ_ONLY_MODE = old_read_only
+            return
+
         if DBG and cache_needs_save: print(f"{DBGPFX}Saving updated cache to disk (libraries changed)...")
         elif DBG: print(f"{DBGPFX}Saving cache to disk (updating library_stats)...")
 
@@ -14550,25 +14556,34 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if dangling_movies > 0:
                 print(f"  Cleaned {dangling_movies} dangling keys from OBJ_BY_MOVIE")
 
+        # Everything below — rebuilding label indexes, on-disk labels, DPM
+        # uniform fields, problem counts, layout_index, plex_known_filepaths,
+        # and the corresponding cache save — is recompute-and-persist work
+        # only meaningful when --update-cache has actually mutated state.
+        # Non-update commands skip this entire block: they read whatever the
+        # last --update-cache wrote, never touch the Plex DB, and never save.
+        if not FORCE_CACHE_UPDATE:
+            return
+
         # Update progress for cache rebuild
-        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+        if PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Building labels index...")
 
         # Build Plex labels index for fast label-based queries
         plex_labels_index = PLEX_Media.build_labels_index()
 
         # Collect on-disk labels from filenames/directory names for every cached object
-        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+        if PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Reading on-disk labels from filenames...")
         for key, obj in PLEX_Media.OBJ_BY_ID.items():
             obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
         PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
         ondisk_labels_idx_size = len(PLEX_Media.OBJ_BY_ONDISK_LABEL)
-        if ondisk_labels_idx_size and FORCE_CACHE_UPDATE and VRB:
+        if ondisk_labels_idx_size and VRB:
             print(f" >>> On-disk labels: {ondisk_labels_idx_size} unique label(s) found in filenames")
 
         # Update progress for cache rebuild
-        if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
+        if PLEX_Media.cache_rebuild_lock:
             PLEX_Media.cache_rebuild_lock.write_progress("Finalizing cache...")
 
         # DISK_PLEX_MAP series_strategy='bottom_up' — compute & store
@@ -14579,45 +14594,42 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Run all problem checks (pure cache walks, ~1s) and store counts in cache
         # so --problems can show cached counts and --update-cache summary can report all issues
-        if FORCE_CACHE_UPDATE:
-            if PLEX_Media.cache_rebuild_lock:
-                PLEX_Media.cache_rebuild_lock.write_progress("Running problem checks...")
-            import io, contextlib
-            all_obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
-            def _silent(func, *a, **kw):
-                sink = io.StringIO()
-                with contextlib.redirect_stdout(sink):
-                    return func(*a, **kw)
-            _pc_broken   = _silent(PLEX_Media._list_broken_files, all_obj_keys, None) or 0
-            _pc_excess   = _silent(PLEX_Media._list_excess_versions, all_obj_keys, None, 3) or (0, 0)
-            _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
-            _pc_noaudio  = _silent(PLEX_Media._list_no_audio_language, all_obj_keys, None) or 0
-            _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
-            _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
-            _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
-            _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
-            _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
-            _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None) or 0
-            # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
-            _pc_tsv      = len(_TSV_FAILED_SHOWS)
-            from datetime import datetime as _dtpc
-            _problems_cache = {
-                'computed_at':       _dtpc.now().isoformat(timespec='seconds'),
-                'broken':            _pc_broken,
-                'excess_versions':   {'entries': _pc_excess[1] if isinstance(_pc_excess, tuple) else 0,
-                                      'files':   _pc_excess[0] if isinstance(_pc_excess, tuple) else 0},
-                'tsv':               _pc_tsv,
-                'unmatched':         _pc_unmatched,
-                'no_audio_language': _pc_noaudio,
-                'unsorted':          _pc_unsorted,
-                'potential_mismatch':_pc_mismatch,
-                'numbering_issues':  _pc_numbering,
-                'reencode':          _pc_reencode,
-                'remux':             _pc_remux,
-                'missing_episodes':  _pc_missing,
-            }
-        else:
-            _problems_cache = CACHE.get('problems')
+        if PLEX_Media.cache_rebuild_lock:
+            PLEX_Media.cache_rebuild_lock.write_progress("Running problem checks...")
+        import io, contextlib
+        all_obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+        def _silent(func, *a, **kw):
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink):
+                return func(*a, **kw)
+        _pc_broken   = _silent(PLEX_Media._list_broken_files, all_obj_keys, None) or 0
+        _pc_excess   = _silent(PLEX_Media._list_excess_versions, all_obj_keys, None, 3) or (0, 0)
+        _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
+        _pc_noaudio  = _silent(PLEX_Media._list_no_audio_language, all_obj_keys, None) or 0
+        _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
+        _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
+        _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
+        _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
+        _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
+        _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None) or 0
+        # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
+        _pc_tsv      = len(_TSV_FAILED_SHOWS)
+        from datetime import datetime as _dtpc
+        _problems_cache = {
+            'computed_at':       _dtpc.now().isoformat(timespec='seconds'),
+            'broken':            _pc_broken,
+            'excess_versions':   {'entries': _pc_excess[1] if isinstance(_pc_excess, tuple) else 0,
+                                  'files':   _pc_excess[0] if isinstance(_pc_excess, tuple) else 0},
+            'tsv':               _pc_tsv,
+            'unmatched':         _pc_unmatched,
+            'no_audio_language': _pc_noaudio,
+            'unsorted':          _pc_unsorted,
+            'potential_mismatch':_pc_mismatch,
+            'numbering_issues':  _pc_numbering,
+            'reencode':          _pc_reencode,
+            'remux':             _pc_remux,
+            'missing_episodes':  _pc_missing,
+        }
 
         # v1.21: persist the layout-index + plex_known_filepaths into the
         # cache pickle so non-update commands (--unrecognized, layout: filter)
