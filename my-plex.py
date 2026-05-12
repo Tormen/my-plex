@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.10"
+SCRIPT_VERSION = "v1.11"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -462,6 +462,7 @@ _my-plex() {
         '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
         '(--mv --move --mv-to --move-to)'{--mv,--move,--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv DEST_LIB \[SCOPE\]. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
         '(--original-languages --collect-original-languages)'{--original-languages,--collect-original-languages}'[Backfill obj.original_language from TMDB API for cached Movies/Series. Required for original_lang: / originallang: filter tokens. Optional SCOPE.]'
+        '(--unrecognized --alien)'{--unrecognized,--alien}'[List top-level entries in each library rootpath that Plex DB does NOT index (no matching media_part). Optional LIB scope. Synonyms.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--clean[With --plex2disk: strip all markers from disk]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
@@ -5652,6 +5653,204 @@ def cmd_original_languages(target=None, dry_run=False):
     print(f"  failed  : {n_fail}")
     print("=" * 76)
     return (n_ok, n_fail, 0)
+
+
+_PLEX_DB_KNOWN_FILES_CACHE = None  # session-local memo for query_plex_database('SELECT file FROM media_parts')
+
+def _get_known_filepaths_from_plex_db(force_refresh=False):
+    """One-shot fetch of every non-deleted file path Plex knows about (media_parts.file).
+
+    Cached for the session — first call costs one sqlite3 query (~50ms for
+    10K rows); subsequent calls are free.  `force_refresh=True` clears the
+    memo (used by tests / when the user explicitly re-runs after a Plex scan).
+
+    Returns: set[str] of absolute file paths Plex has indexed.
+    """
+    global _PLEX_DB_KNOWN_FILES_CACHE
+    if _PLEX_DB_KNOWN_FILES_CACHE is not None and not force_refresh:
+        return _PLEX_DB_KNOWN_FILES_CACHE
+    rows = query_plex_database(
+        "SELECT file FROM media_parts WHERE deleted_at IS NULL AND file IS NOT NULL"
+    )
+    paths = set()
+    if rows:
+        for row in rows:
+            fp = row[0] if isinstance(row, (list, tuple)) else row
+            if fp:
+                paths.add(str(fp))
+    _PLEX_DB_KNOWN_FILES_CACHE = paths
+    if DBG:
+        print(f"{DBGPFX}_get_known_filepaths_from_plex_db: cached {len(paths)} indexed paths from media_parts")
+    return paths
+
+
+def _list_top_level_entries(rootpath, remote_host=None):
+    """List immediate children (files + directories) of `rootpath`.
+
+    Uses SSH `find -maxdepth 1` on the Plex host (or local find if no remote).
+    Returns sorted list of (path, kind) tuples where kind is 'dir' or 'file'.
+    The rootpath itself is excluded.  Hidden entries (starting with '.') are
+    excluded — they're typically Plex / OS scratch and never indexed.
+    """
+    esc = escape_path_for_ssh(rootpath)
+    # `find ... -printf '%y\t%p\n'` would be cleaner but GNU-only.  BSD find
+    # (macOS) has no -printf, so emit type via `-exec stat`.  Simpler still:
+    # run two passes — one for dirs, one for files — and merge.
+    find_dirs  = f'find "{esc}" -maxdepth 1 -mindepth 1 -type d ! -name ".*"'
+    find_files = f'find "{esc}" -maxdepth 1 -mindepth 1 -type f ! -name ".*"'
+    if remote_host:
+        cmd_d = ['ssh', remote_host, find_dirs]
+        cmd_f = ['ssh', remote_host, find_files]
+    else:
+        cmd_d = ['sh', '-c', find_dirs]
+        cmd_f = ['sh', '-c', find_files]
+    out = []
+    try:
+        rd = subprocess.run(cmd_d, capture_output=True, text=True, timeout=120)
+        rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=120)
+        if rd.returncode != 0 and rf.returncode != 0:
+            if VRB:
+                print(f"WARNING: list_top_level_entries failed for {rootpath}: {(rd.stderr or rf.stderr).strip()}")
+            return []
+        for p in (rd.stdout or '').splitlines():
+            p = p.strip()
+            if p:
+                out.append((p, 'dir'))
+        for p in (rf.stdout or '').splitlines():
+            p = p.strip()
+            if p:
+                out.append((p, 'file'))
+    except Exception as e:
+        print(f"WARNING: list_top_level_entries error for {rootpath}: {e}")
+        return []
+    return sorted(out, key=lambda t: t[0])
+
+
+def _count_unrecognized_top_level(target_library=None):
+    """Silent count helper used by --problems.  Returns int."""
+    library_stats = CACHE.get('library_stats', {})
+    locations_by_lib = library_stats.get('locations', {})
+    if not locations_by_lib:
+        return 0
+    libraries = [target_library] if target_library else sorted(PLEX_Library.OBJ_DICT.keys())
+    known = _get_known_filepaths_from_plex_db()
+    count = 0
+    for lib in libraries:
+        for rp in locations_by_lib.get(lib, []):
+            rp_norm = rp.rstrip('/')
+            for entry, _kind in _list_top_level_entries(rp_norm, PLEX_DB_REMOTE_HOST):
+                prefix = entry + '/'
+                if not any(k == entry or k.startswith(prefix) for k in known):
+                    count += 1
+    return count
+
+
+def cmd_unrecognized(target=None):
+    """v1.11: --unrecognized / --alien — list top-level entries in each library
+    rootpath that Plex DB does NOT have a media_part for.
+
+    "Top-level" = direct children of the library rootpath.  Files / directories
+    inside a recognized movie-dir / series-dir / season-dir are NOT considered
+    — only what sits at the surface of each library.
+
+    Detection rule (per user-confirmed choice): an entry is unrecognized iff
+    NO row in Plex's media_parts table has its `file` column starting with
+    that entry's path (or equal to it for bare-file entries).  This catches:
+      - junk left behind after downloads (.tmp, .part, .nfo at root)
+      - folders Plex couldn't classify (wrong agent, no match, name confused
+        the scanner)
+      - files dropped at root that Plex hasn't re-scanned yet
+
+    Args:
+        target: optional library name (or None = all supported libraries).
+                The universal-scope helper isn't used here because we need
+                to walk on-disk rootpaths, not iterate cached objects.
+
+    Returns: tuple (n_libs_scanned, n_unrecognized, n_errors).
+    """
+    library_stats = CACHE.get('library_stats', {})
+    locations_by_lib = library_stats.get('locations', {})
+    if not locations_by_lib:
+        err(1120, "--unrecognized: no library rootpaths in cache.\n  Run --update-cache first.")
+
+    if target:
+        if target not in PLEX_Library.OBJ_DICT:
+            available = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
+            err(1121, f"--unrecognized: library '{target}' not found.\n\nAvailable libraries: {available}")
+        libraries = [target]
+    else:
+        libraries = sorted(PLEX_Library.OBJ_DICT.keys())
+
+    known = _get_known_filepaths_from_plex_db()
+    if not known:
+        print("WARNING: Plex DB returned 0 media_parts paths. Either --update-cache hasn't been run, ")
+        print("         the DB is unreachable, or the library is empty. Continuing — every top-level ")
+        print("         entry will be flagged as unrecognized.")
+
+    print()
+    print("=" * 76)
+    print(f"--unrecognized / --alien:  top-level entries Plex DB doesn't index")
+    print("=" * 76)
+    print(f"  Plex DB knows about {len(known)} media_parts paths.")
+    print(f"  Scanning {len(libraries)} librar{'y' if len(libraries) == 1 else 'ies'}.")
+
+    n_unrecognized = 0
+    n_errors = 0
+    per_lib_unrecog = {}
+
+    for lib in libraries:
+        rootpaths = locations_by_lib.get(lib, [])
+        if not rootpaths:
+            print(f"  ! {lib}: no rootpath in cache — skipping")
+            n_errors += 1
+            continue
+        lib_alien = []
+        for rp in rootpaths:
+            rp_norm = rp.rstrip('/')
+            entries = _list_top_level_entries(rp_norm, PLEX_DB_REMOTE_HOST)
+            if not entries:
+                continue
+            for entry, kind in entries:
+                # Recognized iff any known file starts with entry/ (dir) or equals entry (file).
+                prefix = entry + '/'
+                recognized = any(k == entry or k.startswith(prefix) for k in known)
+                if not recognized:
+                    lib_alien.append((entry, kind))
+        if lib_alien:
+            per_lib_unrecog[lib] = lib_alien
+            n_unrecognized += len(lib_alien)
+
+    if not per_lib_unrecog:
+        print()
+        print(f"  ✓ No unrecognized top-level entries found across {len(libraries)} librar{'y' if len(libraries) == 1 else 'ies'}.")
+        print("=" * 76)
+        return (len(libraries), 0, n_errors)
+
+    for lib in sorted(per_lib_unrecog.keys()):
+        entries = per_lib_unrecog[lib]
+        print()
+        print(f"  >> {lib}  —  {len(entries)} unrecognized top-level entr{'y' if len(entries) == 1 else 'ies'}:")
+        for e, kind in entries[:200]:
+            kind_disp = f"[{kind}]"
+            print(f"       {kind_disp:7s}  {e}")
+        if len(entries) > 200:
+            print(f"       …and {len(entries) - 200} more")
+
+    print()
+    print("=" * 76)
+    print(f"SUMMARY  --unrecognized")
+    print(f"  libraries scanned : {len(libraries)}")
+    print(f"  unrecognized      : {n_unrecognized}")
+    print(f"  errors            : {n_errors}")
+    print()
+    print("  Common causes:")
+    print("    - leftover download artifacts (.tmp / .part / .nfo without a video sibling)")
+    print("    - folders Plex couldn't match (rename + --scan to retry)")
+    print("    - content in a library type that doesn't natively support it (e.g. a")
+    print("      series-shaped folder dropped into a Movie library — Plex scans each")
+    print("      video as a Movie, leaving the wrapper dir un-indexed at the top)")
+    print("=" * 76)
+    return (len(libraries), n_unrecognized, n_errors)
 
 
 def format_duration(duration_ms, unit='m'):
@@ -19768,7 +19967,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -21385,6 +21584,53 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG (in ~/.my-plex.conf):")
             print("  OUTDATED_CONTAINERS, REMUX_TARGET_CONTAINER, REMUX_VIDEO_CODECS_OK,")
             print("  REMUX_AUDIO_CODECS_OK, REMUX_REQUIRE_LANGUAGE, REMUX_TRASH_ORIGINAL")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'unrecognized' | 'alien':
+            print()
+            print("=" * 76)
+            print("UNRECOGNIZED / ALIEN HELP   NEW in v1.11")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --unrecognized [LIB]      # all libs (or one)")
+            print("       my-plex --alien [LIB]             # synonym for --unrecognized")
+            print()
+            print("Lists top-level entries in each library's rootpath(s) that Plex DB")
+            print("does NOT have a `media_part` for.  \"Top-level\" = direct children of")
+            print("the library rootpath; files / dirs nested inside an already-recognized")
+            print("movie-dir, series-dir, or season-dir are deliberately ignored.")
+            print()
+            print("DETECTION RULE (Plex DB authoritative):")
+            print("  An entry is 'unrecognized' (alien) iff NO row in media_parts has its")
+            print("  `file` column starting with the entry's path (or equal to it for")
+            print("  bare-file entries).  Cache freshness doesn't matter — the rule")
+            print("  goes straight to Plex's own DB.")
+            print()
+            print("COMMON CAUSES:")
+            print("  - leftover download artifacts (.tmp / .part / .nfo without a video")
+            print("    sibling at the same level)")
+            print("  - folders Plex couldn't match (typo in name, missing year, agent")
+            print("    confusion — fix the dir name and re-scan)")
+            print("  - content dropped at the wrong level (e.g. a Show wrapper dropped")
+            print("    into a Movie library — Plex scans each video as a Movie and")
+            print("    leaves the wrapper dir un-indexed)")
+            print("  - corrupted videos Plex rejected (bad header, zero-byte, wrong ext)")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --unrecognized                    # scan every library")
+            print("  my-plex --alien                           # same, shorter")
+            print("  my-plex --unrecognized ,unsorted          # scan one library")
+            print("  my-plex --alien movies.fr")
+            print()
+            print("RELATED:")
+            print("  --unsorted   (Series libs only)  finds shows whose episodes live")
+            print("                                    in the series root without season")
+            print("                                    subdirs.  Different problem, same")
+            print("                                    family.")
+            print("  --broken                          files Plex indexed but that ffprobe")
+            print("                                    says are truncated / corrupt.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -28053,6 +28299,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['renumber_season']} season mismatch episodes   →  my-plex{lib_arg} --renumber -V")
     if problems.get('renumber_abs', 0):
         print(f"  >> ⚠ {problems['renumber_abs']} absolute numbering mismatch episodes   →  my-plex{lib_arg} --renumber -V")
+    if problems.get('unrecognized', 0):
+        print(f"  >> ⚠ {problems['unrecognized']} unrecognized top-level entries   →  my-plex{lib_arg} --unrecognized   (synonym: --alien)")
 
 
 def _write_cache_update_log(action, completion_status, total_added, total_removed, total_updated,
@@ -28914,6 +29162,13 @@ def execute_global_commands(args, cmd_args):
         cmd_original_languages(target=target, dry_run=dry_run)
         sys.exit(0)
 
+    # Handle --unrecognized / --alien command (top-level entries Plex DB doesn't index)
+    unrecognized_val = safe_getattr(cmd_args, 'unrecognized', None)
+    if unrecognized_val is not None:
+        target = unrecognized_val if unrecognized_val is not True else None
+        cmd_unrecognized(target=target)
+        sys.exit(0)
+
     # Handle --mv / --move command (cross-library file move)
     mv_args = safe_getattr(cmd_args, 'mv', None)
     if mv_args is not None:
@@ -29235,11 +29490,21 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Renumber: Absolute Numbering Mismatch{lib_label}")
             renumber_abs_count = _run_check(PLEX_Media._list_renumber_abs_mismatch, obj_keys, problems_library)
 
+        # 13. Unrecognized / alien top-level entries (Plex DB authoritative — independent of cache)
+        unrecognized_count = 0
+        if not tsv_only:
+            print(f"  >> Unrecognized Top-Level Entries{lib_label}")
+            unrecognized_count = _count_unrecognized_top_level(problems_library) or 0
+            if unrecognized_count and VRB:
+                # In verbose mode, print the actual list via the standalone command.
+                cmd_unrecognized(target=problems_library)
+
         # Closing milestone with total
         total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
                           + noaudio_count + unsorted_count + mismatch_count + numbering_count
                           + reencode_count + remux_count
-                          + missing_count + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count)
+                          + missing_count + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count
+                          + unrecognized_count)
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
         live_problems = {
@@ -29258,6 +29523,7 @@ def execute_global_commands(args, cmd_args):
             'renumber_nodata':   renumber_nodata_count if not tsv_only else 0,
             'renumber_season':   renumber_season_count if not tsv_only else 0,
             'renumber_abs':      renumber_abs_count    if not tsv_only else 0,
+            'unrecognized':      unrecognized_count    if not tsv_only else 0,
         }
         _print_problem_warnings(live_problems, lib_arg)
         if total_problems == 0:
@@ -29585,6 +29851,7 @@ def main():
         '--remux': 'remux',
         '--mv': 'mv', '--move': 'mv', '--mv-to': 'mv', '--move-to': 'mv',
         '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
+        '--unrecognized': 'unrecognized', '--alien': 'unrecognized',
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
@@ -30186,6 +30453,7 @@ def main():
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
@@ -30269,6 +30537,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter. Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv DEST_LIB [SCOPE]. SCOPE can be a library name, cache key, Plex ID, title, or filepath (omitted = all items). On duplicate title+originalTitle+year matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
     GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help="List top-level entries in each library rootpath that Plex DB doesn't have a media_part for. Catches download leftovers, mis-classified folders, or content dropped at a library root that Plex never matched. Optional LIB scope (single library). Use --help unrecognized for details. Synonym: --alien.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
@@ -30392,6 +30661,8 @@ def main():
                 '--move-to':                 'mv',
                 '--original-languages':         'original-languages',
                 '--collect-original-languages': 'original-languages',
+                '--unrecognized':            'unrecognized',
+                '--alien':                   'unrecognized',
                 '--problems':                'problems',
                 '--tsv':                     'problems',
                 '--scrape':                  'problems',
@@ -30731,6 +31002,16 @@ def main():
             remaining_args.insert(1, '--original-languages')
         else:
             remaining_args.insert(0, '--original-languages')
+
+    # Re-inject --unrecognized / --alien into remaining_args
+    if safe_getattr(args, 'unrecognized', None) is not None:
+        if args.unrecognized is not True and args.unrecognized:
+            # --unrecognized must come BEFORE its value so GLOBAL_CMD_PARSER's
+            # nargs='?' picks it up as the flag's value (not as a stray positional).
+            remaining_args.insert(0, '--unrecognized')
+            remaining_args.insert(1, args.unrecognized)
+        else:
+            remaining_args.insert(0, '--unrecognized')
 
     # Re-inject --mv into remaining_args
     # --mv takes 1 or 2 positionals: DEST_LIB [SCOPE]
