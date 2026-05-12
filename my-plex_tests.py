@@ -8530,6 +8530,18 @@ class TestCompoundFilter(unittest.TestCase):
         self.assertIn("if t == '('", src)
         self.assertIn("if _peek() != ')'", src)
 
+    def test_parser_supports_not(self):
+        """v2.3: NOT operator (uppercase) with precedence above AND."""
+        src = self._read_script()
+        self.assertIn("_parse_not", src)
+        self.assertIn("if _peek() == 'NOT'", src)
+        # NOT pass-through in argv normalization
+        self.assertIn("'NOT', '('", src)
+        # NOT compile branch
+        self.assertIn("if kind == 'NOT':", src)
+        # _is_scope_filter_token recognises NOT
+        self.assertIn("'AND', 'OR', 'NOT'", src)
+
     def test_library_filter_field(self):
         """library: must be a Cat-B filter field with an exact-match handler."""
         src = self._read_script()
