@@ -8426,6 +8426,86 @@ class TestUniversalScope(unittest.TestCase):
             self.assertIn(kw, body, f"--help mv must mention '{kw}'")
 
 
+class TestCompoundFilter(unittest.TestCase):
+    """Tests for v2.1 AND/OR/parens grammar in scope filter expressions."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_compound_parser_exists(self):
+        """_parse_compound_filter must exist and handle AND/OR/parens grammar."""
+        src = self._read_script()
+        self.assertIn("def _parse_compound_filter(", src)
+        self.assertIn("def _tokenize_filter_expr_string(", src)
+
+    def test_grammar_documented_in_docstring(self):
+        """The grammar must be in the docstring (precedence AND > OR; uppercase only)."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def _parse_compound_filter\(.*?\n\s+"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        doc = m.group(1)
+        self.assertIn("HIGHER precedence than OR", doc)
+        self.assertIn("uppercase", doc.lower())
+
+    def test_parser_supports_or(self):
+        """The grammar must include an OR production."""
+        src = self._read_script()
+        self.assertIn("_parse_or", src)
+        self.assertIn("_peek() == 'OR'", src)
+
+    def test_parser_supports_parens(self):
+        """The grammar must accept `(` and `)` tokens for grouping."""
+        src = self._read_script()
+        self.assertIn("if t == '('", src)
+        self.assertIn("if _peek() != ')'", src)
+
+    def test_library_filter_field(self):
+        """library: must be a Cat-B filter field with an exact-match handler."""
+        src = self._read_script()
+        self.assertIn("if field == 'library':", src)
+        # 'library' must be in _SCOPE_FILTER_FIELDS and both Cat-B regexes
+        self.assertIn("'library'", src)
+        self.assertIn("original_lang|type|layout|library", src)
+
+    def test_auto_promote_bare_library(self):
+        """Inside compound expressions, bare library names auto-promote to library:NAME."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def _compile\(node\):(.*?)label, fn = _compile', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertIn("PLEX_Media.OBJ_BY_LIBRARY", body)
+        self.assertIn("library:", body)
+
+    def test_argv_pass_through_operators(self):
+        """Argv normalization must pass `(`, `)`, `AND`, `OR` through as filter ops."""
+        src = self._read_script()
+        self.assertIn("if arg in ('AND', 'OR', '(', ')'):", src)
+
+    def test_universal_scope_detects_operators(self):
+        """_get_universal_scope must route operator-bearing token lists to compound parser."""
+        src = self._read_script()
+        self.assertIn("_OPERATORS = {'AND', 'OR', '(', ')'}", src)
+
+    def test_is_scope_filter_token_detects_compound(self):
+        """_is_scope_filter_token must accept OR / parens too (not just AND)."""
+        src = self._read_script()
+        self.assertIn("token in ('(', ')', 'AND', 'OR')", src)
+        self.assertIn(r"'\bAND\b|\bOR\b'", src)
+
+    def test_help_scope_documents_or_and_parens(self):
+        """--help scope page must document the new compound grammar."""
+        src = self._read_script()
+        import re
+        m = re.search(r"case 'scope':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        for kw in ('OR', 'AND', 'PARENS', 'CASE-SENSITIVE', 'SPACE-SEPARATED'):
+            self.assertIn(kw, body, f"--help scope must mention '{kw}'")
+
+
 class TestLayoutFilter(unittest.TestCase):
     """Tests for the layout: scope token (orthogonal to type:).
 
@@ -8732,6 +8812,7 @@ _UNITTEST_SCOPES = {
     'scope':              [TestUniversalScope],
     'unrecognized':       [TestUnrecognized],
     'layout':             [TestLayoutFilter],
+    'compound':           [TestCompoundFilter],
 }
 
 # List of all unittest classes for run_regression_tests()
