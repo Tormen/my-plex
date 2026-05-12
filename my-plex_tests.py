@@ -8915,6 +8915,83 @@ class TestOriginalLanguages(unittest.TestCase):
         self.assertIn("'originallang': 'ORIG-LANG'", src)
 
 
+class TestAudioLangPureVsCompleted(unittest.TestCase):
+    """v2.9: --update-cache must store TWO views per Movie/Episode:
+      * audio_languages_plex : pure Plex value (never extended)
+      * audio_languages      : Plex + filename + library completion
+
+    --no-plex-audio-language reads the _plex view; --no-audio-language
+    reads the completed view.
+    """
+
+    def _read_script(self):
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'my-plex.py'), 'r') as f:
+            return f.read()
+
+    def test_pure_plex_view_assigned_in_cache_build(self):
+        src = self._read_script()
+        # audio_languages_plex must be set from _normalize_audio_languages(_expanded)
+        # in the same finalize loop that builds audio_languages.
+        self.assertRegex(src,
+            r"obj\['audio_languages_plex'\]\s*=\s*_plex_view")
+        self.assertRegex(src,
+            r"_plex_view\s*=\s*_normalize_audio_languages\(_expanded\)")
+
+    def test_completion_toggles_present_in_config_defaults(self):
+        src = self._read_script()
+        self.assertIn("'AUDIO_LANG_COMPLETE_FROM_FILENAME': True", src)
+        self.assertIn("'AUDIO_LANG_COMPLETE_FROM_LIBRARY':  True", src)
+
+    def test_completion_respects_toggle_filename(self):
+        src = self._read_script()
+        # Filename completion must be gated by AUDIO_LANG_COMPLETE_FROM_FILENAME
+        self.assertRegex(src,
+            r"if AUDIO_LANG_COMPLETE_FROM_FILENAME and \(\s*"
+            r"not obj\['audio_languages'\]")
+
+    def test_completion_respects_toggle_library(self):
+        src = self._read_script()
+        # Library completion must be gated by AUDIO_LANG_COMPLETE_FROM_LIBRARY
+        # and use single-code entries (MULTI is ignored).
+        self.assertRegex(src,
+            r"if AUDIO_LANG_COMPLETE_FROM_LIBRARY and \(\s*"
+            r"not obj\['audio_languages'\]")
+        self.assertIn("str(_lval).upper() != 'MULTI'", src)
+
+    def test_completion_order_plex_filename_library(self):
+        """The library step must run AFTER the filename step (it only fills
+        the gap when filename didn't already)."""
+        src = self._read_script()
+        i_fn  = src.find("Completion step 1: filename markers")
+        i_lib = src.find("Completion step 2: library-language convention")
+        self.assertGreater(i_fn,  0)
+        self.assertGreater(i_lib, i_fn)
+
+    def test_no_plex_audio_language_cli_flag_registered(self):
+        src = self._read_script()
+        self.assertIn("'--no-plex-audio-language'", src)
+        self.assertIn("no_plex_audio_language", src)
+
+    def test_no_plex_audio_language_uses_plex_field(self):
+        src = self._read_script()
+        # The dispatcher must select audio_languages_plex when the flag is set.
+        self.assertRegex(src,
+            r"audio_lang_field\s*=\s*'audio_languages_plex' if no_plex_audio_language")
+
+    def test_pre_v29_cache_falls_back_to_audio_languages(self):
+        """When an old cache lacks audio_languages_plex on an obj, the filter
+        must fall back to audio_languages so --no-plex-audio-language doesn't
+        flag every item as missing."""
+        src = self._read_script()
+        # Both the filter and the listing must guard with 'in obj'.
+        self.assertRegex(src,
+            r"if audio_lang_field in obj:\s*\n\s*audio_languages\s*=\s*obj\.get\(audio_lang_field\)")
+        self.assertRegex(src,
+            r"if field in obj:\s*\n\s*audio_languages\s*=\s*obj\.get\(field\)")
+
+
 class TestAudioLangCacheBuildFallback(unittest.TestCase):
     """v2.7: filename-based audio_language fallback must be wired into the
     --update-cache normalization path, not only the --remux flow.
@@ -8930,11 +9007,13 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
 
     def test_fallback_called_during_cache_build(self):
         src = self._read_script()
-        # The cache-build normalization assigns audio_languages and then,
-        # if empty/unknown, must consult _resolve_audio_lang_from_filename.
+        # v2.9: cache build computes _plex_view = _normalize_audio_languages(...),
+        # assigns it to obj['audio_languages_plex'] (pure) and obj['audio_languages']
+        # (working copy), then consults _resolve_audio_lang_from_filename to fill
+        # empty/unknown filename-inferred codes.
         import re
         m = re.search(
-            r"obj\['audio_languages'\]\s*=\s*_normalize_audio_languages\([^)]*\)"
+            r"_plex_view\s*=\s*_normalize_audio_languages\([^)]*\)"
             r".*?_resolve_audio_lang_from_filename\(",
             src, re.DOTALL)
         self.assertIsNotNone(m, "cache build must call "
@@ -8945,9 +9024,11 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
         src = self._read_script()
         # Guard: the fallback only runs when audio_languages is empty or
         # equals [_AUDIO_LANG_UNKNOWN] — Plex data must take precedence.
+        # v2.9: also gated by AUDIO_LANG_COMPLETE_FROM_FILENAME.
         self.assertRegex(src,
-            r"if not obj\['audio_languages'\]\s+or\s+"
-            r"obj\['audio_languages'\]\s*==\s*\[_AUDIO_LANG_UNKNOWN\]\s*:")
+            r"AUDIO_LANG_COMPLETE_FROM_FILENAME\s+and\s+\(\s*"
+            r"not obj\['audio_languages'\]\s+or\s+"
+            r"obj\['audio_languages'\]\s*==\s*\[_AUDIO_LANG_UNKNOWN\]\s*\)")
 
 
 _UNITTEST_SCOPES = {
@@ -8977,7 +9058,8 @@ _UNITTEST_SCOPES = {
     'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
-                   TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback],
+                   TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
+                   TestAudioLangPureVsCompleted],
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],

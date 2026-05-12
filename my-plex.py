@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.8"
+SCRIPT_VERSION = "v2.9"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -427,7 +427,8 @@ _my-plex() {
         '--list-label[List media with specific label]:label:'
         '--add-label[Add label to media item(s)]:label and scope:'
         '--remove-label[Remove label from media item(s)]:label and scope:'
-        '(--no-audio-language --no-language)'{--no-audio-language,--no-language}'[List media with missing audio language info]'
+        '(--no-audio-language --no-language)'{--no-audio-language,--no-language}'[List media with missing audio language info (after filename / library completion)]'
+        '--no-plex-audio-language[List media where Plex itself has no audio language (pure Plex view, ignores completion)]'
         '--en[List media with English audio]'
         '--de[List media with German audio]'
         '--fr[List media with French audio]'
@@ -874,6 +875,36 @@ CONFIG_DEFAULTS = {
     # The lang:<code> filter still matches against any track in the file
     # regardless of this setting.
     'PREFERRED_AUDIO_LANGUAGES': [],
+
+    # CACHE COMPLETION (v2.9):  During --update-cache, the cache stores TWO
+    # views of each Movie/Episode's audio languages:
+    #
+    #   - audio_languages_plex : what Plex itself reports (the pure view, never
+    #                            modified; --no-plex-audio-language reads this).
+    #   - audio_languages      : COMPLETED view — Plex's value PLUS fallbacks
+    #                            from external signals (filename markers,
+    #                            library-language conventions).  Used by every
+    #                            other command including --no-audio-language.
+    #
+    # Plex's known value ALWAYS wins; completion only fills empty / 'unknown'.
+    #
+    # The toggles below control which completion sources are consulted:
+    #
+    #   - AUDIO_LANG_COMPLETE_FROM_FILENAME  (bool, default True):
+    #     When the filename matches a DISK_PLEX_MAP['AUDIO_LANG']['disk2plex']
+    #     regex (e.g. `\bTVOON\b` → 'de', `\[(fr|french)\]` → 'fr'), use that
+    #     code.  Turn off to disable filename inference.
+    #
+    #   - AUDIO_LANG_COMPLETE_FROM_LIBRARY   (bool, default True):
+    #     When the filename didn't yield a code, fall back to the library's
+    #     conventional language as listed in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY
+    #     (single-code entries only — 'MULTI' entries are ignored since the
+    #     library is explicitly mixed).
+    #
+    # Order: Plex → filename → library.  Each step only runs if the previous
+    # ones left audio_languages empty or [unknown].
+    'AUDIO_LANG_COMPLETE_FROM_FILENAME': True,
+    'AUDIO_LANG_COMPLETE_FROM_LIBRARY':  True,
 
     # Filepath-pattern audio-language hints live in
     # DISK_PLEX_MAP['AUDIO_LANG']['values'][<code>]['disk2plex'] — the legacy
@@ -1488,6 +1519,8 @@ DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBR
 EXTERNAL_TOOLS = CONFIG_DEFAULTS['EXTERNAL_TOOLS']
 AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']
 PREFERRED_AUDIO_LANGUAGES = CONFIG_DEFAULTS['PREFERRED_AUDIO_LANGUAGES']
+AUDIO_LANG_COMPLETE_FROM_FILENAME = CONFIG_DEFAULTS['AUDIO_LANG_COMPLETE_FROM_FILENAME']
+AUDIO_LANG_COMPLETE_FROM_LIBRARY  = CONFIG_DEFAULTS['AUDIO_LANG_COMPLETE_FROM_LIBRARY']
 
 # Default output format for --list-media
 FORMAT = CONFIG_DEFAULTS['FORMAT']
@@ -12857,20 +12890,35 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     if len(_c) > 3 and _c != _AUDIO_LANG_UNKNOWN:
                         _c = ''  # garbage → will become 'unknown' via normaliser
                     _expanded.append(_c)
-                obj['audio_languages'] = _normalize_audio_languages(_expanded)
-                # v2.7: FILENAME-BASED AUDIO-LANG FALLBACK.
-                # When Plex's own metadata is missing / unknown AND the
-                # filename matches a DISK_PLEX_MAP['AUDIO_LANG']['disk2plex']
-                # regex (e.g. `\bTVOON\b` → 'de', `\[(fr|french)\]` → 'fr'),
-                # use the inferred code so --no-audio-language doesn't
-                # false-positive on items that the disk2plex mechanism
-                # could trivially resolve.  Plex-known languages take
-                # precedence; this only fills the gap.
-                if not obj['audio_languages'] or obj['audio_languages'] == [_AUDIO_LANG_UNKNOWN]:
+                # v2.9: store the PURE Plex view (after normalisation but
+                # before any external-source completion) in audio_languages_plex.
+                # --no-plex-audio-language reads this.  Never modified later.
+                _plex_view = _normalize_audio_languages(_expanded)
+                obj['audio_languages_plex'] = _plex_view
+                obj['audio_languages']      = list(_plex_view)
+
+                # Completion step 1: filename markers (DISK_PLEX_MAP regex)
+                if AUDIO_LANG_COMPLETE_FROM_FILENAME and (
+                        not obj['audio_languages']
+                        or obj['audio_languages'] == [_AUDIO_LANG_UNKNOWN]):
                     _fp = obj.get('file', '') or ''
                     _inferred = _resolve_audio_lang_from_filename(_fp) if _fp else None
                     if _inferred:
                         obj['audio_languages'] = [_inferred]
+
+                # Completion step 2: library-language convention.  Uses
+                # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY single-code entries;
+                # 'MULTI' entries are ignored (the library is mixed by design).
+                if AUDIO_LANG_COMPLETE_FROM_LIBRARY and (
+                        not obj['audio_languages']
+                        or obj['audio_languages'] == [_AUDIO_LANG_UNKNOWN]):
+                    _lib_code = None
+                    for _lname, _lval in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
+                        if _lname == lib and str(_lval).upper() != 'MULTI':
+                            _lib_code = str(_lval).lower()
+                            break
+                    if _lib_code:
+                        obj['audio_languages'] = [_lib_code]
                 # Stats: count the first (primary) track only — see legend in
                 # --list-libraries footnote.  'unknown' is now a regular code.
                 _primary = obj['audio_languages'][0]
@@ -13796,6 +13844,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         duplicates_only = safe_getattr(obj_args, 'duplicates', False)
         audio_filter = safe_getattr(args, 'audio', None)
         no_audio_language = safe_getattr(args, 'no_audio_language', False)
+        no_plex_audio_language = safe_getattr(args, 'no_plex_audio_language', False)
+        # When --no-plex-audio-language is given, route through the same engine
+        # but read the pure-Plex view of audio_languages.
+        no_audio_language = no_audio_language or no_plex_audio_language
+        audio_lang_field = 'audio_languages_plex' if no_plex_audio_language else 'audio_languages'
         collections_only = safe_getattr(obj_args, 'collections', False)
 
         # Handle --collections (standalone or combined with --list)
@@ -13815,7 +13868,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             PLEX_Media._list_filtered(filter_expr, library_name=obj, media_type=media_type,
                 watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
         elif needs_full_list or duplicates_only:
-                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language)
+                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field=audio_lang_field)
         # Handle --missing: show missing episodes for all series in this library
         if safe_getattr(obj_args, 'missing', False):
             lib_name = obj  # obj is the library name string
@@ -16150,13 +16203,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(unmatched)
 
     @staticmethod
-    def _list_no_audio_language(obj_keys, library_name):
+    def _list_no_audio_language(obj_keys, library_name, field='audio_languages'):
         """List items (Movie/Episode) whose only audio language is 'unknown'.
 
         Plex's inconsistent placeholders (und/mis/mul/zxx/empty) are collapsed
-        to the canonical 'unknown' code at --update-cache finalize time, so
-        this filter just checks for items whose audio_languages contains only
-        'unknown' (i.e. no actual ISO language is known for any track).
+        to the canonical 'unknown' code at --update-cache finalize time.
+
+        Two views are stored per item:
+          - audio_languages       : COMPLETED — Plex + filename + library fallbacks.
+                                    (--no-audio-language; default)
+          - audio_languages_plex  : PURE Plex value, never extended.
+                                    (--no-plex-audio-language)
+
+        `field` selects which view to filter by.
         """
         count = 0
         for key in obj_keys:
@@ -16166,7 +16225,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             obj_type = obj.get('type')
             if obj_type not in ('Movie', 'Episode'):
                 continue
-            audio_languages = obj.get('audio_languages', []) or []
+            # Fall back to 'audio_languages' when the requested field is
+            # missing on this object (pre-v2.9 caches don't carry _plex).
+            if field in obj:
+                audio_languages = obj.get(field) or []
+            else:
+                audio_languages = obj.get('audio_languages', []) or []
             if all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in audio_languages) \
                     or not audio_languages:
                 count += 1
@@ -16175,7 +16239,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 filepath = obj.get('file', '')
                 print(f"  {key:<17} {library:<20} {title[:45]:<45} {filepath}")
         if count:
-            print(f"\n  {count} item(s) with unknown audio language.")
+            _label = "Plex audio language" if field == 'audio_languages_plex' else "audio language"
+            print(f"\n  {count} item(s) with unknown {_label}.")
         return count
 
     @staticmethod
@@ -18950,7 +19015,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return [sort_duplicate_keys(item) for item in sorted(items_with_duplicates.items())]
 
     @staticmethod
-    def _filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language):
+    def _filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field='audio_languages'):
         filtered_keys = []
         for key in obj_keys:
             obj = PLEX_Media.OBJ_BY_ID.get(key)
@@ -18972,7 +19037,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 # Cache stores the canonical 'unknown' code (normalised at
                 # --update-cache finalize time) for any track Plex flagged
                 # as und/mis/mul/zxx or had no audio metadata for.
-                audio_languages = obj.get('audio_languages', []) or []
+                # audio_lang_field selects which view to consult:
+                #   'audio_languages'      → after filename + library completion
+                #   'audio_languages_plex' → pure Plex value
+                # Fall back to 'audio_languages' when the requested field is
+                # absent (pre-v2.9 caches don't carry audio_languages_plex).
+                if audio_lang_field in obj:
+                    audio_languages = obj.get(audio_lang_field) or []
+                else:
+                    audio_languages = obj.get('audio_languages', []) or []
                 if audio_languages and not all(str(l).lower() == _AUDIO_LANG_UNKNOWN
                                                 for l in audio_languages):
                     continue
@@ -18983,7 +19056,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if watched_only:        filter_parts.append("watched")
             elif unwatched_only:    filter_parts.append("unwatched")
             if audio_filter:        filter_parts.append(f"{audio_filter} audio")
-            if no_audio_language:   filter_parts.append("no-audio-language")
+            if no_audio_language:
+                filter_parts.append("no-plex-audio-language" if audio_lang_field == 'audio_languages_plex'
+                                    else "no-audio-language")
             filter_desc = " ".join(filter_parts)
             scope = f" in library '{library_name}'" if library_name else ""
             print(f"No {filter_desc} items found{scope}.")
@@ -18991,7 +19066,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return filtered_keys
 
     @staticmethod
-    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None):  # pyright: ignore[reportGeneralTypeIssues]
+    def list(args, obj_args, library_name, media_type, duplicates_only=False, resolve_mode=False, broken_only=False, watched_only=False, unwatched_only=False, audio_filter=None, no_audio_language=False, excess_versions=None, audio_lang_field='audio_languages'):  # pyright: ignore[reportGeneralTypeIssues]
         global FORMAT
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
 
@@ -19732,7 +19807,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"\n   No operations were performed.")
         else:
             if watched_only or unwatched_only or audio_filter or no_audio_language:
-                filtered = PLEX_Media._filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language)
+                filtered = PLEX_Media._filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field=audio_lang_field)
                 if filtered is None:
                     return
                 obj_keys = filtered
@@ -20676,7 +20751,18 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex --no-audio-language [--resolve]")
             print()
-            print("Lists media items that have no audio language tag in their file container.")
+            print("Lists media items whose COMPLETED audio_languages view is empty or only")
+            print("contains 'unknown'.  The completed view is built during --update-cache as:")
+            print()
+            print("    Plex's value  →  filename markers  →  library convention")
+            print()
+            print("Plex wins; each fallback step only fires if the previous left the value")
+            print("empty or 'unknown'.  See AUDIO_LANG_COMPLETE_FROM_FILENAME and")
+            print("AUDIO_LANG_COMPLETE_FROM_LIBRARY in the config file to toggle each step.")
+            print()
+            print("To see only what PLEX ITSELF lacks (ignoring filename / library completion),")
+            print("use --no-plex-audio-language instead.")
+            print()
             print("This is common with YTS releases and other re-encodes that strip metadata.")
             print()
             print("Without --resolve, simply lists affected items in compact format:")
@@ -20757,6 +20843,41 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  # Fix missing audio language interactively")
             print("  my-plex --no-audio-language --resolve")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+        case 'no-plex-audio-language' | 'no_plex_audio_language':
+            print()
+            print("=" * 76)
+            print("NO PLEX AUDIO LANGUAGE HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --no-plex-audio-language [SCOPE...]")
+            print()
+            print("Lists media items where PLEX ITSELF has no audio language metadata —")
+            print("ignoring my-plex's filename / library-convention completion.  Use this")
+            print("to see the raw, un-augmented Plex view.")
+            print()
+            print("Difference from --no-audio-language:")
+            print()
+            print("  --no-audio-language       reads obj['audio_languages']")
+            print("                            (Plex + filename + library fallbacks)")
+            print()
+            print("  --no-plex-audio-language  reads obj['audio_languages_plex']")
+            print("                            (pure Plex, never extended)")
+            print()
+            print("Both views are populated during --update-cache and are toggle-controlled")
+            print("by AUDIO_LANG_COMPLETE_FROM_FILENAME / AUDIO_LANG_COMPLETE_FROM_LIBRARY in")
+            print("the config file.  audio_languages_plex is always the pure Plex value")
+            print("regardless of the toggles.")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  # Items Plex has no language for, ignoring my-plex completions")
+            print("  my-plex --no-plex-audio-language")
+            print()
+            print("  # Same but scoped to one library")
+            print("  my-plex MOVIE_LIB --no-plex-audio-language")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -30937,6 +31058,8 @@ def main():
         '--remux': 'remux',
         '--mv-to': 'mv', '--move-to': 'mv',
         '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
+        '--no-audio-language': 'no-audio-language', '--no-language': 'no-audio-language',
+        '--no-plex-audio-language': 'no-plex-audio-language',
         '--unrecognized': 'unrecognized', '--alien': 'unrecognized',
         '--layout': 'layout',   # not a real flag, just enables `my-plex --help layout`
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
@@ -31595,6 +31718,7 @@ def main():
     main_parser.add_argument('--de', '--german', action='store_const', const='de', dest='audio', help=argparse.SUPPRESS)
     main_parser.add_argument('--fr', '--french', action='store_const', const='fr', dest='audio', help=argparse.SUPPRESS)
     main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
+    main_parser.add_argument('--no-plex-audio-language', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
@@ -31686,7 +31810,8 @@ def main():
         help=argparse.SUPPRESS)  # Hidden - documented in --list
     GLOBAL_CMD_PARSER.add_argument('--watched', action='store_true', help="List watched media items. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--unwatched', action='store_true', help="List unwatched media items. Requires a library name.")
-    GLOBAL_CMD_PARSER.add_argument('--no-audio-language', '--no-language', action='store_true', help="List media with missing audio language info. Use --resolve to fix interactively. See --help no-audio-language.", default=False)
+    GLOBAL_CMD_PARSER.add_argument('--no-audio-language', '--no-language', action='store_true', help="List media with missing audio language info (after completion from filename / library convention). Use --resolve to fix interactively. See --help no-audio-language.", default=False)
+    GLOBAL_CMD_PARSER.add_argument('--no-plex-audio-language', action='store_true', help="List media where Plex itself has no audio language (ignores filename / library completion). See --help no-plex-audio-language.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--audio', metavar='LANG', help=argparse.SUPPRESS)  # Hidden - shortcut aliases below are more discoverable
     GLOBAL_CMD_PARSER.add_argument('--en', '--english', action='store_const', const='en', dest='audio', help="List media with English audio.")
     GLOBAL_CMD_PARSER.add_argument('--de', '--german', action='store_const', const='de', dest='audio', help="List media with German audio.")
