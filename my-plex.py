@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.12"
+SCRIPT_VERSION = "v2.14"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -5860,23 +5860,72 @@ _ENGINE_DISPATCH = {
 }
 
 
-def _search_unmatched_candidates(title, kind, engines=None):
+def _clean_query_from_wrapper(wrapper_basename):
+    """Extract a clean `<title> [year]` search query from a wrapper basename.
+
+    Drops Plex-confusing release-tag clutter and reduces to alphanumeric
+    words.  Used when Plex's own `obj['title']` is munged (e.g. orphan 's'
+    from "Queen's Corgi" → "Queen S Corgi") and we want a second-pass
+    TMDB query with a cleaner string.
+
+    Returns (clean_title, year_or_None).
+    Example:
+      'the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]'
+        → ('the queens corgi', 2019)
+    """
+    if not wrapper_basename:
+        return ('', None)
+    base = wrapper_basename.lower()
+    year = None
+    m = _WRAPPER_YEAR_RE.search('.' + base + '.')
+    if m:
+        year = int(m.group(1))
+        # Strip the year and everything after — release tags / resolution /
+        # encoding / source / group are all clutter that confuses TMDB.
+        idx = base.find(m.group(1))
+        if idx > 0:
+            base = base[:idx]
+    # Drop apostrophe-like marks (queen's → queens) BEFORE collapsing
+    # non-alphanumerics, so the orphan 's' doesn't become a separate word.
+    base = re.sub(r"[’‘'“”`´]", '', base)
+    # Collapse all non-alphanumeric runs to a single space.
+    base = re.sub(r'[^a-z0-9]+', ' ', base, flags=re.IGNORECASE).strip()
+    return (base, year)
+
+
+def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, year_hint=None):
     """Cascade through UNMATCHED_RESOLVE_LOOKUP_ENGINES in order; merge
-    candidates from each, deduplicated by (title, year)."""
+    candidates from each, deduplicated by (title, year).
+
+    `extra_query`: optional second search string (e.g. cleaned wrapper
+    basename when Plex's `obj['title']` looks suspicious).  Both queries
+    are run in each engine; results merge.
+
+    `year_hint`: if set, results whose year doesn't match are dropped
+    (TMDB also accepts &year=YYYY natively; we filter post-hoc here for
+    engine-uniform behaviour)."""
     engines = engines or UNMATCHED_RESOLVE_LOOKUP_ENGINES or []
+    queries = [title]
+    if extra_query and extra_query.strip().lower() != (title or '').strip().lower():
+        queries.append(extra_query)
     seen = set()
     merged = []
-    for eng in engines:
-        fn = _ENGINE_DISPATCH.get(eng.upper())
-        if not fn:
-            if VRB: print(f"  ⚠ unknown lookup engine: {eng!r} (supported: {sorted(_ENGINE_DISPATCH)})")
+    for q in queries:
+        if not q:
             continue
-        for r in fn(title, kind=kind):
-            dedup_key = ((r.get('title') or '').lower(), r.get('year'))
-            if dedup_key in seen:
+        for eng in engines:
+            fn = _ENGINE_DISPATCH.get(eng.upper())
+            if not fn:
+                if VRB: print(f"  ⚠ unknown lookup engine: {eng!r} (supported: {sorted(_ENGINE_DISPATCH)})")
                 continue
-            seen.add(dedup_key)
-            merged.append(r)
+            for r in fn(q, kind=kind):
+                if year_hint and r.get('year') and r['year'] != year_hint:
+                    continue
+                dedup_key = ((r.get('title') or '').lower(), r.get('year'))
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                merged.append(r)
     return merged
 
 
@@ -5954,44 +6003,78 @@ def _wrapper_already_has_year(wrapper_path):
     return bool(_WRAPPER_YEAR_RE.search('.' + base + '.'))
 
 
-def _add_year_to_wrapper(wrapper_path, year):
-    """Return the wrapper path with `.(YYYY)` appended to the basename.
+def _slugify_title_for_wrapper(title):
+    """Plex-friendly slug for a movie/series title.
 
-    Preserves the surrounding bracket/comma conventions: if the base ends
-    in `_[tag]` or `,suffix`, the year goes BEFORE those.  Otherwise it's
-    appended with a dot separator."""
+    Lowercase, ASCII-friendly, words joined by '.'  Punctuation that would
+    confuse Plex's matcher (apostrophes especially — see "Queen's Corgi"
+    where `queen.s` orphans a single-char token) is dropped, NOT replaced
+    with the separator.  Result is suitable as a wrapper basename head
+    (year + tail appended by caller)."""
+    if not title:
+        return ''
+    s = str(title).lower()
+    # Drop apostrophe-like marks entirely (queen's → queens).
+    s = re.sub(r"[’‘'“”`´]", '', s)
+    # Replace any remaining non-alphanumeric runs with a single dot.
+    s = re.sub(r'[^a-z0-9]+', '.', s, flags=re.IGNORECASE)
+    return s.strip('.')
+
+
+def _add_year_to_wrapper(wrapper_path, year, canonical_title=None):
+    """Return a renamed wrapper path with the year added (and optionally a
+    canonical-form basename if `canonical_title` is supplied).
+
+    Modes:
+      • `canonical_title is None`:
+         Preserve the existing basename, just append `.(YYYY)` before any
+         trailing bracket/comma tag (e.g. `_[crime]`, `,suffix`).  If the
+         wrapper ALREADY contains a year, return unchanged.
+      • `canonical_title` supplied:
+         Replace the basename with `<slug(canonical_title)>.(YYYY)`, keeping
+         only the trailing `_[tag]` / `,tag` suffix from the original.
+         Used in --resolve when an item is unmatched DESPITE having a year
+         (the basename form itself trips Plex)."""
     if not wrapper_path or not year:
         return wrapper_path
     base = os.path.basename(wrapper_path)
     parent = os.path.dirname(wrapper_path)
-    if _wrapper_already_has_year(wrapper_path):
-        return wrapper_path
-    # Insert before trailing bracket/comma suffixes (e.g. _[crime], ,tag).
+    # Split trailing tag (matches both the existing/legacy form).
     m = re.search(r'^(?P<head>.+?)(?P<tail>[_,]\[[^\]]+\]|,[^/]+)?$', base)
     head = m.group('head') if m else base
     tail = (m.group('tail') if m else '') or ''
+    if canonical_title:
+        new_head = _slugify_title_for_wrapper(canonical_title)
+        new_base = f'{new_head}.({year}){tail}'
+        return f'{parent}/{new_base}' if parent else new_base
+    if _wrapper_already_has_year(wrapper_path):
+        return wrapper_path
     new_base = f'{head}.({year}){tail}'
     return f'{parent}/{new_base}' if parent else new_base
 
 
 def _detect_plex_auto_scan_enabled():
-    """Best-effort detection of Plex's 'update library automatically' setting.
-    Returns True iff Plex will auto-pick up wrapper renames without an
-    explicit scan trigger.  False on uncertainty (so we DO trigger the scan).
-    """
+    """Returns True iff Plex's filesystem watcher will auto-scan on disk
+    changes (i.e. my-plex doesn't need to trigger a manual library.update).
+
+    The Plex setting is `FSEventLibraryUpdatesEnabled` (label: "Scan my
+    library automatically") — on macOS this is wired to FSEvents and
+    triggers a partial scan whenever a watched folder changes.
+
+    A periodic scheduled scan (`ScheduledLibraryUpdatesEnabled`) is NOT
+    enough on its own — it runs on a timer (default 24h), not on disk
+    change, so we still want the manual trigger if only the scheduled
+    scan is on."""
     try:
         plex = ensure_plex_api(required=False)
         if not plex:
             return False
-        s = plex.settings
-        # Different Plex versions name this differently; try both.
-        for key in ('ScheduledLibraryUpdatesEnabled', 'autoEmptyTrash'):
-            try:
-                v = s.get(key)
-                if v is not None and bool(getattr(v, 'value', v)):
-                    return True
-            except Exception:
-                continue
+        try:
+            v = plex.settings.get('FSEventLibraryUpdatesEnabled')
+            if v is not None and bool(getattr(v, 'value', v)):
+                return True
+        except Exception:
+            pass
     except Exception:
         pass
     return False
@@ -6076,15 +6159,27 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         if not wrapper:
             print(f"[{i}/{len(unmatched)}] {key}: cannot derive wrapper path — skipping.")
             continue
-        if _wrapper_already_has_year(wrapper):
-            print(f"[{i}/{len(unmatched)}] {key}: wrapper already has a year — skipping ({wrapper})")
-            continue
+        # v2.14: do NOT skip wrappers that already have a year.  The item is
+        # still UNMATCHED, which means the basename form itself trips Plex's
+        # matcher (e.g. `the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]`
+        # has the year but Plex can't parse past `queen.s` + release tags).
+        # Run the lookup anyway and offer to REPLACE the basename with the
+        # canonical title form `<slug(title)>.(YYYY)`.
+        _wrapper_has_year = _wrapper_already_has_year(wrapper)
 
         print(f"\n──────────────────────────────────────────────────────────────────────────")
         print(f"[{i}/{len(unmatched)}] {key}  {title!r}  ({lib})")
-        print(f"          path: {wrapper}")
+        print(f"          path: {wrapper}{'  [has year — try canonical rename]' if _wrapper_has_year else ''}")
 
-        candidates = _search_unmatched_candidates(title, kind)
+        # Two-shot search: Plex's title + a cleaner one derived from the
+        # wrapper basename.  When wrapper carries a year, also pass it as a
+        # year-hint so results from a wrong year are dropped.
+        _clean_q, _wrapper_year = _clean_query_from_wrapper(os.path.basename(wrapper))
+        candidates = _search_unmatched_candidates(
+            title, kind,
+            extra_query=_clean_q if _clean_q else None,
+            year_hint=_wrapper_year if _wrapper_has_year else None,
+        )
         if not candidates:
             print(f"  (no candidates from any engine — skipping)")
             skipped.append((key, 'no-candidates'))
@@ -6100,10 +6195,29 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         if auto and scored:
             top, top_score = scored[0]
             runner_score = scored[1][1] if len(scored) > 1 else 0
-            if top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score:
+            # Auto-pick rule:
+            #   • top_score == 100  → unconditional (perfect title match)
+            #   • >= 95 but < 100   → trust threshold alone, no runner-up gap
+            #   • threshold ≤ top < 95 → require 1.5× runner-up gap
+            _auto_ok = (
+                top_score >= 100
+                or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
+                or (top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score)
+            )
+            if _auto_ok:
                 year = top.get('year')
                 if year:
-                    new_wrapper = _add_year_to_wrapper(wrapper, year)
+                    # If wrapper already has a year, the basename form is
+                    # what's tripping Plex — rebuild it from the canonical
+                    # title.  Otherwise just append the year.
+                    new_wrapper = _add_year_to_wrapper(
+                        wrapper, year,
+                        canonical_title=top.get('title') if _wrapper_has_year else None,
+                    )
+                    if new_wrapper == wrapper:
+                        print(f"  ⚠ no rename needed (already canonical) — skipping")
+                        skipped.append((key, 'already-canonical'))
+                        continue
                     print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({year})  conf={top_score}  → rename to: {os.path.basename(new_wrapper)}")
                     rename_queue.append((key, obj, wrapper, new_wrapper, year, top.get('tmdb_id')))
                     continue
@@ -6142,6 +6256,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             m = re.match(r'^y(\d{4})$', choice, re.IGNORECASE)
             if m:
                 year = int(m.group(1))
+                # No candidate title here; keep original head, just add year.
                 new_wrapper = _add_year_to_wrapper(wrapper, year)
                 print(f"  ✓ manual year {year}  → rename to: {os.path.basename(new_wrapper)}")
                 rename_queue.append((key, obj, wrapper, new_wrapper, year, None))
@@ -6152,7 +6267,16 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 if not year:
                     print(f"  ⚠ candidate has no year — enter manually with yYYYY")
                     continue
-                new_wrapper = _add_year_to_wrapper(wrapper, year)
+                # If wrapper already has a year, rebuild basename from the
+                # candidate's canonical title (the form Plex's matcher expects).
+                new_wrapper = _add_year_to_wrapper(
+                    wrapper, year,
+                    canonical_title=cand.get('title') if _wrapper_has_year else None,
+                )
+                if new_wrapper == wrapper:
+                    print(f"  ⚠ no rename needed (already canonical) — skipping")
+                    skipped.append((key, 'already-canonical'))
+                    break
                 print(f"  ✓ #{choice} [{cand['engine']}] {cand['title']} ({year})  conf={score}  → rename to: {os.path.basename(new_wrapper)}")
                 rename_queue.append((key, obj, wrapper, new_wrapper, year, cand.get('tmdb_id')))
                 break
