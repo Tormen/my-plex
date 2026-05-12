@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.21"
+SCRIPT_VERSION = "v2.0"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -9492,17 +9492,52 @@ def collect_library_keys(library_name=None, media_type=None):
     return obj_keys
 
 def resolve_scope_to_keys(scope_val, media_type=None):
-    """Resolve a scope value (library name OR media identifier) to cache keys.
+    """Resolve a scope value to cache keys — UNIVERSAL scope entry point for
+    the listing / problem-detection commands (--broken, --unmatched, --unsorted,
+    --mismatch, --missing, --reencode, --problems, ...).
 
-    If scope_val matches a library name, returns (obj_keys, library_name, scope_label).
-    Otherwise tries to resolve as a media identifier (cache key, Plex ID, title).
+    Accepts every shape the universal-scope helpers do:
+      - None / True / '' / []    → all libraries
+      - str (library name)       → that library only
+      - str (cache key / Plex ID / title) → that media item
+      - str (filter expression)  → 'lang:fr', 'year>2020', 'country:france',
+                                    'layout:series', 'type:episode', etc.
+      - list[str]                → AND-combine all tokens (variadic compound
+                                    scope: `my-plex --broken movies.fr year>2020`)
 
     Returns: (obj_keys, library_name_or_None, scope_label_string)
     """
-    if scope_val is None or scope_val is True:
-        # No scope specified → all libraries
+    # Variadic / compound scope → delegate to _get_universal_scope for the
+    # token-intersection AND extract just the keys.  Library context (if any)
+    # falls out: if exactly one token resolves to a library name, surface it
+    # for downstream scope labels.
+    if isinstance(scope_val, (list, tuple)):
+        clean = [t for t in scope_val if t]
+        if not clean:
+            obj_keys = collect_library_keys(library_name=None, media_type=media_type)
+            return (obj_keys, None, "")
+        if len(clean) == 1:
+            scope_val = clean[0]
+            # fall through to single-token path below
+        else:
+            items = _get_universal_scope(clean)
+            obj_keys = [k for k, _o in items]
+            # Best-effort library label: if first token is a library name, use it
+            first = clean[0]
+            lib = first if first in PLEX_Media.OBJ_BY_LIBRARY else None
+            label = f" for [{' AND '.join(clean)}]"
+            return (obj_keys, lib, label)
+
+    if scope_val is None or scope_val is True or scope_val == '':
         obj_keys = collect_library_keys(library_name=None, media_type=media_type)
         return (obj_keys, None, "")
+
+    # Filter-expression scope (lang:fr / year>2020 / layout:series / ...).
+    # Same engine as --list and --mv-to — single source of truth.
+    if isinstance(scope_val, str) and _is_scope_filter_token(scope_val):
+        items = _resolve_scope_filter_expr(scope_val)
+        obj_keys = [k for k, _o in items]
+        return (obj_keys, None, f" for '{scope_val}'")
 
     # First: try as a library name
     if scope_val in PLEX_Media.OBJ_BY_LIBRARY:
@@ -20725,7 +20760,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
-        case 'media' | 'media_item' | 'scope' | 'query' | 'filter':
+        case 'media' | 'media_item' | 'query' | 'filter':
             print()
             print("=" * 76)
             print("MEDIA / FILTER / SCOPE HELP")
@@ -20853,6 +20888,76 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
+        case 'scope':
+            print()
+            print("=" * 76)
+            print("UNIVERSAL SCOPE HELP   (covers EVERY scope-taking command)")
+            print("=" * 76)
+            print()
+            print("`SCOPE` is the same syntax everywhere — `--list`, `--mv-to`, `--remux`,")
+            print("`--plex2disk`, `--disk2plex`, `--rename`, `--renumber`, `--reencode`,")
+            print("`--broken`, `--unmatched`, `--unsorted`, `--mismatch`, `--missing`,")
+            print("`--problems`, `--original-languages`, `--unrecognized`.  ONE filter")
+            print("syntax, every verb.  Plug into the action you want.")
+            print()
+            print("TOKEN SHAPES (any SCOPE position accepts any of these):")
+            print()
+            print("  library name        ,unsorted   movies.fr   series.de")
+            print("  cache key           Movie:12345   Series:42   Season:99   Episode:17740")
+            print("  Plex ID             12345")
+            print("  full filepath       /Volumes/2/watch.v/.../Foo.mkv")
+            print("  title (free text)   'Le Samouraï'    bodyguard")
+            print()
+            print("  filter expression   field:value   field>value   field<value   field=value")
+            print("    type:movie / type:series / type:season / type:episode  (PLEX object type)")
+            print("    layout:movie / layout:series / layout:season / layout:episode (on-disk shape)")
+            print("    lang:fr / language:german / lang:en       (audio language)")
+            print("    original_lang:fr / originallang:french    (original-language, after")
+            print("                                                --original-languages backfill)")
+            print("    country:france / country:fr / country:usa (country of production)")
+            print("    year>2020 / year<2000 / year:1999         (release year)")
+            print("    bitrate>2 / bitrate<1.5                   (Mbps)")
+            print("    resolution:1080p / resolution:4k          (4k = uhd = 2160)")
+            print("    codec:h265 / codec:hevc / codec:av1       (video codec)")
+            print("    duration>2h / duration<90min")
+            print("    size>1gb / size<500mb")
+            print("    rating>7 / stars>3.5 / critics>80")
+            print("    added>2024                                (year added to Plex)")
+            print("    genre:comedy / director:scorsese / actor:depp")
+            print("    label:reencode                            (Plex / on-disk label)")
+            print("    watched:no / watched:yes                  (=`--unwatched` / `--watched`)")
+            print()
+            print("COMPOUND SCOPE — AND-combine multiple tokens (universal):")
+            print("  my-plex ,unsorted country:france                  # filter & list")
+            print("  my-plex --mv-to movies.fr ,unsorted country:france  # filter & MOVE")
+            print("  my-plex --broken ,unsorted country:france         # filter & check")
+            print("  my-plex --remux ,unsorted lang:de codec:mpeg2     # filter & remux")
+            print("  my-plex --reencode movies.de bitrate>2 year>2015")
+            print()
+            print("EVERY token AND-combines via set-intersection — no special ordering,")
+            print("no precedence, no parens.  `lib lang:fr year>2020` is read as")
+            print("`(library = lib) AND (audio = fr) AND (year > 2020)`.")
+            print()
+            print("BARE-FIELD TOKENS — add a column without filtering:")
+            print("  my-plex ,unsorted countries        # show COUNTRY column")
+            print("  my-plex ,unsorted original_lang    # show ORIG-LANG column")
+            print("  my-plex ,unsorted -file            # HIDE the FILEPATH column")
+            print("  my-plex ,unsorted imdb tmdb        # add external-ID URL columns")
+            print()
+            print("--  TERMINATOR — anything after `--` is a literal title search:")
+            print("  my-plex -- imdb                    # search titles containing 'imdb'")
+            print("                                     # (without --, 'imdb' would be a column)")
+            print()
+            print("DEFAULT_SCOPE — auto-applied filters for `--list`:")
+            print("  Set DEFAULT_SCOPE = 'watched:no'  in ~/.my-plex.conf to hide watched")
+            print("  items from `--list` by default.  Override with explicit `watched:yes`.")
+            print()
+            print("--help <field>  /  --help <command>")
+            print("  e.g.  --help type / --help layout / --help mv / --help remux / etc.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'list':
             print()
             print("=" * 76)
@@ -30215,7 +30320,8 @@ def main():
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
-        '--media': 'media', '--scope': 'media', '--query': 'media',
+        '--media': 'media', '--query': 'media',
+        '--scope': 'scope',   # v2.0: dedicated universal-scope help page
         '--config-file': 'config', '-C': 'config', '--config': 'config', '--create-config': 'config',
         '--offline': 'offline', '-O': 'offline',
         '--verbose': 'verbose', '-V': 'verbose', '--debug': 'verbose', '-D': 'verbose',
@@ -30317,6 +30423,10 @@ def main():
         '--plex2disk', '--disk2plex', '--plex-disk-sync', '--sync',
         '--map-to-filename', '--map-from-filename',
         '--rename', '--renumber',
+        # v2.0 (Phase E): listing / problem-detection commands also variadic
+        '--broken', '--unmatched', '--unsorted',
+        '--mismatch', '--potential-mismatch',
+        '--missing', '--reencode', '--problems',
     }
     _in_variadic_window = False
     _i = 1
@@ -30799,16 +30909,16 @@ def main():
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
-    main_parser.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - with --renumber: Plex metadata numbering issues
     main_parser.add_argument('--broken', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--problems', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -30864,15 +30974,15 @@ def main():
              "or --no-audio-language for missing language info.")
     GLOBAL_CMD_PARSER.add_argument('--collections', '--collection', action='store_true', help="List collections in a library. Requires a library name.")
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
-    GLOBAL_CMD_PARSER.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, default=None, help="List broken/truncated media files. Optional: library name or media identifier to filter.")
+    GLOBAL_CMD_PARSER.add_argument('--broken', metavar='SCOPE', nargs='*', default=None, help="List broken/truncated media files. SCOPE: library / cache key / Plex ID / title / filter expression (multiple tokens AND-combine via universal scope).")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='*', default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
-    GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='?', const=True, default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
-    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='?', const=True, default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
-    GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
+    GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
+    GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
-    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
+    GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
@@ -30895,7 +31005,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--list-label', metavar='LABEL', help="List all media items with the specified label.")
     GLOBAL_CMD_PARSER.add_argument('--add-label', nargs='+', metavar='ARG', help="Add a label to media item(s). Usage: --add-label LABEL SCOPE. SCOPE: Plex ID, cache key, title, or library name. Use --help add-label for details.")
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs='+', metavar='ARG', help="Remove a label from media item(s). Usage: --remove-label LABEL SCOPE. SCOPE: Plex ID, cache key, title, or library name. Use --help remove-label for details.")
-    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
+    GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
@@ -31183,118 +31293,43 @@ def main():
 
     main_print_help(args, remaining_args, main_parser)
 
-    # Re-inject --missing into remaining_args
-    # Two cases:
-    #   1. --missing <SERIES> (no CMD_OR_PLEXOBJECT) → global command: insert at front
-    #   2. <PLEXOBJ> --missing (bare --missing with CMD_OR_PLEXOBJECT) → obj_arg: append at end
-    if safe_getattr(args, 'missing', None) is not None:
-        if args.missing is not True:
-            # --missing <SERIES> — explicit series reference, goes through global command path
-            remaining_args.insert(0, '--missing')
-            remaining_args.insert(1, args.missing)
+    # Re-inject the v2.0 (Phase E) variadic listing/problem commands.
+    # All follow the same nargs='*' pattern: flag → optional list of SCOPE tokens.
+    # When no value AND CMD_OR_PLEXOBJECT is present, the flag becomes an obj_arg
+    # (appended after the object); otherwise it's a global command (prepended).
+    def _reinject_variadic(attr_name, flag_name, prefer_obj_arg_when_bare=True):
+        val = safe_getattr(args, attr_name, None)
+        if val is None:
+            return
+        _vals = val if isinstance(val, list) else ([val] if val and val is not True else [])
+        if _vals:
+            remaining_args.insert(0, flag_name)
+            for _i, _v in enumerate(_vals, 1):
+                remaining_args.insert(_i, _v)
         else:
-            # bare --missing — append after PLEXOBJECT so it becomes an obj_arg,
-            # or insert at front if no PLEXOBJECT (global command will error with usage)
+            if prefer_obj_arg_when_bare and args.CMD_OR_PLEXOBJECT is not None:
+                remaining_args.append(flag_name)
+            else:
+                remaining_args.insert(0, flag_name)
+
+    # --missing has a slightly different bare-flag policy: always append (it
+    # errors at the dispatcher level if no series reference resolves).
+    if safe_getattr(args, 'missing', None) is not None:
+        _vals = args.missing if isinstance(args.missing, list) else ([args.missing] if args.missing and args.missing is not True else [])
+        if _vals:
+            remaining_args.insert(0, '--missing')
+            for _i, _v in enumerate(_vals, 1):
+                remaining_args.insert(_i, _v)
+        else:
             remaining_args.append('--missing')
 
-    # Re-inject --broken into remaining_args
-    # Same pattern: supports --broken [SCOPE], <PLEXOBJ> --broken, bare --broken
-    if safe_getattr(args, 'broken', None) is not None:
-        if args.broken is not True:
-            # --broken <SCOPE> — explicit scope, goes through global command path
-            remaining_args.insert(0, '--broken')
-            remaining_args.insert(1, args.broken)
-        else:
-            # bare --broken — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
-            # otherwise it's a global command
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--broken')
-            else:
-                remaining_args.insert(0, '--broken')
-
-    # Re-inject --problems into remaining_args
-    # Same pattern: supports --problems [SCOPE], <PLEXOBJ> --problems, bare --problems
-    if safe_getattr(args, 'problems', None) is not None:
-        if args.problems is not True:
-            # --problems <SCOPE> — explicit scope, goes through global command path
-            remaining_args.insert(0, '--problems')
-            remaining_args.insert(1, args.problems)
-        else:
-            # bare --problems — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
-            # otherwise it's a global command
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--problems')
-            else:
-                remaining_args.insert(0, '--problems')
-
-    # Re-inject --unmatched into remaining_args
-    # Two cases:
-    #   1. --unmatched <LIBRARY> (no CMD_OR_PLEXOBJECT) → global command: insert at front
-    #   2. <PLEXOBJ> --unmatched (bare --unmatched with CMD_OR_PLEXOBJECT) → obj_arg: append at end
-    #   3. bare --unmatched (no arg, no CMD_OR_PLEXOBJECT) → global command: insert at front
-    if safe_getattr(args, 'unmatched', None) is not None:
-        if args.unmatched is not True:
-            # --unmatched <LIBRARY> — explicit library name, goes through global command path
-            remaining_args.insert(0, '--unmatched')
-            remaining_args.insert(1, args.unmatched)
-        else:
-            # bare --unmatched — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
-            # otherwise it's a global command (list all unmatched)
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--unmatched')
-            else:
-                remaining_args.insert(0, '--unmatched')
-
-    # Re-inject --unsorted into remaining_args
-    # Same pattern as --unmatched: supports --unsorted [LIBRARY], <PLEXOBJ> --unsorted, bare --unsorted
-    if safe_getattr(args, 'unsorted', None) is not None:
-        if args.unsorted is not True:
-            # --unsorted <LIBRARY> — explicit library name, goes through global command path
-            remaining_args.insert(0, '--unsorted')
-            remaining_args.insert(1, args.unsorted)
-        else:
-            # bare --unsorted — if there's a CMD_OR_PLEXOBJECT it becomes an obj_arg,
-            # otherwise it's a global command (list all unsorted)
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--unsorted')
-            else:
-                remaining_args.insert(0, '--unsorted')
-
-    # Re-inject --mismatch into remaining_args
-    # Same pattern as --unmatched: supports --mismatch [SCOPE], <PLEXOBJ> --mismatch, bare
-    if safe_getattr(args, 'potential_mismatch', None) is not None:
-        if args.potential_mismatch is not True:
-            remaining_args.insert(0, '--mismatch')
-            remaining_args.insert(1, args.potential_mismatch)
-        else:
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--mismatch')
-            else:
-                remaining_args.insert(0, '--mismatch')
-
-    # Re-inject --episode-numbering-issues into remaining_args
-    # Same pattern as --unmatched: supports --episode-numbering-issues [LIBRARY], <PLEXOBJ> --episode-numbering-issues, bare
-    if safe_getattr(args, 'episode_numbering_issues', None) is not None:
-        if args.episode_numbering_issues is not True:
-            remaining_args.insert(0, '--episode-numbering-issues')
-            remaining_args.insert(1, args.episode_numbering_issues)
-        else:
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--episode-numbering-issues')
-            else:
-                remaining_args.insert(0, '--episode-numbering-issues')
-
-    # Re-inject --reencode into remaining_args
-    # Same pattern as --unmatched: supports --reencode [LIBRARY], <PLEXOBJ> --reencode, bare
-    if safe_getattr(args, 'reencode', None) is not None:
-        if args.reencode is not True:
-            remaining_args.insert(0, '--reencode')
-            remaining_args.insert(1, args.reencode)
-        else:
-            if args.CMD_OR_PLEXOBJECT is not None:
-                remaining_args.append('--reencode')
-            else:
-                remaining_args.insert(0, '--reencode')
+    _reinject_variadic('broken',                    '--broken')
+    _reinject_variadic('problems',                  '--problems')
+    _reinject_variadic('unmatched',                 '--unmatched')
+    _reinject_variadic('unsorted',                  '--unsorted')
+    _reinject_variadic('potential_mismatch',        '--mismatch')
+    _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
+    _reinject_variadic('reencode',                  '--reencode')
 
     # Re-inject --renumber into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'renumber', None) is not None:
