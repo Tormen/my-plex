@@ -20958,6 +20958,24 @@ def main_print_help(args, remaining_args, main_parser):
             print("Tokens AND-combine by default — `,unsorted lang:fr year>2020`")
             print("means `library=,unsorted AND lang=fr AND year>2020`.")
             print()
+            print("BARE-WORD AUTO-INTERPRETATION (simple + intuitive default):")
+            print("  Bare words like `,unsorted`, `movies.fr`, `series.de` are")
+            print("  recognised as LIBRARY scope automatically (no library: needed).")
+            print("  Bare titles / cache keys / Plex IDs / filepaths likewise auto-")
+            print("  detect.  Anything else (`vacation`, `bodyguard`, `tagesschau`)")
+            print("  is treated as a free-text title-search (`title~<word>`).")
+            print()
+            print("EXPLICIT library: OVERRIDE (powerful when needed):")
+            print("  As soon as you write an EXPLICIT `library:NAME` ANYWHERE in the")
+            print("  args, every other bare word switches to title-search semantics —")
+            print("  even ones that LOOK like library names.  This lets you search for")
+            print("  titles literally named e.g. `series.de` or `documentary`:")
+            print()
+            print("    my-plex library:movies.en series.de")
+            print("                  # search titles containing 'series.de' in movies.en")
+            print("    my-plex library:,unsorted documentary year>2020")
+            print("                  # titles containing 'documentary' in ,unsorted")
+            print()
             print("OR / AND / PARENS (v2.1):")
             print("  `OR` and `AND` are CASE-SENSITIVE operators — must be uppercase.")
             print("  Lowercase `and` / `or` stay literal (so titles containing them parse).")
@@ -20975,6 +20993,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Inside a compound expression, bare library names auto-promote to")
             print("  `library:NAME` so `,unsorted ( country:fr OR country:it )` works.")
             print("  Use the explicit form `library:NAME` if you prefer.")
+            print()
+            print("DESIGN PRINCIPLE — simple by default, powerful when needed:")
+            print("  Bare words just work for the 95% case (library names auto-detect,")
+            print("  free text becomes title-search).  The remaining 5% (literal search")
+            print("  for a library-name-shaped term) is unlocked by writing `library:`")
+            print("  explicitly — a clear signal: \"I'm scoping with library:, anything")
+            print("  else is search text\".")
             print()
             print("BARE-FIELD TOKENS — add a column without filtering:")
             print("  my-plex ,unsorted countries        # show COUNTRY column")
@@ -30631,6 +30656,11 @@ def main():
     _remove_cols = set()  # column headers to remove (from negative Cat-C)
     _translations = []   # (original_token, translated_to) for user echo
     _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
+    # v2.1: if the user passes an explicit `library:NAME` anywhere in argv,
+    # bare words that happen to match library names are treated as
+    # title-search instead.  Lets users search for titles like 'series.de'
+    # or 'documentary' by saying e.g. `library:movies.en series.de`.
+    _explicit_library_used = any(re.match(r'^library:.+', _a, re.IGNORECASE) for _a in sys.argv[1:])
     # Variadic flags whose following positional args MUST pass through to argparse
     # unchanged (otherwise tokens like `original_lang:fr` get rewritten into a
     # --list filter expression before --mv ever sees them).  The window opens
@@ -30801,12 +30831,25 @@ def main():
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
                             '--test', '--unittest', '--complete'}
-            _is_search = (not arg.startswith(('-', ',', '/'))
+            # v2.1: a bare token that matches a library name is normally
+            # treated as a SCOPE (library scope).  EXCEPT when the user
+            # has ALSO written an explicit `library:NAME` somewhere — that
+            # signals "I'm using library: explicitly, treat the rest as
+            # title-search even if they look like library names".
+            _is_library_name = (arg in PLEX_Media.OBJ_BY_LIBRARY) and not _explicit_library_used
+            # Library-shaped names (movies.fr / series.de / ,unsorted) also
+            # bypass the search heuristic UNLESS explicit library: is used.
+            _is_library_shaped = (
+                arg.startswith(',') or
+                bool(re.match(r'^(?:movies?|series|shows?|music|photos?|collections?)\.\w', arg, re.IGNORECASE))
+            ) and not _explicit_library_used
+            _is_search = (not arg.startswith(('-', '/'))
                           and ':' not in arg
                           and ' ' not in arg  # multi-word quoted strings are scope, not search
-                          and not re.match(r'^(?:movies?|series|shows?|music|photos?|collections?)\.\w', arg, re.IGNORECASE)
+                          and not _is_library_shaped
                           and not re.match(r'^\d+$', arg)  # bare number = potential Plex ID
                           and arg not in ('--', 'all', 'ALL')
+                          and not _is_library_name
                           and _prev_arg not in _VALUE_FLAGS)  # skip values of --type, --info, etc.
             if _is_search and not arg.startswith('-'):
                 _filter_exprs.append(f"title~{arg}")
