@@ -8366,6 +8366,43 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("originallang|original_lang|type", src,
                       "_field_re inside _parse_filter_sub_expr must list 'type'")
 
+    def test_get_disk_map_scope_auto_promotes_lists(self):
+        """_get_disk_map_scope must auto-promote list input to _get_universal_scope."""
+        src = self._read_script()
+        import re
+        m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
+        body = m.group(1)
+        self.assertIn("isinstance(target, (list, tuple))", body)
+        self.assertIn("_get_universal_scope(", body)
+
+    def test_action_commands_use_nargs_star(self):
+        """--remux / --plex2disk / --disk2plex / --rename / --renumber / --original-languages
+        must use nargs='*' so compound SCOPE (lib + filter) reaches the dispatcher."""
+        src = self._read_script()
+        for flag in ('--remux', '--plex2disk', '--disk2plex', '--plex-disk-sync', '--sync',
+                     '--rename', '--renumber', '--original-languages',
+                     '--map-to-filename', '--map-from-filename'):
+            self.assertIn(f"'{flag}'", src)
+        # Spot-check the nargs setting (look for the GLOBAL_CMD_PARSER line)
+        self.assertIn("'--remux',     metavar='SCOPE', nargs='*'", src)
+        self.assertIn("'--plex2disk', metavar='SCOPE', nargs='*'", src)
+        self.assertIn("'--disk2plex', metavar='SCOPE', nargs='*'", src)
+
+    def test_variadic_scope_flags_includes_migrated_commands(self):
+        """_VARIADIC_SCOPE_FLAGS must list every nargs='*' SCOPE-taking flag."""
+        src = self._read_script()
+        for flag in ("'--remux'", "'--plex2disk'", "'--disk2plex'",
+                     "'--plex-disk-sync'", "'--sync'",
+                     "'--rename'", "'--renumber'",
+                     "'--map-to-filename'", "'--map-from-filename'"):
+            self.assertIn(flag, src, f"_VARIADIC_SCOPE_FLAGS must include {flag}")
+
+    def test_collapse_scope_arg_helper(self):
+        """_collapse_scope_arg helper must exist inside execute_global_commands to normalise list/str/True/None."""
+        src = self._read_script()
+        self.assertIn("def _collapse_scope_arg(val)", src)
+
     def test_help_mv_documents_compound_scope(self):
         """--help mv must document the COMPOUND SCOPE section with country: / original_lang: examples."""
         src = self._read_script()
