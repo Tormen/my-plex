@@ -8925,6 +8925,141 @@ class TestOriginalLanguages(unittest.TestCase):
         self.assertIn("'originallang': 'ORIG-LANG'", src)
 
 
+class TestUnmatchedResolve(unittest.TestCase):
+    """v2.12-v2.15: --unmatched --resolve helpers — pure-Python primitives
+    that don't need a Plex connection.  Exercised by importing the main
+    script as a module."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util, sys as _sys, os as _os
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location('_myplex_under_test',
+            _os.path.join(here, 'my-plex.py'))
+        cls.m = importlib.util.module_from_spec(spec)
+        # Stub argv so the script doesn't try to parse args during import
+        _saved_argv = _sys.argv[:]
+        _sys.argv = [_sys.argv[0]]
+        try:
+            spec.loader.exec_module(cls.m)
+        except SystemExit:
+            pass  # argparse exit during import is expected for this script
+        finally:
+            _sys.argv = _saved_argv
+
+    # ------- _slugify_title_for_wrapper -------
+
+    def test_slugify_drops_apostrophes(self):
+        s = self.m._slugify_title_for_wrapper("The Queen's Corgi")
+        # apostrophe must drop entirely, not become a separator
+        self.assertEqual(s, "the.queens.corgi")
+
+    def test_slugify_smart_quotes(self):
+        # Curly apostrophe also dropped (queen’s → queens, not queen.s).
+        s = self.m._slugify_title_for_wrapper("The Queen’s Corgi")
+        self.assertEqual(s, "the.queens.corgi")
+
+    def test_slugify_collapses_punctuation(self):
+        s = self.m._slugify_title_for_wrapper("Hitchhiker's Guide: Part 2!")
+        self.assertEqual(s, "hitchhikers.guide.part.2")
+
+    def test_slugify_unicode_fallback(self):
+        # Non-ASCII letters collapse to a dot (no transliteration; acceptable
+        # for wrapper-rename target — Plex matches via TMDB id anyway).
+        s = self.m._slugify_title_for_wrapper("Märchenbuch")
+        # Whatever happens, no leading/trailing dot, no double dot.
+        self.assertFalse(s.startswith('.') or s.endswith('.'))
+        self.assertNotIn('..', s)
+
+    # ------- _add_year_to_wrapper -------
+
+    def test_add_year_when_missing(self):
+        out = self.m._add_year_to_wrapper("/lib/movies.en/up.bdrip.xvid", 2009)
+        self.assertEqual(out, "/lib/movies.en/up.bdrip.xvid.(2009)")
+
+    def test_add_year_preserves_trailing_tag(self):
+        # `_[crime]` / `,suffix` tail is kept; year inserts BEFORE it.
+        out = self.m._add_year_to_wrapper("/lib/movies.fr/balthazar_[crime]", 2018)
+        self.assertEqual(out, "/lib/movies.fr/balthazar.(2018)_[crime]")
+
+    def test_add_year_idempotent_when_already_has_year(self):
+        # Without canonical_title, wrapper that already has a year is returned unchanged.
+        wp = "/lib/movies.en/inception.(2010)"
+        out = self.m._add_year_to_wrapper(wp, 2010)
+        self.assertEqual(out, wp)
+
+    def test_add_year_with_canonical_replaces_basename(self):
+        # canonical_title=… rebuilds basename from slug + year, even when
+        # the original wrapper already carries a year.  This is the v2.14
+        # path for items unmatched DESPITE having a year.
+        out = self.m._add_year_to_wrapper(
+            "/lib/movies.en/the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]",
+            2019, canonical_title="The Queen's Corgi")
+        # tail `_[yts.am]`? No — that's bracketed but inside the year run.
+        # The function preserves `_[tag]` / `,tag` from the original; everything
+        # else after the title is dropped.  Just check the head is canonical
+        # and the year is present.
+        self.assertTrue(out.endswith(".(2019)") or "the.queens.corgi.(2019)" in out)
+        self.assertIn("/lib/movies.en/", out)
+        self.assertIn("the.queens.corgi", out)
+        self.assertNotIn("queen.s", out)  # the orphan-S form is gone
+
+    # ------- _score_candidate -------
+
+    def test_score_exact_match_is_100(self):
+        s = self.m._score_candidate("up", {'title': 'Up', 'original_title': 'Up', 'popularity': 0.0})
+        self.assertEqual(s, 100.0)
+
+    def test_score_substring_below_100(self):
+        # "up" vs "Cars Up" → similarity < 1.0
+        s = self.m._score_candidate("up", {'title': 'Cars Up', 'original_title': 'Cars Up', 'popularity': 0.0})
+        self.assertLess(s, 100.0)
+        self.assertGreater(s, 0.0)
+
+    def test_score_popularity_bonus_caps_at_10(self):
+        # Even a giant popularity adds at most +10 to the title-similarity score.
+        s = self.m._score_candidate("zzzzz", {'title': 'aaaaa', 'original_title': '', 'popularity': 1e9})
+        # title similarity is ~0 so the bonus dominates; should be at most 10.
+        self.assertLessEqual(s, 10.5)
+
+    # ------- _clean_query_from_wrapper -------
+
+    def test_clean_query_extracts_year_and_strips_release_tags(self):
+        q, y = self.m._clean_query_from_wrapper(
+            "the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]")
+        self.assertEqual(y, 2019)
+        # release tags / year stripped, all separators normalised to spaces.
+        # The orphan 's' stays as a separate word — TMDB's search tokeniser
+        # handles "the queen s corgi" the same as "the queens corgi".
+        self.assertEqual(q, "the queen s corgi")
+
+    def test_clean_query_no_year_keeps_full_basename(self):
+        q, y = self.m._clean_query_from_wrapper("good_will_hunting.de+en")
+        self.assertIsNone(y)
+        self.assertEqual(q, "good will hunting de en")
+
+    # ------- engine cascade -------
+
+    def test_engine_dispatch_contains_tmdb_and_tvdb(self):
+        self.assertIn('TMDB', self.m._ENGINE_DISPATCH)
+        self.assertIn('TVDB', self.m._ENGINE_DISPATCH)
+
+    def test_search_unmatched_candidates_handles_unknown_engine_gracefully(self):
+        # No real API call — we just verify the function tolerates an
+        # unrecognised engine name in the list (logs a warning, skips).
+        out = self.m._search_unmatched_candidates('x', 'movie', engines=['BOGUS'])
+        self.assertEqual(out, [])
+
+    # ------- conf vars sourced -------
+
+    def test_conf_defaults_present(self):
+        cd = self.m.CONFIG_DEFAULTS
+        self.assertEqual(cd['UNMATCHED_RESOLVE_LOOKUP_ENGINES'], ['TMDB', 'TVDB'])
+        self.assertEqual(cd['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT'], 90)
+        self.assertTrue(cd['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME'])
+        self.assertIsNone(cd['EDITOR'])  # default None → resolves to $EDITOR or 'vim' at use time
+
+
 class TestAudioLangPureVsCompleted(unittest.TestCase):
     """v2.9: --update-cache must store TWO views per Movie/Episode:
       * audio_languages_plex : pure Plex value (never extended)
@@ -9069,7 +9204,8 @@ _UNITTEST_SCOPES = {
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
-                   TestAudioLangPureVsCompleted],
+                   TestAudioLangPureVsCompleted,
+                   TestUnmatchedResolve],
     'refactor':   [TestRefactoredMethodNames, TestDeadCodeRemoval,
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
