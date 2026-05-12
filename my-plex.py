@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.6"
+SCRIPT_VERSION = "v2.7"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -12852,6 +12852,19 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         _c = ''  # garbage → will become 'unknown' via normaliser
                     _expanded.append(_c)
                 obj['audio_languages'] = _normalize_audio_languages(_expanded)
+                # v2.7: FILENAME-BASED AUDIO-LANG FALLBACK.
+                # When Plex's own metadata is missing / unknown AND the
+                # filename matches a DISK_PLEX_MAP['AUDIO_LANG']['disk2plex']
+                # regex (e.g. `\bTVOON\b` → 'de', `\[(fr|french)\]` → 'fr'),
+                # use the inferred code so --no-audio-language doesn't
+                # false-positive on items that the disk2plex mechanism
+                # could trivially resolve.  Plex-known languages take
+                # precedence; this only fills the gap.
+                if not obj['audio_languages'] or obj['audio_languages'] == [_AUDIO_LANG_UNKNOWN]:
+                    _fp = obj.get('file', '') or ''
+                    _inferred = _resolve_audio_lang_from_filename(_fp) if _fp else None
+                    if _inferred:
+                        obj['audio_languages'] = [_inferred]
                 # Stats: count the first (primary) track only — see legend in
                 # --list-libraries footnote.  'unknown' is now a regular code.
                 _primary = obj['audio_languages'][0]
