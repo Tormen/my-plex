@@ -16944,38 +16944,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _n in langs
             return label_str, _lang_fn
 
-        # --- Type (Plex media type: type:movie / type:series / type:show / type:episode / type:season) ---
-        # In the universal-scope pipeline, action commands (--mv, --remux, ...)
-        # only enumerate file-owning items.  Series, Season, and Collection
-        # parents have NO files of their own — moving / re-encoding "a season"
-        # really means moving / re-encoding its episodes.  Therefore every
-        # non-Movie type alias resolves to Episode in this pipeline:
+        # --- Type (Plex media type) — distinguished per the user's mental model:
+        #     type:movie               → Movie objects   (leaves, have files)
+        #     type:series / show / tv  → Series objects  (full-fledged series:
+        #                                 series → season(s) → episode(s) tree)
+        #     type:season              → Season objects  (season → episode(s))
+        #     type:episode             → Episode objects (leaves, have files)
         #
-        #   type:movie / type:film               → Movie
-        #   type:series / type:show / type:tv    → Episode (all of them)
-        #   type:episode                         → Episode
-        #   type:season                          → Episode (every episode that
-        #                                          belongs to any Season)
-        #
-        # For --list display-layer use cases that want Season / Series PARENT
-        # rows, use the existing Cat-A `--type` flag (which renders parents
-        # via PLEX_Media.list() rollup) — outside variadic windows, Cat-A
-        # `type:series` still translates to `--type series` for --list.
+        # In the action-command universal-scope pipeline, Series and Season
+        # matches are auto-expanded to their underlying Episodes by
+        # `_resolve_scope_filter_expr` — same behaviour as passing a
+        # `Series:NNN` or `Season:NNN` cache key directly.  So `type:series`
+        # ends up acting on every episode of every full-fledged series; the
+        # filter-level distinction is preserved (you can `type:series` AND
+        # any series-level field like `year>2020` and get clean semantics)
+        # while action commands still see usable file-owning items.
         if field == 'type':
             needle = val.lower().strip()
-            _MOVIE_ALIASES  = {'movie', 'movies', 'film', 'films'}
-            _NONMOVIE_ALIASES = {  # everything in the series hierarchy → Episode in action context
-                'series', 'show', 'shows', 'tv', 'tvshow', 'tvshows',
-                'episode', 'episodes', 'ep', 'eps',
-                'season', 'seasons',
-            }
+            _MOVIE_ALIASES   = {'movie', 'movies', 'film', 'films'}
+            _SERIES_ALIASES  = {'series', 'show', 'shows', 'tv', 'tvshow', 'tvshows'}
+            _SEASON_ALIASES  = {'season', 'seasons'}
+            _EPISODE_ALIASES = {'episode', 'episodes', 'ep', 'eps'}
             if needle in _MOVIE_ALIASES:
                 target_types = {'Movie', 'Movie*'}
-            elif needle in _NONMOVIE_ALIASES:
+            elif needle in _SERIES_ALIASES:
+                target_types = {'Series', 'Series*'}
+            elif needle in _SEASON_ALIASES:
+                target_types = {'Season', 'Season*'}
+            elif needle in _EPISODE_ALIASES:
                 target_types = {'Episode', 'Episode*'}
             else:
-                # Unknown alias — match the literal capitalised form (allows
-                # forward-compatible types like 'Collection' if ever exposed).
                 target_types = {needle.title(), needle.title() + '*'}
             label_str = f"type:{needle}"
             def _type_fn(obj, fi, _t=target_types):
@@ -23757,34 +23755,78 @@ def _is_scope_filter_token(token):
 
 
 def _resolve_scope_filter_expr(expr):
-    """Return list of (key, obj) for Movie / Episode items satisfying a filter expression.
+    """Return list of (key, obj) satisfying a filter expression.
 
     Delegates each sub-expression (split on ' AND ') to
     PLEX_Media._parse_filter_sub_expr(), then iterates OBJ_BY_ID and keeps
     items where ALL sub-expressions evaluate true for at least one file
     version (mirrors the semantics of --list).
+
+    Two modes of iteration:
+      * No explicit `type:` filter   → iterate file-owning types only
+                                       (Movie / Episode).  Default for
+                                       country: / lang: / year>… etc.
+      * Explicit `type:` filter      → iterate ALL types (so type:series
+                                       matches Series objects, type:season
+                                       matches Season objects, etc.).
+
+    After filtering, Series / Season parent matches are auto-expanded to
+    their underlying Episodes — same behaviour as passing a Series:NNN or
+    Season:NNN cache key to `_get_disk_map_scope()`.  Movies and Episodes
+    pass through unchanged.  This keeps the user-visible semantics of
+    `type:series` ("full-fledged series, series→season→episode hierarchy")
+    while ensuring action commands (--mv / --remux / ...) always receive
+    file-owning items at the end.
     """
     items = []
     sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
     filter_fns = []
+    has_type_filter = False
     for sub in sub_exprs:
         parsed = PLEX_Media._parse_filter_sub_expr(sub)
         if parsed and parsed[1] is not None:
             filter_fns.append(parsed[1])
+            if parsed[0].lower().startswith('type:'):
+                has_type_filter = True
     if not filter_fns:
         return items
+
+    raw_matches = []
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         obj_type = obj.get('type_str') or obj.get('type', '')
-        if obj_type not in ('Movie', 'Episode', 'Movie*', 'Episode*'):
-            continue
-        if not (obj.get('file') or obj.get('files')):
-            continue
+        # Without an explicit type filter, restrict iteration to file-owning
+        # items (Movie / Episode) — keeps the original behaviour for the
+        # 95% case where the caller is filtering by country / language / year.
+        if not has_type_filter:
+            if obj_type not in ('Movie', 'Episode', 'Movie*', 'Episode*'):
+                continue
+            if not (obj.get('file') or obj.get('files')):
+                continue
         files_dict = obj.get('files', {}) or {}
         file_matches = list(files_dict.values()) if files_dict else [{}]
         for fi in file_matches:
             if all(fn(obj, fi) for fn in filter_fns):
-                items.append((key, obj))
+                raw_matches.append((key, obj))
                 break
+
+    # Post-expand Series / Season parents to their underlying Episodes
+    # (matches the existing Series:NNN / Season:NNN scope-expansion semantics
+    # already implemented by _get_disk_map_scope for cache-key input).
+    seen = set()
+    for key, obj in raw_matches:
+        obj_type = obj.get('type_str') or obj.get('type', '')
+        if obj_type in ('Series', 'Series*', 'Season', 'Season*'):
+            expanded = _get_disk_map_scope(key)
+            for ek, eo in expanded:
+                et = eo.get('type_str') or eo.get('type', '')
+                if et in ('Episode', 'Episode*') and ek not in seen:
+                    seen.add(ek)
+                    items.append((ek, eo))
+        elif obj_type in ('Movie', 'Movie*', 'Episode', 'Episode*'):
+            if key not in seen:
+                seen.add(key)
+                items.append((key, obj))
+        # Else (Collection / unknown): silently skipped — not actionable in action commands.
     return items
 
 
