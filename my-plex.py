@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.3"
+SCRIPT_VERSION = "v2.4"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -5529,35 +5529,77 @@ def _country_matches(country_token, obj_countries):
     return False
 
 
-def fetch_original_language_from_tmdb(tmdb_id, media_type='movie'):
+def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5):
     """Fetch `original_language` for one item from TMDB API v3.
 
+    Robust against transient failures:
+      - HTTP 429 (rate-limited): honour `Retry-After`, sleep, retry up to
+        `max_retries` times with exponential fallback if header missing.
+      - HTTP 5xx (TMDB outage): sleep + retry with exponential backoff.
+      - Connection / timeout errors: same retry path.
+      - HTTP 404 / 401: return None immediately (no retry).
+      - All other errors: log in -D mode, return None.
+
     Args:
-        tmdb_id:    TMDB id (string or int)
-        media_type: 'movie' or 'tv'
+        tmdb_id:     TMDB id (string or int)
+        media_type:  'movie' or 'tv'
+        max_retries: per-call cap on retries (default 5)
 
     Returns:
-        str (ISO 639-1 lowercase, e.g. 'fr') on success, or None on any error
-        (no key configured, HTTP failure, missing field, etc.).
+        str (ISO 639-1 lowercase, e.g. 'fr') on success, or None on any
+        permanent failure (no key, 404, 401, exhausted retries, missing field).
     """
     global TMDB_API_KEY
     if not TMDB_API_KEY or not tmdb_id:
         return None
-    import urllib.request, json as _json
+    import urllib.request, urllib.error, json as _json, time as _t
     endpoint = 'tv' if media_type in ('tv', 'series', 'Series', 'Episode') else 'movie'
     url = f'https://api.themoviedb.org/3/{endpoint}/{tmdb_id}'
     req = urllib.request.Request(url, headers={
         'Authorization': f'Bearer {TMDB_API_KEY}',
         'Accept': 'application/json',
     })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = _json.loads(resp.read().decode('utf-8'))
-        lang = data.get('original_language')
-        if lang:
-            return str(lang).lower().strip()
-    except Exception as e:
-        if DBG: print(f"{DBGPFX}fetch_original_language_from_tmdb({tmdb_id},{media_type}): {e}")
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+            lang = data.get('original_language')
+            if lang:
+                return str(lang).lower().strip()
+            return None
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Respect Retry-After if present (seconds or HTTP date — we
+                # only handle the integer-seconds form, which TMDB uses).
+                retry_after = e.headers.get('Retry-After', '') if hasattr(e, 'headers') else ''
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = backoff
+                delay = max(0.5, min(delay, 30.0))
+                if VRB: print(f"  TMDB 429 (rate-limited); sleeping {delay:.1f}s then retrying {tmdb_id}…")
+                _t.sleep(delay)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            if 500 <= e.code < 600:
+                if VRB: print(f"  TMDB {e.code} (server error); sleeping {backoff:.1f}s then retrying {tmdb_id}…")
+                _t.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            # 404 / 401 / etc. — permanent failure
+            if DBG: print(f"{DBGPFX}fetch_original_language_from_tmdb({tmdb_id},{media_type}): HTTP {e.code}")
+            return None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if VRB: print(f"  TMDB transport error ({e.__class__.__name__}); sleeping {backoff:.1f}s then retrying {tmdb_id}…")
+            _t.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        except Exception as e:
+            # Unknown error — log and bail out without retry to avoid hot-loop.
+            if DBG: print(f"{DBGPFX}fetch_original_language_from_tmdb({tmdb_id},{media_type}): {e}")
+            return None
+    if VRB: print(f"  TMDB lookup for {tmdb_id} failed after {max_retries} retries")
     return None
 
 
@@ -5630,27 +5672,63 @@ def cmd_original_languages(target=None, dry_run=False):
     print()
     n_ok = n_fail = 0
     import time as _t
-    for i, (k, o, type_str) in enumerate(work, 1):
-        tmdb_id = (o.get('external_ids') or {}).get('tmdb')
-        endpoint = 'tv' if type_str == 'Series' else 'movie'
-        lang = fetch_original_language_from_tmdb(tmdb_id, media_type=endpoint)
-        if lang:
-            o['original_language'] = lang
-            n_ok += 1
-            print(f"  [{i}/{len(work)}] {k}  →  original_language = {lang}    ({o.get('title','?')})")
-        else:
-            n_fail += 1
-            print(f"  [{i}/{len(work)}] {k}  →  TMDB lookup FAILED               ({o.get('title','?')})")
-        _t.sleep(0.05)   # gentle rate-limit (TMDB allows ~50 req/s)
+    # v2.4: rate-limit at 4 req/s (250ms) to stay well below TMDB's published
+    # 40-req/10s limit, in addition to the 429-Retry-After backoff inside
+    # fetch_original_language_from_tmdb().  Total cost ~6 min for 1500 items.
+    # Checkpoint-save every 50 items so a ctrl-c mid-run keeps progress.
+    _RATE_LIMIT_SLEEP   = 0.25
+    _CHECKPOINT_EVERY   = 50
+    _started = _t.time()
 
-    if not READ_ONLY_MODE:
-        update_and_save_cache(CACHE)
+    def _save_checkpoint(reason=''):
+        if READ_ONLY_MODE:
+            return
+        try:
+            update_and_save_cache(CACHE)
+            if VRB and reason:
+                print(f"  ✓ Cache checkpoint saved ({reason}).")
+        except Exception as _e:
+            print(f"  ! Cache checkpoint save failed: {_e}")
+
+    try:
+        for i, (k, o, type_str) in enumerate(work, 1):
+            tmdb_id = (o.get('external_ids') or {}).get('tmdb')
+            endpoint = 'tv' if type_str == 'Series' else 'movie'
+            lang = fetch_original_language_from_tmdb(tmdb_id, media_type=endpoint)
+            if lang:
+                o['original_language'] = lang
+                n_ok += 1
+                print(f"  [{i}/{len(work)}] {k}  →  original_language = {lang}    ({o.get('title','?')})")
+            else:
+                n_fail += 1
+                print(f"  [{i}/{len(work)}] {k}  →  TMDB lookup FAILED               ({o.get('title','?')})")
+            # Periodic checkpoint: ctrl-c at item 173/1500 still saves 150 successes.
+            if i % _CHECKPOINT_EVERY == 0:
+                _save_checkpoint(reason=f"after {i}/{len(work)}")
+                elapsed = _t.time() - _started
+                rate = i / max(elapsed, 1e-3)
+                remaining = (len(work) - i) / max(rate, 1e-3)
+                if VRB:
+                    print(f"  … {rate:.1f} req/s,  ~{int(remaining)}s remaining")
+            _t.sleep(_RATE_LIMIT_SLEEP)
+    except KeyboardInterrupt:
+        _save_checkpoint(reason="ctrl-c interrupt")
+        print(f"\n  Interrupted at item {i}/{len(work)}.  Cache saved with progress so far.")
+        print(f"  Re-run `my-plex --original-languages {target or ''}` to resume — items already")
+        print(f"  populated will be skipped.")
+        return (n_ok, n_fail, 1)
+
+    # Final save
+    _save_checkpoint(reason="run complete")
 
     print()
     print("=" * 76)
     print(f"SUMMARY  --original-languages")
-    print(f"  fetched : {n_ok}")
-    print(f"  failed  : {n_fail}")
+    print(f"  fetched     : {n_ok}")
+    print(f"  failed      : {n_fail}")
+    print(f"  elapsed     : {int(_t.time() - _started)}s")
+    if n_ok + n_fail > 0:
+        print(f"  avg rate    : {(n_ok+n_fail) / max(_t.time() - _started, 1e-3):.2f} req/s")
     print("=" * 76)
     return (n_ok, n_fail, 0)
 
