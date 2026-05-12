@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.12"
+SCRIPT_VERSION = "v1.20"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -460,7 +460,7 @@ _my-plex() {
         '--plex2disk[Sync Plex metadata to disk markers]'
         '--disk2plex[Sync disk markers to Plex metadata]'
         '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
-        '(--mv --move --mv-to --move-to)'{--mv,--move,--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv DEST_LIB \[SCOPE\]. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
+        '(--mv-to --move-to)'{--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv-to DEST_LIB \[SCOPE...\] — first arg is destination, rest is universal scope. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
         '(--original-languages --collect-original-languages)'{--original-languages,--collect-original-languages}'[Backfill obj.original_language from TMDB API for cached Movies/Series. Required for original_lang: / originallang: filter tokens. Optional SCOPE.]'
         '(--unrecognized --alien)'{--unrecognized,--alien}'[List top-level entries in each library rootpath that Plex DB does NOT index (no matching media_part). Optional LIB scope. Synonyms.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
@@ -5724,6 +5724,188 @@ def _list_top_level_entries(rootpath, remote_host=None):
         print(f"WARNING: list_top_level_entries error for {rootpath}: {e}")
         return []
     return sorted(out, key=lambda t: t[0])
+
+
+_SEASON_DIR_RE = re.compile(r'^(?:season|s)\s*\d+\s*$', re.IGNORECASE)
+_EPISODE_FILE_RE = re.compile(r's\d+\s*e\d+', re.IGNORECASE)
+_VIDEO_EXT_SET = {'.mkv', '.mp4', '.avi', '.m4v', '.mov', '.mpg', '.mpeg', '.ts',
+                  '.m2ts', '.wmv', '.flv', '.ogm', '.divx', '.vob', '.3gp', '.webm'}
+
+
+def _is_season_dir_name(name):
+    """True iff `name` looks like a season directory: 'Season 1', 'S01', etc."""
+    return bool(_SEASON_DIR_RE.match(name.strip()))
+
+
+def _classify_layout(entry_path, kind, remote_host=None):
+    """Classify a top-level library entry by its on-disk shape.
+
+    Returns one of: 'movie', 'series', 'season', 'episode', 'unknown'.
+
+      'series'   — directory containing season subdirs (Season X / S0X),
+                   OR a directory with episode-named (s0xe0x) video files
+                   loose at its root (un-sub-foldered show)
+      'season'   — directory whose own name is 'Season X' / 'S0X' AND it
+                   contains video files
+      'movie'    — directory containing one or more video files that
+                   don't look like episodes (no s0xe0x pattern), and no
+                   season subdirs
+      'episode'  — bare video file at the library root whose filename
+                   contains a S0xE0x pattern
+      'unknown'  — anything else (junk, .nfo-only dirs, deeply nested, ...)
+    """
+    base = os.path.basename(entry_path.rstrip('/'))
+    if kind == 'file':
+        ext = os.path.splitext(base)[1].lower()
+        if ext in _VIDEO_EXT_SET and _EPISODE_FILE_RE.search(base):
+            return 'episode'
+        if ext in _VIDEO_EXT_SET:
+            return 'movie'
+        return 'unknown'
+
+    # kind == 'dir' — list one level inside it
+    listing = _list_top_level_entries(entry_path, remote_host)
+    has_season_subdir = any(_is_season_dir_name(os.path.basename(p)) for p, k in listing if k == 'dir')
+    video_files = [os.path.basename(p) for p, k in listing if k == 'file'
+                   and os.path.splitext(p)[1].lower() in _VIDEO_EXT_SET]
+    has_video = bool(video_files)
+    has_episode_files = any(_EPISODE_FILE_RE.search(name) for name in video_files)
+
+    if has_season_subdir:
+        return 'series'
+    if _is_season_dir_name(base) and (has_video or has_episode_files):
+        return 'season'
+    if has_episode_files:
+        return 'series'   # un-sub-foldered show
+    if has_video:
+        return 'movie'
+    return 'unknown'
+
+
+_LAYOUT_INDEX_CACHE = None   # session memo: {lib_rootpath: {entry_basename: layout}}
+
+
+def _build_layout_index(force_refresh=False):
+    """Walk every cached library rootpath and classify each top-level entry.
+
+    Returns a nested dict for fast filepath→layout lookup:
+        { '/Volumes/2/watch.v/,unsorted': {'tais.toi.(2003)...[reencode]': 'movie',
+                                            'about.a.boy.s01e12...': 'series',
+                                            ...},
+          '/Volumes/2/watch.v/movies.fr':  {...},
+          ... }
+    Session-memoised; pass force_refresh=True to rebuild.
+
+    Performance: one bulk `find -maxdepth 2 -mindepth 1` per library
+    rootpath, then classification happens in Python from the listing.
+    Avoids the N×M SSH-per-top-level-dir blow-up.
+    """
+    global _LAYOUT_INDEX_CACHE
+    if _LAYOUT_INDEX_CACHE is not None and not force_refresh:
+        return _LAYOUT_INDEX_CACHE
+    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+    remote = PLEX_DB_REMOTE_HOST
+    index = {}
+    for lib, rootpaths in locations_by_lib.items():
+        for rp in rootpaths:
+            rp_norm = rp.rstrip('/')
+            # ONE SSH find: every level-1 + level-2 entry under rp_norm, with type tag.
+            # Output format: "TYPE\tPATH" per line.  BSD-compatible (no -printf):
+            # use two passes via separate find invocations OR a single `find -type d/f`
+            # mass walk with subsequent type-classification in Python.
+            # We pick the simplest: TWO bulk finds (dirs, then files), depth 2.
+            esc = escape_path_for_ssh(rp_norm)
+            find_d = f'find "{esc}" -maxdepth 2 -mindepth 1 -type d ! -name ".*"'
+            find_f = f'find "{esc}" -maxdepth 2 -mindepth 1 -type f ! -name ".*"'
+            if remote:
+                cmd_d = ['ssh', remote, find_d]
+                cmd_f = ['ssh', remote, find_f]
+            else:
+                cmd_d = ['sh', '-c', find_d]
+                cmd_f = ['sh', '-c', find_f]
+            try:
+                rd = subprocess.run(cmd_d, capture_output=True, text=True, timeout=300)
+                rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=300)
+            except Exception as e:
+                if VRB: print(f"WARNING: _build_layout_index find failed for {rp_norm}: {e}")
+                continue
+            level1_dirs   = []   # top-level dirs (direct child of rp_norm)
+            level2_in_dir = {}   # dir_basename → list of (basename, kind) inside it
+            level1_files  = []   # top-level video files
+            # Process dirs
+            for line in (rd.stdout or '').splitlines():
+                p = line.strip()
+                if not p:
+                    continue
+                rel = p[len(rp_norm) + 1:] if p.startswith(rp_norm + '/') else p
+                parts = rel.split('/')
+                if len(parts) == 1:
+                    level1_dirs.append(parts[0])
+                elif len(parts) == 2:
+                    level2_in_dir.setdefault(parts[0], []).append((parts[1], 'dir'))
+            # Process files
+            for line in (rf.stdout or '').splitlines():
+                p = line.strip()
+                if not p:
+                    continue
+                rel = p[len(rp_norm) + 1:] if p.startswith(rp_norm + '/') else p
+                parts = rel.split('/')
+                if len(parts) == 1:
+                    level1_files.append(parts[0])
+                elif len(parts) == 2:
+                    level2_in_dir.setdefault(parts[0], []).append((parts[1], 'file'))
+
+            # Classify each top-level entry from the in-memory listings
+            lib_idx = {}
+            for d in level1_dirs:
+                children = level2_in_dir.get(d, [])
+                has_season_subdir = any(_is_season_dir_name(name) for name, k in children if k == 'dir')
+                video_files = [name for name, k in children if k == 'file'
+                               and os.path.splitext(name)[1].lower() in _VIDEO_EXT_SET]
+                has_video = bool(video_files)
+                has_episode_files = any(_EPISODE_FILE_RE.search(name) for name in video_files)
+                if has_season_subdir:
+                    lib_idx[d] = 'series'
+                elif _is_season_dir_name(d) and (has_video or has_episode_files):
+                    lib_idx[d] = 'season'
+                elif has_episode_files:
+                    lib_idx[d] = 'series'
+                elif has_video:
+                    lib_idx[d] = 'movie'
+                else:
+                    lib_idx[d] = 'unknown'
+            for f in level1_files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in _VIDEO_EXT_SET and _EPISODE_FILE_RE.search(f):
+                    lib_idx[f] = 'episode'
+                elif ext in _VIDEO_EXT_SET:
+                    lib_idx[f] = 'movie'
+                else:
+                    lib_idx[f] = 'unknown'
+            index[rp_norm] = lib_idx
+    _LAYOUT_INDEX_CACHE = index
+    if DBG:
+        n_total = sum(len(v) for v in index.values())
+        print(f"{DBGPFX}_build_layout_index: classified {n_total} top-level entries across {len(index)} rootpaths")
+    return index
+
+
+def _lookup_layout_for_filepath(filepath):
+    """Return the layout label ('movie'/'series'/'season'/'episode'/'unknown')
+    of the top-level library entry containing `filepath`, or None if it
+    doesn't live under any cached library rootpath.
+    """
+    if not filepath:
+        return None
+    idx = _build_layout_index()
+    for rp_norm, entries in idx.items():
+        if filepath == rp_norm:
+            return None  # the rootpath itself, not under it
+        if filepath.startswith(rp_norm + '/'):
+            rest = filepath[len(rp_norm) + 1:]
+            top = rest.split('/', 1)[0]
+            return entries.get(top, 'unknown')
+    return None
 
 
 def _count_unrecognized_top_level(target_library=None):
@@ -16965,7 +17147,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type|layout)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -17142,6 +17324,42 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
                 return _n in langs
             return label_str, _lang_fn
+
+        # --- Layout (on-disk shape, ORTHOGONAL to Plex's type) ---
+        # NEW in v1.20.  Where `type:` filters by what Plex catalogued the
+        # item as, `layout:` filters by what the FILESYSTEM thinks each
+        # top-level library entry looks like.  Useful for finding
+        # mis-classified content: e.g. series-shaped folders dropped into
+        # a Movie library (Plex scans the individual .mkv as a Movie, but
+        # the wrapper folder structure says "series").
+        #
+        #   layout:movie     → Plex item lives under a movie-shaped folder
+        #                      (videos, no season subdirs, no s0xe0x names)
+        #   layout:series    → lives under a series-shaped folder (has
+        #                      season subdirs, or s0xe0x videos loose)
+        #   layout:season    → lives under a season-shaped folder (dir
+        #                      name = 'Season X' / 'S0X' with video files)
+        #   layout:episode   → bare s0xe0x video file at the library root
+        #
+        # First lookup builds an in-memory layout index via SSH find on
+        # every cached library rootpath; subsequent lookups are O(1).
+        if field == 'layout':
+            needle = val.lower().strip()
+            _LAYOUT_ALIASES = {
+                'movie': 'movie', 'movies': 'movie', 'film': 'movie', 'films': 'movie',
+                'series': 'series', 'show': 'series', 'shows': 'series', 'tv': 'series', 'tvshow': 'series', 'tvshows': 'series',
+                'season': 'season', 'seasons': 'season',
+                'episode': 'episode', 'episodes': 'episode', 'ep': 'episode',
+            }
+            target_layout = _LAYOUT_ALIASES.get(needle, needle)
+            label_str = f"layout:{needle}"
+            def _layout_fn(obj, fi, _t=target_layout):
+                fp = (fi.get('filepath') if fi else None) or obj.get('file', '')
+                if not fp:
+                    return False
+                layout = _lookup_layout_for_filepath(fp)
+                return layout == _t
+            return label_str, _layout_fn
 
         # --- Type (Plex media type) — distinguished per the user's mental model:
         #     type:movie               → Movie objects   (leaves, have files)
@@ -21588,6 +21806,53 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'layout':
+            print()
+            print("=" * 76)
+            print("LAYOUT HELP   NEW in v1.20")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex <SCOPE> layout:<KIND>")
+            print("       my-plex --mv-to <DEST> <SCOPE> layout:<KIND>")
+            print()
+            print("ORTHOGONAL to `type:` — where `type:` filters by what Plex catalogued")
+            print("the item as, `layout:` filters by what the FILESYSTEM thinks each")
+            print("top-level library entry looks like (its on-disk shape).  Useful when")
+            print("the two disagree — typically content that Plex mis-classified.")
+            print()
+            print("LAYOUT KINDS:")
+            print("  layout:movie     →  item lives under a movie-shaped folder")
+            print("                       (videos, no Season subdirs, no S0xE0x names)")
+            print("  layout:series    →  series-shaped folder (has Season subdirs, OR")
+            print("                       s0xe0x video files loose at its root)")
+            print("  layout:season    →  season-shaped folder (dir name = 'Season X' /")
+            print("                       'S0X' AND it contains video files)")
+            print("  layout:episode   →  bare s0xe0x video file at the library root")
+            print()
+            print("ALIASES:   series = show = tv = tvshow      movie = film")
+            print()
+            print("FIRST CALL builds an in-memory classification index by running ONE")
+            print("`find -maxdepth 2` per library rootpath on the Plex host.  Cached")
+            print("for the session — subsequent layout: queries are O(1).")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex ,unsorted layout:series          # find series content")
+            print("                                             Plex catalogued as Movies")
+            print("  my-plex movies.de layout:season          # season-shaped folders")
+            print("                                             inside Movie library")
+            print("  my-plex series.en layout:movie           # movie content sitting")
+            print("                                             in a Series library")
+            print("  my-plex --mv-to series.en movies.de layout:series   # move them")
+            print()
+            print("WHEN layout: RETURNS 0 ITEMS:")
+            print("  Means no CACHED Plex object lives under a folder matching that")
+            print("  layout.  Sometimes Plex doesn't even index mis-shaped folders —")
+            print("  for those, see `--unrecognized` / `--alien`, which goes straight")
+            print("  to Plex DB and surfaces top-level entries Plex never matched.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'unrecognized' | 'alien':
             print()
             print("=" * 76)
@@ -23976,7 +24241,7 @@ _SCOPE_FILTER_FIELDS = (
     'subs', 'sub', 'subtitle', 'subtitles', 'director', 'directors',
     'country', 'countries', 'original_language', 'originallang', 'original_lang',
     'writer', 'writers', 'actor', 'actors', 'title', 'originaltitle',
-    'type',
+    'type', 'layout',
 )
 _SCOPE_FILTER_RE = re.compile(
     r'^(?P<field>' + '|'.join(_SCOPE_FILTER_FIELDS) + r')'
@@ -24016,13 +24281,12 @@ def _resolve_scope_filter_expr(expr):
                                        matches Series objects, type:season
                                        matches Season objects, etc.).
 
-    After filtering, Series / Season parent matches are auto-expanded to
-    their underlying Episodes — same behaviour as passing a Series:NNN or
-    Season:NNN cache key to `_get_disk_map_scope()`.  Movies and Episodes
-    pass through unchanged.  This keeps the user-visible semantics of
-    `type:series` ("full-fledged series, series→season→episode hierarchy")
-    while ensuring action commands (--mv / --remux / ...) always receive
-    file-owning items at the end.
+    PURE type-filter semantics: returns objects of EXACTLY the matched
+    Plex type — no expansion.  `type:series` → Series objects; `type:season`
+    → Season objects; `type:episode` → Episode objects; `type:movie` →
+    Movie objects.  For action commands needing file-owners, use
+    `type:episode` (or pass an explicit Series:NNN / Season:NNN cache key,
+    which `_get_disk_map_scope` auto-expands as before).
     """
     items = []
     sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
@@ -24055,24 +24319,17 @@ def _resolve_scope_filter_expr(expr):
                 raw_matches.append((key, obj))
                 break
 
-    # Post-expand Series / Season parents to their underlying Episodes
-    # (matches the existing Series:NNN / Season:NNN scope-expansion semantics
-    # already implemented by _get_disk_map_scope for cache-key input).
+    # PURE type-filter semantics (per user spec): return objects of exactly
+    # the matched type — no expansion.  type:series → Series objects only,
+    # type:season → Season objects only, type:episode → Episode objects only.
+    # For action commands that need file-owners, use `type:episode` (or pass
+    # an explicit Series:NNN / Season:NNN cache key, which `_get_disk_map_scope`
+    # auto-expands as before).
     seen = set()
     for key, obj in raw_matches:
-        obj_type = obj.get('type_str') or obj.get('type', '')
-        if obj_type in ('Series', 'Series*', 'Season', 'Season*'):
-            expanded = _get_disk_map_scope(key)
-            for ek, eo in expanded:
-                et = eo.get('type_str') or eo.get('type', '')
-                if et in ('Episode', 'Episode*') and ek not in seen:
-                    seen.add(ek)
-                    items.append((ek, eo))
-        elif obj_type in ('Movie', 'Movie*', 'Episode', 'Episode*'):
-            if key not in seen:
-                seen.add(key)
-                items.append((key, obj))
-        # Else (Collection / unknown): silently skipped — not actionable in action commands.
+        if key not in seen:
+            seen.add(key)
+            items.append((key, obj))
     return items
 
 
@@ -29878,9 +30135,10 @@ def main():
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--remux': 'remux',
-        '--mv': 'mv', '--move': 'mv', '--mv-to': 'mv', '--move-to': 'mv',
+        '--mv-to': 'mv', '--move-to': 'mv',
         '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
         '--unrecognized': 'unrecognized', '--alien': 'unrecognized',
+        '--layout': 'layout',   # not a real flag, just enables `my-plex --help layout`
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
         '--info': 'info', '--test': 'test', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
@@ -29978,7 +30236,7 @@ def main():
     # --list filter expression before --mv ever sees them).  The window opens
     # at the flag and closes at the next dash-flag.
     _VARIADIC_SCOPE_FLAGS = {
-        '--mv', '--move', '--mv-to', '--move-to',
+        '--mv-to', '--move-to',
         '--original-languages', '--collect-original-languages',
         '--add-label', '--remove-label',
         # v1.12: migrated to nargs='*' so compound SCOPE (lib + filter) works:
@@ -30156,7 +30414,7 @@ def main():
                      '--duplicates','--reencode','--rename','--missing','--sort-new',
                      '--info','--scan','--collections','--list-labels','--list-label',
                      '--no-audio-language','--no-language','--watched','--unwatched',
-                     '--mv','--move','--mv-to','--move-to','--remux'}
+                     '--mv-to','--move-to','--remux'}
             if not any(a in _CMDS for a in sys.argv):
                 sys.argv += ['--list']
         if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
@@ -30485,7 +30743,7 @@ def main():
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
@@ -30569,7 +30827,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux ,unsorted country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
-    GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv DEST_LIB [SCOPE]. SCOPE can be a library name, cache key, Plex ID, title, or filepath (omitted = all items). On duplicate title+originalTitle+year matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
+    GLOBAL_CMD_PARSER.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv-to DEST_LIB [SCOPE...]. The `-to` suffix makes it explicit that the FIRST arg is the destination library. SCOPE: library / cache key / Plex ID / title / filepath / filter expression — multiple tokens AND-combine. On duplicate (title+originalTitle+year) matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
     GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
     GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help="List top-level entries in each library rootpath that Plex DB doesn't have a media_part for. Catches download leftovers, mis-classified folders, or content dropped at a library root that Plex never matched. Optional LIB scope (single library). Use --help unrecognized for details. Synonym: --alien.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
@@ -30689,8 +30947,6 @@ def main():
                 '--map-to-filename':         'plex2disk',
                 '--map-from-filename':       'plex2disk',
                 '--rename':                  'rename',
-                '--mv':                      'mv',
-                '--move':                    'mv',
                 '--mv-to':                   'mv',
                 '--move-to':                 'mv',
                 '--original-languages':         'original-languages',
@@ -31040,14 +31296,13 @@ def main():
         else:
             remaining_args.insert(0, '--unrecognized')
 
-    # Re-inject --mv into remaining_args
-    # --mv takes 1 or 2 positionals: DEST_LIB [SCOPE]
+    # Re-inject --mv-to into remaining_args
+    # --mv-to DEST_LIB [SCOPE...] — first positional is destination, rest is scope.
     if safe_getattr(args, 'mv', None) is not None:
         _mv_args = args.mv if isinstance(args.mv, list) else [args.mv]
-        # Insert in original order: --mv DEST [SCOPE]
         for _i, _v in enumerate(_mv_args):
             remaining_args.insert(_i + 1, _v)
-        remaining_args.insert(0, '--mv')
+        remaining_args.insert(0, '--mv-to')
 
     # Re-inject --disk2plex into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'disk2plex', None) is not None:
