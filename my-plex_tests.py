@@ -8330,18 +8330,34 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("'type'", body, "_SCOPE_FILTER_FIELDS must include 'type'")
 
     def test_type_filter_handler_in_parser(self):
-        """_parse_filter_sub_expr must handle type:movie / type:series / type:episode / type:season."""
+        """_parse_filter_sub_expr must handle type:movie / type:series / type:episode / type:season distinctly."""
         src = self._read_script()
         self.assertIn("if field == 'type':", src)
         self.assertIn("_MOVIE_ALIASES", src)
-        self.assertIn("_NONMOVIE_ALIASES", src)
-        # All series-hierarchy aliases must resolve to Episode in the action pipeline
+        self.assertIn("_SERIES_ALIASES", src)
+        self.assertIn("_SEASON_ALIASES", src)
+        self.assertIn("_EPISODE_ALIASES", src)
+
+    def test_type_filter_distinct_per_type(self):
+        """Each type alias must map to its own Plex type set (not collapsed to Episode)."""
+        src = self._read_script()
+        # Each type alias set must target the right Plex type at filter level
+        self.assertIn("target_types = {'Movie', 'Movie*'}", src)
+        self.assertIn("target_types = {'Series', 'Series*'}", src)
+        self.assertIn("target_types = {'Season', 'Season*'}", src)
+        self.assertIn("target_types = {'Episode', 'Episode*'}", src)
+
+    def test_filter_expr_auto_expands_series_and_season(self):
+        """_resolve_scope_filter_expr must auto-expand Series/Season matches to their Episodes."""
+        src = self._read_script()
         import re
-        m = re.search(r'_NONMOVIE_ALIASES = \{(.*?)\}', src, re.DOTALL)
-        self.assertIsNotNone(m, "Must find _NONMOVIE_ALIASES set")
+        m = re.search(r'def _resolve_scope_filter_expr\(expr\).*?\n(.*?)def _get_universal_scope', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _resolve_scope_filter_expr body")
         body = m.group(1)
-        for alias in ("'series'", "'show'", "'tv'", "'episode'", "'season'"):
-            self.assertIn(alias, body, f"_NONMOVIE_ALIASES must include {alias}")
+        self.assertIn("Post-expand", body)
+        self.assertIn("_get_disk_map_scope(key)", body)
+        # Must conditionally iterate all types when type: filter is present
+        self.assertIn("has_type_filter", body)
 
     def test_type_filter_in_field_regex(self):
         """The _field_re regex inside _parse_filter_sub_expr must include 'type'."""
