@@ -8319,6 +8319,31 @@ class TestUniversalScope(unittest.TestCase):
                      "'--original-languages'", "'--add-label'", "'--remove-label'"):
             self.assertIn(flag, src, f"_VARIADIC_SCOPE_FLAGS must include {flag}")
 
+    def test_type_filter_in_scope_fields(self):
+        """type must be in _SCOPE_FILTER_FIELDS so type:series works as a SCOPE token."""
+        src = self._read_script()
+        # Must appear in the field whitelist (look for the tuple containing 'type')
+        import re
+        m = re.search(r'_SCOPE_FILTER_FIELDS = \((.*?)\)', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _SCOPE_FILTER_FIELDS")
+        body = m.group(1)
+        self.assertIn("'type'", body, "_SCOPE_FILTER_FIELDS must include 'type'")
+
+    def test_type_filter_handler_in_parser(self):
+        """_parse_filter_sub_expr must handle type:movie / type:series / type:episode."""
+        src = self._read_script()
+        self.assertIn("if field == 'type':", src)
+        self.assertIn("_SERIES_ALIASES", src)
+        self.assertIn("_MOVIE_ALIASES", src)
+        self.assertIn("_EPISODE_ALIASES", src)
+
+    def test_type_filter_in_field_regex(self):
+        """The _field_re regex inside _parse_filter_sub_expr must include 'type'."""
+        src = self._read_script()
+        # Find _field_re definition that has all the cat-B fields
+        self.assertIn("originallang|original_lang|type", src,
+                      "_field_re inside _parse_filter_sub_expr must list 'type'")
+
     def test_help_mv_documents_compound_scope(self):
         """--help mv must document the COMPOUND SCOPE section with country: / original_lang: examples."""
         src = self._read_script()
