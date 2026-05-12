@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.5"
+SCRIPT_VERSION = "v2.6"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -26795,76 +26795,143 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             n_errors += 1
             continue
 
-        # Move each file (preserve relative directory structure under src_root)
+        # v2.6: Movie moves now relocate the WHOLE WRAPPER FOLDER (the first
+        # directory under the library rootpath that contains the video).
+        # This carries along EVERYTHING — non-matching basenames (e.g.
+        # RARBG.com.txt), nested subdirs (Subs/, Other/), posters,
+        # .nfo files — preserving the user's on-disk grouping.  Previously
+        # only same-basename siblings moved, leaving orphan wrappers behind.
+        #
+        # For Episodes we still move per-file: the wrapper of an episode is
+        # the SEASON folder, which contains many sibling episodes that
+        # shouldn't all relocate together.
         item_failed = False
         moved_filepaths = []
-        for fp in filepaths:
+        moved_as_wrapper = False
+        if type_str == 'Movie' and filepaths:
+            # Compute wrapper = first path component under src_root.
+            first_fp = filepaths[0]
             try:
-                rel_path = os.path.relpath(fp, src_root)
+                rel = os.path.relpath(first_fp, src_root)
             except Exception:
-                rel_path = os.path.basename(fp)
-            if rel_path.startswith('..'):
-                rel_path = os.path.basename(fp)
-            new_path = os.path.join(dest_root, rel_path)
-            new_dir = os.path.dirname(new_path)
+                rel = os.path.basename(first_fp)
+            if rel.startswith('..') or '/' not in rel:
+                # Video sits at the library root (no wrapper dir) — fall
+                # through to the per-file move path below.
+                pass
+            else:
+                wrapper_name = rel.split('/', 1)[0]
+                src_wrapper = os.path.join(src_root, wrapper_name)
+                dst_wrapper = os.path.join(dest_root, wrapper_name)
+                # All filepaths for this movie SHOULD live under the same
+                # wrapper.  If a multi-version movie has parts in DIFFERENT
+                # wrappers, fall back to per-file move.
+                same_wrapper = all(fp.startswith(src_wrapper + '/') for fp in filepaths)
+                if same_wrapper:
+                    if action == 'overwrite':
+                        exists, _ = my_plex_file_operation('CHECK', dst_wrapper, PLEX_DB_REMOTE_HOST)
+                        if exists:
+                            rm_ok, _ = my_plex_file_operation('REMOVE', dst_wrapper, PLEX_DB_REMOTE_HOST)
+                            if not rm_ok:
+                                print(f"  ✗ ERROR overwrite: failed to remove existing wrapper {dst_wrapper}")
+                                item_failed = True
+                    if not item_failed:
+                        # mkdir -p the dest_root on the Plex host (the wrapper itself
+                        # will be created by mv since the source IS the wrapper).
+                        if PLEX_DB_REMOTE_HOST:
+                            esc_dst_root = escape_path_for_ssh(dest_root)
+                            mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dst_root}\""]
+                            r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                            if r.returncode != 0:
+                                print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}")
+                                item_failed = True
+                        if not item_failed:
+                            ok, actual = my_plex_file_operation('MOVE', src_wrapper, PLEX_DB_REMOTE_HOST, dest_path=dst_wrapper)
+                            if ok:
+                                print(f"  ✓ MOVE  {cache_key}  ({type_str}, {src_lib} → {dest_lib})  [WHOLE WRAPPER]")
+                                print(f"          {src_wrapper}/")
+                                print(f"       →  {actual or dst_wrapper}/")
+                                # Track moved paths for cache invalidation: each
+                                # original filepath has a new path inside the moved wrapper.
+                                for fp in filepaths:
+                                    new_fp = (actual or dst_wrapper) + fp[len(src_wrapper):]
+                                    moved_filepaths.append((fp, new_fp))
+                                moved_as_wrapper = True
+                            else:
+                                print(f"  ✗ ERROR wrapper move: {src_wrapper} → {dst_wrapper}")
+                                item_failed = True
 
-            if action == 'overwrite':
-                exists, _ = my_plex_file_operation('CHECK', new_path, PLEX_DB_REMOTE_HOST)
-                if exists:
-                    rm_ok, _ = my_plex_file_operation('REMOVE', new_path, PLEX_DB_REMOTE_HOST)
-                    if not rm_ok:
-                        print(f"  ✗ ERROR overwrite: failed to remove existing {new_path}")
+        # Per-file path (Episodes, and Movies that didn't qualify for wrapper-move:
+        # bare files at library root OR multi-wrapper multi-version).
+        if not moved_as_wrapper and not item_failed:
+            for fp in filepaths:
+                try:
+                    rel_path = os.path.relpath(fp, src_root)
+                except Exception:
+                    rel_path = os.path.basename(fp)
+                if rel_path.startswith('..'):
+                    rel_path = os.path.basename(fp)
+                new_path = os.path.join(dest_root, rel_path)
+                new_dir = os.path.dirname(new_path)
+
+                if action == 'overwrite':
+                    exists, _ = my_plex_file_operation('CHECK', new_path, PLEX_DB_REMOTE_HOST)
+                    if exists:
+                        rm_ok, _ = my_plex_file_operation('REMOVE', new_path, PLEX_DB_REMOTE_HOST)
+                        if not rm_ok:
+                            print(f"  ✗ ERROR overwrite: failed to remove existing {new_path}")
+                            item_failed = True
+                            break
+
+                # mkdir -p the destination directory on the Plex host
+                if PLEX_DB_REMOTE_HOST:
+                    esc_dir = escape_path_for_ssh(new_dir)
+                    mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dir}\""]
+                    r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                    if r.returncode != 0:
+                        print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}")
+                        print(f"    stderr: {r.stderr.strip()}")
+                        item_failed = True
+                        break
+                else:
+                    try:
+                        os.makedirs(new_dir, exist_ok=True)
+                    except Exception as e:
+                        print(f"  ✗ ERROR mkdir local: {new_dir} — {e}")
                         item_failed = True
                         break
 
-            # mkdir -p the destination directory on the Plex host
-            if PLEX_DB_REMOTE_HOST:
-                esc_dir = escape_path_for_ssh(new_dir)
-                mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dir}\""]
-                r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}")
-                    print(f"    stderr: {r.stderr.strip()}")
+                ok, actual = my_plex_file_operation('MOVE', fp, PLEX_DB_REMOTE_HOST, dest_path=new_path)
+                if not ok:
+                    print(f"  ✗ ERROR move: {fp} → {new_path}")
                     item_failed = True
                     break
-            else:
-                try:
-                    os.makedirs(new_dir, exist_ok=True)
-                except Exception as e:
-                    print(f"  ✗ ERROR mkdir local: {new_dir} — {e}")
-                    item_failed = True
-                    break
+                actual_new = actual or new_path
+                moved_filepaths.append((fp, actual_new))
+                print(f"  ✓ MOVE  {cache_key}  ({type_str}, {src_lib} → {dest_lib})")
+                print(f"          {fp}")
+                print(f"       →  {actual_new}")
 
-            ok, actual = my_plex_file_operation('MOVE', fp, PLEX_DB_REMOTE_HOST, dest_path=new_path)
-            if not ok:
-                print(f"  ✗ ERROR move: {fp} → {new_path}")
-                item_failed = True
-                break
-            actual_new = actual or new_path
-            moved_filepaths.append((fp, actual_new))
-            print(f"  ✓ MOVE  {cache_key}  ({type_str}, {src_lib} → {dest_lib})")
-            print(f"          {fp}")
-            print(f"       →  {actual_new}")
-
-            # Move siblings (.nfo, .srt, etc., same basename prefix)
-            src_dir = os.path.dirname(fp)
-            base_no_ext = os.path.splitext(fp)[0]
-            new_base_no_ext = os.path.splitext(actual_new)[0]
-            okls, listing = my_plex_file_operation('LIST_DIR', src_dir, PLEX_DB_REMOTE_HOST, maxdepth=1)
-            if okls and listing:
-                for sib in listing:
-                    if sib == fp or sib == actual_new:
-                        continue
-                    if sib.startswith(base_no_ext + '.'):
-                        sib_ext = sib[len(base_no_ext):]
-                        sib_new = new_base_no_ext + sib_ext
-                        ok_sib, _ = my_plex_file_operation('MOVE', sib, PLEX_DB_REMOTE_HOST, dest_path=sib_new)
-                        if ok_sib:
-                            print(f"          + sibling: {os.path.basename(sib)} → {os.path.basename(sib_new)}")
-                            if sib in PLEX_Media.OBJ_BY_FILEPATH:
-                                PLEX_Media.OBJ_BY_FILEPATH[sib_new] = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
-                        else:
-                            print(f"          ! sibling move failed: {sib}")
+                # Move siblings (.nfo, .srt, etc., same basename prefix) —
+                # Episode-only path; Movies took the whole-wrapper branch above.
+                src_dir = os.path.dirname(fp)
+                base_no_ext = os.path.splitext(fp)[0]
+                new_base_no_ext = os.path.splitext(actual_new)[0]
+                okls, listing = my_plex_file_operation('LIST_DIR', src_dir, PLEX_DB_REMOTE_HOST, maxdepth=1)
+                if okls and listing:
+                    for sib in listing:
+                        if sib == fp or sib == actual_new:
+                            continue
+                        if sib.startswith(base_no_ext + '.'):
+                            sib_ext = sib[len(base_no_ext):]
+                            sib_new = new_base_no_ext + sib_ext
+                            ok_sib, _ = my_plex_file_operation('MOVE', sib, PLEX_DB_REMOTE_HOST, dest_path=sib_new)
+                            if ok_sib:
+                                print(f"          + sibling: {os.path.basename(sib)} → {os.path.basename(sib_new)}")
+                                if sib in PLEX_Media.OBJ_BY_FILEPATH:
+                                    PLEX_Media.OBJ_BY_FILEPATH[sib_new] = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
+                            else:
+                                print(f"          ! sibling move failed: {sib}")
 
         if item_failed:
             n_errors += 1
