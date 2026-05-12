@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.20"
+SCRIPT_VERSION = "v1.21"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -5655,20 +5655,15 @@ def cmd_original_languages(target=None, dry_run=False):
     return (n_ok, n_fail, 0)
 
 
-_PLEX_DB_KNOWN_FILES_CACHE = None  # session-local memo for query_plex_database('SELECT file FROM media_parts')
+_PLEX_DB_KNOWN_FILES_CACHE = None  # session-local memo
 
-def _get_known_filepaths_from_plex_db(force_refresh=False):
-    """One-shot fetch of every non-deleted file path Plex knows about (media_parts.file).
 
-    Cached for the session — first call costs one sqlite3 query (~50ms for
-    10K rows); subsequent calls are free.  `force_refresh=True` clears the
-    memo (used by tests / when the user explicitly re-runs after a Plex scan).
-
-    Returns: set[str] of absolute file paths Plex has indexed.
+def _compute_known_filepaths_from_plex_db_live():
+    """LIVE query of Plex DB media_parts.  Always hits SQLite (via SSH if
+    PLEX_DB_REMOTE_HOST is set).  Invoked by `--update-cache` to persist
+    into the cache pickle; non-update commands must use
+    `_get_known_filepaths_from_plex_db()` instead.
     """
-    global _PLEX_DB_KNOWN_FILES_CACHE
-    if _PLEX_DB_KNOWN_FILES_CACHE is not None and not force_refresh:
-        return _PLEX_DB_KNOWN_FILES_CACHE
     rows = query_plex_database(
         "SELECT file FROM media_parts WHERE deleted_at IS NULL AND file IS NOT NULL"
     )
@@ -5678,9 +5673,38 @@ def _get_known_filepaths_from_plex_db(force_refresh=False):
             fp = row[0] if isinstance(row, (list, tuple)) else row
             if fp:
                 paths.add(str(fp))
-    _PLEX_DB_KNOWN_FILES_CACHE = paths
     if DBG:
-        print(f"{DBGPFX}_get_known_filepaths_from_plex_db: cached {len(paths)} indexed paths from media_parts")
+        print(f"{DBGPFX}_compute_known_filepaths_from_plex_db_live: {len(paths)} indexed paths")
+    return paths
+
+
+def _get_known_filepaths_from_plex_db(force_refresh=False):
+    """Cache-first reader for the set of paths Plex DB has a media_part for.
+
+    Prefers `CACHE['plex_known_filepaths']` (persisted by --update-cache).
+    Falls back to live DB query only when the cache is empty AND we're
+    not in --offline mode.  CACHE FIRST principle compliance.
+    """
+    global _PLEX_DB_KNOWN_FILES_CACHE
+    if _PLEX_DB_KNOWN_FILES_CACHE is not None and not force_refresh:
+        return _PLEX_DB_KNOWN_FILES_CACHE
+    cached = CACHE.get('plex_known_filepaths')
+    if cached and not force_refresh:
+        # Stored as a sorted list to keep the pickle deterministic — load as a set.
+        paths = set(cached) if not isinstance(cached, set) else cached
+        _PLEX_DB_KNOWN_FILES_CACHE = paths
+        if DBG:
+            print(f"{DBGPFX}_get_known_filepaths_from_plex_db: loaded {len(paths)} paths from CACHE['plex_known_filepaths']")
+        return paths
+    if OFFLINE:
+        if VRB:
+            print("WARNING: --unrecognized / --alien needs CACHE['plex_known_filepaths'] "
+                  "but it's empty and --offline forbids live DB access.  Run "
+                  "`my-plex --update-cache` once (without --offline) to populate it.")
+        _PLEX_DB_KNOWN_FILES_CACHE = set()
+        return set()
+    paths = _compute_known_filepaths_from_plex_db_live()
+    _PLEX_DB_KNOWN_FILES_CACHE = paths
     return paths
 
 
@@ -5785,24 +5809,21 @@ def _classify_layout(entry_path, kind, remote_host=None):
 _LAYOUT_INDEX_CACHE = None   # session memo: {lib_rootpath: {entry_basename: layout}}
 
 
-def _build_layout_index(force_refresh=False):
-    """Walk every cached library rootpath and classify each top-level entry.
+def _compute_layout_index_live():
+    """LIVE computation of the per-library top-level layout index via SSH find.
 
-    Returns a nested dict for fast filepath→layout lookup:
-        { '/Volumes/2/watch.v/,unsorted': {'tais.toi.(2003)...[reencode]': 'movie',
-                                            'about.a.boy.s01e12...': 'series',
-                                            ...},
-          '/Volumes/2/watch.v/movies.fr':  {...},
+    Always hits the network — runs ONE bulk `find -maxdepth 2 -type d/f`
+    per library rootpath, then classifies each top-level entry in Python.
+    Avoids the N×M SSH-per-dir blow-up.
+
+    This is invoked by `--update-cache` to persist the index into the
+    cache pickle.  Non-update commands should call `_build_layout_index()`
+    instead, which prefers the cached value (so `--offline` works).
+
+    Returns the same nested dict shape as `_build_layout_index`:
+        { '/Volumes/2/watch.v/,unsorted': {entry_basename: 'movie'/'series'/...},
           ... }
-    Session-memoised; pass force_refresh=True to rebuild.
-
-    Performance: one bulk `find -maxdepth 2 -mindepth 1` per library
-    rootpath, then classification happens in Python from the listing.
-    Avoids the N×M SSH-per-top-level-dir blow-up.
     """
-    global _LAYOUT_INDEX_CACHE
-    if _LAYOUT_INDEX_CACHE is not None and not force_refresh:
-        return _LAYOUT_INDEX_CACHE
     locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
     remote = PLEX_DB_REMOTE_HOST
     index = {}
@@ -5883,10 +5904,45 @@ def _build_layout_index(force_refresh=False):
                 else:
                     lib_idx[f] = 'unknown'
             index[rp_norm] = lib_idx
-    _LAYOUT_INDEX_CACHE = index
     if DBG:
         n_total = sum(len(v) for v in index.values())
-        print(f"{DBGPFX}_build_layout_index: classified {n_total} top-level entries across {len(index)} rootpaths")
+        print(f"{DBGPFX}_compute_layout_index_live: classified {n_total} top-level entries across {len(index)} rootpaths")
+    return index
+
+
+def _build_layout_index(force_refresh=False):
+    """Cache-first layout-index reader.  Returns the same nested dict as
+    `_compute_layout_index_live()` but prefers the value persisted in
+    `CACHE['layout_index']` by `--update-cache`.  Falls back to live
+    computation only when:
+      - the cache has no layout_index (e.g. user hasn't run --update-cache
+        since this feature shipped), AND
+      - we're NOT in --offline mode
+
+    Honours the project's CACHE FIRST principle: non-update commands
+    must work entirely from the cache pickle in --offline mode.
+    """
+    global _LAYOUT_INDEX_CACHE
+    if _LAYOUT_INDEX_CACHE is not None and not force_refresh:
+        return _LAYOUT_INDEX_CACHE
+    # First preference: persisted in cache (works with --offline).
+    cached = CACHE.get('layout_index')
+    if cached and not force_refresh:
+        _LAYOUT_INDEX_CACHE = cached
+        if DBG:
+            n_total = sum(len(v) for v in cached.values())
+            print(f"{DBGPFX}_build_layout_index: loaded {n_total} entries from CACHE['layout_index']")
+        return cached
+    # Cache miss → compute live, but only if we're allowed to hit the network.
+    if OFFLINE:
+        if VRB:
+            print("WARNING: layout: filter needs CACHE['layout_index'] but it's empty "
+                  "and --offline forbids live SSH.  Run `my-plex --update-cache` once "
+                  "(without --offline) to populate it.")
+        _LAYOUT_INDEX_CACHE = {}
+        return {}
+    index = _compute_layout_index_live()
+    _LAYOUT_INDEX_CACHE = index
     return index
 
 
@@ -14415,9 +14471,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         else:
             _problems_cache = CACHE.get('problems')
 
-        # Save all rebuilt/cleaned structures to cache (including problem counts)
+        # v1.21: persist the layout-index + plex_known_filepaths into the
+        # cache pickle so non-update commands (--unrecognized, layout: filter)
+        # work entirely offline.  CACHE FIRST principle.
+        try:
+            _layout_idx_live = _compute_layout_index_live()
+        except Exception as _e:
+            if VRB: print(f"WARNING: layout_index live build failed: {_e}")
+            _layout_idx_live = CACHE.get('layout_index') or {}
+        try:
+            _known_paths_live = sorted(_compute_known_filepaths_from_plex_db_live())
+        except Exception as _e:
+            if VRB: print(f"WARNING: plex_known_filepaths live build failed: {_e}")
+            _known_paths_live = sorted(CACHE.get('plex_known_filepaths') or [])
+
+        # Save all rebuilt/cleaned structures to cache (including problem counts
+        # and the v1.21 offline-friendly indices for layout: / --unrecognized).
         update_and_save_cache(build_media_cache_dict(plex_labels_index=plex_labels_index,
-                                                     problems=_problems_cache))
+                                                     problems=_problems_cache,
+                                                     layout_index=_layout_idx_live,
+                                                     plex_known_filepaths=_known_paths_live))
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
