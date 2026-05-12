@@ -19846,6 +19846,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if no_audio_language and FORMAT in ('tsv_labeled', 'tsv'):
                 saved_format = FORMAT
                 FORMAT = '{ID}\t{LIBRARY}\t{TITLE}\t{VERSION}\t{FILE}'
+                if VRB:
+                    # Column header for the overridden format above.
+                    print("ID\tLIBRARY\tTITLE\tVERSION\tFILE")
 
             for key in obj_keys: PLEX_Media.print_OBJ_BY_ID( key )
 
