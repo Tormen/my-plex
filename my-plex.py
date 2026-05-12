@@ -17396,6 +17396,71 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         sub = sub_expr.strip()
 
+        # v2.11: --<flag> problem/listing tokens — promoted from CLI commands
+        # so they combine with AND / OR / NOT / parens.  Checked FIRST so the
+        # field-regex early-exit at the bottom of this function doesn't
+        # swallow them.  Keeping the leading `--` means bare 'unmatched'
+        # remains a title search; only the explicit `--unmatched` is a filter.
+        if sub.startswith('--'):
+            if sub == '--unmatched':
+                def _unmatched_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Series'):
+                        return False
+                    g = obj.get('guid') or ''
+                    if not g:
+                        return True
+                    if g.startswith('local://'):
+                        return True
+                    if obj.get('type') == 'Series' and not (obj.get('external_ids') or {}):
+                        return True
+                    return False
+                return '--unmatched', _unmatched_fn
+            if sub in ('--no-audio-language', '--no-language'):
+                def _nal_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        return False
+                    al = obj.get('audio_languages', []) or []
+                    return (not al) or all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al)
+                return '--no-audio-language', _nal_fn
+            if sub == '--no-plex-audio-language':
+                def _npal_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        return False
+                    al = obj.get('audio_languages_plex')
+                    if al is None:
+                        al = obj.get('audio_languages', []) or []
+                    return (not al) or all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al)
+                return '--no-plex-audio-language', _npal_fn
+            if sub == '--broken':
+                def _broken_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        return False
+                    plex_duration = obj.get('duration') or 0
+                    for fi2 in (obj.get('files', {}) or {}).values():
+                        if _get_broken_reason(fi2, plex_duration):
+                            return True
+                    return False
+                return '--broken', _broken_fn
+            if sub == '--reencode':
+                def _reenc_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        return False
+                    return _classify_migration_action(obj).get('action') == 'reencode'
+                return '--reencode', _reenc_fn
+            if sub == '--remux':
+                def _remux_fn(obj, fi):
+                    if obj.get('type') not in ('Movie', 'Episode'):
+                        return False
+                    return _classify_migration_action(obj).get('action') == 'remux'
+                return '--remux', _remux_fn
+            if sub == '--unsorted':
+                def _unsorted_fn(obj, fi):
+                    if obj.get('type') != 'Series':
+                        return False
+                    lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj.get('library', ''), '')
+                    return lib_type == 'Movie'
+                return '--unsorted', _unsorted_fn
+
         # --- Display-only column: +field — adds column, no filtering ---
         if sub.startswith('+'):
             _display_field = sub[1:].strip().lower()
@@ -24794,6 +24859,17 @@ _SCOPE_FILTER_FIELDS = (
     'writer', 'writers', 'actor', 'actors', 'title', 'originaltitle',
     'type', 'layout', 'library',
 )
+# Problem/listing tokens.  Same spellings as their CLI commands — the leading
+# `--` is the marker that distinguishes them from title searches.  Promoted
+# into the compound-filter grammar so AND / OR / NOT / parens combine them.
+# Plain `unmatched` (no dashes) stays a title search, never a filter atom.
+_SCOPE_FILTER_BARE_TOKENS = frozenset({
+    '--unmatched',
+    '--no-audio-language', '--no-language',
+    '--no-plex-audio-language',
+    '--broken',
+    '--reencode', '--remux', '--unsorted',
+})
 _SCOPE_FILTER_RE = re.compile(
     r'^(?P<field>' + '|'.join(_SCOPE_FILTER_FIELDS) + r')'
     r'(?P<op>[<>]=?|[:=!~]=?)(?P<val>.+)$',
@@ -24823,6 +24899,8 @@ def _is_scope_filter_token(token):
     if re.search(r'\bAND\b|\bOR\b|\bNOT\b', token):
         return True
     if '(' in token or ')' in token:
+        return True
+    if token in _SCOPE_FILTER_BARE_TOKENS:
         return True
     return bool(_SCOPE_FILTER_RE.match(token.strip()))
 
@@ -31206,6 +31284,19 @@ def main():
     # title-search instead.  Lets users search for titles like 'lib5'
     # or 'lib8' by saying e.g. `library:lib3 lib5`.
     _explicit_library_used = any(re.match(r'^library:.+', _a, re.IGNORECASE) for _a in sys.argv[1:])
+    # v2.11: when AND / OR / NOT / parens appear anywhere in argv, promote
+    # the matching --<flag> listing commands (e.g. `--unmatched`,
+    # `--no-audio-language`, `--broken`) into compound-filter atoms instead
+    # of letting argparse consume them as standalone listing flags.  This
+    # is what makes `--unmatched AND --no-audio-language` work.
+    _COMPOUND_PROMOTABLE_FLAGS = frozenset({
+        '--unmatched',
+        '--no-audio-language', '--no-language',
+        '--no-plex-audio-language',
+        '--broken',
+        '--reencode', '--remux', '--unsorted',
+    })
+    _has_compound_ops = any(a in ('AND', 'OR', 'NOT', '(', ')') for a in sys.argv[1:])
     _paren_depth = 0   # tracked through the argv loop to know "inside compound expression"
     # Variadic flags whose following positional args MUST pass through to argparse
     # unchanged (otherwise tokens like `original_lang:fr` get rewritten into a
@@ -31238,7 +31329,12 @@ def main():
         # Variadic-flag window: tokens following --mv / --add-label / ... are
         # consumed by the flag itself.  Pass them through verbatim so argparse
         # sees them as the flag's positional args, not as global filter tokens.
-        if _prev_arg in _VARIADIC_SCOPE_FLAGS:
+        # v2.11: do NOT open a variadic window when the previous flag was
+        # promoted to a compound-filter atom (e.g. `--unmatched AND ...`) —
+        # the promoted flag isn't consuming positionals, the AND/OR operator
+        # is the next real token.
+        if (_prev_arg in _VARIADIC_SCOPE_FLAGS
+                and not (_has_compound_ops and _prev_arg in _COMPOUND_PROMOTABLE_FLAGS)):
             _in_variadic_window = True
         if _in_variadic_window:
             if arg.startswith('-') and arg != '--':
@@ -31299,6 +31395,18 @@ def main():
             if DBG: print(f" ~~~ Shortcut '{arg}' → --type {_type_val}", file=sys.stderr)
             _i += 1
             continue
+        # v2.11: promote --<flag> listing commands to compound-filter atoms.
+        # Only when an AND/OR/NOT/() is present somewhere in argv — otherwise
+        # the user wants the plain CLI behaviour of that flag.  This keeps
+        # `my-plex --unmatched` working as-is and adds `--unmatched AND
+        # --no-audio-language` as a compound expression.
+        if _has_compound_ops and arg in _COMPOUND_PROMOTABLE_FLAGS:
+            _filter_exprs.append(arg)
+            _translations.append((arg, f"--list atom: {arg}"))
+            if DBG: print(f" ~~~ Compound-mode promotion: {arg} → filter atom", file=sys.stderr)
+            _i += 1
+            continue
+
         # v2.1: filter-expression OPERATORS as standalone CLI tokens.  Pass
         # through to _filter_exprs in original order so the compound parser
         # in _resolve_scope_filter_expr / _list_filtered sees them.  `(` and
