@@ -6315,12 +6315,33 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 print(f"  (dedup: {keys} share wrapper {src!r} — single mv)")
         else:
             conflicts.append((src, group))
+    # Track silent dedupes too (same src + same dst → kept one but lost the
+    # rest) so the user can see when conflict resolution narrowed things down.
+    dedupes = [(src, group) for src, group in _by_src.items()
+               if len(group) > 1 and len({e[3] for e in group}) == 1]
+    if dedupes:
+        print(f"\nℹ {len(dedupes)} wrapper(s) had multiple items mapped to the SAME target — kept one rename per wrapper:")
+        for src, group in dedupes:
+            keys = ', '.join(e[0] for e in group)
+            print(f"    {src}")
+            print(f"      collapsed {keys}  →  {group[0][3]}")
     if conflicts:
         print(f"\n⚠ {len(conflicts)} conflict(s): wrapper holds multiple matched items with DIFFERENT target names — skipping (you'll have to split or rename manually):")
         for src, group in conflicts:
             print(f"    {src}")
             for key, _obj, _src, dst, year, _tmdb in group:
                 print(f"      {key:<18} {year}  → {dst}")
+    if skipped:
+        # Per-item skips emitted earlier (no candidates / user 's' / user 'q'
+        # before reaching this item / already-canonical).  Surface a summary
+        # so the user knows what didn't make it into the queue.
+        _by_reason = {}
+        for key, reason in skipped:
+            _by_reason.setdefault(reason, []).append(key)
+        print(f"\nℹ {len(skipped)} item(s) skipped during picker:")
+        for reason, keys in _by_reason.items():
+            sample = ', '.join(keys[:5]) + (f", … (+{len(keys)-5} more)" if len(keys) > 5 else '')
+            print(f"    {reason}: {sample}")
     rename_queue = deduped_queue
     if not rename_queue:
         print(f"\nNothing to rename after conflict pruning. Bye.")
@@ -6346,13 +6367,18 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # consecutive lines (SRC then DEST, both absolute paths).  Lines
         # starting with '#' are ignored.  Delete a SRC+DEST pair to skip
         # that rename; edit DEST to change the target.
+        # Prompt accepts single letters (y/n/e) or full words (yes/no/edit);
+        # case-insensitive; default on EOF/Ctrl-C is no.
         while True:
             try:
-                confirm = input(f"Execute {len(rename_queue)} rename(s) via SSH? [yes/no/edit] ").strip().lower()
+                confirm = input(f"Execute {len(rename_queue)} rename(s) via SSH? [Y(es) / N(o) / E(dit)] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 confirm = 'no'
             if confirm in ('y', 'yes'):
                 break
+            if confirm in ('n', 'no'):
+                print("Aborted.")
+                return
             if confirm in ('e', 'edit'):
                 import tempfile, subprocess as _sp
                 editor = EDITOR or os.environ.get('EDITOR') or 'vim'
@@ -6393,8 +6419,9 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 rename_queue = new_queue
                 _print_queue(rename_queue)
                 continue
-            print("Aborted.")
-            return
+            # Unrecognised input — re-prompt rather than silently abort.
+            print(f"  (didn't understand {confirm!r} — please answer y / n / e)")
+            continue
 
     # Build a single bulk SSH command of MV statements, separated by `;`.
     # ControlMaster multiplexing keeps this to one connection.
