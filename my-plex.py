@@ -16944,25 +16944,38 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return _n in langs
             return label_str, _lang_fn
 
-        # --- Type (Plex media type: type:movie / type:series / type:show / type:episode) ---
+        # --- Type (Plex media type: type:movie / type:series / type:show / type:episode / type:season) ---
         # In the universal-scope pipeline, action commands (--mv, --remux, ...)
-        # only enumerate file-owning items, so `type:series` matches Episode
-        # objects (the Series and Season parents have no files of their own).
-        # For --list, the Cat-A `type:` token translates to `--type` before
-        # argparse so --list keeps its existing parent-row rendering.
+        # only enumerate file-owning items.  Series, Season, and Collection
+        # parents have NO files of their own — moving / re-encoding "a season"
+        # really means moving / re-encoding its episodes.  Therefore every
+        # non-Movie type alias resolves to Episode in this pipeline:
+        #
+        #   type:movie / type:film               → Movie
+        #   type:series / type:show / type:tv    → Episode (all of them)
+        #   type:episode                         → Episode
+        #   type:season                          → Episode (every episode that
+        #                                          belongs to any Season)
+        #
+        # For --list display-layer use cases that want Season / Series PARENT
+        # rows, use the existing Cat-A `--type` flag (which renders parents
+        # via PLEX_Media.list() rollup) — outside variadic windows, Cat-A
+        # `type:series` still translates to `--type series` for --list.
         if field == 'type':
             needle = val.lower().strip()
-            _SERIES_ALIASES = {'series', 'show', 'shows', 'tv', 'tvshow', 'tvshows'}
             _MOVIE_ALIASES  = {'movie', 'movies', 'film', 'films'}
-            _EPISODE_ALIASES = {'episode', 'episodes', 'ep', 'eps'}
-            _SEASON_ALIASES  = {'season', 'seasons'}
+            _NONMOVIE_ALIASES = {  # everything in the series hierarchy → Episode in action context
+                'series', 'show', 'shows', 'tv', 'tvshow', 'tvshows',
+                'episode', 'episodes', 'ep', 'eps',
+                'season', 'seasons',
+            }
             if needle in _MOVIE_ALIASES:
                 target_types = {'Movie', 'Movie*'}
-            elif needle in _SERIES_ALIASES or needle in _EPISODE_ALIASES:
+            elif needle in _NONMOVIE_ALIASES:
                 target_types = {'Episode', 'Episode*'}
-            elif needle in _SEASON_ALIASES:
-                target_types = {'Season', 'Season*'}
             else:
+                # Unknown alias — match the literal capitalised form (allows
+                # forward-compatible types like 'Collection' if ever exposed).
                 target_types = {needle.title(), needle.title() + '*'}
             label_str = f"type:{needle}"
             def _type_fn(obj, fi, _t=target_types):
@@ -21474,7 +21487,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("                            # originally-English series in ,unsorted")
             print()
             print("  Filter tokens accepted (same syntax as --list):")
-            print("    type:movie / type:series / type:show / type:episode  (v1.10)")
+            print("    type:movie  /  type:series / type:show / type:tv /")
+            print("    type:episode / type:season   (v1.10 — all non-movie aliases →")
+            print("                                  Episodes in action context)")
             print("    lang:fr / original_lang:fr / country:france / year>2020 /")
             print("    bitrate>2 / resolution:1080p / codec:h265 / size>1gb /")
             print("    duration>2h / rating>7 / genre:comedy / director:scorsese / etc.")

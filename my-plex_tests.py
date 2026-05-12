@@ -8330,12 +8330,18 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("'type'", body, "_SCOPE_FILTER_FIELDS must include 'type'")
 
     def test_type_filter_handler_in_parser(self):
-        """_parse_filter_sub_expr must handle type:movie / type:series / type:episode."""
+        """_parse_filter_sub_expr must handle type:movie / type:series / type:episode / type:season."""
         src = self._read_script()
         self.assertIn("if field == 'type':", src)
-        self.assertIn("_SERIES_ALIASES", src)
         self.assertIn("_MOVIE_ALIASES", src)
-        self.assertIn("_EPISODE_ALIASES", src)
+        self.assertIn("_NONMOVIE_ALIASES", src)
+        # All series-hierarchy aliases must resolve to Episode in the action pipeline
+        import re
+        m = re.search(r'_NONMOVIE_ALIASES = \{(.*?)\}', src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find _NONMOVIE_ALIASES set")
+        body = m.group(1)
+        for alias in ("'series'", "'show'", "'tv'", "'episode'", "'season'"):
+            self.assertIn(alias, body, f"_NONMOVIE_ALIASES must include {alias}")
 
     def test_type_filter_in_field_regex(self):
         """The _field_re regex inside _parse_filter_sub_expr must include 'type'."""
