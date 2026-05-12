@@ -27992,130 +27992,153 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
     if not lib:
         return result
 
-    # Get cached item IDs for this library
+    # Build cache-side index keyed by ratingKey (int) — robust against
+    # missing/null season/episode index fields (common for niche content).
+    # Series objects → cached_ids (Series-level membership).
+    # Season/Episode objects → cached_series[series_title]['season_ids'/'episode_ids'].
     cached_ids = set()
-    cached_series = {}  # For Series libraries: series_title -> {seasons: set, episodes: set}
+    cached_series = {}  # series_title -> {'season_ids': set(int), 'episode_ids': set(int)}
+
+    def _rk(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
 
     if len(PLEX_Media.OBJ_BY_ID) > 0:
         for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
-            if obj.get('library') == lib_name:
-                cached_ids.add(obj_id)
+            if obj.get('library') != lib_name:
+                continue
+            rk = _rk(obj.get('id'))
+            if rk is not None:
+                cached_ids.add(rk)
+            if lib_type == 'Series':
+                obj_type = obj.get('type')
+                if obj_type == 'Series':
+                    series_title = obj.get('title', '')
+                    cached_series.setdefault(series_title, {'season_ids': set(), 'episode_ids': set()})
+                elif obj_type == 'Season':
+                    series_title = obj.get('series') or obj.get('show') or ''
+                    bucket = cached_series.setdefault(series_title, {'season_ids': set(), 'episode_ids': set()})
+                    if rk is not None:
+                        bucket['season_ids'].add(rk)
+                elif obj_type == 'Episode':
+                    series_title = obj.get('series') or obj.get('show') or ''
+                    bucket = cached_series.setdefault(series_title, {'season_ids': set(), 'episode_ids': set()})
+                    if rk is not None:
+                        bucket['episode_ids'].add(rk)
 
-                # For Series libraries, track shows/seasons/episodes
-                if lib_type == 'Series':
-                    obj_type = obj.get('type')
-                    if obj_type == 'Series':
-                        series_title = obj.get('title', '')
-                        if series_title not in cached_series:
-                            cached_series[series_title] = {'seasons': set(), 'episodes': set()}
-                    elif obj_type == 'Season':
-                        series_title = obj.get('show', '')
-                        season_num = obj.get('index', 0)
-                        if series_title not in cached_series:
-                            cached_series[series_title] = {'seasons': set(), 'episodes': set()}
-                        cached_series[series_title]['seasons'].add(season_num)
-                    elif obj_type == 'Episode':
-                        series_title = obj.get('show', '')
-                        episode_key = f"S{obj.get('season_index', 0)}E{obj.get('index', 0)}"
-                        if series_title not in cached_series:
-                            cached_series[series_title] = {'seasons': set(), 'episodes': set()}
-                        cached_series[series_title]['episodes'].add(episode_key)
-
-    # Fetch server items and compare
+    safe_name = lib_name.replace("'", "''")
     try:
         if lib_type == 'Movie':
-            # For movies, list missing titles
-            movies = plex_retry_operation(
-                lambda: lib.all(),
-                context=f"library '{lib_name}' get all movies"
-            )
+            rows = query_plex_database(
+                f"SELECT mi.id, mi.title FROM metadata_items mi "
+                f"JOIN library_sections ls ON mi.library_section_id = ls.id "
+                f"WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 "
+                f"AND mi.deleted_at IS NULL",
+                mode='rows') or []
             server_movie_ids = set()
             server_movie_titles = set()
-            for movie in movies:
-                server_movie_ids.add(movie.ratingKey)
-                server_movie_titles.add(movie.title)
-                if movie.ratingKey not in cached_ids:
-                    result['missing_from_cache'].append(movie.title)
+            for row in rows:
+                rk = int(row[0])
+                title = row[1] or ''
+                server_movie_ids.add(rk)
+                server_movie_titles.add(title)
+                if rk not in cached_ids:
+                    result['missing_from_cache'].append(title)
 
-            # Find movies in cache that are no longer on server (deleted)
-            # Check both by ID and by title to avoid false positives from re-scans
             for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
                 if obj.get('library') == lib_name and obj.get('type') == 'Movie':
                     movie_title = obj.get('title', f'ID:{obj_id}')
-                    # Only mark as deleted if BOTH the ID is missing AND the title doesn't exist on server
-                    if obj_id not in server_movie_ids and movie_title not in server_movie_titles:
+                    try:
+                        rk = int(obj.get('id', 0))
+                    except (TypeError, ValueError):
+                        rk = 0
+                    if rk not in server_movie_ids and movie_title not in server_movie_titles:
                         result['deleted_from_server'].append(movie_title)
 
         elif lib_type == 'Series':
-            # For series, check for missing series, seasons, or episodes
-            all_series_objs = plex_retry_operation(
-                lambda: lib.all(),
-                context=f"library '{lib_name}' get all series"
-            )
-
+            # One Series row per show.
+            series_rows = query_plex_database(
+                f"SELECT mi.id, mi.title FROM metadata_items mi "
+                f"JOIN library_sections ls ON mi.library_section_id = ls.id "
+                f"WHERE ls.name = '{safe_name}' AND mi.metadata_type = 2 "
+                f"AND mi.deleted_at IS NULL",
+                mode='rows') or []
             server_series_ids = set()
             server_series_titles = set()
+            # series_id → {'title': str, 'season_ids': set(int), 'episode_ids': set(int)}
+            server_series = {}
+            for row in series_rows:
+                sid = int(row[0])
+                stitle = row[1] or ''
+                server_series_ids.add(sid)
+                server_series_titles.add(stitle)
+                server_series[sid] = {'title': stitle, 'season_ids': set(), 'episode_ids': set()}
+
+            # season.id → series_id  (for routing episodes back to their show)
+            season_to_series = {}
+            season_rows = query_plex_database(
+                f"SELECT s.id, s.parent_id FROM metadata_items s "
+                f"JOIN library_sections ls ON s.library_section_id = ls.id "
+                f"WHERE ls.name = '{safe_name}' AND s.metadata_type = 3 "
+                f"AND s.deleted_at IS NULL",
+                mode='rows') or []
+            for row in season_rows:
+                season_id = int(row[0])
+                series_id = int(row[1]) if row[1] is not None else None
+                season_to_series[season_id] = series_id
+                if series_id in server_series:
+                    server_series[series_id]['season_ids'].add(season_id)
+
+            if deep_episode_check:
+                episode_rows = query_plex_database(
+                    f"SELECT ep.id, ep.parent_id FROM metadata_items ep "
+                    f"JOIN library_sections ls ON ep.library_section_id = ls.id "
+                    f"WHERE ls.name = '{safe_name}' AND ep.metadata_type = 4 "
+                    f"AND ep.deleted_at IS NULL",
+                    mode='rows') or []
+                for row in episode_rows:
+                    ep_id = int(row[0])
+                    season_id = int(row[1]) if row[1] is not None else None
+                    series_id = season_to_series.get(season_id)
+                    if series_id in server_series:
+                        server_series[series_id]['episode_ids'].add(ep_id)
+
             series_with_missing_content = []
-
-            for series_obj in all_series_objs:
-                series_title = series_obj.title
-                server_series_ids.add(series_obj.ratingKey)
-                server_series_titles.add(series_title)
-
-                # Check if series exists in cache (by ID first, then by title)
-                if series_obj.ratingKey not in cached_ids:
-                    # Series ID not in cache, but check if a series with same title exists
-                    if series_title not in cached_series:
-                        # Completely new series
-                        result['missing_from_cache'].append(series_title)
+            for sid, srv in server_series.items():
+                stitle = srv['title']
+                if sid not in cached_ids:
+                    if stitle not in cached_series:
+                        result['missing_from_cache'].append(stitle)
                         continue
-                    # else: Series exists by title but with different ID (re-scanned), treat as ID mismatch
-
-                # Series exists (either by ID or title), check seasons and episodes
-                try:
-                    seasons = series_obj.seasons()
-                    server_season_nums = set(s.index for s in seasons)
-
-                    # Get cached seasons/episodes for this series (may be empty)
-                    cached_season_nums = cached_series.get(series_title, {}).get('seasons', set())
-                    cached_episode_keys = cached_series.get(series_title, {}).get('episodes', set())
-
-                    missing_seasons = server_season_nums - cached_season_nums
-
-                    # Count missing episodes (only if deep_episode_check is enabled)
-                    missing_episode_count = 0
+                    # Series re-scanned with new ratingKey but same title — fall through
+                bucket = cached_series.get(stitle, {'season_ids': set(), 'episode_ids': set()})
+                missing_season_ids = srv['season_ids'] - bucket['season_ids']
+                missing_episode_count = 0
+                if deep_episode_check:
+                    missing_episode_count = len(srv['episode_ids'] - bucket['episode_ids'])
+                if missing_season_ids or (deep_episode_check and missing_episode_count > 0):
+                    result['missing_seasons'] += len(missing_season_ids)
                     if deep_episode_check:
-                        # SLOW: Fetch and count every episode
-                        for season in seasons:
-                            for episode in season.episodes():
-                                episode_key = f"S{season.index}E{episode.index}"
-                                if episode_key not in cached_episode_keys:
-                                    missing_episode_count += 1
-                    # else: Skip episode counting for speed (episodes will be 0 in result)
+                        result['missing_episodes'] += missing_episode_count
+                    series_with_missing_content.append({
+                        'title': stitle,
+                        'missing_seasons': len(missing_season_ids),
+                        'missing_episodes': missing_episode_count,
+                    })
 
-                    if missing_seasons or (deep_episode_check and missing_episode_count > 0):
-                        result['missing_seasons'] += len(missing_seasons)
-                        if deep_episode_check:
-                            result['missing_episodes'] += missing_episode_count
-                        series_with_missing_content.append({
-                            'title': series_title,
-                            'missing_seasons': len(missing_seasons),
-                            'missing_episodes': missing_episode_count
-                        })
-                except Exception:
-                    pass
-
-            # Add series with missing content to the result
             if series_with_missing_content:
                 result['missing_from_cache'].extend(series_with_missing_content)
 
-            # Find series in cache that are no longer on server (deleted)
-            # Check both by ID and by title to avoid false positives from re-scans
             for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
                 if obj.get('library') == lib_name and obj.get('type') == 'Series':
                     series_title = obj.get('title', f'ID:{obj_id}')
-                    # Only mark as deleted if BOTH the ID is missing AND the title doesn't exist on server
-                    if obj_id not in server_series_ids and series_title not in server_series_titles:
+                    try:
+                        rk = int(obj.get('id', 0))
+                    except (TypeError, ValueError):
+                        rk = 0
+                    if rk not in server_series_ids and series_title not in server_series_titles:
                         result['deleted_from_server'].append(series_title)
 
     except Exception as e:
