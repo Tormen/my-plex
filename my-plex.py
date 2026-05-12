@@ -19845,10 +19845,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             saved_format = None
             if no_audio_language and FORMAT in ('tsv_labeled', 'tsv'):
                 saved_format = FORMAT
-                FORMAT = '{ID}\t{LIBRARY}\t{TITLE}\t{VERSION}\t{FILE}'
+                FORMAT = '{KEY}\t{LIBRARY}\t{TITLE}\t{VERSION}\t{FILE}'
                 if VRB:
                     # Column header for the overridden format above.
-                    print("ID\tLIBRARY\tTITLE\tVERSION\tFILE")
+                    print("KEY\tLIBRARY\tTITLE\tVERSION\tFILE")
 
             for key in obj_keys: PLEX_Media.print_OBJ_BY_ID( key )
 
@@ -19899,7 +19899,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # set all available variables in dict 'var'
         obj = PLEX_Media.OBJ_BY_ID[key]
-        var = {}
+        # KEY is the cache key (e.g. 'Episode:13291') — the canonical
+        # identifier for a Plex object across my-plex output. Use {KEY} in
+        # format strings to start every row with it.
+        var = {'KEY': key}
         label = ''
         for k, v in obj.items():
             #print(f"k={k.upper()} : v={v}'''")
