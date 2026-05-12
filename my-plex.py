@@ -18097,6 +18097,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _matched = _ep_title_re or _title_re
             needle = (_matched.group('val') if _matched else sub[1:]).strip().strip("'\"").lower()
             label = f"{'ep' if _ep_only else 'title'}~{needle}"
+            # v2.13: filename-path fallback.  Title fields never contain
+            # `.`/`_`/`-` separators; folder/file names usually do.  When the
+            # needle splits into multiple non-empty words on those separators,
+            # also try matching against PATH COMPONENTS (post-library-root) —
+            # all needle-words must appear in a SINGLE path component.
+            _needle_words = {w for w in re.split(r'[\s._\-]+', needle) if w}
+            _path_fallback = (len(_needle_words) >= 2)
             # Pre-build set of series keys whose title matches (for fast episode lookup)
             _matching_series = set()
             if not _ep_only:
@@ -18106,14 +18113,46 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _sot = (_sobj.get('originalTitle') or '').lower()
                     if needle in _st or needle in _sot:
                         _matching_series.add(_sk2)
-            def _title_fn(obj, fi, _n=needle, _ep_only=_ep_only, _ms=_matching_series):
+            def _component_match(filepath, lib_name, _nw=_needle_words):
+                if not filepath or not _nw:
+                    return False
+                rel = filepath
+                roots = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib_name, []) or []
+                for _root in roots:
+                    rn = _root.rstrip('/')
+                    if filepath.startswith(rn + '/'):
+                        rel = filepath[len(rn) + 1:]
+                        break
+                for component in rel.split('/'):
+                    cw = [w for w in re.split(r'[\s._\-]+', component.lower()) if w]
+                    # Every needle word must appear as a substring of SOME
+                    # word in this path component (so `war.einmal` matches
+                    # `es.war.einmal.das.leben`, and `einmal.leb` matches it
+                    # too because 'leb' ⊂ 'leben').
+                    if all(any(nw in word for word in cw) for nw in _nw):
+                        return True
+                return False
+            def _title_fn(obj, fi, _n=needle, _ep_only=_ep_only, _ms=_matching_series,
+                          _pf=_path_fallback, _cm=_component_match):
                 t = (obj.get('title') or '').lower()
                 ot = (obj.get('originalTitle') or '').lower()
                 if _n in t or _n in ot:
                     return True
                 # For episodes: also match parent series title (unless ep: search)
-                if not _ep_only and _ms:
-                    return obj.get('series_key', '') in _ms
+                if not _ep_only and _ms and obj.get('series_key', '') in _ms:
+                    return True
+                # NEW: path-component fallback for dotted/underscored needles.
+                if _pf:
+                    lib_name = obj.get('library', '')
+                    # Check obj['file'] (Series/Season have a dir here; Movie/Episode
+                    # have the primary file).
+                    f = obj.get('file', '')
+                    if f and _cm(f, lib_name):
+                        return True
+                    # Check every version's filepath for Movie/Episode.
+                    for _fi in (obj.get('files', {}) or {}).values():
+                        if isinstance(_fi, dict) and _cm(_fi.get('filepath', ''), lib_name):
+                            return True
                 return False
             return label, _title_fn
 
