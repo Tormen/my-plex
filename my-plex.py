@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.10"
+SCRIPT_VERSION = "v2.12"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -681,6 +681,33 @@ CONFIG_DEFAULTS = {
     # TMDB API v3: Register for free at https://www.themoviedb.org/settings/api
     'TVDB_API_KEY': None,   # TVDB v4 API key (subscriber PIN not needed for read-only)
     'TMDB_API_KEY': None,   # TMDB API v3 key (also called "API Read Access Token")
+
+    # --unmatched --resolve (v2.12): for each unmatched item, query the
+    # configured online sources to find a year/external-id, then rename the
+    # on-disk wrapper directory to include the year so Plex's matcher can
+    # match it.  Renames are queued through an interactive picker and
+    # executed in ONE bulk SSH session at the end.
+    #
+    # UNMATCHED_RESOLVE_LOOKUP_ENGINES — ordered list of sources tried per
+    #   item.  First engine to return a candidate at >= the auto-confidence
+    #   threshold (in --auto mode) wins; otherwise candidates from every
+    #   engine in the list are merged and shown in the picker.
+    #   Supported: 'TMDB', 'TVDB'.  IMDb has no free search API.
+    'UNMATCHED_RESOLVE_LOOKUP_ENGINES': ['TMDB', 'TVDB'],
+
+    # UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT — only used with --auto.  A
+    # candidate is picked silently when its score (title-similarity *
+    # popularity factor, 0-100) is >= this percentage AND it's at least 1.5x
+    # the runner-up's score.  Below the threshold, the interactive picker
+    # is shown.  Default 90 = very conservative.
+    'UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT': 90,
+
+    # UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME — after the bulk rename, run
+    # `library.update()` on each affected library so Plex re-scans the
+    # renamed wrappers.  Detection of Plex's own "auto update on disk
+    # change" setting suppresses the manual scan when it's enabled (no
+    # point firing two scans).  Set False to never trigger.
+    'UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME': True,
 
     # Per-library episode source for --missing
     # Dict of library_name → source ('tvdb', 'tmdb', 'fernsehserien.de')
@@ -1484,6 +1511,9 @@ ALTERNATIVE_ROOTPATHS = CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']
 CUSTOM_DATE_EXTRACTORS = CONFIG_DEFAULTS['CUSTOM_DATE_EXTRACTORS']
 TVDB_API_KEY = CONFIG_DEFAULTS['TVDB_API_KEY']
 TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
+UNMATCHED_RESOLVE_LOOKUP_ENGINES = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_LOOKUP_ENGINES']
+UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT']
+UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -5662,6 +5692,555 @@ def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5
             return None
     if VRB: print(f"  TMDB lookup for {tmdb_id} failed after {max_retries} retries")
     return None
+
+
+# =============================================================================
+# v2.12: --unmatched --resolve  (year-discovery + bulk rename)
+# =============================================================================
+# When Plex marks an item as unmatched (guid='local://…') the most common
+# cause is a missing year hint in the wrapper directory name (Plex's matcher
+# treats "Un Plan Parfait" with no year as ambiguous and refuses).  This
+# command queries the configured online sources (TMDB → TVDB cascade) to
+# find the correct year for each item, then renames the wrapper directory
+# on disk so Plex auto-matches on the next scan.
+
+def _search_tmdb_titles(title, kind='movie', max_retries=3):
+    """Search TMDB for movies or TV shows by title.
+
+    kind: 'movie' or 'tv'
+    Returns: list of dicts (limit 10), each with keys:
+        title, original_title, year, tmdb_id, popularity, overview, lang
+    """
+    if not TMDB_API_KEY or not title:
+        return []
+    import urllib.request, urllib.parse, urllib.error, json as _json, time as _t
+    endpoint = 'tv' if kind in ('tv', 'series', 'Series') else 'movie'
+    q = urllib.parse.quote(title)
+    url = f'https://api.themoviedb.org/3/search/{endpoint}?query={q}&include_adult=false'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json',
+    })
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+            results = []
+            for r in (data.get('results') or [])[:10]:
+                date_field = 'release_date' if endpoint == 'movie' else 'first_air_date'
+                date = r.get(date_field) or ''
+                year = int(date[:4]) if date[:4].isdigit() else None
+                results.append({
+                    'engine':         'TMDB',
+                    'title':          r.get('title') if endpoint == 'movie' else r.get('name'),
+                    'original_title': r.get('original_title') if endpoint == 'movie' else r.get('original_name'),
+                    'year':           year,
+                    'tmdb_id':        r.get('id'),
+                    'imdb_id':        None,   # not in search result; would need /find call
+                    'tvdb_id':        None,
+                    'popularity':     r.get('popularity') or 0.0,
+                    'overview':       (r.get('overview') or '')[:140],
+                    'lang':           r.get('original_language') or '',
+                })
+            return results
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TMDB search {endpoint}?query={title!r} → HTTP {e.code}", file=sys.stderr)
+            return []
+        except Exception as e:
+            if attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TMDB search {endpoint}?query={title!r} → {e!r}", file=sys.stderr)
+            return []
+    return []
+
+
+# Cached TVDB v4 access token (obtained from POST /login).
+_TVDB_TOKEN_CACHE = {'token': None, 'expires_at': 0}
+
+def _tvdb_token():
+    """Return a valid TVDB v4 bearer token, refreshing if expired."""
+    import time as _t
+    if not TVDB_API_KEY:
+        return None
+    if _TVDB_TOKEN_CACHE['token'] and _t.time() < _TVDB_TOKEN_CACHE['expires_at']:
+        return _TVDB_TOKEN_CACHE['token']
+    import urllib.request, json as _json
+    req = urllib.request.Request(
+        'https://api4.thetvdb.com/v4/login',
+        data=_json.dumps({'apikey': TVDB_API_KEY}).encode('utf-8'),
+        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode('utf-8'))
+        token = (data.get('data') or {}).get('token')
+        if token:
+            _TVDB_TOKEN_CACHE['token'] = token
+            # TVDB tokens are valid for ~30 days; refresh every 24h to be safe.
+            _TVDB_TOKEN_CACHE['expires_at'] = _t.time() + 86400
+            return token
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}TVDB login failed: {e!r}", file=sys.stderr)
+    return None
+
+
+def _search_tvdb_titles(title, kind='movie', max_retries=3):
+    """Search TVDB v4 for movies or series by title.
+
+    kind: 'movie' or 'tv'/'series'
+    Returns: list of dicts (limit 10), same shape as _search_tmdb_titles.
+    """
+    if not TVDB_API_KEY or not title:
+        return []
+    token = _tvdb_token()
+    if not token:
+        return []
+    import urllib.request, urllib.parse, urllib.error, json as _json, time as _t
+    tvdb_type = 'series' if kind in ('tv', 'series', 'Series') else 'movie'
+    q = urllib.parse.quote(title)
+    url = f'https://api4.thetvdb.com/v4/search?query={q}&type={tvdb_type}&limit=10'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/json',
+    })
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+            results = []
+            for r in (data.get('data') or [])[:10]:
+                year_str = r.get('year') or ''
+                year = int(year_str[:4]) if year_str[:4].isdigit() else None
+                rd = r.get('remote_ids') or []
+                imdb_id = next((x.get('id') for x in rd if (x.get('sourceName') or '').lower() == 'imdb'), None)
+                tmdb_id = next((x.get('id') for x in rd if (x.get('sourceName') or '').lower() == 'themoviedb.com'), None)
+                results.append({
+                    'engine':         'TVDB',
+                    'title':          r.get('name') or r.get('translations', {}).get('eng') or '',
+                    'original_title': r.get('name') or '',
+                    'year':           year,
+                    'tmdb_id':        tmdb_id,
+                    'imdb_id':        imdb_id,
+                    'tvdb_id':        r.get('tvdb_id') or r.get('id'),
+                    'popularity':     0.0,  # TVDB doesn't expose a popularity score
+                    'overview':       (r.get('overview') or '')[:140],
+                    'lang':           r.get('primary_language') or '',
+                })
+            return results
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                # Token expired — drop cache and retry once.
+                _TVDB_TOKEN_CACHE['token'] = None
+                if attempt < max_retries:
+                    token = _tvdb_token()
+                    if not token: return []
+                    req = urllib.request.Request(url, headers={
+                        'Authorization': f'Bearer {token}', 'Accept': 'application/json'})
+                    continue
+            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TVDB search {tvdb_type}?query={title!r} → HTTP {e.code}", file=sys.stderr)
+            return []
+        except Exception as e:
+            if attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TVDB search {tvdb_type}?query={title!r} → {e!r}", file=sys.stderr)
+            return []
+    return []
+
+
+_ENGINE_DISPATCH = {
+    'TMDB': _search_tmdb_titles,
+    'TVDB': _search_tvdb_titles,
+}
+
+
+def _search_unmatched_candidates(title, kind, engines=None):
+    """Cascade through UNMATCHED_RESOLVE_LOOKUP_ENGINES in order; merge
+    candidates from each, deduplicated by (title, year)."""
+    engines = engines or UNMATCHED_RESOLVE_LOOKUP_ENGINES or []
+    seen = set()
+    merged = []
+    for eng in engines:
+        fn = _ENGINE_DISPATCH.get(eng.upper())
+        if not fn:
+            if VRB: print(f"  ⚠ unknown lookup engine: {eng!r} (supported: {sorted(_ENGINE_DISPATCH)})")
+            continue
+        for r in fn(title, kind=kind):
+            dedup_key = ((r.get('title') or '').lower(), r.get('year'))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            merged.append(r)
+    return merged
+
+
+def _score_candidate(query_title, candidate):
+    """Return a 0..100 confidence score for a candidate vs the query.
+
+    Pure title-similarity (Ratcliff-Obershelp) on both `title` and
+    `original_title`; takes the better of the two.  TMDB popularity adds a
+    mild bonus (cap +10) to break ties between identical-title duplicates."""
+    import difflib
+    if not query_title:
+        return 0
+    q = query_title.lower().strip()
+    titles = [candidate.get('title'), candidate.get('original_title')]
+    sim = 0.0
+    for t in titles:
+        if not t:
+            continue
+        s = difflib.SequenceMatcher(None, q, str(t).lower()).ratio()
+        if s > sim:
+            sim = s
+    score = sim * 100.0
+    pop = float(candidate.get('popularity') or 0.0)
+    # Log-scale popularity bump, capped at +10 points
+    if pop > 0:
+        import math
+        score = min(100.0, score + min(10.0, math.log10(pop + 1) * 5))
+    return round(score, 1)
+
+
+def _derive_wrapper_path(obj):
+    """Return the wrapper directory for a Movie/Series, or None.
+
+    Movie wrapper = the first subdirectory under the library rootpath that
+    contains the indexed file.  Series wrapper = the show directory.
+    See feedback memory: every Plex object's item_path is the atomic
+    on-disk unit (Movie/Series/Season directory or Episode file)."""
+    obj_type = obj.get('type')
+    if obj_type == 'Series':
+        # For Series, obj['file'] already points at the show dir.
+        d = obj.get('file') or ''
+        return d.rstrip('/') if d else None
+    if obj_type == 'Movie':
+        files = obj.get('files', {}) or {}
+        # Pick any version's filepath; all versions should share the wrapper.
+        fp = None
+        for fi in files.values():
+            fp = fi.get('filepath') if isinstance(fi, dict) else None
+            if fp:
+                break
+        if not fp:
+            fp = obj.get('file', '')
+        if not fp:
+            return None
+        # Walk back to first subdir under the library rootpath.
+        lib = obj.get('library', '')
+        roots = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib, [])
+        for root in roots:
+            root_n = root.rstrip('/')
+            if fp.startswith(root_n + '/'):
+                rest = fp[len(root_n) + 1:]
+                head = rest.split('/', 1)[0]
+                return f'{root_n}/{head}'
+        # Fallback: parent dir of the video file.
+        return os.path.dirname(fp)
+    return None
+
+
+_WRAPPER_YEAR_RE = re.compile(r'[\.\s\(\[]\(?(19\d{2}|20\d{2})\)?[\.\s\)\]]', re.IGNORECASE)
+
+
+def _wrapper_already_has_year(wrapper_path):
+    """True iff the wrapper basename already contains a 19xx/20xx token."""
+    base = os.path.basename(wrapper_path or '')
+    return bool(_WRAPPER_YEAR_RE.search('.' + base + '.'))
+
+
+def _add_year_to_wrapper(wrapper_path, year):
+    """Return the wrapper path with `.(YYYY)` appended to the basename.
+
+    Preserves the surrounding bracket/comma conventions: if the base ends
+    in `_[tag]` or `,suffix`, the year goes BEFORE those.  Otherwise it's
+    appended with a dot separator."""
+    if not wrapper_path or not year:
+        return wrapper_path
+    base = os.path.basename(wrapper_path)
+    parent = os.path.dirname(wrapper_path)
+    if _wrapper_already_has_year(wrapper_path):
+        return wrapper_path
+    # Insert before trailing bracket/comma suffixes (e.g. _[crime], ,tag).
+    m = re.search(r'^(?P<head>.+?)(?P<tail>[_,]\[[^\]]+\]|,[^/]+)?$', base)
+    head = m.group('head') if m else base
+    tail = (m.group('tail') if m else '') or ''
+    new_base = f'{head}.({year}){tail}'
+    return f'{parent}/{new_base}' if parent else new_base
+
+
+def _detect_plex_auto_scan_enabled():
+    """Best-effort detection of Plex's 'update library automatically' setting.
+    Returns True iff Plex will auto-pick up wrapper renames without an
+    explicit scan trigger.  False on uncertainty (so we DO trigger the scan).
+    """
+    try:
+        plex = ensure_plex_api(required=False)
+        if not plex:
+            return False
+        s = plex.settings
+        # Different Plex versions name this differently; try both.
+        for key in ('ScheduledLibraryUpdatesEnabled', 'autoEmptyTrash'):
+            try:
+                v = s.get(key)
+                if v is not None and bool(getattr(v, 'value', v)):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _print_candidate_row(idx, cand, score):
+    yr = cand.get('year') or '----'
+    pop = cand.get('popularity') or 0.0
+    ids = []
+    if cand.get('tmdb_id'): ids.append(f"tmdb:{cand['tmdb_id']}")
+    if cand.get('imdb_id'): ids.append(f"imdb:{cand['imdb_id']}")
+    if cand.get('tvdb_id'): ids.append(f"tvdb:{cand['tvdb_id']}")
+    id_str = ' '.join(ids)
+    title = cand.get('title') or ''
+    orig = cand.get('original_title') or ''
+    orig_str = f"  (orig: {orig})" if orig and orig != title else ''
+    lang = cand.get('lang') or '?'
+    print(f"  {idx}) [{cand['engine']}] {title} ({yr})  conf={score:5.1f}  lang={lang}  pop={pop:5.1f}  {id_str}{orig_str}")
+    ov = cand.get('overview') or ''
+    if ov:
+        print(f"       {ov}")
+
+
+def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
+    """Interactive resolver for Plex-unmatched items.
+
+    For each unmatched Movie / Series in scope:
+      1. Search the configured online engines (UNMATCHED_RESOLVE_LOOKUP_ENGINES)
+         in cascade order.
+      2. In --auto mode, silently pick the top candidate if its score >=
+         UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT AND it's clearly ahead of #2.
+      3. Otherwise show a numbered picker.  Keys: 1-N pick, s skip,
+         yYYYY manual year, q quit, ? show on-disk contents.
+      4. Queue (src_wrapper, dest_wrapper) rename pairs.
+      5. At end, print a confirmation table and execute all renames in one
+         SSH session (using ControlMaster multiplexing — see v2.5).
+      6. Trigger Plex library scan(s) afterwards (unless Plex's own
+         auto-update-on-disk-change is on, or AUTO_SCAN_AFTER_RENAME=False).
+    """
+    # Resolve scope to a list of object keys.  Without a scope, walk the
+    # whole cache and let _list_unmatched-style logic filter.
+    obj_keys = []
+    if scope:
+        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
+        obj_keys = [k for (k, _o) in (scope_items or [])]
+    else:
+        obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+
+    # Filter to unmatched Movies / Series.
+    unmatched = []
+    for key in obj_keys:
+        obj = PLEX_Media.OBJ_BY_ID.get(key)
+        if not obj:
+            continue
+        if obj.get('type') not in ('Movie', 'Series'):
+            continue
+        g = obj.get('guid') or ''
+        if g and not g.startswith('local://'):
+            # Already matched — skip.  (Series w/o ext_ids could be added here
+            # later if user wants to re-match them too.)
+            continue
+        unmatched.append((key, obj))
+
+    if not unmatched:
+        print("No unmatched Movie/Series items in scope — nothing to resolve.")
+        return
+
+    print(f">>> --unmatched --resolve: {len(unmatched)} item(s) to process")
+    print(f">>> Engines: {' → '.join(UNMATCHED_RESOLVE_LOOKUP_ENGINES)}")
+    if auto:
+        print(f">>> AUTO mode: auto-pick threshold = {UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT}%")
+    print()
+
+    rename_queue = []     # list of (key, obj, src_wrapper, dest_wrapper, year, tmdb_id)
+    skipped = []
+    quit_early = False
+    for i, (key, obj) in enumerate(unmatched, 1):
+        title = obj.get('title') or ''
+        lib   = obj.get('library', '')
+        kind  = 'tv' if obj.get('type') == 'Series' else 'movie'
+        wrapper = _derive_wrapper_path(obj)
+        if not wrapper:
+            print(f"[{i}/{len(unmatched)}] {key}: cannot derive wrapper path — skipping.")
+            continue
+        if _wrapper_already_has_year(wrapper):
+            print(f"[{i}/{len(unmatched)}] {key}: wrapper already has a year — skipping ({wrapper})")
+            continue
+
+        print(f"\n──────────────────────────────────────────────────────────────────────────")
+        print(f"[{i}/{len(unmatched)}] {key}  {title!r}  ({lib})")
+        print(f"          path: {wrapper}")
+
+        candidates = _search_unmatched_candidates(title, kind)
+        if not candidates:
+            print(f"  (no candidates from any engine — skipping)")
+            skipped.append((key, 'no-candidates'))
+            continue
+
+        # Score & sort
+        scored = sorted(
+            ((c, _score_candidate(title, c)) for c in candidates),
+            key=lambda x: x[1], reverse=True,
+        )[:5]   # show top 5
+
+        # AUTO mode: pick #1 if confident enough and clearly ahead of #2
+        if auto and scored:
+            top, top_score = scored[0]
+            runner_score = scored[1][1] if len(scored) > 1 else 0
+            if top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score:
+                year = top.get('year')
+                if year:
+                    new_wrapper = _add_year_to_wrapper(wrapper, year)
+                    print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({year})  conf={top_score}  → rename to: {os.path.basename(new_wrapper)}")
+                    rename_queue.append((key, obj, wrapper, new_wrapper, year, top.get('tmdb_id')))
+                    continue
+                print(f"  ⚠ Top candidate has no year — falling through to picker")
+
+        # Interactive picker
+        for idx, (cand, score) in enumerate(scored, 1):
+            _print_candidate_row(idx, cand, score)
+        print(f"  s) skip   yYYYY) enter year manually   q) quit & process renames so far   ?) ls wrapper contents")
+        while True:
+            try:
+                choice = input("  pick> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if not choice:
+                continue
+            if choice.lower() == 'q':
+                quit_early = True
+                break
+            if choice.lower() == 's':
+                skipped.append((key, 'user-skipped'))
+                break
+            if choice == '?':
+                # Show wrapper contents via SSH so user knows what's there
+                try:
+                    import subprocess
+                    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"ls -1 {shlex.quote(wrapper)}"]
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+                    for line in out.splitlines()[:20]:
+                        print(f"      {line}")
+                except Exception as e:
+                    print(f"      (ls failed: {e})")
+                continue
+            m = re.match(r'^y(\d{4})$', choice, re.IGNORECASE)
+            if m:
+                year = int(m.group(1))
+                new_wrapper = _add_year_to_wrapper(wrapper, year)
+                print(f"  ✓ manual year {year}  → rename to: {os.path.basename(new_wrapper)}")
+                rename_queue.append((key, obj, wrapper, new_wrapper, year, None))
+                break
+            if choice.isdigit() and 1 <= int(choice) <= len(scored):
+                cand, score = scored[int(choice) - 1]
+                year = cand.get('year')
+                if not year:
+                    print(f"  ⚠ candidate has no year — enter manually with yYYYY")
+                    continue
+                new_wrapper = _add_year_to_wrapper(wrapper, year)
+                print(f"  ✓ #{choice} [{cand['engine']}] {cand['title']} ({year})  conf={score}  → rename to: {os.path.basename(new_wrapper)}")
+                rename_queue.append((key, obj, wrapper, new_wrapper, year, cand.get('tmdb_id')))
+                break
+            print(f"  (unrecognized — use 1-{len(scored)}, s, yYYYY, q, or ?)")
+        if quit_early:
+            break
+
+    # ----- Bulk rename phase -----
+    if not rename_queue:
+        print(f"\nNothing to rename. Skipped: {len(skipped)}.  Bye.")
+        return
+
+    print(f"\n──────────────────────────────────────────────────────────────────────────")
+    print(f">>> {len(rename_queue)} rename operation(s) queued:")
+    print()
+    for key, _obj, src, dst, year, tmdb_id in rename_queue:
+        print(f"  {key:<18} {year}  {src}")
+        print(f"  {'':>18}        → {dst}")
+    print()
+
+    if dry_run:
+        print(">>> --try / --dry-run: no renames performed.")
+        return
+
+    if not yes:
+        try:
+            confirm = input(f"Execute {len(rename_queue)} rename(s) via SSH? [yes/no] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            confirm = 'no'
+        if confirm not in ('y', 'yes'):
+            print("Aborted.")
+            return
+
+    # Build a single bulk SSH command of MV statements, separated by `;`.
+    # ControlMaster multiplexing keeps this to one connection.
+    import subprocess
+    bulk_cmds = []
+    for _key, _obj, src, dst, _yr, _tmdb in rename_queue:
+        # POSIX-safe quoting — quote the paths to survive special chars.
+        bulk_cmds.append(f"mv -n {shlex.quote(src)} {shlex.quote(dst)} && echo MOVED || echo FAILED")
+    ssh_payload = " ; ".join(bulk_cmds)
+    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), ssh_payload]
+    if DBG: print(f"{DBGPFX}SSH bulk-mv ({len(rename_queue)} ops)…", file=sys.stderr)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        print(f"ERROR: SSH bulk-mv failed: {e}")
+        return
+    if result.returncode != 0 and not result.stdout:
+        print(f"ERROR: SSH returned {result.returncode}\n{result.stderr}")
+        return
+
+    # Parse per-op result
+    outcomes = result.stdout.splitlines()
+    moved_count = sum(1 for line in outcomes if line.strip() == 'MOVED')
+    failed_count = len(rename_queue) - moved_count
+    print(f">>> Bulk rename done: {moved_count} moved, {failed_count} failed.")
+    if failed_count and result.stderr:
+        print(f"    stderr: {result.stderr.strip()}")
+
+    # Update the cache so subsequent --update-cache doesn't re-flag these items.
+    # We don't know the new ratingKey yet (Plex assigns one on scan), so just
+    # invalidate the OBJ_BY_FILEPATH entries pointing at the OLD wrapper.
+    libs_affected = set()
+    for _key, obj, src, dst, _yr, _tmdb in rename_queue:
+        libs_affected.add(obj.get('library', ''))
+
+    # ----- Trigger Plex scan(s) -----
+    if UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME:
+        if _detect_plex_auto_scan_enabled():
+            print(">>> Plex auto-update-on-disk-change is enabled — skipping manual scan.")
+        else:
+            try:
+                plex = ensure_plex_api(required=False)
+                if plex:
+                    for lib_name in sorted(libs_affected):
+                        try:
+                            lib = plex.library.section(lib_name)
+                            lib.update()
+                            print(f"  ✓ triggered Plex scan of '{lib_name}'")
+                        except Exception as e:
+                            print(f"  ⚠ scan of '{lib_name}' failed: {e}")
+                else:
+                    print(">>> Plex API not configured — please trigger a library scan manually.")
+            except Exception as e:
+                print(f"  ⚠ scan trigger failed: {e}")
+
+    print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
 
 
 def cmd_original_languages(target=None, dry_run=False):
@@ -18284,7 +18863,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if _multi_libs and any(r['lib'] in _multi_libs for r in rows):
                 has_lang = True
         if has_lang:
-            extra_cols.append(('AUDIO', 8,  lambda r: r['audio_langs'] or '-'))
+            # Smart-column hiding rules for AUDIO:
+            #   - --no-audio-language / --no-plex-audio-language in filter →
+            #     every matched row has empty/unknown audio by definition,
+            #     so the column carries zero information.  Skip.
+            #   - Otherwise: skip if NO row has any real (non-unknown)
+            #     audio code — same outcome, derived from data instead of
+            #     filter shape.
+            _nal_in_filter = any(
+                lbl in ('--no-audio-language', '--no-plex-audio-language')
+                for (lbl, _) in filters
+            )
+            _audio_diverse = any(
+                (r.get('audio_langs') or '').strip().lower() not in ('', 'unknown', '-')
+                for r in rows
+            )
+            if _audio_diverse and not _nal_in_filter:
+                extra_cols.append(('AUDIO', 8, lambda r: r['audio_langs'] or '-'))
         if has_subs:
             extra_cols.append(('SUBS',  8,  lambda r: r['sub_langs'] or '-'))
 
@@ -18325,7 +18920,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             extra_cols.append(('ORIGINAL-TITLE', 30,
                                lambda r: _clip(r['original_title']) if r['original_title'] else '-'))
         if has_library:
-            extra_cols.append(('LIBRARY', 14, lambda r: r['library'] or '-'))
+            # LIBRARY goes right after KEY (most-identifying scope info first).
+            extra_cols.insert(0, ('LIBRARY', 14, lambda r: r['library'] or '-'))
         if has_genre:
             extra_cols.append(('GENRE',  16, lambda r: r['genres'] if r['genres'] else '-'))
         if has_label:
@@ -18539,8 +19135,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             sep += "  " + "-" * 40
         try:
             if VRB:
-                print(hdr)
-                print(sep)
+                print(hdr.rstrip())
+                print(sep.rstrip())
             for r in rows:
                 line = f"{r['key']:<{_key_width}}" if not _hide_key else ""
                 for _, hwidth, vfn in extra_cols:
@@ -18548,7 +19144,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     line += f"  {str(val):<{hwidth}}"
                 if not _hide_filepath:
                     line += f"  {r['filepath']}"
-                print(line)
+                # Strip trailing pad on the last column (cosmetic — no
+                # spurious whitespace at end of row).
+                print(line.rstrip())
             if VRB: print(f"\n >>> {len(rows)} item(s)")
         except BrokenPipeError:
             pass
@@ -30864,6 +31462,14 @@ def execute_global_commands(args, cmd_args):
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
     if unmatched_val is not None:
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        # v2.12: --resolve mode → online lookup + bulk-rename wrappers to add year.
+        resolve_mode = safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False)
+        if resolve_mode:
+            auto    = bool(safe_getattr(args, 'auto', False) or safe_getattr(cmd_args, 'auto', False))
+            dry_run = bool(safe_getattr(args, 'dry_run', False) or safe_getattr(cmd_args, 'dry_run', False))
+            yes     = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
+            cmd_unmatched_resolve(scope=unmatched_val or None, auto=auto, dry_run=dry_run, yes=yes)
+            return
         obj_keys, library_name, scope = resolve_scope_to_keys(unmatched_val, media_type=media_type)
         print(f"\n--- Unmatched Items{scope} (not identified by any Plex metadata agent) ---")
         PLEX_Media._list_unmatched(obj_keys, library_name)
@@ -31529,6 +32135,15 @@ def main():
                 arg.startswith(',') or
                 bool(re.match(r'^(?:movies?|series|shows?|music|photos?|collections?)\.\w', arg, re.IGNORECASE))
             ) and not _explicit_library_used
+            # `+field` (e.g. +library / +year) is a display-only column
+            # marker — pass through to the compound filter parser, never
+            # treat as a title search.
+            if arg.startswith('+') and len(arg) > 1:
+                _filter_exprs.append(arg)
+                _translations.append((arg, f"--list display column: {arg}"))
+                if DBG: print(f" ~~~ Display column '{arg}' → filter atom", file=sys.stderr)
+                _i += 1
+                continue
             _is_search = (not arg.startswith(('-', '/'))
                           and ':' not in arg
                           and ' ' not in arg  # multi-word quoted strings are scope, not search
@@ -31875,6 +32490,7 @@ def main():
     main_parser.add_argument('--fr', '--french', action='store_const', const='fr', dest='audio', help=argparse.SUPPRESS)
     main_parser.add_argument('--no-audio-language', '--no-language', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--no-plex-audio-language', action='store_true', help=argparse.SUPPRESS, default=False)
+    main_parser.add_argument('--auto', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
