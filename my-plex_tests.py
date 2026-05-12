@@ -8561,20 +8561,20 @@ class TestCompoundFilter(unittest.TestCase):
         self.assertIn("library:", body)
 
     def test_argv_pass_through_operators(self):
-        """Argv normalization must pass `(`, `)`, `AND`, `OR` through as filter ops."""
+        """Argv normalization must pass `(`, `)`, `AND`, `OR`, `NOT` through as filter ops."""
         src = self._read_script()
-        self.assertIn("if arg in ('AND', 'OR', '(', ')'):", src)
+        self.assertIn("if arg in ('AND', 'OR', 'NOT', '(', ')'):", src)
 
     def test_universal_scope_detects_operators(self):
         """_get_universal_scope must route operator-bearing token lists to compound parser."""
         src = self._read_script()
-        self.assertIn("_OPERATORS = {'AND', 'OR', '(', ')'}", src)
+        self.assertIn("_OPERATORS = {'AND', 'OR', 'NOT', '(', ')'}", src)
 
     def test_is_scope_filter_token_detects_compound(self):
-        """_is_scope_filter_token must accept OR / parens too (not just AND)."""
+        """_is_scope_filter_token must accept OR / NOT / parens too (not just AND)."""
         src = self._read_script()
-        self.assertIn("token in ('(', ')', 'AND', 'OR')", src)
-        self.assertIn(r"'\bAND\b|\bOR\b'", src)
+        self.assertIn("token in ('(', ')', 'AND', 'OR', 'NOT')", src)
+        self.assertIn(r"'\bAND\b|\bOR\b|\bNOT\b'", src)
 
     def test_help_scope_documents_or_and_parens(self):
         """--help scope page must document the new compound grammar."""
