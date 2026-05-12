@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.9"
+SCRIPT_VERSION = "v2.10"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -4195,9 +4195,14 @@ def fetch_movies_from_database(library_section_id):
             existing['type_str'] = 'Movie*'
             existing['media_nr'] = f"1/{media_cnt}"
             # Merge audio/subtitle languages from this part (different versions may have different languages)
+            # v2.9: also accumulate the PURE Plex view so completion can't pollute it.
+            if 'audio_languages_plex' not in existing:
+                existing['audio_languages_plex'] = list(existing.get('audio_languages', []))
             for lang in streams['audio_languages']:
                 if lang not in existing['audio_languages']:
                     existing['audio_languages'].append(lang)
+                if lang not in existing['audio_languages_plex']:
+                    existing['audio_languages_plex'].append(lang)
             for lang in streams['subtitle_languages']:
                 if lang not in existing['subtitle_languages']:
                     existing['subtitle_languages'].append(lang)
@@ -4246,8 +4251,9 @@ def fetch_movies_from_database(library_section_id):
                 'resolution': f"{height}p" if height else '',
                 'resolution_full': resolution_full,
                 'filesize': int(filesize) if filesize else None,
-                'audio_languages': streams['audio_languages'],
-                'subtitle_languages': streams['subtitle_languages'],
+                'audio_languages': list(streams['audio_languages']),
+                'audio_languages_plex': list(streams['audio_languages']),
+                'subtitle_languages': list(streams['subtitle_languages']),
                 'collections': tags.get('collections', []),
                 'labels': [],  # Labels will be fetched separately if needed
                 'actors': tags.get('actors', []),
@@ -11041,9 +11047,14 @@ def fetch_series_from_database(library_section_id):
             existing['media_cnt'] = media_cnt
             existing['type_str'] = 'Episode*'
             existing['media_nr'] = f"1/{media_cnt}"
+            # v2.9: PURE Plex view alongside the working copy.
+            if 'audio_languages_plex' not in existing:
+                existing['audio_languages_plex'] = list(existing.get('audio_languages', []))
             for lang in streams['audio_languages']:
                 if lang not in existing['audio_languages']:
                     existing['audio_languages'].append(lang)
+                if lang not in existing['audio_languages_plex']:
+                    existing['audio_languages_plex'].append(lang)
             for lang in streams['subtitle_languages']:
                 if lang not in existing['subtitle_languages']:
                     existing['subtitle_languages'].append(lang)
@@ -11061,7 +11072,9 @@ def fetch_series_from_database(library_section_id):
                 'audienceRating':float(ep_aud) if ep_aud else None,'summary':ep_sum or '','duration':int(md_dur) if md_dur else None,
                 'video_codec':v_codec or '','audio_codec':a_codec or '','resolution':f"{height}p" if height else '',
                 'resolution_full':res_full,'filesize':int(filesize) if filesize else None,
-                'audio_languages':streams['audio_languages'],'subtitle_languages':streams['subtitle_languages'],
+                'audio_languages':list(streams['audio_languages']),
+                'audio_languages_plex':list(streams['audio_languages']),
+                'subtitle_languages':list(streams['subtitle_languages']),
                 'contentRating':ep_cr,'season':s_key,'S_str':f"S{s_key:02d}",'S_idx':s_key,
                 'episode':int(ep_num) if ep_num else 0,'E_str':f"E{int(ep_num):02d}" if ep_num else "E00",'E_idx':int(ep_num) if ep_num else 0,
                 'S0XE0X':f"S{s_key:02d}E{int(ep_num):02d}" if ep_num else f"S{s_key:02d}E00",'series':sh_title,
@@ -12879,7 +12892,15 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             # Normalise audio_languages and tally the first track for stats.
             # Movie/Episode are the only types with audio metadata.
             if obj_type in ('Movie', 'Episode'):
-                _raw = obj.get('audio_languages') or []
+                # v2.9: read from audio_languages_plex when present (the
+                # persistent PURE Plex snapshot written at DB-read time).
+                # Fall back to audio_languages on items predating v2.9 —
+                # that's a best-effort migration (if completion had already
+                # baked into audio_languages, the snapshot inherits it;
+                # subsequent DB re-reads will correct it).
+                _raw = obj.get('audio_languages_plex')
+                if _raw is None:
+                    _raw = obj.get('audio_languages') or []
                 # First, lowercase + map 3-letter to 2-letter.  Then run through
                 # the canonical normaliser (collapses und/mis/mul/zxx/empty
                 # into 'unknown'). Drop concatenated garbage like 'engeng'.
@@ -12961,16 +12982,18 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Persist the per-library audio-language index built above
         current_library_stats['language_distribution'] = _lang_distribution
 
-        # Save cache to disk
+        # v2.10: defer the actual pickle.dump.  Stash the three derived
+        # structures so the post-init block (which has its own things to
+        # add: plex_labels_index, problems, layout_index, plex_known_filepaths)
+        # can perform ONE merged save at the end of --update-cache.
+        # Saves ~5 s per --update-cache run.
+        PLEX_Media._pending_save_extras = {
+            'library_stats':         current_library_stats,
+            'library_object_counts': updated_library_object_counts,
+            'server_info':           server_info,
+        }
         if DBG:
-            print(f"{DBGPFX}BEFORE save: OBJ_BY_ID has {new_count} items, OBJ_BY_MOVIE has {len(PLEX_Media.OBJ_BY_MOVIE)} items, OBJ_BY_SERIES has {len(PLEX_Media.OBJ_BY_SERIES)} items")
-        update_and_save_cache(build_media_cache_dict(
-            library_stats=current_library_stats,
-            library_object_counts=updated_library_object_counts,
-            server_info=server_info,
-        ))
-        if DBG:
-            print(f"{DBGPFX}AFTER save: CACHE['obj_by_id'] has {len(CACHE.get('obj_by_id', {}))} items")
+            print(f"{DBGPFX}_finalize_and_save_cache(): deferred save — extras stashed for merged save")
 
         # Restore READ_ONLY_MODE if it was temporarily disabled for user-approved incremental update
         if old_read_only is not None:
@@ -14698,12 +14721,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if VRB: print(f"WARNING: plex_known_filepaths live build failed: {_e}")
             _known_paths_live = sorted(CACHE.get('plex_known_filepaths') or [])
 
-        # Save all rebuilt/cleaned structures to cache (including problem counts
-        # and the v1.21 offline-friendly indices for layout: / --unrecognized).
-        update_and_save_cache(build_media_cache_dict(plex_labels_index=plex_labels_index,
-                                                     problems=_problems_cache,
-                                                     layout_index=_layout_idx_live,
-                                                     plex_known_filepaths=_known_paths_live))
+        # v2.10: ONE merged save for the whole --update-cache run.  Pull in
+        # the deferred extras stashed by _finalize_and_save_cache (library_stats,
+        # library_object_counts, server_info) plus everything we just built
+        # (plex_labels_index, problems, layout_index, plex_known_filepaths).
+        _pending = getattr(PLEX_Media, '_pending_save_extras', {}) or {}
+        update_and_save_cache(build_media_cache_dict(
+            plex_labels_index=plex_labels_index,
+            problems=_problems_cache,
+            layout_index=_layout_idx_live,
+            plex_known_filepaths=_known_paths_live,
+            **_pending,
+        ))
+        PLEX_Media._pending_save_extras = {}
 
         # Release the cache rebuild lock if we held it
         if FORCE_CACHE_UPDATE and PLEX_Media.cache_rebuild_lock:
@@ -19886,6 +19916,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'COUNTRIES':           label = 'COUNTRY:' if labeled else ''
                     case 'GENRES':              label = 'GENRE:' if labeled else ''
                     case 'AUDIO_LANGUAGES':     label = 'AUDIO-LANG:' if labeled else ''
+                    case 'AUDIO_LANGUAGES_PLEX':label = 'AUDIO-LANG-PLEX:' if labeled else ''
                     case 'SUBTITLE_LANGUAGES':  label = 'SUBTITLE-LANG:' if labeled else ''
                     case 'WRITERS':             label = 'WRITER:' if labeled else ''
                     case 'VERSIONS':            label = 'VERSION:' if labeled else ''
@@ -30859,12 +30890,17 @@ def execute_global_commands(args, cmd_args):
         unwatched_only = safe_getattr(args, 'unwatched', False)
         audio_filter   = safe_getattr(args, 'audio', None)
         no_audio_language = safe_getattr(args, 'no_audio_language', False)
+        no_plex_audio_language = safe_getattr(args, 'no_plex_audio_language', False)
+        # Either flag triggers the same filter engine; audio_lang_field picks
+        # which cache field to consult (completed view vs pure Plex view).
+        no_audio_language = no_audio_language or no_plex_audio_language
+        audio_lang_field = 'audio_languages_plex' if no_plex_audio_language else 'audio_languages'
 
         # Special cases that need the full PLEX_Media.list() engine
         needs_full_list = duplicates_only or broken_only or resolve_mode or no_audio_language or excess_versions
         if needs_full_list:
-            if DBG: print(f"{DBGPFX}execute_global_commands(): full list mode: duplicates={duplicates_only} broken={broken_only} resolve={resolve_mode} no_audio_lang={no_audio_language} excess={excess_versions}")
-            PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions)
+            if DBG: print(f"{DBGPFX}execute_global_commands(): full list mode: duplicates={duplicates_only} broken={broken_only} resolve={resolve_mode} no_audio_lang={no_audio_language} field={audio_lang_field} excess={excess_versions}")
+            PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions, audio_lang_field=audio_lang_field)
         else:
             # All simple listing (with or without filter expr) → clean KEY|cols|FILEPATH format
             PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type,
@@ -31436,7 +31472,9 @@ def main():
         return arg.startswith('--audio') or arg in AUDIO_FLAGS
 
     has_audio = any(is_audio_flag(arg) for arg in sys.argv)
-    has_no_audio_language = '--no-audio-language' in sys.argv or '--no-language' in sys.argv
+    has_no_audio_language = ('--no-audio-language' in sys.argv
+                             or '--no-language' in sys.argv
+                             or '--no-plex-audio-language' in sys.argv)
 
     def inject_before_first_match(trigger_fn, to_inject, label=""):
         """Inject args before the first matching trigger in sys.argv. Returns True if injected."""
@@ -31468,7 +31506,7 @@ def main():
         if inject_before_first_match(lambda a: a in ('--duplicates', '--broken'), ['--list'], " (--duplicates/--broken)"):
             has_list = True
     elif (has_watched or has_unwatched or has_audio or has_no_audio_language) and not has_list:
-        if inject_before_first_match(lambda a: a == '--watched' or a == '--unwatched' or a in ('--no-audio-language', '--no-language') or is_audio_flag(a), ['--list'], " (filters)"):
+        if inject_before_first_match(lambda a: a == '--watched' or a == '--unwatched' or a in ('--no-audio-language', '--no-language', '--no-plex-audio-language') or is_audio_flag(a), ['--list'], " (filters)"):
             has_list = True
 
     # Detect bare filter expression as first positional arg → inject --list

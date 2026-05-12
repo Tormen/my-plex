@@ -1873,14 +1873,19 @@ class TestUpdateCacheSplit(unittest.TestCase):
         self.assertIn("old_read_only", params, "Must accept old_read_only to restore READ_ONLY_MODE")
 
     def test_finalize_saves_cache(self):
-        """_finalize_and_save_cache must call update_and_save_cache."""
+        """v2.10: _finalize_and_save_cache no longer saves directly — it stashes
+        the derived extras on PLEX_Media._pending_save_extras and the merged
+        save at the end of PLEX_Media.init() picks them up.  This avoids
+        pickling the full ~40 MB cache twice per --update-cache run."""
         content = self._read_script()
         import re
         match = re.search(r'def _finalize_and_save_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("update_and_save_cache(", body)
-        self.assertIn("build_media_cache_dict(", body)
+        self.assertIn("_pending_save_extras", body)
+        # Must NOT call update_and_save_cache directly anymore (would re-introduce
+        # the duplicate-save regression).
+        self.assertNotIn("update_and_save_cache(", body)
 
     def test_finalize_rebuilds_library_object_counts(self):
         """_finalize_and_save_cache must rebuild library_object_counts."""
@@ -3884,13 +3889,18 @@ class TestObjByLibraryDedup(unittest.TestCase):
             "--update-cache must clean dangling keys from OBJ_BY_SERIES_EPISODES")
 
     def test_update_cache_saves_all_structures(self):
-        """--update-cache final save must include all cache structures, not just labels/filepath."""
+        """v2.10: --update-cache does ONE merged save at the end of init(), and
+        that single call must include all cache structures (build_media_cache_dict)
+        plus the deferred extras stashed by _finalize_and_save_cache."""
         src = self._read_script()
-        match = re.search(r'# Save all rebuilt.*?\n\s*(update_and_save_cache\(.*?\))', src, re.DOTALL)
-        self.assertIsNotNone(match, "Final save must use build_media_cache_dict()")
+        match = re.search(r'# v2\.10: ONE merged save.*?\n\s*(update_and_save_cache\(.*?\*\*_pending,?\s*\)\s*)',
+                          src, re.DOTALL)
+        self.assertIsNotNone(match, "Final save must merge _pending_save_extras via **_pending")
         save_call = match.group(1)
-        self.assertIn('build_media_cache_dict', save_call,
-            "Final save must use build_media_cache_dict() to persist all structures")
+        self.assertIn('build_media_cache_dict', save_call)
+        self.assertIn('plex_known_filepaths', save_call)
+        self.assertIn('problems', save_call)
+        self.assertIn('layout_index', save_call)
 
 
 class TestDeleteRequiresRemove(unittest.TestCase):
