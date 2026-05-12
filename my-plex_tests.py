@@ -8377,6 +8377,77 @@ class TestUniversalScope(unittest.TestCase):
             self.assertIn(kw, body, f"--help mv must mention '{kw}'")
 
 
+class TestUnrecognized(unittest.TestCase):
+    """Tests for --unrecognized / --alien: top-level entries Plex DB doesn't index."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_cmd_unrecognized_exists(self):
+        """cmd_unrecognized() must exist as a top-level function."""
+        src = self._read_script()
+        self.assertIn("def cmd_unrecognized(", src)
+
+    def test_count_helper_exists(self):
+        """_count_unrecognized_top_level() helper for --problems integration must exist."""
+        src = self._read_script()
+        self.assertIn("def _count_unrecognized_top_level(", src)
+
+    def test_known_filepaths_helper_uses_media_parts(self):
+        """_get_known_filepaths_from_plex_db must query media_parts (the user-chosen detection rule)."""
+        src = self._read_script()
+        self.assertIn("def _get_known_filepaths_from_plex_db(", src)
+        self.assertIn("SELECT file FROM media_parts", src)
+
+    def test_list_top_level_helper(self):
+        """_list_top_level_entries must SSH/find with maxdepth=1 and return (path,kind) tuples."""
+        src = self._read_script()
+        self.assertIn("def _list_top_level_entries(", src)
+        self.assertIn("-maxdepth 1", src)
+        # Hidden entries filtered
+        self.assertIn('! -name ".*"', src)
+
+    def test_unrecognized_registered_main_parser(self):
+        """--unrecognized + --alien synonym must be in main_parser."""
+        src = self._read_script()
+        self.assertIn("main_parser.add_argument('--unrecognized', '--alien'", src)
+
+    def test_unrecognized_registered_global_parser(self):
+        """--unrecognized must be in GLOBAL_CMD_PARSER with help text."""
+        src = self._read_script()
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien'", src)
+
+    def test_unrecognized_in_has_standalone_cmd(self):
+        """--unrecognized must be in has_standalone_cmd."""
+        src = self._read_script()
+        self.assertIn("safe_getattr(args, 'unrecognized', None) is not None", src)
+
+    def test_unrecognized_handler_in_execute_global_commands(self):
+        """execute_global_commands must dispatch --unrecognized to cmd_unrecognized."""
+        src = self._read_script()
+        self.assertIn("cmd_unrecognized(target=target)", src)
+
+    def test_alien_synonym_in_option_to_help_topic(self):
+        """--alien must map to the same help topic as --unrecognized."""
+        src = self._read_script()
+        self.assertIn("'--unrecognized': 'unrecognized'", src)
+        self.assertIn("'--alien': 'unrecognized'", src)
+
+    def test_problems_integration(self):
+        """--problems must include 'unrecognized' count + warning row."""
+        src = self._read_script()
+        self.assertIn("unrecognized_count = _count_unrecognized_top_level", src)
+        self.assertIn("'unrecognized':      unrecognized_count", src)
+        # _print_problem_warnings must surface the unrecognized count
+        self.assertIn("unrecognized top-level entries", src)
+
+    def test_help_page_exists(self):
+        """--help unrecognized must have a dedicated help page (covers --alien synonym too)."""
+        src = self._read_script()
+        self.assertIn("case 'unrecognized' | 'alien':", src)
+
+
 class TestOriginalLanguages(unittest.TestCase):
     """Tests for --original-languages backfill + country: / originallang: filter tokens."""
 
@@ -8530,6 +8601,7 @@ _UNITTEST_SCOPES = {
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
     'scope':              [TestUniversalScope],
+    'unrecognized':       [TestUnrecognized],
 }
 
 # List of all unittest classes for run_regression_tests()
