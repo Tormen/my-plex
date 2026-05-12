@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.9"
+SCRIPT_VERSION = "v1.10"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -16766,7 +16766,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # --- Field:value or field OP value patterns ---
         _field_re = re.match(
-            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang)'
+            r'^(?P<field>resolution|codec|year|label|genre|size|duration|rating|stars|critics|added|watched|lang|language|subs|sub|subtitle|subtitles|director|directors|country|countries|original_language|originallang|original_lang|type)'
             r'(?P<op>[<>]=?|[:=!]=?)(?P<val>.+)$',
             sub, re.IGNORECASE
         )
@@ -16943,6 +16943,32 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
                 return _n in langs
             return label_str, _lang_fn
+
+        # --- Type (Plex media type: type:movie / type:series / type:show / type:episode) ---
+        # In the universal-scope pipeline, action commands (--mv, --remux, ...)
+        # only enumerate file-owning items, so `type:series` matches Episode
+        # objects (the Series and Season parents have no files of their own).
+        # For --list, the Cat-A `type:` token translates to `--type` before
+        # argparse so --list keeps its existing parent-row rendering.
+        if field == 'type':
+            needle = val.lower().strip()
+            _SERIES_ALIASES = {'series', 'show', 'shows', 'tv', 'tvshow', 'tvshows'}
+            _MOVIE_ALIASES  = {'movie', 'movies', 'film', 'films'}
+            _EPISODE_ALIASES = {'episode', 'episodes', 'ep', 'eps'}
+            _SEASON_ALIASES  = {'season', 'seasons'}
+            if needle in _MOVIE_ALIASES:
+                target_types = {'Movie', 'Movie*'}
+            elif needle in _SERIES_ALIASES or needle in _EPISODE_ALIASES:
+                target_types = {'Episode', 'Episode*'}
+            elif needle in _SEASON_ALIASES:
+                target_types = {'Season', 'Season*'}
+            else:
+                target_types = {needle.title(), needle.title() + '*'}
+            label_str = f"type:{needle}"
+            def _type_fn(obj, fi, _t=target_types):
+                ts = obj.get('type_str') or obj.get('type', '')
+                return ts in _t
+            return label_str, _type_fn
 
         # --- Country (country of production: country:france / country:fr / countries:usa) ---
         # Matches obj['countries'] (list of English country names from Plex).
@@ -21448,10 +21474,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("                            # originally-English series in ,unsorted")
             print()
             print("  Filter tokens accepted (same syntax as --list):")
+            print("    type:movie / type:series / type:show / type:episode  (v1.10)")
             print("    lang:fr / original_lang:fr / country:france / year>2020 /")
             print("    bitrate>2 / resolution:1080p / codec:h265 / size>1gb /")
             print("    duration>2h / rating>7 / genre:comedy / director:scorsese / etc.")
             print("  See --help scope for the full filter reference.")
+            print()
+            print("  Note: in the action-command pipeline (--mv / --remux / ...)")
+            print("  `type:series` resolves to Episodes (the file-owning subset of")
+            print("  the series hierarchy), since Series/Season parents have no files.")
             print()
             print("TYPE COMPATIBILITY:")
             print("  Movie libraries accept only Movies.")
@@ -23686,6 +23717,7 @@ _SCOPE_FILTER_FIELDS = (
     'subs', 'sub', 'subtitle', 'subtitles', 'director', 'directors',
     'country', 'countries', 'original_language', 'originallang', 'original_lang',
     'writer', 'writers', 'actor', 'actors', 'title', 'originaltitle',
+    'type',
 )
 _SCOPE_FILTER_RE = re.compile(
     r'^(?P<field>' + '|'.join(_SCOPE_FILTER_FIELDS) + r')'
