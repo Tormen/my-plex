@@ -13,8 +13,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
 - **Title search** — bare words search movies/series by title: `my-plex tagesschau` (episode title search with `ep:word`)
-- **Column hiding** — `-field` removes columns: `my-plex ,unsorted -file` hides FILEPATH
-- **Filter + hide** — `-field:value` filters AND hides the column: `my-plex ,unsorted -genre:comedy` filters by comedy without showing the GENRE column
+- **Column hiding** — `-field` removes columns: `my-plex lib1 -file` hides FILEPATH
+- **Filter + hide** — `-field:value` filters AND hides the column: `my-plex lib1 -genre:comedy` filters by comedy without showing the GENRE column
 - **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
 - **Per-library audio-language stats** — `--update-cache` builds a per-library `{lang: [keys]}` index, surfaced as a `LANGUAGES` column in `--list-libraries` (e.g. `en* 79%, fr 15%, de 2% [MULTI]`). Mark a library multi-language by adding `('lib', 'MULTI')` to `AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY` — `--list` then auto-shows the AUDIO column for results from that library, and `--no-audio-language --resolve` always prompts (no autoresolve)
 - **Movies-only result layout** — when a `--list` result set is all movies, my-plex auto-replaces FILEPATH with YEAR + TITLE + ORIGINAL-TITLE columns. Use bare `path` / `filepath` / `file` token to bring FILEPATH back
@@ -50,7 +50,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings into season directories
   - Series libraries: matches file dates to episode data, renames with S##E## prefix
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
-  - Scoped: `my-plex movies.fr --sort-new --dry-run` or `my-plex 'Tagesschau' --unsorted --fix`
+  - Scoped: `my-plex lib4 --sort-new --dry-run` or `my-plex 'Tagesschau' --unsorted --fix`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
 - **Renumber episodes** (`--renumber`) — detect and fix incorrect S0xE0x numbering in filenames
   - Scraped data (TMDB/TVDB/fernsehserien.de) is the ground truth for correct numbering
@@ -65,11 +65,11 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - `--disk2plex` — sync disk markers → Plex (push watched status, ratings, labels back)
   - `--plex-disk-sync` — bidirectional: disk→plex first, then plex→disk
   - `--remux` — stream-copy outdated-container files (e.g. `.avi`) to `.mkv`, attaching the resolved audio language as track metadata. Default: PREVIEW only; `--yes` commits. Combine with `--no-audio-language` to bulk-fix files where Plex has no audio language yet (e.g. German DVR recordings with `[TVOON]` filename hints).
-  - **`layout:` scope token** (v1.20) — orthogonal to `type:`. Where `type:` filters by what Plex catalogued an item as, `layout:` filters by what the FILESYSTEM thinks each top-level library entry looks like (its on-disk shape). Surfaces mis-classification: `layout:movie`, `layout:series`, `layout:season`, `layout:episode`. First call builds an in-memory classification index via ONE bulk `find -maxdepth 2` per library; subsequent lookups O(1). Use with `--mv-to` to relocate mis-shaped content: e.g. `my-plex --mv-to series.en movies.de layout:series` moves series-shaped folders out of a Movie library. When `layout:` returns 0 items, the folder isn't in Plex's index at all — use `--unrecognized` for that case.
+  - **`layout:` scope token** (v1.20) — orthogonal to `type:`. Where `type:` filters by what Plex catalogued an item as, `layout:` filters by what the FILESYSTEM thinks each top-level library entry looks like (its on-disk shape). Surfaces mis-classification: `layout:movie`, `layout:series`, `layout:season`, `layout:episode`. First call builds an in-memory classification index via ONE bulk `find -maxdepth 2` per library; subsequent lookups O(1). Use with `--mv-to` to relocate mis-shaped content: e.g. `my-plex --mv-to lib6 lib2 layout:series` moves series-shaped folders out of a Movie library. When `layout:` returns 0 items, the folder isn't in Plex's index at all — use `--unrecognized` for that case.
   - **PURE `type:` semantics** (v1.20) — `type:series` returns ONLY Series Plex objects, `type:season` ONLY Seasons, `type:episode` ONLY Episodes, `type:movie` ONLY Movies. No auto-expansion. For action commands needing file-owners, use `type:episode` (or pass an explicit `Series:NNN`/`Season:NNN` cache key, which auto-expands as before).
   - **`--mv-to` / `--move-to`** (v1.20 — renamed from `--mv` / `--move`): explicit `-to` suffix makes destination semantics unambiguous.
   - `--unrecognized` / `--alien` (v1.11) — list top-level entries in each library rootpath that Plex DB does NOT have a `media_part` for. Catches download leftovers (`.tmp`/`.part`), folders Plex couldn't match (wrong agent, name confusion), or content dropped at a library root that Plex never indexed. Particularly useful in Movie libraries that accidentally contain Series-shaped folders (`show.s01e0X.*` patterns) which Plex's movie matcher rejected. Detection rule: Plex DB authoritative (queries `media_parts.file`). Also integrated into `--problems`. Synonym: `--alien`.
-  - **SCOPE is universal** (v1.9 → v2.0) — there is ONE scope syntax in my-plex, used identically by every SCOPE-taking command (`--list`, `--mv-to`, `--remux`, `--plex2disk`, `--disk2plex`, `--rename`, `--renumber`, `--reencode`, `--broken`, `--unmatched`, `--unsorted`, `--mismatch`, `--missing`, `--problems`, `--original-languages`, `--unrecognized` — and any future verb). SCOPE can be a library name, cache key, full filepath, title search, or filter expression (`type:series`, `layout:series`, `lang:fr`, `country:france`, `original_lang:de`, `year>2020`, `bitrate>2`, etc.). Multiple tokens **AND-combine**: e.g. `my-plex --mv-to movies.fr ,unsorted original_lang:fr` resolves to "every originally-French movie currently in `,unsorted`" and moves them. Write your query once, plug it into the verb. See `my-plex --help scope`.
+  - **SCOPE is universal** (v1.9 → v2.0) — there is ONE scope syntax in my-plex, used identically by every SCOPE-taking command (`--list`, `--mv-to`, `--remux`, `--plex2disk`, `--disk2plex`, `--rename`, `--renumber`, `--reencode`, `--broken`, `--unmatched`, `--unsorted`, `--mismatch`, `--missing`, `--problems`, `--original-languages`, `--unrecognized` — and any future verb). SCOPE can be a library name, cache key, full filepath, title search, or filter expression (`type:series`, `layout:series`, `lang:fr`, `country:france`, `original_lang:de`, `year>2020`, `bitrate>2`, etc.). Multiple tokens **AND-combine**: e.g. `my-plex --mv-to lib4 lib1 original_lang:fr` resolves to "every originally-French movie currently in `lib1`" and moves them. Write your query once, plug it into the verb. See `my-plex --help scope`.
   - `--original-languages` (v1.8) — backfill the `original_language` field on cached Movies / Series from the TMDB API. Required to power the new `original_lang:` / `originallang:` / `original_language:` filter tokens, which distinguish "in French audio (possibly dubbed)" from "originally in French" — e.g. an Italian movie dubbed to French has `audio_languages=['fr']` but `original_language='it'`. Companion token `country:` (no backfill needed; data already in cache) accepts ISO 3166-1 alpha-2 codes (`country:fr`) AND English names (`country:france`, `country:united_states`). Language tokens accept ISO 639-1 codes (`original_lang:fr`) AND English names (`originallang:french`). Use `--help original-languages` for details.
   - `--mv` / `--move` / `--mv-to` / `--move-to` — move Plex media to another library. Usage: `--mv DEST_LIB [SCOPE]`. Accepts every Plex type in the cache: **whole Series** (`Series:NNN` → expands to all seasons + episodes), **whole Season** (`Season:NNN` → expands to all its episodes), **single Episode** (`Episode:NNN`), **Movie** (`Movie:NNN` — all versions), **whole library** (library name), title search, full filepath, or omitted = global (every Movie / Episode currently in another library). Sibling files (`.nfo`, `.srt`, posters, …) move alongside the main video files. Duplicate detection in DEST_LIB by (Plex title + originalTitle + year) — interactive prompt with `[s]kip / [o]verwrite / [S]kip-all / [O]verwrite-all / [q]uit`, or `--force` to auto-overwrite. Default: PREVIEW only; `--yes` commits. After moving, triggers Plex library scans on source AND destination so Plex re-indexes the files (Plex assigns new IDs for cross-library moves; run `--update-cache` afterwards to repopulate cache).
 - **4 scopes**: media files, movie directories, series directories, season directories
@@ -186,7 +186,7 @@ my-plex Series:5191 --renumber --fix --try
 my-plex --missing 'Tagesschau'
 
 # Missing episodes for all shows in a library
-my-plex series.en --missing
+my-plex lib6 --missing
 
 # Sort new recordings (preview)
 my-plex --sort-new --dry-run                    # shortcut for --unsorted --fix
@@ -194,7 +194,7 @@ my-plex --unsorted --fix --dry-run              # equivalent
 my-plex 'Tagesschau' --unsorted --fix --try   # sort one series
 
 # Sort movies in a specific library
-my-plex movies.fr --sort-new --dry-run
+my-plex lib4 --sort-new --dry-run
 
 # Sync Plex metadata to disk markers
 my-plex --plex2disk --dry-run
@@ -222,13 +222,13 @@ TVDB_API_KEY = 'your-tvdb-key'    # Free: https://thetvdb.com/dashboard
 TMDB_API_KEY = 'your-tmdb-token'  # Free: https://www.themoviedb.org/settings/api
 
 # Optional: Per-library episode source override
-MISSING_EPISODES_SOURCE = {'series.de': 'fernsehserien.de', 'series.en': 'tvdb'}
+MISSING_EPISODES_SOURCE = {'lib5': 'fernsehserien.de', 'lib6': 'tvdb'}
 
 # Optional: Episode renumbering filename pattern (for --renumber --fix)
 RENUMBER_NAME_PATTERN = '{S0XE0X} {TITLE}'
 
 # Optional: Duplicate detection — ignore cross-library duplicates
-DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
+DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['lib2', 'lib3', 'lib4']]
 
 # Optional: Default filter scope (applied to all listing commands)
 DEFAULT_SCOPE = 'watched:no'  # Only show unwatched items by default

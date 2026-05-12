@@ -31,13 +31,13 @@
 #              Plex stores this as "userRating" on a 0–10 scale internally;
 #              my-plex exposes it as 0–5 stars (filter: stars>3.5).
 #
-# LIBRARY      A Plex library section (e.g. "movies.en", ",unsorted").
+# LIBRARY      A Plex library section (e.g. "lib3", "lib1").
 #              Identified by its title string.  my-plex uses the library name
-#              as a scope prefix: my-plex movies.en --problems
+#              as a scope prefix: my-plex lib3 --problems
 #
 # SCOPE        An optional prefix to any command that narrows its target:
 #              a library name, a title/filename, a KEY, or filter tokens.
-#              e.g.  my-plex ,unsorted --broken
+#              e.g.  my-plex lib1 --broken
 #                    my-plex "Tagesschau" --missing
 #                    my-plex type:series lang:de --list
 #
@@ -791,9 +791,9 @@ CONFIG_DEFAULTS = {
     # Each group is a list of library names. A duplicate is excluded ONLY if
     # ALL of its copies are within the SAME group. Any copy outside the group
     # means it IS a duplicate.
-    # Example: [['movies.de', 'movies.en', 'movies.fr']] — a movie existing
-    # only in movies.de + movies.en is NOT a duplicate (both in group).
-    # But a movie in movies.de + ,unsorted IS a duplicate (,unsorted not in group).
+    # Example: [['lib2', 'lib3', 'lib4']] — a movie existing
+    # only in lib2 + lib3 is NOT a duplicate (both in group).
+    # But a movie in lib2 + lib1 IS a duplicate (lib1 not in group).
     'DUPLICATES_IGNORE_LIBRARY_COMBINATIONS': [],
 
     # Disk Marker Mapping Configuration (--plex2disk / --disk2plex)
@@ -1032,7 +1032,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   - German libraries (de-DE) → fernsehserien.de (web scraping, no API key needed)
 #   - Other libraries → tvdb (requires TVDB_API_KEY), fallback to tmdb
 # Override per library:
-# MISSING_EPISODES_SOURCE = {{'series.de': 'fernsehserien.de', 'series.en': 'tvdb', 'series.fr': 'tmdb'}}
+# MISSING_EPISODES_SOURCE = {{'lib5': 'fernsehserien.de', 'lib6': 'tvdb', 'lib7': 'tmdb'}}
 
 ###############################################################################
 # Output Configuration
@@ -1205,9 +1205,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Each entry is a list of library names. A duplicate is excluded ONLY if
 # ALL of its copies are within the SAME group. Any copy outside the group
 # means it IS a duplicate.
-# Example: A movie in movies.de AND movies.en only → NOT a duplicate (both in group).
-# But a movie in movies.de AND ,unsorted → IS a duplicate (,unsorted not in group).
-# DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['movies.de', 'movies.en', 'movies.fr']]
+# Example: A movie in lib2 AND lib3 only → NOT a duplicate (both in group).
+# But a movie in lib2 AND lib1 → IS a duplicate (lib1 not in group).
+# DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['lib2', 'lib3', 'lib4']]
 
 ###############################################################################
 # DISK_PLEX_MAP — unified, bidirectional disk ↔ Plex marker map
@@ -1307,9 +1307,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #     --list/--filter auto-shows the AUDIO column when results span it.
 # Example:
 # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [
-#     (',unsorted',   'MULTI'),
-#     ('documentary', 'MULTI'),
-#     ('movies.de',   'de'),
+#     ('lib1',   'MULTI'),
+#     ('lib8', 'MULTI'),
+#     ('lib2',   'de'),
 # ]
 
 # Filepath-pattern audio language hints — ground truth.
@@ -1482,8 +1482,8 @@ DUPLICATE_FILE = CONFIG_DEFAULTS['DUPLICATE_FILE']
 
 # Duplicate detection: library combinations to ignore
 # A duplicate is excluded ONLY if ALL copies are within the SAME ignore group.
-# e.g. [['movies.de', 'movies.en', 'movies.fr']] — movie in movies.de + movies.en only → NOT a duplicate.
-# But movie in movies.de + ,unsorted → IS a duplicate (,unsorted not in group).
+# e.g. [['lib2', 'lib3', 'lib4']] — movie in lib2 + lib3 only → NOT a duplicate.
+# But movie in lib2 + lib1 → IS a duplicate (lib1 not in group).
 DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBRARY_COMBINATIONS']
 EXTERNAL_TOOLS = CONFIG_DEFAULTS['EXTERNAL_TOOLS']
 AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']
@@ -1701,7 +1701,7 @@ _GENRE_NORM = {
     'horror': 'Horror', 'horreur': 'Horror',
     'thriller': 'Thriller',
     'romance': 'Romance', 'liebesfilm': 'Romance', 'romantik': 'Romance',
-    'documentary': 'Documentary', 'dokumentarfilm': 'Documentary', 'documentaire': 'Documentary',
+    'lib8': 'Documentary', 'dokumentarfilm': 'Documentary', 'documentaire': 'Documentary',
     'crime': 'Crime', 'krimi': 'Crime',
     'mystery': 'Mystery', 'mystère': 'Mystery', 'mystere': 'Mystery',
     'family': 'Family', 'familie': 'Family', 'familial': 'Family',
@@ -1771,11 +1771,11 @@ usage:  my-plex [SCOPE] COMMAND [OPTIONS]    (order does not matter)
 SCOPE SELECTORS  (for commands marked with [SCOPE])
 
   SCOPE EXAMPLES:
-    my-plex movies.en --broken                                   library
+    my-plex lib3 --broken                                   library
     my-plex "Tagesschau" --reencode                              title
     my-plex Series:4925 --renumber                                 my-plex cache key
     my-plex --playlist "My Favs" --list                          playlist
-    my-plex ,unsorted --problems                                 library
+    my-plex lib1 --problems                                 library
     my-plex type:movie lang:de watched:no bitrate'>2' --list     filter tokens
 
   FILTER TOKENS  (select multiple items — combine freely, all are AND):
@@ -1912,7 +1912,7 @@ def plex_retry_operation(operation, *args, context=None, library=None, **kwargs)
     Handles connection throttling/timeouts. During cache update mode, will reduce
     parallel workers and retry indefinitely. Otherwise exits after retries exhausted.
 
-    Usage: plex_retry_operation(lambda: obj.property_name, context="Episode_ID:123 'Pilot' reload()", library="series.en")
+    Usage: plex_retry_operation(lambda: obj.property_name, context="Episode_ID:123 'Pilot' reload()", library="lib6")
     or: plex_retry_operation(some_function, arg1, arg2)
 
     Retry schedule: 5s, 30s, 1min, 2min (total of 5 attempts: initial + 4 retries).
@@ -4443,7 +4443,7 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
         new_path:    Full path to the renamed file
         remote_host: SSH host for remote operations, or None for local
         dry_run:     If True, only print what would be done
-        log_prefix:  Prefix to prepend to log lines (e.g. 'movies.en|Movie:11411| ')
+        log_prefix:  Prefix to prepend to log lines (e.g. 'lib3|Movie:11411| ')
 
     Returns:
         tuple: (renamed_count, error_count)
@@ -5821,7 +5821,7 @@ def _compute_layout_index_live():
     instead, which prefers the cached value (so `--offline` works).
 
     Returns the same nested dict shape as `_build_layout_index`:
-        { '/Volumes/2/watch.v/,unsorted': {entry_basename: 'movie'/'series'/...},
+        { '/Volumes/2/watch.v/lib1': {entry_basename: 'movie'/'series'/...},
           ... }
     """
     locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
@@ -6867,7 +6867,7 @@ def get_library_dir_from_path(filepath, library_name):
 
     Args:
         filepath: Full path to the file
-        library_name: Name of the library (e.g., 'movies.en')
+        library_name: Name of the library (e.g., 'lib3')
 
     Returns:
         Library directory path, or parent directory if library not found in path
@@ -7317,7 +7317,7 @@ def get_movie_dir_from_path(filepath, library_name):
 
     Args:
         filepath: Full path to the file
-        library_name: Name of the library (e.g., 'movies.en')
+        library_name: Name of the library (e.g., 'lib3')
 
     Returns:
         Full path to the movie directory (directory directly within library)
@@ -9503,7 +9503,7 @@ def resolve_scope_to_keys(scope_val, media_type=None):
       - str (filter expression)  → 'lang:fr', 'year>2020', 'country:france',
                                     'layout:series', 'type:episode', etc.
       - list[str]                → AND-combine all tokens (variadic compound
-                                    scope: `my-plex --broken movies.fr year>2020`)
+                                    scope: `my-plex --broken lib4 year>2020`)
 
     Returns: (obj_keys, library_name_or_None, scope_label_string)
     """
@@ -10580,7 +10580,7 @@ def _track_delta(display_title, obj_type, is_new):
     """Increment library_delta_counters for a cache object being added or updated.
 
     Args:
-        display_title: Library name (or partition key like 'series.en[0:50]')
+        display_title: Library name (or partition key like 'lib6[0:50]')
         obj_type: 'Series', 'Season', 'Episode', or 'Movie'
         is_new: True if object is newly added, False if updated
     """
@@ -12316,7 +12316,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # IMPORTANT: Don't overwrite if already initialized (would lose expected_partitions registered during partition creation)
         if title not in PLEX_Media.library_partition_info:
             PLEX_Media.library_partition_info[title] = {
-                'expected_partitions': set(),  # Will contain all partition keys like 'series.de[0:19]'
+                'expected_partitions': set(),  # Will contain all partition keys like 'lib5[0:19]'
                 'completed_partitions': set(),
                 'all_complete': False
             }
@@ -13184,7 +13184,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 MAX_PARTITIONS_PER_LIBRARY = 4  # Maximum number of partitions per library
 
                 # Filter out completed libraries when resuming
-                # Note: completed_libraries may contain partition keys like "series.de[0:19]"
+                # Note: completed_libraries may contain partition keys like "lib5[0:19]"
                 # We need to check if the base library (or all its partitions) are completed
                 if hasattr(PLEX_Media, 'completed_libraries') and PLEX_Media.completed_libraries:
                     # Build a map of library -> completed partitions
@@ -14913,7 +14913,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if DBG: print(f"{DBGPFX}Failed to save checkpoint: {e}")
 
     argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--media] <media_item> [<MEDIA_COMMAND> [..]]", description="Without any <MEDIA_COMMAND> this does the same as with <MEDIA_COMMAND> '--info'.", allow_abbrev=False, exit_on_error=False, epilog="""Examples:
-  {US} series.de -V --list --type show     # lists all series in PLEX library series.de and because of -V also prints their directories on disk
+  {US} lib5 -V --list --type show     # lists all series in PLEX library lib5 and because of -V also prints their directories on disk
     """)
     # help="Media-related commands. This is selected if <PLEX_OBJECT> is either <media_title> or <media_filename>. For more info: --help media",
     argparser._optionals.title = '// if PLEX_OBJECT is a media_item: Available <MEDIA_COMMAND>s' # argparse.SUPPRESS
@@ -17470,7 +17470,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return label_str, _layout_fn
 
         # --- Library (case-sensitive exact match against obj.library) ---
-        # Enables OR-ing libraries: `library:movies.fr OR library:movies.de`.
+        # Enables OR-ing libraries: `library:lib4 OR library:lib2`.
         # For AND-style "in this library", a bare library name as a separate
         # SCOPE token already works via the universal-scope resolver — this
         # filter form is mainly for use INSIDE compound (OR/parens) expressions.
@@ -20584,9 +20584,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("    below 100% is a strong candidate).")
             print("    Example:")
             print("      AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [")
-            print("          (',unsorted',   'MULTI'),")
-            print("          ('documentary', 'MULTI'),")
-            print("          ('movies.de',   'de'),")
+            print("          ('lib1',   'MULTI'),")
+            print("          ('lib8', 'MULTI'),")
+            print("          ('lib2',   'de'),")
             print("      ]")
             print()
             print("  DISK_PLEX_MAP['AUDIO_LANG']  (ground truth — filename hint):")
@@ -20660,9 +20660,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  DUPLICATES_IGNORE_LIBRARY_COMBINATIONS:")
             print("    Ignore duplicates when ALL copies are within the same library group.")
-            print("    Example: [['movies.de', 'movies.en', 'movies.fr']]")
-            print("    A movie in movies.de + movies.en only → NOT a duplicate (both in group).")
-            print("    But movies.de + ,unsorted → IS a duplicate (,unsorted not in group).")
+            print("    Example: [['lib2', 'lib3', 'lib4']]")
+            print("    A movie in lib2 + lib3 only → NOT a duplicate (both in group).")
+            print("    But lib2 + lib1 → IS a duplicate (lib1 not in group).")
             print()
             print("EXAMPLES:")
             print()
@@ -20737,7 +20737,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --scan                     # Scan all libraries + update cache")
-            print("  my-plex series.en --scan           # Scan only series.en + update cache")
+            print("  my-plex lib6 --scan           # Scan only lib6 + update cache")
             print("  my-plex ID:51862 --scan            # Scan the library containing ID:51862")
             print()
             print("NOTE: lib.refresh() forces Plex to re-analyze every file in the library.")
@@ -20759,8 +20759,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex ,unsorted --watched        # List watched items in ,unsorted")
-            print("  my-plex ,unsorted --unwatched       # List unwatched items in ,unsorted")
+            print("  my-plex lib1 --watched        # List watched items in lib1")
+            print("  my-plex lib1 --unwatched       # List unwatched items in lib1")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -20777,7 +20777,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex ,unsorted --unwatched       # List unwatched items in ,unsorted")
+            print("  my-plex lib1 --unwatched       # List unwatched items in lib1")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -20828,7 +20828,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("COMBINING TOKENS  (all conditions are AND):")
             print()
-            print("  my-plex ,unsorted type:movie lang:de watched:no bitrate'>2mbps'")
+            print("  my-plex lib1 type:movie lang:de watched:no bitrate'>2mbps'")
             print("  my-plex type:series resolution:1080p codec:h265")
             print()
             print("  When tokens are translated, my-plex echoes:")
@@ -20837,9 +20837,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("DISPLAY COLUMNS  (bare field name — adds column, no filtering):")
             print()
-            print("  my-plex ,unsorted genre                    add GENRE column")
-            print("  my-plex ,unsorted rating>7 genre title     add GENRE + TITLE columns")
-            print("  my-plex ,unsorted year country director    add multiple columns")
+            print("  my-plex lib1 genre                    add GENRE column")
+            print("  my-plex lib1 rating>7 genre title     add GENRE + TITLE columns")
+            print("  my-plex lib1 year country director    add multiple columns")
             print()
             print("  Supported: title, library, genre, year, rating, stars, critics, added,")
             print("    bitrate, resolution, codec, size, duration, watched, lang, subs,")
@@ -20847,22 +20847,22 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("HIDING COLUMNS  (-field — removes a column from output):")
             print()
-            print("  my-plex ,unsorted -file                    hide FILEPATH column")
-            print("  my-plex ,unsorted -key -file               hide both KEY and FILEPATH")
-            print("  my-plex ,unsorted genre -file              add GENRE, hide FILEPATH")
+            print("  my-plex lib1 -file                    hide FILEPATH column")
+            print("  my-plex lib1 -key -file               hide both KEY and FILEPATH")
+            print("  my-plex lib1 genre -file              add GENRE, hide FILEPATH")
             print()
             print("  Synonyms: -file = -filepath = -path,  -watched = -watch")
             print()
             print("FILTER + HIDE COMBINED  (-field:value — filters AND hides the column):")
             print()
-            print("  my-plex ,unsorted -genre:comedy            filter by comedy AND hide GENRE column")
-            print("  my-plex ,unsorted -year>2020 -lang:de      apply both filters, no extra columns")
+            print("  my-plex lib1 -genre:comedy            filter by comedy AND hide GENRE column")
+            print("  my-plex lib1 -year>2020 -lang:de      apply both filters, no extra columns")
             print()
             print("  Use this when a field is only useful as a filter, not for display.")
             print()
             print("EXTERNAL ID URLS  (imdb / tmdb / tvdb — adds clickable URL column):")
             print()
-            print("  my-plex ,unsorted imdb                     add IMDB URL column")
+            print("  my-plex lib1 imdb                     add IMDB URL column")
             print("  my-plex Tagesschau imdb tmdb               add both IMDB and TMDB URLs")
             print()
             print("  Episodes inherit the parent series' external IDs.")
@@ -20876,12 +20876,12 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Matches movies/series by title. Episodes are included if their")
             print("  series title matches. For episode-only title search, use ep:word:")
             print()
-            print("  my-plex ,unsorted ep:pilot                 episodes with 'pilot' in title")
+            print("  my-plex lib1 ep:pilot                 episodes with 'pilot' in title")
             print()
             print("END-OF-FILTERS MARKER  (--):")
             print()
             print("  my-plex -- imdb genre comedy               literal title search (all 3 words)")
-            print("  my-plex ,unsorted -- year                  search titles for 'year' literally")
+            print("  my-plex lib1 -- year                  search titles for 'year' literally")
             print()
             print("  After --, every remaining token is a literal title~ search,")
             print("  bypassing all filter heuristics. Use this to match words that")
@@ -20891,7 +20891,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("SCOPING COMMANDS:")
             print()
             print("  my-plex --problems                      all libraries")
-            print("  my-plex movies.en --problems            one library")
+            print("  my-plex lib3 --problems            one library")
             print('  my-plex "Tagesschau" --missing          one series')
             print("  my-plex type:movie --reencode           all movies")
             print()
@@ -20923,7 +20923,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("TOKEN SHAPES (any SCOPE position accepts any of these):")
             print()
-            print("  library name        ,unsorted   movies.fr   series.de")
+            print("  library name        lib1   lib4   lib5")
             print("  cache key           Movie:12345   Series:42   Season:99   Episode:17740")
             print("  Plex ID             12345")
             print("  full filepath       /Volumes/2/watch.v/.../Foo.mkv")
@@ -20949,14 +20949,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("    watched:no / watched:yes                  (=`--unwatched` / `--watched`)")
             print()
             print("COMPOUND SCOPE — AND-combine multiple tokens (universal):")
-            print("  my-plex ,unsorted country:france                  # filter & list")
-            print("  my-plex --mv-to movies.fr ,unsorted country:france  # filter & MOVE")
-            print("  my-plex --broken ,unsorted country:france         # filter & check")
-            print("  my-plex --remux ,unsorted lang:de codec:mpeg2     # filter & remux")
-            print("  my-plex --reencode movies.de bitrate>2 year>2015")
+            print("  my-plex lib1 country:france                  # filter & list")
+            print("  my-plex --mv-to lib4 lib1 country:france  # filter & MOVE")
+            print("  my-plex --broken lib1 country:france         # filter & check")
+            print("  my-plex --remux lib1 lang:de codec:mpeg2     # filter & remux")
+            print("  my-plex --reencode lib2 bitrate>2 year>2015")
             print()
-            print("Tokens AND-combine by default — `,unsorted lang:fr year>2020`")
-            print("means `library=,unsorted AND lang=fr AND year>2020`.")
+            print("Tokens AND-combine by default — `lib1 lang:fr year>2020`")
+            print("means `library=lib1 AND lang=fr AND year>2020`.")
             print()
             print("BARE-WORD AUTO-INTERPRETATION (simple + intuitive default):")
             print("  Bare words that match a Plex library are recognised as LIBRARY")
@@ -20975,8 +20975,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("    my-plex library:library1 library2")
             print("              # search titles containing 'library2' in library1")
-            print("    my-plex library:library1 year>2020 documentary")
-            print("              # titles containing 'documentary' in library1, post-2020")
+            print("    my-plex library:library1 year>2020 lib8")
+            print("              # titles containing 'lib8' in library1, post-2020")
             print()
             print("OR / AND / PARENS (v2.1):")
             print("  `OR` and `AND` are CASE-SENSITIVE operators — must be uppercase.")
@@ -21023,10 +21023,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  else is search text\".")
             print()
             print("BARE-FIELD TOKENS — add a column without filtering:")
-            print("  my-plex ,unsorted countries        # show COUNTRY column")
-            print("  my-plex ,unsorted original_lang    # show ORIG-LANG column")
-            print("  my-plex ,unsorted -file            # HIDE the FILEPATH column")
-            print("  my-plex ,unsorted imdb tmdb        # add external-ID URL columns")
+            print("  my-plex lib1 countries        # show COUNTRY column")
+            print("  my-plex lib1 original_lang    # show ORIG-LANG column")
+            print("  my-plex lib1 -file            # HIDE the FILEPATH column")
+            print("  my-plex lib1 imdb tmdb        # add external-ID URL columns")
             print()
             print("--  TERMINATOR — anything after `--` is a literal title search:")
             print("  my-plex -- imdb                    # search titles containing 'imdb'")
@@ -21097,14 +21097,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("  lang / subs / critics / watched / contentrating")
             print("  country / director / writer / actors")
             print("  Works on CLI and in DEFAULT_SCOPE. Combinable with filters:")
-            print("  my-plex ,unsorted rating>7 genre title  ← filter + GENRE + TITLE columns")
+            print("  my-plex lib1 rating>7 genre title  ← filter + GENRE + TITLE columns")
             print()
             print("HIDING COLUMNS (-field — removes a column from output):")
             print("  -file / -filepath / -path  → hides FILEPATH column")
             print("  -key                       → hides KEY column")
             print("  -genre / -title / -year    → hides that display column")
             print("  -watched / -watch          → hides WATCH# + LAST-PLAYED columns")
-            print("  my-plex ,unsorted genre -file  ← add GENRE, hide FILEPATH")
+            print("  my-plex lib1 genre -file  ← add GENRE, hide FILEPATH")
             print()
             print("FILTER + HIDE COMBINED (-field:value — filter AND hide column):")
             print("  -genre:comedy              → filter by comedy AND hide GENRE column")
@@ -21129,7 +21129,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("SCOPE:")
             print("  my-plex 'EXPR'                  # all libraries")
             print("  my-plex KEY-1234 'EXPR'          # single Plex object")
-            print("  my-plex series.en 'EXPR'         # one library")
+            print("  my-plex lib6 'EXPR'         # one library")
             print("  my-plex 'TITLE' 'EXPR'           # matching title")
             print()
             print("OPTIONS:")
@@ -21157,7 +21157,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex '< 1Mbps'                              # All items below 1 Mbps")
             print("  my-plex '> 400MB/hr'                           # All items above 400 MB/hr")
             print("  my-plex --list '< 1' type:movie                # Movies only, below 1 Mbps")
-            print("  my-plex series.en --list '> 2'                 # One library, above 2 Mbps")
+            print("  my-plex lib6 --list '> 2'                 # One library, above 2 Mbps")
             print("  my-plex --list 'resolution:1080p AND codec:h265'  # 1080p H.265 items")
             print("  my-plex --list 'year>2015 AND genre:action'    # Action items after 2015")
             print("  my-plex --list 'label:reencode'                # Items with reencode label")
@@ -21167,11 +21167,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  # key:value shorthand — no --list needed:")
             print("  my-plex type:movie                             # All movies")
-            print("  my-plex ,unsorted type:movie lang:de watched:no bitrate'>2mbps'")
+            print("  my-plex lib1 type:movie lang:de watched:no bitrate'>2mbps'")
             print()
             print("  my-plex --list                                 # List all libraries")
-            print("  my-plex ,unsorted --list                       # List all items in ,unsorted")
-            print("  my-plex ,unsorted --list --type movie          # Only movies in ,unsorted")
+            print("  my-plex lib1 --list                       # List all items in lib1")
+            print("  my-plex lib1 --list --type movie          # Only movies in lib1")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -21190,7 +21190,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print(f"  my-plex ,unsorted --{lang}            # List items with {lang_names.get(lang, lang)} audio")
+            print(f"  my-plex lib1 --{lang}            # List items with {lang_names.get(lang, lang)} audio")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -21308,7 +21308,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --unmatched                # All unmatched across all libraries")
-            print("  my-plex ,unsorted --unmatched      # Unmatched in ,unsorted only")
+            print("  my-plex lib1 --unmatched      # Unmatched in lib1 only")
             print("  my-plex --problems                 # Includes unmatched in full report")
             print()
             print("=" * 76)
@@ -21352,10 +21352,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --unsorted                          # All unsorted across all libraries")
-            print("  my-plex series.en --unsorted                # Unsorted in series.en only")
+            print("  my-plex lib6 --unsorted                # Unsorted in lib6 only")
             print("  my-plex 'Tagesschau' --unsorted             # Check a specific series")
             print("  my-plex --unsorted --fix --dry-run          # Preview sorting for all libraries")
-            print("  my-plex series.en --unsorted --fix          # Sort in series.en only")
+            print("  my-plex lib6 --unsorted --fix          # Sort in lib6 only")
             print("  my-plex 'Tagesschau' --unsorted --fix       # Sort a specific series")
             print("  my-plex Series:5191 --unsorted --fix --try    # Sort by cache key, preview")
             print("  my-plex --problems                          # Includes unsorted in full report")
@@ -21389,8 +21389,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --mismatch                    # All libraries")
-            print("  my-plex --mismatch series.en          # One library")
-            print("  my-plex series.en --mismatch          # Same")
+            print("  my-plex --mismatch lib6          # One library")
+            print("  my-plex lib6 --mismatch          # Same")
             print("  my-plex --mismatch Series:4925          # One series")
             print("  my-plex --problems                    # Includes this in full report")
             print()
@@ -21512,11 +21512,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --reencode                        # List candidates above threshold")
-            print("  my-plex --reencode movies.fr              # Limit to one library")
+            print("  my-plex --reencode lib4              # Limit to one library")
             print()
             print("  my-plex --reencode --mark                 # Detect + write on-disk labels")
             print("  my-plex --reencode --mark --try           # Dry-run: preview labels/renames")
-            print("  my-plex --reencode movies.fr --mark       # Detect + label one library")
+            print("  my-plex --reencode lib4 --mark       # Detect + label one library")
             print("  my-plex --reencode --mark --force         # Also remove labels below threshold")
             print("  my-plex --reencode --mark --force --try   # Preview --force without writes")
             print()
@@ -21592,7 +21592,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("SCOPE:")
             print("  my-plex --renumber                # all libraries")
-            print("  my-plex --renumber series.en      # one library")
+            print("  my-plex --renumber lib6      # one library")
             print("  my-plex Series:5191 --renumber      # one series")
             print("  my-plex Season:5192 --renumber    # one season")
             print("  my-plex Episode:2579 --renumber   # one episode")
@@ -21640,7 +21640,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  <SERIES> can be:")
             print("    - Plex title:  my-plex --missing 'Tagesschau'")
             print("    - Plex ID:     my-plex --missing ID:4215")
-            print("    - Filepath:    my-plex --missing /j2/watch.v/series.de/wer.weiss.denn.sowas_[quiz]")
+            print("    - Filepath:    my-plex --missing /j2/watch.v/lib5/wer.weiss.denn.sowas_[quiz]")
             print()
             print("EPISODE SOURCES:")
             print("  --source tvdb             TVDB v4 API (requires TVDB_API_KEY in config)")
@@ -21657,7 +21657,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  library, showing which source is used and why.")
             print()
             print("  Per-library override in ~/.my-plex.conf:")
-            print("    MISSING_EPISODES_SOURCE = {'series.de': 'fernsehserien.de', 'series.en': 'tvdb'}")
+            print("    MISSING_EPISODES_SOURCE = {'lib5': 'fernsehserien.de', 'lib6': 'tvdb'}")
             print()
             print("API KEYS:")
             print("  TVDB:  Register free at https://thetvdb.com/dashboard (Project → API Keys)")
@@ -21722,7 +21722,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --sort-new --dry-run              # Preview all libraries")
-            print("  my-plex series.en --sort-new              # Sort in series.en only")
+            print("  my-plex lib6 --sort-new              # Sort in lib6 only")
             print("  my-plex 'Tagesschau' --sort-new           # Sort a specific series")
             print("  my-plex --unsorted --fix --dry-run        # Equivalent to --sort-new --dry-run")
             print()
@@ -21780,7 +21780,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("    → S05E12 Sondersendung [vu@2026-02-14].avi")
             print()
             print("  my-plex 'Tagesschau' --rename --dry-run     # Preview renames")
-            print("  my-plex series.en --rename                   # Rename all in library")
+            print("  my-plex lib6 --rename                   # Rename all in library")
             print("  my-plex ID:12345 --rename                    # Rename single episode")
             print()
             print("MULTI-EPISODE FILES:")
@@ -21889,7 +21889,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print("  my-plex --plex2disk --try                  # Preview all changes")
-            print("  my-plex movies.en --plex2disk              # Map metadata for English movies")
+            print("  my-plex lib3 --plex2disk              # Map metadata for English movies")
             print("  my-plex --plex2disk --force --try          # Preview destructive sync (Plex wins)")
             print("  my-plex --plex2disk --replace --try        # Preview canonicalising rename")
             print("  my-plex --plex2disk --clean                # Strip all markers")
@@ -22048,7 +22048,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("UNIVERSAL SCOPE (per feedback_universal_scope):")
             print("  my-plex --remux                       # all candidates")
-            print("  my-plex movies.de --remux             # one library")
+            print("  my-plex lib2 --remux             # one library")
             print("  my-plex 'Tagesschau' --remux          # one series")
             print("  my-plex Series:2047 --remux           # by cache key")
             print("  my-plex Episode:2603 --remux          # one episode")
@@ -22098,13 +22098,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("for the session — subsequent layout: queries are O(1).")
             print()
             print("EXAMPLES:")
-            print("  my-plex ,unsorted layout:series          # find series content")
+            print("  my-plex lib1 layout:series          # find series content")
             print("                                             Plex catalogued as Movies")
-            print("  my-plex movies.de layout:season          # season-shaped folders")
+            print("  my-plex lib2 layout:season          # season-shaped folders")
             print("                                             inside Movie library")
-            print("  my-plex series.en layout:movie           # movie content sitting")
+            print("  my-plex lib6 layout:movie           # movie content sitting")
             print("                                             in a Series library")
-            print("  my-plex --mv-to series.en movies.de layout:series   # move them")
+            print("  my-plex --mv-to lib6 lib2 layout:series   # move them")
             print()
             print("WHEN layout: RETURNS 0 ITEMS:")
             print("  Means no CACHED Plex object lives under a folder matching that")
@@ -22148,8 +22148,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print("  my-plex --unrecognized                    # scan every library")
             print("  my-plex --alien                           # same, shorter")
-            print("  my-plex --unrecognized ,unsorted          # scan one library")
-            print("  my-plex --alien movies.fr")
+            print("  my-plex --unrecognized lib1          # scan one library")
+            print("  my-plex --alien lib4")
             print()
             print("RELATED:")
             print("  --unsorted   (Series libs only)  finds shows whose episodes live")
@@ -22170,7 +22170,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex --original-languages [SCOPE]       # backfill from TMDB")
             print("       my-plex --original-languages --try         # dry-run preview only")
-            print("       my-plex --original-languages 'movies.fr'   # scoped backfill")
+            print("       my-plex --original-languages 'lib4'   # scoped backfill")
             print()
             print("Walks the cache and, for every Movie / Series that has a cached TMDB")
             print("external_id but no `original_language` field yet, queries the TMDB API")
@@ -22201,10 +22201,10 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print("  my-plex --original-languages                # backfill all movies+series")
-            print("  my-plex --original-languages movies.fr      # one library only")
+            print("  my-plex --original-languages lib4      # one library only")
             print("  my-plex --original-languages Movie:115547   # one item (test)")
-            print("  my-plex ,unsorted original_lang:fr          # filter (after backfill)")
-            print("  my-plex movies.fr -- country:france         # all French-country movies")
+            print("  my-plex lib1 original_lang:fr          # filter (after backfill)")
+            print("  my-plex lib4 -- country:france         # all French-country movies")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -22236,26 +22236,26 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("UNIVERSAL SCOPE (per feedback_universal_scope) — every Plex type the")
             print("cache knows about is accepted; Series / Season auto-expand to episodes:")
-            print("  my-plex --mv movies.fr Movie:12345         # one movie (all versions)")
-            print("  my-plex --mv movies.fr 'Le Samouraï'       # by title")
-            print("  my-plex --mv movies.fr movies.unsorted     # whole source library")
-            print("  my-plex --mv movies.fr /path/to/file.mkv   # by full filepath")
-            print("  my-plex --mv series.de Series:42           # WHOLE SERIES → all eps")
-            print("  my-plex --mv series.de Season:99           # WHOLE SEASON → all eps")
-            print("  my-plex --mv series.de Episode:17740       # single episode")
-            print("  my-plex --mv movies.fr                     # global: ALL movies")
+            print("  my-plex --mv lib4 Movie:12345         # one movie (all versions)")
+            print("  my-plex --mv lib4 'Le Samouraï'       # by title")
+            print("  my-plex --mv lib4 movies.unsorted     # whole source library")
+            print("  my-plex --mv lib4 /path/to/file.mkv   # by full filepath")
+            print("  my-plex --mv lib5 Series:42           # WHOLE SERIES → all eps")
+            print("  my-plex --mv lib5 Season:99           # WHOLE SEASON → all eps")
+            print("  my-plex --mv lib5 Episode:17740       # single episode")
+            print("  my-plex --mv lib4                     # global: ALL movies")
             print()
             print("COMPOUND SCOPE (v1.9) — pass multiple tokens; they AND-combine via the")
             print("shared universal-scope resolver (same engine as --list):")
-            print("  my-plex --mv movies.fr ,unsorted country:france")
-            print("                            # all France-produced movies in ,unsorted")
-            print("  my-plex --mv movies.fr ,unsorted original_lang:fr")
-            print("                            # all originally-French movies in ,unsorted")
+            print("  my-plex --mv lib4 lib1 country:france")
+            print("                            # all France-produced movies in lib1")
+            print("  my-plex --mv lib4 lib1 original_lang:fr")
+            print("                            # all originally-French movies in lib1")
             print("                              (run --original-languages first to populate)")
-            print("  my-plex --mv movies.de ,unsorted lang:de year>2020")
-            print("                            # German-audio movies in ,unsorted, post-2020")
-            print("  my-plex --mv series.en ,unsorted type:series original_lang:en")
-            print("                            # originally-English series in ,unsorted")
+            print("  my-plex --mv lib2 lib1 lang:de year>2020")
+            print("                            # German-audio movies in lib1, post-2020")
+            print("  my-plex --mv lib6 lib1 type:series original_lang:en")
+            print("                            # originally-English series in lib1")
             print()
             print("  Filter tokens accepted (same syntax as --list):")
             print("    type:movie  /  type:series / type:show / type:tv /")
@@ -22325,7 +22325,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("    - A cache key:     my-plex --add-label reencode Movie:123")
             print("    - A Plex ID:       my-plex --add-label reencode 12345")
             print("    - A title:         my-plex --add-label foreign 'Tagesschau'")
-            print("    - A library name:  my-plex --add-label foreign series.en")
+            print("    - A library name:  my-plex --add-label foreign lib6")
             print()
             print("  SAFETY:")
             print("    When SCOPE resolves to more than 10 items, --dry-run or --yes is required.")
@@ -22338,8 +22338,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --add-label reencode Movie:123          # Single item by cache key")
             print("  my-plex --add-label foreign 'Tagesschau'        # By title")
-            print("  my-plex --add-label foreign series.en --dry-run # Preview: all items in library")
-            print("  my-plex --add-label foreign series.en --yes     # Confirm: all items in library")
+            print("  my-plex --add-label foreign lib6 --dry-run # Preview: all items in library")
+            print("  my-plex --add-label foreign lib6 --yes     # Confirm: all items in library")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -22360,7 +22360,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --remove-label reencode Movie:123          # Single item")
-            print("  my-plex --remove-label foreign series.en --dry-run # Preview")
+            print("  my-plex --remove-label foreign lib6 --dry-run # Preview")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -22633,7 +22633,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --renumber --fix --try          # Preview renumber changes")
             print("  my-plex --unsorted --fix --dry-run      # Preview sort changes")
             print("  my-plex --plex2disk -T                  # Preview disk marker writes")
-            print("  my-plex --add-label foreign series.en --dry-run  # Preview label additions")
+            print("  my-plex --add-label foreign lib6 --dry-run  # Preview label additions")
             print("  my-plex --reencode --mark --try         # Preview on-disk reencode labels")
             print()
             print("=" * 76)
@@ -22655,7 +22655,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --unsorted --fix --yes          # Sort all without asking")
             print("  my-plex ID:4167 --rm --yes              # Trash files without confirmation")
-            print("  my-plex --add-label foreign series.en --yes  # Label all without asking")
+            print("  my-plex --add-label foreign lib6 --yes  # Label all without asking")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -22770,8 +22770,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex movies.en --collections")
-            print("  my-plex series.de --collections")
+            print("  my-plex lib3 --collections")
+            print("  my-plex lib5 --collections")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -24693,9 +24693,9 @@ def _parse_compound_filter(expr_or_tokens):
                 return parsed
             # v2.1 ergonomics: auto-promote bare library names to library:NAME
             # inside compound expressions, so users can write
-            #   ,unsorted ( country:france OR country:italy )
+            #   lib1 ( country:france OR country:italy )
             # instead of
-            #   library:,unsorted ( country:france OR country:italy )
+            #   library:lib1 ( country:france OR country:italy )
             if atom in PLEX_Media.OBJ_BY_LIBRARY:
                 parsed = PLEX_Media._parse_filter_sub_expr(f'library:{atom}')
                 if parsed:
@@ -24783,8 +24783,8 @@ def _get_universal_scope(scope_tokens):
 
     Multiple tokens are AND-combined: the result is the intersection of
     cache keys produced by each token independently.  This is what makes
-    `--mv movies.fr ,unsorted original_lang:fr` (move all originally-French
-    items currently in ,unsorted to movies.fr) work elegantly across every
+    `--mv lib4 lib1 original_lang:fr` (move all originally-French
+    items currently in lib1 to lib4) work elegantly across every
     SCOPE-taking command (--mv, --remux, --plex2disk, --disk2plex,
     --original-languages, etc.).
 
@@ -26356,7 +26356,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                    SCOPE can be ANY Plex type the cache knows about — Movie, Series,
                    Season, Episode, library name, title, cache key, or full filepath.
                    Series and Season scopes auto-expand to their underlying Episodes
-                   via _get_disk_map_scope(), so e.g. `--mv series.de Series:42`
+                   via _get_disk_map_scope(), so e.g. `--mv lib5 Series:42`
                    moves every season + episode of that series in one invocation.
         dry_run:   preview only (no file changes, no cache changes)
         force:     auto-overwrite duplicates in destination (skip interactive prompt)
@@ -26401,7 +26401,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
     # Resolve scope via the universal multi-token resolver — same engine
     # used by --list, --remux, --plex2disk, etc.  Multiple tokens AND-combine
-    # (e.g. `,unsorted original_lang:fr` = library AND filter).
+    # (e.g. `lib1 original_lang:fr` = library AND filter).
     items = _get_universal_scope(scope_tokens) if scope_tokens else _get_disk_map_scope(None)
     if not items:
         print(f"--mv: no media items found for scope: {scope_tokens!r}")
@@ -27469,7 +27469,7 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
         err(1063, f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
             f"  Usage: my-plex --{action}-label 'my-label' Movie:123\n"
             f"         my-plex --{action}-label 'my-label' 'Tagesschau'\n"
-            f"         my-plex --{action}-label 'my-label' series.en\n"
+            f"         my-plex --{action}-label 'my-label' lib6\n"
             f"  Use --help {action}-label for details.")
 
     label = label_args[0]
@@ -29812,14 +29812,20 @@ def execute_global_commands(args, cmd_args):
         # run_regression_tests() calls sys.exit(), so we never reach here
 
     # Handle --missing command
-    if safe_getattr(cmd_args, 'missing', None):
-        if cmd_args.missing is True:  # --missing without series reference
+    _missing_val = safe_getattr(cmd_args, 'missing', None)
+    if _missing_val is not None:
+        # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
+        if _missing_val is True or _missing_val == [] or _missing_val == '':
             err(1091, "--missing requires a series reference (title, Plex ID, or filepath)\n"
                 "  Usage: my-plex --missing <show>\n"
                 "         my-plex <library> --missing  (all series in library)\n"
                 "         my-plex <show> --missing     (specific series)\n"
                 "  Use --help missing for details")
-        cmd_missing(cmd_args.missing, source_override=safe_getattr(cmd_args, 'source', None))
+        # Collapse list → str/None for the existing cmd_missing API.
+        _target = _missing_val
+        if isinstance(_target, list):
+            _target = _target[0] if len(_target) == 1 else (_target if len(_target) > 1 else None)
+        cmd_missing(_target, source_override=safe_getattr(cmd_args, 'source', None))
         sys.exit(0)
 
     # Handle --sort-new command (shortcut for --unsorted --fix)
@@ -30116,7 +30122,7 @@ def execute_global_commands(args, cmd_args):
 
     # Check if --collections is used without a library (global context = no library)
     if safe_getattr(cmd_args, 'collections', False):
-        err(1072, "--collections requires a library name.\nExample: my-plex ,unsorted --collections")
+        err(1072, "--collections requires a library name.\nExample: my-plex lib1 --collections")
 
     # Handle --problems: run all problem detection checks with summary
     problems_val = safe_getattr(cmd_args, 'problems', None)
@@ -30679,8 +30685,8 @@ def main():
     _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
     # v2.1: if the user passes an explicit `library:NAME` anywhere in argv,
     # bare words that happen to match library names are treated as
-    # title-search instead.  Lets users search for titles like 'series.de'
-    # or 'documentary' by saying e.g. `library:movies.en series.de`.
+    # title-search instead.  Lets users search for titles like 'lib5'
+    # or 'lib8' by saying e.g. `library:lib3 lib5`.
     _explicit_library_used = any(re.match(r'^library:.+', _a, re.IGNORECASE) for _a in sys.argv[1:])
     _paren_depth = 0   # tracked through the argv loop to know "inside compound expression"
     # Variadic flags whose following positional args MUST pass through to argparse
@@ -30792,7 +30798,7 @@ def main():
 
         # v2.1: inside a parenthesised compound expression, EVERY bare word
         # must reach the filter parser (otherwise a bare library name like
-        # `,unsorted` inside `( ,unsorted OR series.de )` would fall through
+        # `lib1` inside `( lib1 OR lib5 )` would fall through
         # to argparse as CMD_OR_PLEXOBJECT and the parser would see `( OR )`
         # with a missing atom).
         # Two sub-rules:
@@ -30890,7 +30896,7 @@ def main():
             # signals "I'm using library: explicitly, treat the rest as
             # title-search even if they look like library names".
             _is_library_name = (arg in PLEX_Media.OBJ_BY_LIBRARY) and not _explicit_library_used
-            # Library-shaped names (movies.fr / series.de / ,unsorted) also
+            # Library-shaped names (lib4 / lib5 / lib1) also
             # bypass the search heuristic UNLESS explicit library: is used.
             _is_library_shaped = (
                 arg.startswith(',') or
@@ -31343,7 +31349,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
-    GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux ,unsorted country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
+    GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux lib1 country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv-to DEST_LIB [SCOPE...]. The `-to` suffix makes it explicit that the FIRST arg is the destination library. SCOPE: library / cache key / Plex ID / title / filepath / filter expression — multiple tokens AND-combine. On duplicate (title+originalTitle+year) matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
     GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
     GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help="List top-level entries in each library rootpath that Plex DB doesn't have a media_part for. Catches download leftovers, mis-classified folders, or content dropped at a library root that Plex never matched. Optional LIB scope (single library). Use --help unrecognized for details. Synonym: --alien.")
