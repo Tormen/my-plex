@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.11"
+SCRIPT_VERSION = "v1.12"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -24134,16 +24134,32 @@ def _get_universal_scope(scope_tokens):
 
 
 def _get_disk_map_scope(target):
-    """Determine which cache entries to process for --map-to-filename / --map-from-filename.
+    """Determine which cache entries to process — UNIVERSAL scope resolver.
 
-    Args:
-        target: None (all), library name, full filepath, media identifier,
-                title, or filter expression (lang:fr / year>2020 /
-                original_lang:french / 'lang:fr AND year>2020').
+    Accepts ALL these target shapes:
+      - None / '' / []           → every Movie + Episode in the cache
+      - str (single token)       → library name / cache key / filepath /
+                                   title / filter expression
+      - list[str] (multi-token)  → AND-combine all tokens via
+                                   _get_universal_scope (set-intersection
+                                   of per-token results)
 
     Returns:
         list of (cache_key, obj_dict) tuples
     """
+    # Multi-token compound scope → delegate to the universal AND-combiner.
+    # This is what makes every SCOPE-taking command (--remux / --plex2disk /
+    # --rename / --mv / --original-languages / ...) accept the same
+    # `lib filter:val year>2020` compound syntax uniformly.
+    if isinstance(target, (list, tuple)):
+        clean = [t for t in target if t]
+        if not clean:
+            target = None
+        elif len(clean) == 1:
+            target = clean[0]
+        else:
+            return _get_universal_scope(clean)
+
     items = []
     # Filter-expression scope — delegate to the same parser --list uses, so
     # any Cat-B token (lang:fr / original_lang:fr / country:france / year>2020)
@@ -29112,6 +29128,20 @@ def execute_global_commands(args, cmd_args):
         cmd_sort_new(args, dry_run=dry_run, target=target)
         sys.exit(0)
 
+    # Helper: collapse a SCOPE arg (nargs='*' list, legacy single str, or
+    # legacy `True` sentinel) into the shape every cmd_* + _get_disk_map_scope
+    # expects: None / str / list[str].
+    def _collapse_scope_arg(val):
+        if val is None or val is True:
+            return None
+        if isinstance(val, list):
+            if not val:
+                return None
+            if len(val) == 1:
+                return val[0]
+            return val
+        return val   # already a string (legacy nargs='?')
+
     # Handle --plex-disk-sync / --sync (bidirectional: disk2plex first, then plex2disk)
     sync_target = safe_getattr(cmd_args, 'plex_disk_sync', None) or safe_getattr(cmd_args, 'sync', None)
     if sync_target is not None:
@@ -29121,7 +29151,7 @@ def execute_global_commands(args, cmd_args):
                 "    my-plex --plex2disk --force   (Plex overwrites disk — removes markers for unwatched items)\n"
                 "    my-plex --disk2plex --force   (disk overwrites Plex — marks unwatched in Plex where no marker)")
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-        target = sync_target if sync_target is not True else None
+        target = _collapse_scope_arg(sync_target)
         print("=== Phase 1: Syncing disk markers → Plex ===")
         cmd_disk2plex(target, dry_run=dry_run)
         print()
@@ -29136,7 +29166,7 @@ def execute_global_commands(args, cmd_args):
         force = args.force
         clean = safe_getattr(cmd_args, 'clean', False) or safe_getattr(cmd_args, 'map_from_filename', None) is not None
         replace = safe_getattr(cmd_args, 'replace', False)
-        target = plex2disk_target if plex2disk_target is not True else None
+        target = _collapse_scope_arg(plex2disk_target)
         if clean:
             cmd_plex2disk_clean(target, dry_run=dry_run)
         else:
@@ -29146,9 +29176,8 @@ def execute_global_commands(args, cmd_args):
     # Handle --remux command
     remux_target = safe_getattr(cmd_args, 'remux', None)
     if remux_target is not None:
-        target = remux_target if remux_target is not True else None
+        target = _collapse_scope_arg(remux_target)
         yes = safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False)
-        # --no-audio-language --remux filter (flag is on the global args)
         no_audio_lang_only = (bool(safe_getattr(args, 'no_audio_language', False))
                               or bool(safe_getattr(cmd_args, 'no_audio_language', False)))
         cmd_remux(target, yes=yes, no_audio_language_only=no_audio_lang_only)
@@ -29157,7 +29186,7 @@ def execute_global_commands(args, cmd_args):
     # Handle --original-languages command (TMDB backfill for original_language field)
     olang_target = safe_getattr(cmd_args, 'original_languages', None)
     if olang_target is not None:
-        target = olang_target if olang_target is not True else None
+        target = _collapse_scope_arg(olang_target)
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         cmd_original_languages(target=target, dry_run=dry_run)
         sys.exit(0)
@@ -29183,7 +29212,7 @@ def execute_global_commands(args, cmd_args):
     # Handle --map-from-filename alias (standalone, without --plex2disk)
     if safe_getattr(cmd_args, 'map_from_filename', None) is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-        target = cmd_args.map_from_filename if cmd_args.map_from_filename is not True else None
+        target = _collapse_scope_arg(cmd_args.map_from_filename)
         cmd_plex2disk_clean(target, dry_run=dry_run)
         sys.exit(0)
 
@@ -29192,7 +29221,7 @@ def execute_global_commands(args, cmd_args):
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force = args.force
         yes = safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False)
-        target = cmd_args.disk2plex if cmd_args.disk2plex is not True else None
+        target = _collapse_scope_arg(cmd_args.disk2plex)
         cmd_disk2plex(target, dry_run=dry_run, force=force, yes=yes)
         sys.exit(0)
 
@@ -29952,6 +29981,11 @@ def main():
         '--mv', '--move', '--mv-to', '--move-to',
         '--original-languages', '--collect-original-languages',
         '--add-label', '--remove-label',
+        # v1.12: migrated to nargs='*' so compound SCOPE (lib + filter) works:
+        '--remux',
+        '--plex2disk', '--disk2plex', '--plex-disk-sync', '--sync',
+        '--map-to-filename', '--map-from-filename',
+        '--rename', '--renumber',
     }
     _in_variadic_window = False
     _i = 1
@@ -30440,27 +30474,27 @@ def main():
     main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='?', const=True, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--renumber', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--plex', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - with --renumber: Plex metadata numbering issues
-    main_parser.add_argument('--broken', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--broken', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--problems', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
+    main_parser.add_argument('--sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--clean', action='store_true', default=False, help=argparse.SUPPRESS)
-    main_parser.add_argument('--map-to-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
-    main_parser.add_argument('--map-from-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias
-    main_parser.add_argument('--rename', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
+    main_parser.add_argument('--map-to-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias
+    main_parser.add_argument('--map-from-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias
+    main_parser.add_argument('--rename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
     main_parser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
@@ -30511,7 +30545,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--detect', action='store_true', default=False, help=argparse.SUPPRESS)  # Deprecated — candidates are always listed by --reencode
     GLOBAL_CMD_PARSER.add_argument('--force', action='store_true', default=False, help="With --reencode --mark: also remove labels from items now below the threshold.")
-    GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='SCOPE', nargs='?', const=True, default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files. Use --plex to show Plex metadata numbering issues.")
+    GLOBAL_CMD_PARSER.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help="List episodes with incorrect S0xE0x numbering in filename. Use --fix to rename files. Use --plex to show Plex metadata numbering issues.")
     GLOBAL_CMD_PARSER.add_argument('--fix', action='store_true', default=False, help="With --renumber: rename episode files to correct numbering. With --unsorted: sort files into season dirs (= --sort-new). Respects --try/--dry-run.")
     GLOBAL_CMD_PARSER.add_argument('--plex', action='store_true', default=False, help="With --renumber: show Plex metadata numbering issues instead of filename issues (replaces --episode-numbering-issues).")
     GLOBAL_CMD_PARSER.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan for all libraries, wait for completion, then update cache. Use --help scan for details.")
@@ -30533,18 +30567,18 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='?', const=True, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
-    GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
-    GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='?', const=True, default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter. Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
+    GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
+    GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux ,unsorted country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv DEST_LIB [SCOPE]. SCOPE can be a library name, cache key, Plex ID, title, or filepath (omitted = all items). On duplicate title+originalTitle+year matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
-    GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='?', const=True, default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
+    GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
     GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help="List top-level entries in each library rootpath that Plex DB doesn't have a media_part for. Catches download leftovers, mis-classified folders, or content dropped at a library root that Plex never matched. Optional LIB scope (single library). Use --help unrecognized for details. Synonym: --alien.")
-    GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='?', const=True, default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
-    GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='?', const=True, default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
-    GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
+    GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
+    GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
     GLOBAL_CMD_PARSER.add_argument('--clean', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
     GLOBAL_CMD_PARSER.add_argument('--replace', action='store_true', default=False, help="Used with --plex2disk: also strip every disk2plex-matching marker (non-canonical aliases) before writing the canonical plex2disk marker. Use this to normalise filenames after adding new aliases (e.g. consolidating [german] -> [de] when [de] is the canonical form).")
-    GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
-    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
+    GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
+    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
@@ -30933,12 +30967,13 @@ def main():
             else:
                 remaining_args.insert(0, '--reencode')
 
-    # Re-inject --renumber into remaining_args
-    # Same pattern as --reencode: supports --renumber [LIBRARY], <PLEXOBJ> --renumber, bare
+    # Re-inject --renumber into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'renumber', None) is not None:
-        if args.renumber is not True:
+        _renumber_vals = args.renumber if isinstance(args.renumber, list) else ([args.renumber] if args.renumber and args.renumber is not True else [])
+        if _renumber_vals:
             remaining_args.insert(0, '--renumber')
-            remaining_args.insert(1, args.renumber)
+            for _i, _v in enumerate(_renumber_vals, 1):
+                remaining_args.insert(_i, _v)
         else:
             if args.CMD_OR_PLEXOBJECT is not None:
                 remaining_args.append('--renumber')
@@ -30968,40 +31003,32 @@ def main():
         else:
             remaining_args.insert(0, '--sort-new')
 
-    # Re-inject --plex2disk into remaining_args
-    # Supports: --plex2disk [TARGET], <TARGET> --plex2disk, bare --plex2disk
+    # Re-inject --plex2disk into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'plex2disk', None) is not None:
-        if args.plex2disk is not True and args.plex2disk:
-            # --plex2disk <TARGET> — explicit target
-            remaining_args.insert(0, args.plex2disk)
-            remaining_args.insert(1, '--plex2disk')
-        else:
-            # bare --plex2disk — CMD_OR_PLEXOBJECT is already re-injected at front
-            remaining_args.insert(0, '--plex2disk')
-    # Re-inject --map-to-filename alias
+        _vals = args.plex2disk if isinstance(args.plex2disk, list) else ([args.plex2disk] if args.plex2disk and args.plex2disk is not True else [])
+        remaining_args.insert(0, '--plex2disk')
+        for _i, _v in enumerate(_vals, 1):
+            remaining_args.insert(_i, _v)
+    # Re-inject --map-to-filename alias (legacy → --plex2disk)
     elif safe_getattr(args, 'map_to_filename', None) is not None:
-        if args.map_to_filename is not True and args.map_to_filename:
-            remaining_args.insert(0, args.map_to_filename)
-            remaining_args.insert(1, '--plex2disk')
-        else:
-            remaining_args.insert(0, '--plex2disk')
+        _vals = args.map_to_filename if isinstance(args.map_to_filename, list) else ([args.map_to_filename] if args.map_to_filename and args.map_to_filename is not True else [])
+        remaining_args.insert(0, '--plex2disk')
+        for _i, _v in enumerate(_vals, 1):
+            remaining_args.insert(_i, _v)
 
-    # Re-inject --remux into remaining_args
-    # Supports: --remux [TARGET], <TARGET> --remux, bare --remux
+    # Re-inject --remux into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'remux', None) is not None:
-        if args.remux is not True and args.remux:
-            remaining_args.insert(0, args.remux)
-            remaining_args.insert(1, '--remux')
-        else:
-            remaining_args.insert(0, '--remux')
+        _remux_vals = args.remux if isinstance(args.remux, list) else ([args.remux] if args.remux and args.remux is not True else [])
+        remaining_args.insert(0, '--remux')
+        for _i, _v in enumerate(_remux_vals, 1):
+            remaining_args.insert(_i, _v)
 
-    # Re-inject --original-languages into remaining_args
+    # Re-inject --original-languages into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'original_languages', None) is not None:
-        if args.original_languages is not True and args.original_languages:
-            remaining_args.insert(0, args.original_languages)
-            remaining_args.insert(1, '--original-languages')
-        else:
-            remaining_args.insert(0, '--original-languages')
+        _vals = args.original_languages if isinstance(args.original_languages, list) else ([args.original_languages] if args.original_languages and args.original_languages is not True else [])
+        remaining_args.insert(0, '--original-languages')
+        for _i, _v in enumerate(_vals, 1):
+            remaining_args.insert(_i, _v)
 
     # Re-inject --unrecognized / --alien into remaining_args
     if safe_getattr(args, 'unrecognized', None) is not None:
@@ -31022,39 +31049,36 @@ def main():
             remaining_args.insert(_i + 1, _v)
         remaining_args.insert(0, '--mv')
 
-    # Re-inject --disk2plex into remaining_args
-    # Supports: --disk2plex [TARGET], <TARGET> --disk2plex, bare --disk2plex
+    # Re-inject --disk2plex into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'disk2plex', None) is not None:
-        if args.disk2plex is not True and args.disk2plex:
-            remaining_args.insert(0, args.disk2plex)
-            remaining_args.insert(1, '--disk2plex')
-        else:
-            remaining_args.insert(0, '--disk2plex')
+        _vals = args.disk2plex if isinstance(args.disk2plex, list) else ([args.disk2plex] if args.disk2plex and args.disk2plex is not True else [])
+        remaining_args.insert(0, '--disk2plex')
+        for _i, _v in enumerate(_vals, 1):
+            remaining_args.insert(_i, _v)
 
     # Re-inject --clean into remaining_args
     if safe_getattr(args, 'clean', False):
         remaining_args.insert(0, '--clean')
 
-    # Re-inject --map-from-filename alias (→ --plex2disk --clean)
+    # Re-inject --map-from-filename alias (→ --plex2disk --clean), nargs='*'
     if safe_getattr(args, 'map_from_filename', None) is not None:
-        if args.map_from_filename is not True and args.map_from_filename:
-            remaining_args.insert(0, args.map_from_filename)
-            remaining_args.insert(1, '--plex2disk')
-        else:
-            remaining_args.insert(0, '--plex2disk')
+        _vals = args.map_from_filename if isinstance(args.map_from_filename, list) else ([args.map_from_filename] if args.map_from_filename and args.map_from_filename is not True else [])
+        remaining_args.insert(0, '--plex2disk')
+        for _i, _v in enumerate(_vals, 1):
+            remaining_args.insert(_i, _v)
         remaining_args.insert(0, '--clean')
 
-    # Re-inject --rename into remaining_args
+    # Re-inject --rename into remaining_args (nargs='*' → list of tokens)
     # Two cases (mimics --info/--missing pattern):
-    #   1. --rename <TARGET> (no CMD_OR_PLEXOBJECT) → TARGET becomes the object, --rename is obj_arg
+    #   1. --rename <TARGETS...> (no CMD_OR_PLEXOBJECT) → targets become PLEX objects, --rename is obj_arg
     #   2. <PLEXOBJ> --rename (bare --rename with CMD_OR_PLEXOBJECT) → append as obj_arg
     if safe_getattr(args, 'rename', None) is not None:
-        if args.rename is not True and args.rename:
-            # --rename <TARGET> — target is the PLEX object, --rename is a flag
-            remaining_args.insert(0, args.rename)
+        _rename_vals = args.rename if isinstance(args.rename, list) else ([args.rename] if args.rename and args.rename is not True else [])
+        if _rename_vals:
+            for _i, _v in enumerate(_rename_vals):
+                remaining_args.insert(_i, _v)
             remaining_args.append('--rename')
-        elif args.rename is True:
-            # bare --rename — append after PLEXOBJECT
+        else:
             remaining_args.append('--rename')
 
     # Re-inject --dry-run into remaining_args
