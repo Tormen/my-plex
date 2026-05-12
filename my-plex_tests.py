@@ -8091,14 +8091,22 @@ class TestMove(unittest.TestCase):
             self.assertIn(kw, sig, f"cmd_move must accept '{kw}' kwarg")
 
     def test_mv_registered_in_main_parser(self):
-        """--mv / --move / --mv-to / --move-to must be registered in main_parser."""
+        """v1.20+: --mv-to / --move-to must be registered in main_parser (--mv and --move dropped)."""
         src = self._read_script()
-        self.assertIn("main_parser.add_argument('--mv', '--move', '--mv-to', '--move-to'", src)
+        self.assertIn("main_parser.add_argument('--mv-to', '--move-to'", src)
 
     def test_mv_registered_in_global_cmd_parser(self):
-        """--mv must be registered in GLOBAL_CMD_PARSER with help text."""
+        """v1.20+: --mv-to must be registered in GLOBAL_CMD_PARSER with help text."""
         src = self._read_script()
-        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--mv', '--move', '--mv-to', '--move-to'", src)
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--mv-to', '--move-to'", src)
+
+    def test_mv_short_forms_removed(self):
+        """v1.20+: --mv and --move must NOT be registered anywhere (--mv-to is the explicit name)."""
+        src = self._read_script()
+        self.assertNotIn("main_parser.add_argument('--mv',", src)
+        self.assertNotIn("GLOBAL_CMD_PARSER.add_argument('--mv',", src)
+        self.assertNotIn("'--mv': 'mv'", src)
+        self.assertNotIn("'--move': 'mv'", src)
 
     def test_mv_in_has_standalone_cmd(self):
         """--mv must be in has_standalone_cmd check (so it doesn't fall through to help)."""
@@ -8106,10 +8114,10 @@ class TestMove(unittest.TestCase):
         self.assertIn("safe_getattr(args, 'mv', None) is not None", src)
 
     def test_mv_in_option_to_help_topic(self):
-        """--mv and aliases must be in _OPTION_TO_HELP_TOPIC for --mv --help synonym."""
+        """v1.20+: --mv-to and --move-to in _OPTION_TO_HELP_TOPIC for --mv-to --help synonym."""
         src = self._read_script()
-        self.assertIn("'--mv': 'mv'", src)
-        self.assertIn("'--move': 'mv'", src)
+        self.assertIn("'--mv-to': 'mv'", src)
+        self.assertIn("'--move-to': 'mv'", src)
 
     def test_mv_reinject_exists(self):
         """--mv must be re-injected into remaining_args."""
@@ -8310,13 +8318,14 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("_get_universal_scope(", body)
 
     def test_argv_normalization_skips_variadic_window(self):
-        """Tokens after --mv (and other variadic flags) must NOT be rewritten as --list filter exprs."""
+        """Tokens after --mv-to (and other variadic flags) must NOT be rewritten as --list filter exprs."""
         src = self._read_script()
         self.assertIn("_VARIADIC_SCOPE_FLAGS", src)
         self.assertIn("_in_variadic_window", src)
-        # Every variadic-scope flag must appear in the set
-        for flag in ("'--mv'", "'--move'", "'--mv-to'", "'--move-to'",
-                     "'--original-languages'", "'--add-label'", "'--remove-label'"):
+        # Every variadic-scope flag must appear in the set (v1.20+: --mv / --move dropped, --mv-to / --move-to are the canonical names)
+        for flag in ("'--mv-to'", "'--move-to'",
+                     "'--original-languages'", "'--add-label'", "'--remove-label'",
+                     "'--remux'", "'--plex2disk'", "'--disk2plex'"):
             self.assertIn(flag, src, f"_VARIADIC_SCOPE_FLAGS must include {flag}")
 
     def test_type_filter_in_scope_fields(self):
@@ -8347,17 +8356,20 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("target_types = {'Season', 'Season*'}", src)
         self.assertIn("target_types = {'Episode', 'Episode*'}", src)
 
-    def test_filter_expr_auto_expands_series_and_season(self):
-        """_resolve_scope_filter_expr must auto-expand Series/Season matches to their Episodes."""
+    def test_filter_expr_pure_type_semantics(self):
+        """v1.20+: _resolve_scope_filter_expr returns objects of EXACTLY the matched type
+        (no Series/Season → Episode auto-expansion). Pure semantics per user spec."""
         src = self._read_script()
         import re
         m = re.search(r'def _resolve_scope_filter_expr\(expr\).*?\n(.*?)def _get_universal_scope', src, re.DOTALL)
         self.assertIsNotNone(m, "Must find _resolve_scope_filter_expr body")
         body = m.group(1)
-        self.assertIn("Post-expand", body)
-        self.assertIn("_get_disk_map_scope(key)", body)
+        # Pure semantics doc comment present
+        self.assertIn("PURE type-filter semantics", body)
         # Must conditionally iterate all types when type: filter is present
         self.assertIn("has_type_filter", body)
+        # Must NOT contain the old auto-expansion logic
+        self.assertNotIn("Post-expand Series", body)
 
     def test_type_filter_in_field_regex(self):
         """The _field_re regex inside _parse_filter_sub_expr must include 'type'."""
@@ -8412,6 +8424,86 @@ class TestUniversalScope(unittest.TestCase):
         body = m.group(1)
         for kw in ('COMPOUND SCOPE', 'country:france', 'original_lang:fr', 'AND-combine'):
             self.assertIn(kw, body, f"--help mv must mention '{kw}'")
+
+
+class TestLayoutFilter(unittest.TestCase):
+    """Tests for the layout: scope token (orthogonal to type:).
+
+    `layout:X` classifies items by their on-disk folder shape rather
+    than by Plex's catalogued type.  Useful for surfacing
+    mis-classified content (e.g. series-shaped folders in a Movie lib).
+    """
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_layout_in_scope_filter_fields(self):
+        """'layout' must be in _SCOPE_FILTER_FIELDS so it's recognised as a Cat-B token."""
+        src = self._read_script()
+        self.assertIn("'layout'", src)
+        import re
+        m = re.search(r'_SCOPE_FILTER_FIELDS = \((.*?)\)', src, re.DOTALL)
+        self.assertIsNotNone(m)
+        self.assertIn("'layout'", m.group(1))
+
+    def test_layout_filter_handler_exists(self):
+        """_parse_filter_sub_expr must have a layout handler with the four aliases."""
+        src = self._read_script()
+        self.assertIn("if field == 'layout':", src)
+        self.assertIn("_LAYOUT_ALIASES", src)
+        for kw in ("'series'", "'show'", "'tv'", "'season'", "'episode'", "'movie'"):
+            self.assertIn(kw, src, f"_LAYOUT_ALIASES must include {kw}")
+
+    def test_classify_layout_helper(self):
+        """_classify_layout must distinguish movie / series / season / episode / unknown."""
+        src = self._read_script()
+        self.assertIn("def _classify_layout(", src)
+        # All five labels must appear as return values
+        for label in ("'movie'", "'series'", "'season'", "'episode'", "'unknown'"):
+            self.assertIn(label, src, f"layout classifier must produce {label}")
+
+    def test_layout_index_builder_is_bulk_ssh(self):
+        """_build_layout_index must use a single bulk `find -maxdepth 2` per library (not per-dir SSH)."""
+        src = self._read_script()
+        self.assertIn("def _build_layout_index(", src)
+        self.assertIn("-maxdepth 2", src)
+        # Session memo must exist
+        self.assertIn("_LAYOUT_INDEX_CACHE", src)
+
+    def test_lookup_layout_helper(self):
+        """_lookup_layout_for_filepath maps a filepath to its top-level entry's layout."""
+        src = self._read_script()
+        self.assertIn("def _lookup_layout_for_filepath(", src)
+
+    def test_layout_filter_uses_lookup(self):
+        """The layout filter fn must call _lookup_layout_for_filepath."""
+        src = self._read_script()
+        import re
+        m = re.search(r"if field == 'layout':(.*?)return label_str, _layout_fn", src, re.DOTALL)
+        self.assertIsNotNone(m, "Must find layout filter block")
+        self.assertIn("_lookup_layout_for_filepath(", m.group(1))
+
+    def test_layout_orthogonal_to_type(self):
+        """Type and layout must be distinct filter fields (not aliases)."""
+        src = self._read_script()
+        # Both appear in the regex alternation
+        self.assertIn("type|layout", src)
+        # Both have their own handler block
+        self.assertIn("if field == 'type':", src)
+        self.assertIn("if field == 'layout':", src)
+
+    def test_layout_help_page_exists(self):
+        """--help layout must have a dedicated help page mentioning every alias."""
+        src = self._read_script()
+        self.assertIn("case 'layout':", src)
+        import re
+        m = re.search(r"case 'layout':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        for kw in ('layout:movie', 'layout:series', 'layout:season', 'layout:episode',
+                   '--unrecognized', 'ORTHOGONAL'):
+            self.assertIn(kw, body, f"--help layout must mention '{kw}'")
 
 
 class TestUnrecognized(unittest.TestCase):
@@ -8639,6 +8731,7 @@ _UNITTEST_SCOPES = {
     'original-languages': [TestOriginalLanguages],
     'scope':              [TestUniversalScope],
     'unrecognized':       [TestUnrecognized],
+    'layout':             [TestLayoutFilter],
 }
 
 # List of all unittest classes for run_regression_tests()
