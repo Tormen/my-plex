@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v1.8"
+SCRIPT_VERSION = "v1.9"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -21435,6 +21435,24 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --mv series.de Episode:17740       # single episode")
             print("  my-plex --mv movies.fr                     # global: ALL movies")
             print()
+            print("COMPOUND SCOPE (v1.9) — pass multiple tokens; they AND-combine via the")
+            print("shared universal-scope resolver (same engine as --list):")
+            print("  my-plex --mv movies.fr ,unsorted country:france")
+            print("                            # all France-produced movies in ,unsorted")
+            print("  my-plex --mv movies.fr ,unsorted original_lang:fr")
+            print("                            # all originally-French movies in ,unsorted")
+            print("                              (run --original-languages first to populate)")
+            print("  my-plex --mv movies.de ,unsorted lang:de year>2020")
+            print("                            # German-audio movies in ,unsorted, post-2020")
+            print("  my-plex --mv series.en ,unsorted type:series original_lang:en")
+            print("                            # originally-English series in ,unsorted")
+            print()
+            print("  Filter tokens accepted (same syntax as --list):")
+            print("    lang:fr / original_lang:fr / country:france / year>2020 /")
+            print("    bitrate>2 / resolution:1080p / codec:h265 / size>1gb /")
+            print("    duration>2h / rating>7 / genre:comedy / director:scorsese / etc.")
+            print("  See --help scope for the full filter reference.")
+            print()
             print("TYPE COMPATIBILITY:")
             print("  Movie libraries accept only Movies.")
             print("  Series libraries accept only Episodes (use series/season scope).")
@@ -23659,16 +23677,145 @@ def _resolve_target_to_cache_keys_via_filepath(target):
     return []
 
 
+# Fields that can appear in a Cat-B filter token (lang:fr, year>2020, etc.).
+# Used by _is_scope_filter_token() to distinguish filter expressions from
+# library names, cache keys, and titles in the universal scope resolver.
+_SCOPE_FILTER_FIELDS = (
+    'bitrate', 'resolution', 'codec', 'year', 'label', 'genre', 'size', 'duration',
+    'rating', 'stars', 'critics', 'added', 'watched', 'lang', 'language',
+    'subs', 'sub', 'subtitle', 'subtitles', 'director', 'directors',
+    'country', 'countries', 'original_language', 'originallang', 'original_lang',
+    'writer', 'writers', 'actor', 'actors', 'title', 'originaltitle',
+)
+_SCOPE_FILTER_RE = re.compile(
+    r'^(?P<field>' + '|'.join(_SCOPE_FILTER_FIELDS) + r')'
+    r'(?P<op>[<>]=?|[:=!~]=?)(?P<val>.+)$',
+    re.IGNORECASE
+)
+
+
+def _is_scope_filter_token(token):
+    """True iff `token` is a Cat-B filter expression (lang:fr, year>2020, ' AND ' chains, etc.).
+
+    A token is a filter expression iff it starts with a known filter field
+    name followed by an operator (`:`, `=`, `<`, `>`, `~`, `!`).  This is
+    deliberately conservative — Plex cache keys (`Movie:115547`) are NOT
+    matched because `Movie` is not in `_SCOPE_FILTER_FIELDS`.
+    """
+    if not isinstance(token, str) or not token:
+        return False
+    if re.search(r'\bAND\b', token, re.IGNORECASE):
+        return True
+    return bool(_SCOPE_FILTER_RE.match(token.strip()))
+
+
+def _resolve_scope_filter_expr(expr):
+    """Return list of (key, obj) for Movie / Episode items satisfying a filter expression.
+
+    Delegates each sub-expression (split on ' AND ') to
+    PLEX_Media._parse_filter_sub_expr(), then iterates OBJ_BY_ID and keeps
+    items where ALL sub-expressions evaluate true for at least one file
+    version (mirrors the semantics of --list).
+    """
+    items = []
+    sub_exprs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
+    filter_fns = []
+    for sub in sub_exprs:
+        parsed = PLEX_Media._parse_filter_sub_expr(sub)
+        if parsed and parsed[1] is not None:
+            filter_fns.append(parsed[1])
+    if not filter_fns:
+        return items
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        obj_type = obj.get('type_str') or obj.get('type', '')
+        if obj_type not in ('Movie', 'Episode', 'Movie*', 'Episode*'):
+            continue
+        if not (obj.get('file') or obj.get('files')):
+            continue
+        files_dict = obj.get('files', {}) or {}
+        file_matches = list(files_dict.values()) if files_dict else [{}]
+        for fi in file_matches:
+            if all(fn(obj, fi) for fn in filter_fns):
+                items.append((key, obj))
+                break
+    return items
+
+
+def _get_universal_scope(scope_tokens):
+    """Universal scope resolver — the ONE entry point every command should call.
+
+    Accepts a list (or tuple) of scope tokens.  Each token can be ANY of:
+      - None or '' (skipped)
+      - a library name        → all items in that library
+      - a cache key           → that single item (Series/Season scopes expand)
+      - a full filepath       → item(s) owning that file
+      - a title (free text)   → title-substring search
+      - a filter expression   → lang:fr / year>2020 / original_lang:french / etc.
+      - a compound expr       → 'lang:fr AND year>2020' (handled internally)
+
+    Multiple tokens are AND-combined: the result is the intersection of
+    cache keys produced by each token independently.  This is what makes
+    `--mv movies.fr ,unsorted original_lang:fr` (move all originally-French
+    items currently in ,unsorted to movies.fr) work elegantly across every
+    SCOPE-taking command (--mv, --remux, --plex2disk, --disk2plex,
+    --original-languages, etc.).
+
+    With zero tokens (or all-empty/None), returns the full Movie / Episode
+    universe — the same default as `_get_disk_map_scope(None)`.
+
+    Returns: list of (cache_key, obj_dict) tuples, dedup'd, ordered by
+    insertion of the first token's result.
+    """
+    # Normalise input: accept a single string OR a list/tuple of strings.
+    if scope_tokens is None or scope_tokens == '' or scope_tokens == []:
+        return _get_disk_map_scope(None)
+    if isinstance(scope_tokens, str):
+        scope_tokens = [scope_tokens]
+    real_tokens = [t for t in scope_tokens if t]
+    if not real_tokens:
+        return _get_disk_map_scope(None)
+    if len(real_tokens) == 1:
+        return _get_disk_map_scope(real_tokens[0])
+
+    # Multi-token: intersect per-token key sets.
+    per_token_keysets = []
+    first_order = None
+    for tok in real_tokens:
+        sub_items = _get_disk_map_scope(tok)
+        sub_keys = {k for k, _ in sub_items}
+        per_token_keysets.append(sub_keys)
+        if first_order is None:
+            first_order = [k for k, _ in sub_items]
+    survivors = set.intersection(*per_token_keysets) if per_token_keysets else set()
+    seen = set()
+    result = []
+    for k in (first_order or []):
+        if k in survivors and k not in seen:
+            seen.add(k)
+            o = PLEX_Media.OBJ_BY_ID.get(k)
+            if o:
+                result.append((k, o))
+    return result
+
+
 def _get_disk_map_scope(target):
     """Determine which cache entries to process for --map-to-filename / --map-from-filename.
 
     Args:
-        target: None (all), library name, full filepath, or media identifier
+        target: None (all), library name, full filepath, media identifier,
+                title, or filter expression (lang:fr / year>2020 /
+                original_lang:french / 'lang:fr AND year>2020').
 
     Returns:
         list of (cache_key, obj_dict) tuples
     """
     items = []
+    # Filter-expression scope — delegate to the same parser --list uses, so
+    # any Cat-B token (lang:fr / original_lang:fr / country:france / year>2020)
+    # works identically as SCOPE for every command (--mv, --remux, etc.).
+    if _is_scope_filter_token(target):
+        return _resolve_scope_filter_expr(target)
+
     # Filepath scope — if the target is a path string, resolve via
     # OBJ_BY_FILEPATH first so it's not shadowed by title-search.  Honours
     # ALTERNATIVE_ROOTPATHS (per feedback_scope_filepath_universal).
@@ -25184,11 +25331,9 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     """
     global VRB
     if not args_list:
-        err(1100, "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE]\n  Use --help mv for details.")
-    if len(args_list) > 2:
-        err(1101, f"--mv accepts at most 2 args (DEST_LIB and SCOPE), got {len(args_list)}: {args_list!r}\n  Use --help mv for details.")
+        err(1100, "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE...]\n  Use --help mv for details.")
     dest_lib = args_list[0]
-    scope_target = args_list[1] if len(args_list) > 1 else None
+    scope_tokens = list(args_list[1:])   # variadic — every command sharing _get_universal_scope() ANDs these together
 
     # Validate destination library
     if dest_lib not in PLEX_Library.OBJ_DICT:
@@ -25201,12 +25346,15 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         err(1103, f"--mv: destination library '{dest_lib}' has no known rootpath in cache.\n  Run --update-cache first.")
     dest_root = dest_locations[0].rstrip('/')
 
-    # Resolve scope
-    items = _get_disk_map_scope(scope_target)
+    # Resolve scope via the universal multi-token resolver — same engine
+    # used by --list, --remux, --plex2disk, etc.  Multiple tokens AND-combine
+    # (e.g. `,unsorted original_lang:fr` = library AND filter).
+    items = _get_universal_scope(scope_tokens) if scope_tokens else _get_disk_map_scope(None)
     if not items:
-        print(f"--mv: no media items found for scope: {scope_target!r}")
+        print(f"--mv: no media items found for scope: {scope_tokens!r}")
         print("Possible reasons:")
-        print(f"  - Scope '{scope_target}' did not match any library / cache key / title / filepath")
+        print(f"  - No item matched ALL of: {scope_tokens}")
+        print(f"  - For filter tokens like 'original_lang:fr', run `--original-languages` first to backfill the field")
         print(f"  - Run --update-cache if the cache is stale")
         return (0, 0, 0)
 
@@ -29440,6 +29588,16 @@ def main():
     _remove_cols = set()  # column headers to remove (from negative Cat-C)
     _translations = []   # (original_token, translated_to) for user echo
     _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
+    # Variadic flags whose following positional args MUST pass through to argparse
+    # unchanged (otherwise tokens like `original_lang:fr` get rewritten into a
+    # --list filter expression before --mv ever sees them).  The window opens
+    # at the flag and closes at the next dash-flag.
+    _VARIADIC_SCOPE_FLAGS = {
+        '--mv', '--move', '--mv-to', '--move-to',
+        '--original-languages', '--collect-original-languages',
+        '--add-label', '--remove-label',
+    }
+    _in_variadic_window = False
     _i = 1
     while _i < len(sys.argv):
         arg = sys.argv[_i]
@@ -29449,6 +29607,18 @@ def main():
             _new_argv.append(arg)
             _i += 1
             continue
+        # Variadic-flag window: tokens following --mv / --add-label / ... are
+        # consumed by the flag itself.  Pass them through verbatim so argparse
+        # sees them as the flag's positional args, not as global filter tokens.
+        if _prev_arg in _VARIADIC_SCOPE_FLAGS:
+            _in_variadic_window = True
+        if _in_variadic_window:
+            if arg.startswith('-') and arg != '--':
+                _in_variadic_window = False   # next dash-flag closes the window
+            else:
+                _new_argv.append(arg)
+                _i += 1
+                continue
         # End-of-filters marker: every remaining token is a literal title search,
         # bypassing all heuristics (so words like 'imdb', 'genre' that would otherwise
         # be filter keywords can still be matched against titles).
