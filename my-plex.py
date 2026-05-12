@@ -29967,18 +29967,22 @@ def show_item_info(identifier, table_only=False):
     if 'Library' in visible:
         print(f"Library:\t{obj.get('library', 'N/A')}")
 
-    # Match status (guid) — highlight unmatched items
-    if 'Match' in visible:
-        guid = obj.get('guid', '')
+    # Match status (guid).  Problem signals are ALWAYS shown (unmatched or
+    # matched-without-external-IDs); the routine "Match: TMDB:..." confirmation
+    # is verbose-only to keep default output uncluttered.
+    if obj_type in ('Movie', 'Series'):
+        guid = obj.get('guid') or ''
+        ext_ids = obj.get('external_ids') or {}
         if guid.startswith('local://'):
-            print(f"Match:\t⚠ UNMATCHED (local://) — use Fix Match in Plex to identify this item")
-        elif guid:
-            ext_ids = obj.get('external_ids', {})
-            if ext_ids:
-                ids_str = ', '.join(f"{k.upper()}:{v}" for k, v in ext_ids.items())
-                print(f"Match:\t{ids_str}")
-            else:
-                print(f"Match:\t⚠ Matched but no external IDs — rematch in Plex recommended")
+            print(f"Match:\t⚠ UNMATCHED by Plex (guid='{guid}') — use Fix Match in Plex to identify this item")
+        elif not guid:
+            # Empty/missing guid: pre-v1.x cache OR Plex DB has no guid row.
+            print(f"Match:\t⚠ no guid in cache — run --update-cache --from-scratch to refresh")
+        elif not ext_ids:
+            print(f"Match:\t⚠ Matched ({guid}) but no external IDs — rematch in Plex recommended")
+        elif 'Match' in visible:
+            ids_str = ', '.join(f"{k.upper()}:{v}" for k, v in ext_ids.items())
+            print(f"Match:\t{ids_str}")
 
     # Type-specific info
     if obj_type == 'Episode':
