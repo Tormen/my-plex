@@ -20959,22 +20959,24 @@ def main_print_help(args, remaining_args, main_parser):
             print("means `library=,unsorted AND lang=fr AND year>2020`.")
             print()
             print("BARE-WORD AUTO-INTERPRETATION (simple + intuitive default):")
-            print("  Bare words like `,unsorted`, `movies.fr`, `series.de` are")
-            print("  recognised as LIBRARY scope automatically (no library: needed).")
-            print("  Bare titles / cache keys / Plex IDs / filepaths likewise auto-")
-            print("  detect.  Anything else (`vacation`, `bodyguard`, `tagesschau`)")
-            print("  is treated as a free-text title-search (`title~<word>`).")
+            print("  Bare words that match a Plex library are recognised as LIBRARY")
+            print("  scope automatically — no `library:` prefix needed.  Other bare")
+            print("  words become free-text title-search (`title~<word>`).")
             print()
-            print("EXPLICIT library: OVERRIDE (powerful when needed):")
-            print("  As soon as you write an EXPLICIT `library:NAME` ANYWHERE in the")
-            print("  args, every other bare word switches to title-search semantics —")
-            print("  even ones that LOOK like library names.  This lets you search for")
-            print("  titles literally named e.g. `series.de` or `documentary`:")
+            print("    my-plex library1                    # library scope (auto-detect)")
+            print("    my-plex library1 lang:fr year>2020  # lib AND filters")
+            print("    my-plex vacation                    # free text → title~vacation")
             print()
-            print("    my-plex library:movies.en series.de")
-            print("                  # search titles containing 'series.de' in movies.en")
-            print("    my-plex library:,unsorted documentary year>2020")
-            print("                  # titles containing 'documentary' in ,unsorted")
+            print("EXPLICIT library: OVERRIDE (powerful when you need disambiguation):")
+            print("  As soon as you write `library:NAME` ANYWHERE in the args, every")
+            print("  other bare word switches to title-search semantics — even ones")
+            print("  that LOOK like library names.  Lets you search titles literally")
+            print("  named like a library:")
+            print()
+            print("    my-plex library:library1 library2")
+            print("              # search titles containing 'library2' in library1")
+            print("    my-plex library:library1 year>2020 documentary")
+            print("              # titles containing 'documentary' in library1, post-2020")
             print()
             print("OR / AND / PARENS (v2.1):")
             print("  `OR` and `AND` are CASE-SENSITIVE operators — must be uppercase.")
@@ -20982,20 +20984,39 @@ def main_print_help(args, remaining_args, main_parser):
             print("  `(` and `)` MUST be SPACE-SEPARATED CLI tokens (own argv elements).")
             print("  Precedence:  AND binds tighter than OR.  Use parens to override.")
             print()
-            print("  my-plex ,unsorted country:france OR country:italy")
-            print("                     # FR-country OR IT-country movies in ,unsorted")
-            print("  my-plex ,unsorted ( country:france OR country:italy ) AND year>2020")
-            print("                     # ↑ note: each paren is its OWN argv arg")
-            print("  my-plex --mv-to series.en ,unsorted \\")
-            print("                  ( original_lang:fr OR original_lang:it ) type:movie")
-            print("                     # also works for action commands")
+            print("    my-plex library1 country:france OR country:italy")
+            print("              # FR-country OR IT-country items in library1")
             print()
-            print("  Inside a compound expression, bare library names auto-promote to")
-            print("  `library:NAME` so `,unsorted ( country:fr OR country:it )` works.")
-            print("  Use the explicit form `library:NAME` if you prefer.")
+            print("    my-plex library1 ( country:france OR country:italy ) AND year>2020")
+            print("              # ↑ each paren is its OWN argv token")
+            print()
+            print("    my-plex --mv-to library2 library1 \\")
+            print("            ( original_lang:fr OR original_lang:it )")
+            print("              # action commands accept the same compound SCOPE")
+            print()
+            print("INSIDE PARENS — bare library names AUTO-PROMOTE to `library:NAME`")
+            print("(this is how a compound `( libA OR libB )` works without you having")
+            print("to type `library:` twice):")
+            print()
+            print("    my-plex ( library1 OR library2 )")
+            print("              # equivalent to:  ( library:library1 OR library:library2 )")
+            print("              # i.e. every item in EITHER library")
+            print()
+            print("    my-plex ( library1 OR library2 ) AND year>2020")
+            print("              # ditto, then AND'd with year>2020")
+            print()
+            print("EXPLICIT library: + COMPOUND — the override propagates INTO parens:")
+            print("  If `library:NAME` appears anywhere, bare words inside parens turn")
+            print("  into title-search instead of auto-promoting to `library:`.  This")
+            print("  is the most powerful combination — clear scope + free-form search:")
+            print()
+            print("    my-plex ( library1 OR library2 ) library:library3")
+            print("              # search titles containing 'library1' OR 'library2'")
+            print("              # within library3.  Literal:")
+            print("              # ( title~library1 OR title~library2 ) AND library:library3")
             print()
             print("DESIGN PRINCIPLE — simple by default, powerful when needed:")
-            print("  Bare words just work for the 95% case (library names auto-detect,")
+            print("  Bare words just work for the 95% case (library names auto-detect;")
             print("  free text becomes title-search).  The remaining 5% (literal search")
             print("  for a library-name-shaped term) is unlocked by writing `library:`")
             print("  explicitly — a clear signal: \"I'm scoping with library:, anything")
@@ -30661,6 +30682,7 @@ def main():
     # title-search instead.  Lets users search for titles like 'series.de'
     # or 'documentary' by saying e.g. `library:movies.en series.de`.
     _explicit_library_used = any(re.match(r'^library:.+', _a, re.IGNORECASE) for _a in sys.argv[1:])
+    _paren_depth = 0   # tracked through the argv loop to know "inside compound expression"
     # Variadic flags whose following positional args MUST pass through to argparse
     # unchanged (otherwise tokens like `original_lang:fr` get rewritten into a
     # --list filter expression before --mv ever sees them).  The window opens
@@ -30761,6 +30783,37 @@ def main():
             _filter_exprs.append(arg)
             _translations.append((arg, f"--list operator: {arg}"))
             if DBG: print(f" ~~~ Filter operator '{arg}' preserved", file=sys.stderr)
+            if arg == '(':
+                _paren_depth += 1
+            elif arg == ')':
+                _paren_depth = max(0, _paren_depth - 1)
+            _i += 1
+            continue
+
+        # v2.1: inside a parenthesised compound expression, EVERY bare word
+        # must reach the filter parser (otherwise a bare library name like
+        # `,unsorted` inside `( ,unsorted OR series.de )` would fall through
+        # to argparse as CMD_OR_PLEXOBJECT and the parser would see `( OR )`
+        # with a missing atom).
+        # Two sub-rules:
+        #   (a) Cat-B filter atoms (`country:france`, `year>2020`, etc.)
+        #       pass through unchanged.
+        #   (b) Bare words — if explicit `library:NAME` is used elsewhere,
+        #       become title-search `title~WORD`.  Otherwise they're
+        #       auto-promoted to `library:WORD` by the compound parser at
+        #       filter-eval time (works for valid library names; errors
+        #       cleanly for invalid ones).
+        if _paren_depth > 0:
+            if _CAT_B_TOKEN_RE.match(arg) or arg in ('AND', 'OR', '(', ')'):
+                _filter_exprs.append(arg)
+                _translations.append((arg, f"--list atom (inside parens): {arg}"))
+            elif _explicit_library_used:
+                _filter_exprs.append(f"title~{arg}")
+                _translations.append((arg, f"--list atom (inside parens, explicit library:): title~{arg}"))
+            else:
+                _filter_exprs.append(arg)
+                _translations.append((arg, f"--list atom (inside parens, auto-promoted to library:): {arg}"))
+            if DBG: print(f" ~~~ Filter atom (paren depth {_paren_depth}): '{arg}'", file=sys.stderr)
             _i += 1
             continue
         _ma = _CAT_A_TOKEN_RE.match(arg)
