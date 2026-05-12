@@ -5892,6 +5892,9 @@ def _clean_query_from_wrapper(wrapper_basename):
         idx = base.find(m.group(1))
         if idx > 0:
             base = base[:idx]
+    # Drop bracketed/hashed tags ({…}, [...], (…), #…#) before tokenising —
+    # they're virtually never part of the real title.
+    base = _strip_query_tags(base)
     # Drop apostrophe-like marks (queen's → queens) BEFORE collapsing
     # non-alphanumerics, so the orphan 's' doesn't become a separate word.
     base = re.sub(r"[’‘'“”`´]", '', base)
@@ -6001,7 +6004,41 @@ def _derive_wrapper_path(obj):
     return None
 
 
-_WRAPPER_YEAR_RE = re.compile(r'[\.\s\(\[]\(?(19\d{2}|20\d{2})\)?[\.\s\)\]]', re.IGNORECASE)
+_WRAPPER_YEAR_RE = re.compile(r'[\.\s\(\[\{]\(?(19\d{2}|20\d{2})\)?[\.\s\)\]\}]', re.IGNORECASE)
+
+
+def _strip_query_tags(text):
+    """Strip tag/marker clutter that confuses TMDB/TVDB search.
+
+    Drops everything matching `#tag#`, `#tag`, `{tag}`, `(tag)`, `[tag]`
+    EXCEPT 4-digit year tokens which carry useful disambiguation info
+    (`(2019)` / `[2010]` / `{1992}` are kept as bare `2019` / `2010` /
+    `1992` so engines that ignore parentheses still benefit).
+
+    Used by both `_clean_query_from_wrapper` (wrapper-derived query) and
+    the cmd_unmatched_resolve pre-search step (obj['title'] cleanup —
+    Plex sometimes carries the wrapper tags through into the title field).
+    """
+    if not text:
+        return ''
+    s = str(text)
+    # 1. Preserve year tokens by replacing the bracketed form with the bare year.
+    s = re.sub(r'[\(\[\{](19\d{2}|20\d{2})[\)\]\}]', r' \1 ', s)
+    # 2. Drop balanced bracket groups (no year inside — those were rewritten above).
+    for _ in range(3):  # nested brackets — iterate a couple times
+        new = re.sub(r'\([^()]*\)', ' ', s)
+        new = re.sub(r'\[[^\[\]]*\]', ' ', new)
+        new = re.sub(r'\{[^{}]*\}', ' ', new)
+        if new == s:
+            break
+        s = new
+    # 3. Drop hash-tagged clusters.  A cluster is `#` followed by any
+    #    non-whitespace (greedy), so `#Melissa#mccarthy#` is one cluster
+    #    that drops entirely.  Loose `#foo` without a closing `#` also drops.
+    s = re.sub(r'#\S*', ' ', s)
+    # 4. Collapse leftover whitespace.
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
 
 
 def _wrapper_already_has_year(wrapper_path):
@@ -6180,11 +6217,14 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         # Two-shot search: Plex's title + a cleaner one derived from the
         # wrapper basename.  When wrapper carries a year, also pass it as a
-        # year-hint so results from a wrong year are dropped.
+        # year-hint so results from a wrong year are dropped.  Both queries
+        # go through _strip_query_tags so `#tag#` / `{tag}` / `[tag]` /
+        # `(tag)` clutter doesn't poison the search.
         _clean_q, _wrapper_year = _clean_query_from_wrapper(os.path.basename(wrapper))
+        _title_for_search = _strip_query_tags(title)
         candidates = _search_unmatched_candidates(
-            title, kind,
-            extra_query=_clean_q if _clean_q else None,
+            _title_for_search, kind,
+            extra_query=_clean_q if _clean_q and _clean_q != _title_for_search.lower() else None,
             year_hint=_wrapper_year if _wrapper_has_year else None,
         )
         if not candidates:

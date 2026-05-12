@@ -9038,6 +9038,50 @@ class TestUnmatchedResolve(unittest.TestCase):
         self.assertIsNone(y)
         self.assertEqual(q, "good will hunting de en")
 
+    # ------- _strip_query_tags -------
+
+    def test_strip_query_tags_hash_pairs(self):
+        # `#tag#` and `#tag` clutter (common in user-tagged wrappers) drops out.
+        s = self.m._strip_query_tags("Superintelligence #Melissa#mccarthy#")
+        self.assertEqual(s, "Superintelligence")
+
+    def test_strip_query_tags_braces(self):
+        # `{2010}` year-marker should be PRESERVED as a bare year so TMDB
+        # can still see "Henrys Crime 2010".
+        s = self.m._strip_query_tags("Henrys Crime {2010}")
+        self.assertIn("2010", s)
+        self.assertIn("Henrys Crime", s)
+        self.assertNotIn("{", s)
+        self.assertNotIn("}", s)
+
+    def test_strip_query_tags_brackets_drop_non_year(self):
+        # `[tag]` with non-year content drops entirely.
+        s = self.m._strip_query_tags("V for Vendetta [yts.am]")
+        self.assertEqual(s, "V for Vendetta")
+
+    def test_strip_query_tags_parens_drop_non_year(self):
+        # `(tag)` with non-year content drops entirely.
+        s = self.m._strip_query_tags("Movie Name (uncut)")
+        self.assertEqual(s, "Movie Name")
+
+    def test_strip_query_tags_parens_keep_year(self):
+        # `(2019)` year form is preserved (as bare 2019).
+        s = self.m._strip_query_tags("Joker (2019)")
+        self.assertIn("Joker", s)
+        self.assertIn("2019", s)
+        self.assertNotIn("(", s)
+
+    def test_clean_query_strips_brace_year_form(self):
+        # wrapper basename with `{YYYY}` style year + a release-tag suffix.
+        q, y = self.m._clean_query_from_wrapper(
+            "henrys.crime.{2010}.720p.brrip.x264.-.kickassddl.zip.folder_#keanu.reeves#")
+        self.assertEqual(y, 2010)
+        self.assertIn("henrys", q)
+        self.assertIn("crime", q)
+        self.assertNotIn("#", q)
+        self.assertNotIn("{", q)
+        self.assertNotIn("keanu", q)  # hash-tagged authority dropped
+
     # ------- engine cascade -------
 
     def test_engine_dispatch_contains_tmdb_and_tvdb(self):
