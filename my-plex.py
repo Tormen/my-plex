@@ -29357,10 +29357,17 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
                         sorted_count += 1
                         continue
-                if dry_run:
-                    dry_run_lines.append((9999, 0, f"    WARNING: Cannot parse date from: {fn}"))
-                else:
-                    print(f"    WARNING: Cannot parse date from: {fn}")
+                # Not a real warning — many legitimate naming schemes
+                # don't carry dates (e.g. `Seinfeld-101-Pilot.avi`,
+                # `Es_war_einmal_das_Leben_-_25_-_…`).  Counts as a
+                # failed sort but only chatters under -D / -V; otherwise
+                # silent to keep the --sort-new output clean.
+                if VRB or DBG:
+                    msg = f"    (no date in: {fn})"
+                    if dry_run:
+                        dry_run_lines.append((9999, 0, msg))
+                    else:
+                        print(msg)
                 failed_count += 1
                 continue
 
