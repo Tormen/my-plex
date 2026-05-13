@@ -6692,25 +6692,48 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             )
             if _refresh_targets:
                 print(f">>> Re-matching {len(_refresh_targets)} item(s) via item.fixMatch(auto=True)…")
+                # When Plex's FSEvents watcher is on, our rename triggers a
+                # near-instant rescan that DELETES the old ratingKey and
+                # creates a new one for the renamed wrapper.  In that case
+                # fetchItem(old_rk) → HTTP 404; treat as "Plex already
+                # rescanned and the new entry will match on its own".
+                def _is_404(exc):
+                    s = str(exc).lower()
+                    return '404' in s or 'not_found' in s or 'not found' in s
                 for key, obj in _refresh_targets:
                     try:
                         rk = int(obj.get('id', 0)) if obj else 0
                         if not rk:
                             continue
-                        item = plex.fetchItem(rk)
+                        try:
+                            item = plex.fetchItem(rk)
+                        except Exception as fetch_exc:
+                            if _is_404(fetch_exc):
+                                print(f"  ✓ {key}: Plex already re-scanned (old ratingKey gone) — new entry will match on its own")
+                            else:
+                                print(f"  ⚠ fetch failed for {key}: {fetch_exc}")
+                            continue
                         try:
                             item.fixMatch(auto=True)
                             print(f"  ✓ matched: {key}  {obj.get('title','?')!r}")
                         except Exception as fm_exc:
-                            # Plexapi raises NotFound when the agent returned
-                            # no matches.  Fall back to refresh() — at least
-                            # tells Plex to re-analyse the wrapper.
-                            print(f"  ⚠ fixMatch found no candidates for {key}: {fm_exc}")
-                            try:
-                                item.refresh()
-                                print(f"     fallback: item.refresh() queued")
-                            except Exception as r_exc:
-                                print(f"     refresh fallback also failed: {r_exc}")
+                            if _is_404(fm_exc):
+                                # 404 on the match endpoint = old ratingKey
+                                # was deleted between fetchItem and fixMatch
+                                # (FSEvents race).  Equivalent to success.
+                                print(f"  ✓ {key}: Plex auto-rescanned between fetch and match (FSEvents race) — OK")
+                            else:
+                                # Genuine "no agent candidates" case — fall
+                                # back to refresh() so Plex at least re-analyses.
+                                print(f"  ⚠ fixMatch found no candidates for {key}: {fm_exc}")
+                                try:
+                                    item.refresh()
+                                    print(f"     fallback: item.refresh() queued")
+                                except Exception as r_exc:
+                                    if _is_404(r_exc):
+                                        print(f"     (item meanwhile gone — Plex auto-rescanned)")
+                                    else:
+                                        print(f"     refresh fallback also failed: {r_exc}")
                     except Exception as e:
                         print(f"  ⚠ re-match failed for {key}: {e}")
         else:
