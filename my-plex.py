@@ -6116,7 +6116,7 @@ def _slugify_title_for_wrapper(title):
     return s.strip('.')
 
 
-def _add_year_to_wrapper(wrapper_path, year, canonical_title=None):
+def _add_year_to_wrapper(wrapper_path, year, canonical_title=None, audio_lang_marker=None):
     """Return a renamed wrapper path with the year added (and optionally a
     canonical-form basename if `canonical_title` is supplied).
 
@@ -6129,22 +6129,44 @@ def _add_year_to_wrapper(wrapper_path, year, canonical_title=None):
          Replace the basename with `<slug(canonical_title)>.(YYYY)`, keeping
          only the trailing `_[tag]` / `,tag` suffix from the original.
          Used in --resolve when an item is unmatched DESPITE having a year
-         (the basename form itself trips Plex)."""
+         (the basename form itself trips Plex).
+
+    `audio_lang_marker` (str, 2-letter code): if non-empty AND the basename
+    doesn't already contain `[<code>]` somewhere, insert `.[<code>]` just
+    before the trailing tag (so e.g. wrappers full of `_TVOON_DE_` files
+    get tagged `.[de]` consistent with `DISK_PLEX_MAP['AUDIO_LANG']`)."""
     if not wrapper_path or not year:
         return wrapper_path
     base = os.path.basename(wrapper_path)
     parent = os.path.dirname(wrapper_path)
     # Split trailing tag (matches both the existing/legacy form).
-    m = re.search(r'^(?P<head>.+?)(?P<tail>[_,]\[[^\]]+\]|,[^/]+)?$', base)
+    # Trailing tag forms recognised: `_[tag]`, `.[tag]`, `,suffix`.
+    m = re.search(r'^(?P<head>.+?)(?P<tail>[._,]\[[^\]]+\]|,[^/]+)?$', base)
     head = m.group('head') if m else base
     tail = (m.group('tail') if m else '') or ''
+    # Compose optional language marker.  Skip if `[code]` already appears
+    # ANYWHERE in the basename (head OR tail) — don't double-mark.
+    lang_marker = ''
+    if audio_lang_marker:
+        _code = str(audio_lang_marker).lower().strip()
+        if _code and _code not in ('unknown', ''):
+            if f'[{_code}]' not in base.lower():
+                lang_marker = f'.[{_code}]'
     if canonical_title:
         new_head = _slugify_title_for_wrapper(canonical_title)
-        new_base = f'{new_head}.({year}){tail}'
+        new_base = f'{new_head}.({year}){lang_marker}{tail}'
         return f'{parent}/{new_base}' if parent else new_base
-    if _wrapper_already_has_year(wrapper_path):
+    if _wrapper_already_has_year(wrapper_path) and not lang_marker:
         return wrapper_path
-    new_base = f'{head}.({year}){tail}'
+    if _wrapper_already_has_year(wrapper_path):
+        # year already there; just need to insert the language marker
+        # before the trailing tag.
+        # Match the year token + optional surrounding parens to know where
+        # to insert.  Simple approach: insert lang_marker before tail.
+        head_with_year = base[:-len(tail)] if tail else base
+        new_base = f'{head_with_year}{lang_marker}{tail}'
+        return f'{parent}/{new_base}' if parent else new_base
+    new_base = f'{head}.({year}){lang_marker}{tail}'
     return f'{parent}/{new_base}' if parent else new_base
 
 
@@ -6266,10 +6288,24 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # Run the lookup anyway and offer to REPLACE the basename with the
         # canonical title form `<slug(title)>.(YYYY)`.
         _wrapper_has_year = _wrapper_already_has_year(wrapper)
+        # v2.23: when the wrapper carries a clear single-language audio
+        # signal (e.g. filenames inside contain `_TVOON_DE_` → v2.7
+        # inference set obj['audio_languages']=['de']), thread that
+        # 2-letter code into the rename target so the new wrapper picks
+        # up the `[de]` / `[fr]` / `[en]` marker consistent with
+        # DISK_PLEX_MAP['AUDIO_LANG']['plex2disk'].
+        _lang_marker = None
+        _al = obj.get('audio_languages') or []
+        if len(_al) == 1 and str(_al[0]).lower() not in ('', 'unknown'):
+            _lang_marker = str(_al[0]).lower()
 
         print(f"\n──────────────────────────────────────────────────────────────────────────")
         print(f"[{i}/{len(unmatched)}] {key}  {title!r}  ({lib})")
-        print(f"          path: {wrapper}{'  [has year — try canonical rename]' if _wrapper_has_year else ''}")
+        _hint_bits = []
+        if _wrapper_has_year: _hint_bits.append("has year — try canonical rename")
+        if _lang_marker:     _hint_bits.append(f"audio: {_lang_marker} → will add [{_lang_marker}]")
+        _hint_str = f"  [{' / '.join(_hint_bits)}]" if _hint_bits else ''
+        print(f"          path: {wrapper}{_hint_str}")
 
         # Two-shot search: Plex's title + a cleaner one derived from the
         # wrapper basename.  When wrapper carries a year, also pass it as a
@@ -6319,6 +6355,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     new_wrapper = _add_year_to_wrapper(
                         wrapper, year,
                         canonical_title=top.get('title') if _wrapper_has_year else None,
+                        audio_lang_marker=_lang_marker,
                     )
                     if new_wrapper == wrapper:
                         print(f"  ⚠ already canonical — queueing item.refresh() to nudge Plex re-match")
@@ -6362,8 +6399,10 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             m = re.match(r'^y(\d{4})$', choice, re.IGNORECASE)
             if m:
                 year = int(m.group(1))
-                # No candidate title here; keep original head, just add year.
-                new_wrapper = _add_year_to_wrapper(wrapper, year)
+                # No candidate title here; keep original head, just add year
+                # (+ optional audio-lang marker if inferred from filenames).
+                new_wrapper = _add_year_to_wrapper(wrapper, year,
+                                                   audio_lang_marker=_lang_marker)
                 print(f"  ✓ manual year {year}  → rename to: {os.path.basename(new_wrapper)}")
                 rename_queue.append((key, obj, wrapper, new_wrapper, year, None))
                 break
@@ -6378,6 +6417,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 new_wrapper = _add_year_to_wrapper(
                     wrapper, year,
                     canonical_title=cand.get('title') if _wrapper_has_year else None,
+                    audio_lang_marker=_lang_marker,
                 )
                 if new_wrapper == wrapper:
                     print(f"  ⚠ no rename needed (already canonical) — skipping")
