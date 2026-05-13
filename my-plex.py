@@ -28884,7 +28884,16 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 yr = obj.get('year') or '----'
                 marker = f"[rule #{rule_idx+1}]"
                 renamed = ' (cleaned)' if os.path.basename(sw) != os.path.basename(dw) else ''
+                # External-id link: prefer IMDB, fall back to TMDB.
+                _ext = obj.get('external_ids') or {}
+                _link = ''
+                if _ext.get('imdb'):
+                    _link = f"https://imdb.com/title/{_ext['imdb']}/"
+                elif _ext.get('tmdb'):
+                    _link = f"https://themoviedb.org/movie/{_ext['tmdb']}"
                 print(f"      {key:<16} {yr}  {(obj.get('title') or '?')[:50]:<50}  {marker}{renamed}")
+                if _link:
+                    print(f"        URL : {_link}")
                 print(f"        FROM: {sw}")
                 print(f"        TO  : {dw}")
             if len(items) > 50:
