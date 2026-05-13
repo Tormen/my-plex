@@ -705,6 +705,27 @@ CONFIG_DEFAULTS = {
     # is shown.  Default 90 = very conservative.
     'UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT': 90,
 
+    # MISSING_MIN_COMPLETION_PCT — for --missing AND for the --problems
+    # summary aggregation: a series counts toward the "missing episodes"
+    # number only when at least this percentage of its scraped catalog is
+    # already on disk.  Default 50 means: shows where you have ≥50% of the
+    # aired episodes are considered "actively tracked" and their gaps are
+    # surfaced; shows with <50% are assumed to be back-catalog scrapes you
+    # don't care about completing (Tagesschau, daily quiz shows, etc.) and
+    # their thousands of theoretically-missing episodes don't pollute the
+    # total.
+    # Per-series `my-plex <show> --missing` ALWAYS shows the full count —
+    # the filter only applies to global / library-wide invocations.
+    # Use `my-plex --missing --all` to bypass the threshold globally.
+    'MISSING_MIN_COMPLETION_PCT': 50,
+
+    # MISSING_COMPLETION_EXCLUDE_SHOWS — list of series titles, cache keys
+    # (`Series:NNN`), or substrings that are NEVER counted toward the
+    # aggregate "missing episodes" total, regardless of completion%.
+    # Use for shows you actively follow but where catalog completeness
+    # isn't your goal (e.g. you keep only recent seasons of a long-runner).
+    'MISSING_COMPLETION_EXCLUDE_SHOWS': [],
+
     # EDITOR — used by --unmatched --resolve (and any future interactive
     # bulk-edit prompts) so the user can review/modify the queued operations
     # before they execute.  Defaults to $EDITOR env var if set, else 'vim'.
@@ -1523,6 +1544,8 @@ UNMATCHED_RESOLVE_LOOKUP_ENGINES = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_LOOKUP_ENG
 UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT']
 UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']
 EDITOR = CONFIG_DEFAULTS['EDITOR']
+MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
+MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -15642,7 +15665,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
         _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
         _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
-        _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None) or 0
+        # When the user explicitly opts in via --all, bypass the completion
+        # filter so the headline number matches the per-show truth.
+        _apply_filter = '--all' not in sys.argv
+        _pc_missing  = _silent(PLEX_Media._list_missing_episodes, all_obj_keys, None, _apply_filter) or 0
         # TSV: already accumulated in _TSV_STATS/_TSV_FAILED_SHOWS — no SSH needed
         _pc_tsv      = len(_TSV_FAILED_SHOWS)
         from datetime import datetime as _dtpc
@@ -17248,13 +17274,25 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return count
 
     @staticmethod
-    def _list_missing_episodes(obj_keys, library_name):
+    def _list_missing_episodes(obj_keys, library_name, apply_completion_filter=False):
         """Count missing episodes across all series (cache-only, reads episodes.tsv from disk).
-        Returns total number of missing episodes across all series that have TSV data."""
+        Returns total number of missing episodes across all series that have TSV data.
+
+        When `apply_completion_filter` is True (used by --problems aggregation
+        and `my-plex --missing` global form) a series is skipped from the
+        aggregate when:
+          - its title or cache key matches MISSING_COMPLETION_EXCLUDE_SHOWS, OR
+          - its completion % (cached_eps / scraped_eps × 100) is below
+            MISSING_MIN_COMPLETION_PCT.
+        Per-series invocations (`my-plex <show> --missing`) pass False so
+        the full count for that show is always shown."""
         from datetime import datetime
         today = datetime.now().strftime('%Y-%m-%d')
         total_missing = 0
         series_with_missing = 0
+        excluded_filtered = 0
+        _exclude = [str(x) for x in (MISSING_COMPLETION_EXCLUDE_SHOWS or [])]
+        _min_pct = float(MISSING_MIN_COMPLETION_PCT or 0)
         # Collect series keys from obj_keys
         series_keys = set()
         for key in obj_keys:
@@ -17314,12 +17352,35 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if missing_count:
                 series_title = series_obj.get('title', '?')
                 library = series_obj.get('library', '')
+                # Apply optional completion filter for global/aggregate use.
+                if apply_completion_filter:
+                    # Match exclude list against title and cache key, plus
+                    # any substring (so 'Tagesschau' matches keys whose
+                    # title contains 'Tagesschau').
+                    excluded = any(
+                        (x == series_key) or (x == series_title) or (x and x in series_title)
+                        for x in _exclude
+                    )
+                    if excluded:
+                        excluded_filtered += 1
+                        continue
+                    # Completion %: how much of the scraped catalog is on disk.
+                    total_eps = max(1, len(all_episodes))
+                    have_count = sum(1 for ep in all_episodes
+                                     if (ep['season'], ep['episode']) in have_set)
+                    pct = (have_count * 100.0) / total_eps
+                    if pct < _min_pct:
+                        excluded_filtered += 1
+                        continue
                 print(f"  {series_key:<17} {library:<20} {series_title:<45} {missing_count} missing")
                 total_missing += missing_count
                 series_with_missing += 1
 
         if total_missing:
-            print(f"\n  {total_missing} missing episode(s) across {series_with_missing} series.")
+            extra = ""
+            if apply_completion_filter and excluded_filtered:
+                extra = f"  ({excluded_filtered} series filtered out: <{int(_min_pct)}% complete or excluded — use --all to include)"
+            print(f"\n  {total_missing} missing episode(s) across {series_with_missing} series.{extra}")
         return total_missing
 
     @staticmethod
@@ -32194,7 +32255,10 @@ def execute_global_commands(args, cmd_args):
 
             # 9. Missing episodes (cache-only — reads episodes.tsv from disk)
             print(f"  >> Missing Episodes{lib_label}")
-            missing_count = _run_check(PLEX_Media._list_missing_episodes, obj_keys, problems_library)
+            # --all bypasses the completion filter.
+            missing_count = _run_check(PLEX_Media._list_missing_episodes,
+                                       obj_keys, problems_library,
+                                       '--all' not in sys.argv)
 
             # 10. Renumber candidates (actionable — scraped data exists)
             print(f"  >> Renumber Candidates{lib_label}")
@@ -33316,6 +33380,7 @@ def main():
     main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--all', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
