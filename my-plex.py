@@ -705,6 +705,20 @@ CONFIG_DEFAULTS = {
     # is shown.  Default 90 = very conservative.
     'UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT': 90,
 
+    # SORT_NEW_MOVIE_ROUTES — extend --sort-new to also route MOVIES from a
+    # source library to per-language destination libraries based on the
+    # existing scope-filter grammar.  Ordered list, first match wins.
+    # Each entry:
+    #   {'from': 'SRC_LIB', 'when': '<filter-expression>', 'to': 'DST_LIB'}
+    # `when` is the same grammar used by --list / --remux / etc.
+    # Examples (live in YOUR ~/.my-plex.conf, NOT in this default):
+    #   {'from': ',unsorted', 'when': 'original_lang:de OR lang:de', 'to': 'movies.de'},
+    #   {'from': ',unsorted', 'when': 'original_lang:fr OR lang:fr', 'to': 'movies.fr'},
+    #   {'from': ',unsorted', 'when': '*',                           'to': 'movies.en'},
+    # Empty default keeps my-plex GENERIC — user's library names live only
+    # in their config, never in the script.
+    'SORT_NEW_MOVIE_ROUTES': [],
+
     # MISSING_MIN_COMPLETION_PCT — for --missing AND for the --problems
     # summary aggregation: a series counts toward the "missing episodes"
     # number only when at least this percentage of its scraped catalog is
@@ -1546,6 +1560,7 @@ UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AU
 EDITOR = CONFIG_DEFAULTS['EDITOR']
 MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
 MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
+SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -28784,6 +28799,171 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     return (n_moved, n_skipped, n_errors)
 
 
+def _sort_new_movies(dry_run=False, target=None, yes=False):
+    """v2.24: route MOVIES across libraries per SORT_NEW_MOVIE_ROUTES.
+
+    For each rule (ordered, first match wins), resolves the source-library
+    scope through the existing filter grammar, plans cross-library moves,
+    asks Y/N/E (with $EDITOR support — same UX as --unmatched --resolve),
+    then executes via a single SSH bulk-mv session.
+
+    Returns (n_moved, n_skipped, n_errors)."""
+    routes = SORT_NEW_MOVIE_ROUTES or []
+    if not routes:
+        return (0, 0, 0)
+
+    print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
+
+    # Resolve every Movie under each `from` library, apply `when` filter,
+    # first-match-wins.  Carry the matching rule for reporting.
+    libs_present = set(PLEX_Library.OBJ_DICT.keys())
+    plan = []   # list of (key, obj, src_lib, dst_lib, rule_idx)
+    claimed = set()
+    for i, rule in enumerate(routes):
+        src = rule.get('from')
+        dst = rule.get('to')
+        when = (rule.get('when') or '').strip()
+        if not src or not dst or not when:
+            print(f"  ⚠ rule #{i+1} malformed (missing from/when/to) — skipping: {rule}")
+            continue
+        if src not in libs_present:
+            print(f"  ⚠ rule #{i+1}: source library {src!r} not present in cache — skipping")
+            continue
+        if dst not in libs_present:
+            print(f"  ⚠ rule #{i+1}: destination library {dst!r} not present in cache — skipping")
+            continue
+        # Honour --sort-new target: only process this source if it matches.
+        if target and target != src:
+            continue
+        # Compose final filter: source-library AND the user's `when` expression.
+        # Wildcard `*` means "everything in the source library not yet claimed".
+        if when == '*':
+            expr_tokens = [f"library:{src}", "AND", "type:movie"]
+        else:
+            expr_tokens = [f"library:{src}", "AND", "type:movie", "AND", "("] \
+                          + when.split() + [")"]
+        try:
+            matches = _resolve_scope_filter_expr(expr_tokens)
+        except Exception as e:
+            print(f"  ⚠ rule #{i+1}: filter evaluation failed — {e}")
+            continue
+        matched_now = 0
+        for key, obj in matches:
+            if key in claimed:
+                continue
+            if obj.get('type') != 'Movie':
+                continue
+            if obj.get('library') != src:
+                continue
+            claimed.add(key)
+            plan.append((key, obj, src, dst, i))
+            matched_now += 1
+        print(f"  rule #{i+1}: {src!r} when={when!r} → {dst!r}  matched {matched_now} new item(s)")
+
+    if not plan:
+        print("\nNo movies matched any SORT_NEW_MOVIE_ROUTES rule.")
+        return (0, 0, 0)
+
+    # ----- Plan preview -----
+    print(f"\n{'='*76}\n>>> {len(plan)} movie(s) queued for cross-library moves:\n{'='*76}")
+    # Group by destination for readability.
+    _by_dst = {}
+    for entry in plan:
+        _by_dst.setdefault(entry[3], []).append(entry)
+    for dst, items in sorted(_by_dst.items()):
+        print(f"\n  → {dst}  ({len(items)} item(s))")
+        for key, obj, src, _dst, rule_idx in items[:50]:
+            yr = obj.get('year') or '----'
+            fp = obj.get('file', '') or ''
+            print(f"      {key:<16} {yr}  {(obj.get('title') or '?')[:50]:<50}  [rule #{rule_idx+1}]  {fp}")
+        if len(items) > 50:
+            print(f"      … (+{len(items)-50} more)")
+
+    if dry_run:
+        print("\n>>> --try / --dry-run: no moves performed.")
+        return (0, 0, 0)
+
+    if not yes:
+        # Y/N/E loop — same shape as --unmatched --resolve bulk-rename.
+        while True:
+            try:
+                confirm = input(f"\nExecute {len(plan)} cross-library move(s)? [Y(es) / N(o) / E(dit)] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                confirm = 'no'
+            if confirm in ('y', 'yes'):
+                break
+            if confirm in ('n', 'no'):
+                print("Aborted.")
+                return (0, 0, 0)
+            if confirm in ('e', 'edit'):
+                import tempfile, subprocess as _sp
+                editor = EDITOR or os.environ.get('EDITOR') or 'vim'
+                with tempfile.NamedTemporaryFile('w', suffix='.my-plex-sort-new', delete=False) as tf:
+                    tf.write("# my-plex --sort-new movie routes: edit before execution.\n")
+                    tf.write("# - Comments (#) ignored.  Empty lines ignored.\n")
+                    tf.write("# - Format: <KEY>\\t<DEST_LIB>\\t<src_file>\n")
+                    tf.write("# - Change DEST_LIB to retarget a movie.\n")
+                    tf.write("# - Delete a line to skip that move.\n")
+                    tf.write("# - Save empty to abort entirely.\n\n")
+                    for key, obj, src, dst, rule_idx in plan:
+                        fp = obj.get('file', '') or ''
+                        tf.write(f"# rule #{rule_idx+1}: {src} → {dst}  {(obj.get('title') or '?')!r}\n")
+                        tf.write(f"{key}\t{dst}\t{fp}\n\n")
+                    tmp_path = tf.name
+                try:
+                    _sp.call([editor, tmp_path])
+                    with open(tmp_path) as rf:
+                        edited_lines = [ln.rstrip('\n') for ln in rf
+                                        if ln.strip() and not ln.lstrip().startswith('#')]
+                finally:
+                    try: os.remove(tmp_path)
+                    except OSError: pass
+                new_plan = []
+                _by_key = {entry[0]: entry for entry in plan}
+                for ln in edited_lines:
+                    parts = ln.split('\t', 2)
+                    if len(parts) < 2:
+                        continue
+                    key, new_dst = parts[0].strip(), parts[1].strip()
+                    base = _by_key.get(key)
+                    if not base:
+                        continue
+                    new_plan.append((base[0], base[1], base[2], new_dst, base[4]))
+                if not new_plan:
+                    print("Empty queue after edit — aborted.")
+                    return (0, 0, 0)
+                plan = new_plan
+                print(f"\n{'='*76}\n>>> {len(plan)} movie(s) queued (after edit):\n{'='*76}")
+                continue
+            print(f"  (didn't understand {confirm!r} — please answer y / n / e)")
+
+    # ----- Execute: per-item cmd_move (reuses proven cross-library logic).
+    # ControlMaster multiplexing keeps each cmd_move call cheap.
+    n_moved = n_skipped = n_errors = 0
+    grand_log_path = None
+    for key, obj, src, dst, _rule_idx in plan:
+        print(f"\n--- moving {key} ({src} → {dst}) ---")
+        # cmd_move's first arg is [DEST_LIB, SCOPE_TOKEN…].  Use the cache
+        # key as the scope so cmd_move targets exactly this item.
+        try:
+            mv_result = cmd_move([dst, key], dry_run=False, force=False, yes=True)
+            if isinstance(mv_result, tuple) and len(mv_result) == 3:
+                a, b, c = mv_result
+                n_moved += a; n_skipped += b; n_errors += c
+            else:
+                n_moved += 1
+        except Exception as e:
+            print(f"  ✗ ERROR cmd_move({dst}, {key}): {e}")
+            n_errors += 1
+
+    print(f"\n{'='*76}\n--sort-new MOVIE ROUTING SUMMARY")
+    print(f"  moved   : {n_moved}")
+    print(f"  skipped : {n_skipped}")
+    print(f"  errors  : {n_errors}")
+    print(f"{'='*76}")
+    return (n_moved, n_skipped, n_errors)
+
+
 def cmd_sort_new(args, dry_run=False, target=None):
     """Sort unsorted recordings into season directories for all series.
 
@@ -29325,6 +29505,11 @@ def cmd_sort_new(args, dry_run=False, target=None):
             print(f"\nDone: {'; '.join(parts)}")
     else:
         print("\nNothing to sort.")
+
+    # v2.24: after series sorting, also run MOVIE routing if the user has
+    # SORT_NEW_MOVIE_ROUTES configured (default empty → no-op).
+    _yes = safe_getattr(args, 'yes', False)
+    _sort_new_movies(dry_run=dry_run, target=target, yes=_yes)
 
 
 def _next_episode_in_dir(directory, season_num):
