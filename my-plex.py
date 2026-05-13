@@ -29272,7 +29272,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
             abs_match = _re.search(r'(?:^|[^0-9])(\d{3,4})(?:[^0-9]|$)', fn)
             if abs_match:
                 abs_num = int(abs_match.group(1))
-                if abs_num >= 100:
+                # v2.26: skip year tokens (1900-2100) — `Mars 2016 Special-…`
+                # was mis-routed to S20E16 because 2016 satisfied the
+                # `>= 100, candidate_ep > 0` test.  Year tokens are common
+                # in titles and should NOT be treated as concatenated S##E##.
+                if 1900 <= abs_num <= 2100:
+                    pass  # fall through to other strategies
+                elif abs_num >= 100:
                     candidate_season = abs_num // 100
                     candidate_ep = abs_num % 100
                     if candidate_ep > 0:
@@ -29324,6 +29330,82 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     sorted_count += 1
                     continue
 
+            # 1d.5 (v2.26).  Specials / Pilot keyword has HIGHER precedence
+            # than the abs-idx lookup so a filename like `… Millionen-Special
+            # [1of4]` is correctly routed to s00/ instead of being parsed
+            # as abs-idx=3 = S01E03.  Keeps the descriptive part of the
+            # filename so the user can still tell which special it is.
+            if _re.search(r'\b(special|pilot|bonus|extra)\b', fn, _re.IGNORECASE):
+                season = 0
+                target_dir = os.path.join(series_dir, 's00')
+                next_ep = _next_episode_in_dir(target_dir, season)
+                ep_num = next_ep
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
+                if dry_run:
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [special] S00E{ep_num:02d}: {fn}"))
+                else:
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
+                    print(f"    [special] {fn} -> s00/{new_name}")
+                sorted_count += 1
+                continue
+
+            # 1e (v2.26). Embedded absolute episode-index lookup against
+            # the TSV catalog.  Filenames like
+            # `Es_war_einmal_das_Leben_-_25_-_Giftstoffe.avi` carry the
+            # absolute episode number (1..N) between separators with no
+            # date and no S/E hint.  We rank the TSV by (season, episode)
+            # and look up the file's number as the abs-index — gives us
+            # the true (season, episode) of the file.
+            if all_episodes:
+                # Match any 1-3 digit number bounded by separators (not at
+                # start — that's 1d's job — and not a 4-digit year).
+                emb_match = _re.search(r'[\s_\-\.](\d{1,3})[\s_\-\.]', fn)
+                if emb_match:
+                    abs_num = int(emb_match.group(1))
+                    if 1 <= abs_num <= len(all_episodes):
+                        # TSV may not be in season+episode order; sort first.
+                        _sorted_tsv = sorted(all_episodes,
+                                             key=lambda e: (e.get('season') or 0, e.get('episode') or 0))
+                        matched = _sorted_tsv[abs_num - 1]
+                        season = matched['season']
+                        ep_num = matched['episode']
+                        target_dir = os.path.join(series_dir, f"s{season:02d}")
+                        new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
+                        if dry_run:
+                            dry_run_lines.append((season, ep_num, f"    [dry-run] [abs-idx={abs_num}] S{season:02d}E{ep_num:02d}: {fn}"))
+                        else:
+                            if not _sort_move(fp, target_dir, new_name):
+                                print(f"    ERROR: Failed to move {fn}")
+                                failed_count += 1
+                                continue
+                            print(f"    [abs-idx={abs_num}] {fn} -> s{season:02d}/{new_name}")
+                        sorted_count += 1
+                        continue
+
+            # 1f (v2.26). Explicit prose forms — `Season N Episode M`,
+            # or `Special` / `Pilot` keyword (→ s00/).
+            prose_match = _re.search(
+                r'season[\s_\-]*(\d+)[\s_\-]+episode[\s_\-]*(\d+)',
+                fn, _re.IGNORECASE
+            )
+            if prose_match:
+                season = int(prose_match.group(1))
+                ep_num = int(prose_match.group(2))
+                target_dir = os.path.join(series_dir, f"s{season:02d}")
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
+                if dry_run:
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [prose] S{season:02d}E{ep_num:02d}: {fn}"))
+                else:
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}")
+                        failed_count += 1
+                        continue
+                    print(f"    [prose] {fn} -> s{season:02d}/{new_name}")
+                sorted_count += 1
+                continue
             # 2. Parse date from filename
             file_date = extract_episode_date(fn)
             if file_date is None:
