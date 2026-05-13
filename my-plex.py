@@ -6196,6 +6196,11 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     rename_queue = []     # list of (key, obj, src_wrapper, dest_wrapper, year, tmdb_id)
     skipped = []
+    # v2.19: items whose wrapper is ALREADY canonical (rename would be a no-op)
+    # but that Plex still has 'local://' for.  We force item.refresh() on
+    # them at the end so Plex re-queries the metadata agent.  Without this
+    # the unmatched count never drops for canonical-but-stuck items.
+    refresh_only = []     # list of (key, obj)
     quit_early = False
     for i, (key, obj) in enumerate(unmatched, 1):
         title = obj.get('title') or ''
@@ -6236,7 +6241,10 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         # Score & sort
         scored = sorted(
-            ((c, _score_candidate(title, c)) for c in candidates),
+            # Score against the CLEANED title (no #tag# / [tag] / etc.) so a
+            # title that's clean except for surrounding clutter scores 100%
+            # instead of 66% (the clutter dragged the similarity ratio down).
+            ((c, _score_candidate(_title_for_search or title, c)) for c in candidates),
             key=lambda x: x[1], reverse=True,
         )[:5]   # show top 5
 
@@ -6264,8 +6272,8 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         canonical_title=top.get('title') if _wrapper_has_year else None,
                     )
                     if new_wrapper == wrapper:
-                        print(f"  ⚠ no rename needed (already canonical) — skipping")
-                        skipped.append((key, 'already-canonical'))
+                        print(f"  ⚠ already canonical — queueing item.refresh() to nudge Plex re-match")
+                        refresh_only.append((key, obj))
                         continue
                     print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({year})  conf={top_score}  → rename to: {os.path.basename(new_wrapper)}")
                     rename_queue.append((key, obj, wrapper, new_wrapper, year, top.get('tmdb_id')))
@@ -6334,9 +6342,14 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             break
 
     # ----- Bulk rename phase -----
-    if not rename_queue:
+    if not rename_queue and not refresh_only:
         print(f"\nNothing to rename. Skipped: {len(skipped)}.  Bye.")
         return
+    if not rename_queue and refresh_only:
+        # Nothing to mv, but we still have canonical-but-stuck items to
+        # nudge.  Jump straight to the refresh phase.
+        print(f"\nNo renames queued, but {len(refresh_only)} already-canonical item(s) "
+              f"will be refreshed to nudge Plex re-match.")
 
     # v2.15: dedupe + conflict-detect.  Two cache items can point at the
     # SAME wrapper (e.g. Short Circuit 1 & 2 — two Movie entries sharing
@@ -6385,7 +6398,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             sample = ', '.join(keys[:5]) + (f", … (+{len(keys)-5} more)" if len(keys) > 5 else '')
             print(f"    {reason}: {sample}")
     rename_queue = deduped_queue
-    if not rename_queue:
+    if not rename_queue and not refresh_only:
         print(f"\nNothing to rename after conflict pruning. Bye.")
         return
 
@@ -6397,13 +6410,17 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             print(f"  {key:<18} {year}  {src}")
             print(f"  {'':>18}        → {dst}")
         print()
-    _print_queue(rename_queue)
+    if rename_queue:
+        _print_queue(rename_queue)
 
     if dry_run:
-        print(">>> --try / --dry-run: no renames performed.")
+        if rename_queue:
+            print(">>> --try / --dry-run: no renames performed.")
+        if refresh_only:
+            print(f">>> --try / --dry-run: would refresh {len(refresh_only)} already-canonical item(s).")
         return
 
-    if not yes:
+    if rename_queue and not yes:
         # Edit-or-confirm loop: 'e' opens the queue in $EDITOR (default vim)
         # for fine-tuning before execution.  Format: each rename is two
         # consecutive lines (SRC then DEST, both absolute paths).  Lines
@@ -6467,37 +6484,40 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     # Build a single bulk SSH command of MV statements, separated by `;`.
     # ControlMaster multiplexing keeps this to one connection.
-    import subprocess
-    bulk_cmds = []
-    for _key, _obj, src, dst, _yr, _tmdb in rename_queue:
-        # POSIX-safe quoting — quote the paths to survive special chars.
-        bulk_cmds.append(f"mv -n {shlex.quote(src)} {shlex.quote(dst)} && echo MOVED || echo FAILED")
-    ssh_payload = " ; ".join(bulk_cmds)
-    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), ssh_payload]
-    if DBG: print(f"{DBGPFX}SSH bulk-mv ({len(rename_queue)} ops)…", file=sys.stderr)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except Exception as e:
-        print(f"ERROR: SSH bulk-mv failed: {e}")
-        return
-    if result.returncode != 0 and not result.stdout:
-        print(f"ERROR: SSH returned {result.returncode}\n{result.stderr}")
-        return
-
-    # Parse per-op result
-    outcomes = result.stdout.splitlines()
-    moved_count = sum(1 for line in outcomes if line.strip() == 'MOVED')
-    failed_count = len(rename_queue) - moved_count
-    print(f">>> Bulk rename done: {moved_count} moved, {failed_count} failed.")
-    if failed_count and result.stderr:
-        print(f"    stderr: {result.stderr.strip()}")
-
-    # Update the cache so subsequent --update-cache doesn't re-flag these items.
-    # We don't know the new ratingKey yet (Plex assigns one on scan), so just
-    # invalidate the OBJ_BY_FILEPATH entries pointing at the OLD wrapper.
+    # Skip entirely if rename_queue is empty (refresh-only path).
     libs_affected = set()
+    if rename_queue:
+        import subprocess
+        bulk_cmds = []
+        for _key, _obj, src, dst, _yr, _tmdb in rename_queue:
+            # POSIX-safe quoting — quote the paths to survive special chars.
+            bulk_cmds.append(f"mv -n {shlex.quote(src)} {shlex.quote(dst)} && echo MOVED || echo FAILED")
+        ssh_payload = " ; ".join(bulk_cmds)
+        cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), ssh_payload]
+        if DBG: print(f"{DBGPFX}SSH bulk-mv ({len(rename_queue)} ops)…", file=sys.stderr)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            print(f"ERROR: SSH bulk-mv failed: {e}")
+            return
+        if result.returncode != 0 and not result.stdout:
+            print(f"ERROR: SSH returned {result.returncode}\n{result.stderr}")
+            return
+
+        # Parse per-op result
+        outcomes = result.stdout.splitlines()
+        moved_count = sum(1 for line in outcomes if line.strip() == 'MOVED')
+        failed_count = len(rename_queue) - moved_count
+        print(f">>> Bulk rename done: {moved_count} moved, {failed_count} failed.")
+        if failed_count and result.stderr:
+            print(f"    stderr: {result.stderr.strip()}")
+
+    # libs_affected: from both rename_queue and refresh_only — both need
+    # scan + refresh to actually update Plex state.
     for _key, obj, src, dst, _yr, _tmdb in rename_queue:
         libs_affected.add(obj.get('library', ''))
+    for _key, obj in refresh_only:
+        libs_affected.add((obj or {}).get('library', ''))
 
     # ----- Trigger Plex scan(s) + per-item metadata re-match -----
     # A simple library.update() detects the rename but Plex DOES NOT re-query
@@ -6524,20 +6544,28 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         print(f"  ✓ triggered Plex scan of '{lib_name}'")
                     except Exception as e:
                         print(f"  ⚠ scan of '{lib_name}' failed: {e}")
-            # 2. item.refresh() per renamed item — re-runs metadata match
-            #    and is what actually flips guid from 'local://' to a real
-            #    plex://… for the items we renamed.
-            print(f">>> Re-matching {len(rename_queue)} item(s) via item.refresh()…")
-            for key, obj, _src, _dst, _yr, tmdb_id in rename_queue:
-                try:
-                    rk = int(obj.get('id', 0)) if obj else 0
-                    if not rk:
-                        continue
-                    item = plex.fetchItem(rk)
-                    item.refresh()
-                    print(f"  ✓ refresh queued: {key}  {obj.get('title','?')!r}")
-                except Exception as e:
-                    print(f"  ⚠ refresh failed for {key}: {e}")
+            # 2. item.refresh() per renamed AND per already-canonical item.
+            #    Renamed items: forces Plex to re-query the agent with the
+            #      new wrapper name (year + canonical title).
+            #    Already-canonical items: Plex's prior state STILL has
+            #      guid='local://'; refresh re-queries the agent against the
+            #      already-correct wrapper name and usually flips it now.
+            _refresh_targets = (
+                [(k, o) for k, o, *_ in rename_queue]
+                + list(refresh_only)
+            )
+            if _refresh_targets:
+                print(f">>> Re-matching {len(_refresh_targets)} item(s) via item.refresh()…")
+                for key, obj in _refresh_targets:
+                    try:
+                        rk = int(obj.get('id', 0)) if obj else 0
+                        if not rk:
+                            continue
+                        item = plex.fetchItem(rk)
+                        item.refresh()
+                        print(f"  ✓ refresh queued: {key}  {obj.get('title','?')!r}")
+                    except Exception as e:
+                        print(f"  ⚠ refresh failed for {key}: {e}")
         else:
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
@@ -15866,15 +15894,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # >> problem counts — identical format to --problems summary
             labels_str = f", {ondisk_labels_idx_size} on-disk labels" if ondisk_labels_idx_size else ""
             if _problems_cache:
+                # Sum EVERY category the summary printer surfaces below.
+                # Keep this list in sync with _print_problem_warnings().
                 _total_p = (
                     _problems_cache.get('broken', 0) +
                     _problems_cache.get('excess_versions', {}).get('entries', 0) +
                     _problems_cache.get('tsv', 0) +
                     _problems_cache.get('unmatched', 0) +
+                    _problems_cache.get('no_audio_language', 0) +
                     _problems_cache.get('unsorted', 0) +
                     _problems_cache.get('potential_mismatch', 0) +
+                    _problems_cache.get('multi_movie_folder', 0) +
+                    _problems_cache.get('library_language_mismatch', 0) +
                     _problems_cache.get('numbering_issues', 0) +
-                    _problems_cache.get('reencode', 0)
+                    _problems_cache.get('reencode', 0) +
+                    _problems_cache.get('remux', 0) +
+                    _problems_cache.get('missing_episodes', 0) +
+                    _problems_cache.get('renumber', 0) +
+                    _problems_cache.get('renumber_nodata', 0) +
+                    _problems_cache.get('renumber_season', 0) +
+                    _problems_cache.get('renumber_abs', 0) +
+                    _problems_cache.get('unrecognized', 0)
                 )
                 vrb_hint = "" if VRB else " (use -V to show details)"
                 print(f" >>> PROBLEM DETECTION: {_total_p} problem(s) found{vrb_hint}")
