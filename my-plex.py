@@ -6593,28 +6593,40 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         print(f"  ✓ triggered Plex scan of '{lib_name}'")
                     except Exception as e:
                         print(f"  ⚠ scan of '{lib_name}' failed: {e}")
-            # 2. item.refresh() per renamed AND per already-canonical item.
-            #    Renamed items: forces Plex to re-query the agent with the
-            #      new wrapper name (year + canonical title).
-            #    Already-canonical items: Plex's prior state STILL has
-            #      guid='local://'; refresh re-queries the agent against the
-            #      already-correct wrapper name and usually flips it now.
+            # 2. item.fixMatch(auto=True) per renamed AND already-canonical
+            #    item.  item.refresh() does NOT help here — its docstring
+            #    explicitly says "refresh the metadata for the item" — for
+            #    UNMATCHED items (guid='local://') the agent never gets a
+            #    chance to match.  fixMatch internally calls item.matches()
+            #    to query the agent and applies the top result.  This is
+            #    what actually flips guid from 'local://…' to 'plex://…'.
             _refresh_targets = (
                 [(k, o) for k, o, *_ in rename_queue]
                 + list(refresh_only)
             )
             if _refresh_targets:
-                print(f">>> Re-matching {len(_refresh_targets)} item(s) via item.refresh()…")
+                print(f">>> Re-matching {len(_refresh_targets)} item(s) via item.fixMatch(auto=True)…")
                 for key, obj in _refresh_targets:
                     try:
                         rk = int(obj.get('id', 0)) if obj else 0
                         if not rk:
                             continue
                         item = plex.fetchItem(rk)
-                        item.refresh()
-                        print(f"  ✓ refresh queued: {key}  {obj.get('title','?')!r}")
+                        try:
+                            item.fixMatch(auto=True)
+                            print(f"  ✓ matched: {key}  {obj.get('title','?')!r}")
+                        except Exception as fm_exc:
+                            # Plexapi raises NotFound when the agent returned
+                            # no matches.  Fall back to refresh() — at least
+                            # tells Plex to re-analyse the wrapper.
+                            print(f"  ⚠ fixMatch found no candidates for {key}: {fm_exc}")
+                            try:
+                                item.refresh()
+                                print(f"     fallback: item.refresh() queued")
+                            except Exception as r_exc:
+                                print(f"     refresh fallback also failed: {r_exc}")
                     except Exception as e:
-                        print(f"  ⚠ refresh failed for {key}: {e}")
+                        print(f"  ⚠ re-match failed for {key}: {e}")
         else:
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
