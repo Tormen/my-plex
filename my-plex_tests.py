@@ -9071,6 +9071,30 @@ class TestUnmatchedResolve(unittest.TestCase):
         self.assertIn("2019", s)
         self.assertNotIn("(", s)
 
+    # ------- _strip_tvoon_suffix -------
+
+    def test_tvoon_suffix_stripped_basic(self):
+        s = self.m._strip_tvoon_suffix(
+            "der_fall_jeanne_darc_24.11.23_21-00_phoenix_45_tvoon_de.mpg.hq")
+        self.assertEqual(s, "der_fall_jeanne_darc")
+
+    def test_tvoon_suffix_stripped_no_quality(self):
+        # `.mpg` with no `.hq` / `.hd` suffix should also be stripped.
+        s = self.m._strip_tvoon_suffix(
+            "belle_21.03.08_18-50_ukfilm4_130_tvoon_de.mpg")
+        self.assertEqual(s, "belle")
+
+    def test_tvoon_suffix_left_alone_when_not_present(self):
+        s = self.m._strip_tvoon_suffix("the.queen.s.corgi.2019.720p.bluray")
+        self.assertEqual(s, "the.queen.s.corgi.2019.720p.bluray")
+
+    def test_clean_query_for_tvoon_basename(self):
+        q, y = self.m._clean_query_from_wrapper(
+            "good_bye_lenin_21.05.10_23-10_mdr_115_tvoon_de.mpg.hq")
+        # TVOON broadcast date is NOT the release year — year=None expected.
+        self.assertIsNone(y)
+        self.assertEqual(q, "good bye lenin")
+
     def test_clean_query_strips_brace_year_form(self):
         # wrapper basename with `{YYYY}` style year + a release-tag suffix.
         q, y = self.m._clean_query_from_wrapper(

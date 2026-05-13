@@ -5892,6 +5892,28 @@ _ENGINE_DISPATCH = {
 }
 
 
+# TVOON-recorded files carry a fixed suffix pattern that's never part of
+# the actual title and confuses every metadata engine:
+#   <title>_<YY.MM.DD>_<HH-MM>_<channel>_<duration>_tvoon_de.mpg[.hq|.hd|.…]
+# Matched as a TRAILING suffix on a wrapper basename; replaced with empty
+# string to recover the bare title (e.g.
+#   `der_fall_jeanne_darc_24.11.23_21-00_phoenix_45_tvoon_de.mpg.hq`
+#   → `der_fall_jeanne_darc`).
+_TVOON_SUFFIX_RE = re.compile(
+    r'_\d{2}\.\d{2}\.\d{2}_\d{2}-\d{2}_[a-z0-9]+_\d+_tvoon_de(?:\.[a-z0-9]+)*$',
+    re.IGNORECASE
+)
+
+
+def _strip_tvoon_suffix(basename):
+    """Strip the TVOON broadcast-metadata suffix from a wrapper basename.
+
+    No-op on basenames that don't match the pattern."""
+    if not basename:
+        return basename
+    return _TVOON_SUFFIX_RE.sub('', basename)
+
+
 def _clean_query_from_wrapper(wrapper_basename):
     """Extract a clean `<title> [year]` search query from a wrapper basename.
 
@@ -5908,6 +5930,10 @@ def _clean_query_from_wrapper(wrapper_basename):
     if not wrapper_basename:
         return ('', None)
     base = wrapper_basename.lower()
+    # Strip TVOON broadcast suffix FIRST.  The broadcast date (YY.MM.DD) is
+    # not a release year and Plex/TMDB don't care about the channel/duration
+    # tags.  After this, what remains is the bare title (e.g. 'good_bye_lenin').
+    base = _strip_tvoon_suffix(base)
     year = None
     m = _WRAPPER_YEAR_RE.search('.' + base + '.')
     if m:
