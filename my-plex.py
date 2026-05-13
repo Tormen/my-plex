@@ -6102,7 +6102,14 @@ def _strip_query_tags(text):
     #    non-whitespace (greedy), so `#Melissa#mccarthy#` is one cluster
     #    that drops entirely.  Loose `#foo` without a closing `#` also drops.
     s = re.sub(r'#\S*', ' ', s)
-    # 4. Collapse leftover whitespace.
+    # 4. Strip `a.k.a.` / `a k a` plus everything after — alternate-title
+    #    noise pollutes the engine query.  `Society of the Snow a k a La
+    #    Sociedad De La Nieve` → keep only `Society of the Snow`.
+    s = re.split(r'\ba[\.\s_]?k[\.\s_]?a\b', s, maxsplit=1, flags=re.IGNORECASE)[0]
+    # 5. Strip multi-part markers `1of6` / `2 of 6` / `(2of6)`.  These
+    #    appear in documentary series and never match a film title.
+    s = re.sub(r'\b\d+\s*of\s*\d+\b', ' ', s, flags=re.IGNORECASE)
+    # 6. Collapse leftover whitespace.
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
