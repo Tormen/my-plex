@@ -6348,6 +6348,30 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             key=lambda x: x[1], reverse=True,
         )[:5]   # show top 5
 
+        # v2.27: UNAMBIGUOUS-MATCH boost.  When the wrapper carries a year
+        # hint, treat the top candidate as 100% in either of these cases:
+        #   • Exactly ONE candidate survived the year filter (the obvious case).
+        #   • Top candidate clearly dominates the runner-up by popularity —
+        #     in practice this means the runner-ups are "Making-of"
+        #     documentaries, fan trailers, etc. that share the year by
+        #     coincidence but aren't the real film.
+        # Example: `die.hard [2007] [04] Die Hard 4.0 …` cleans to "die hard";
+        # TMDB year=2007 returns "Live Free or Die Hard" (pop 7.0); TVDB
+        # year=2007 returns "Making of Live Free or Die Hard" (pop 0.0).
+        # Similarity of "die hard" ↔ "Live Free or Die Hard" is only ~60 %
+        # but it's the ONLY popular hit for 2007.  Score it 100.
+        if _wrapper_has_year and scored:
+            top, top_score = scored[0]
+            if len(candidates) == 1:
+                scored = [(top, 100.0)]
+            elif len(scored) >= 2:
+                runner = scored[1][0]
+                top_pop    = float(top.get('popularity') or 0)
+                runner_pop = float(runner.get('popularity') or 0)
+                # Top has real popularity AND runner is essentially noise.
+                if top_pop >= 1.0 and runner_pop < 0.5:
+                    scored = [(top, 100.0)] + scored[1:]
+
         # AUTO mode: pick #1 if confident enough and clearly ahead of #2
         if auto and scored:
             top, top_score = scored[0]
