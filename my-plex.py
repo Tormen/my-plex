@@ -28799,13 +28799,15 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     return (n_moved, n_skipped, n_errors)
 
 
-def _sort_new_movies(dry_run=False, target=None, yes=False):
-    """v2.24: route MOVIES across libraries per SORT_NEW_MOVIE_ROUTES.
+def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
+    """v2.24+: route MOVIES across libraries per SORT_NEW_MOVIE_ROUTES.
 
-    For each rule (ordered, first match wins), resolves the source-library
-    scope through the existing filter grammar, plans cross-library moves,
-    asks Y/N/E (with $EDITOR support — same UX as --unmatched --resolve),
-    then executes via a single SSH bulk-mv session.
+    For each rule (ordered, first match wins) resolves the source-library
+    scope through the filter grammar.  Computes a CLEAN destination
+    wrapper basename (TVOON suffix stripped — see _strip_tvoon_suffix).
+    Shows a single plan, then asks Y/N/E.  Execution is ONE SSH session
+    of `mv` commands (ControlMaster-multiplexed) — fast, atomic-ish,
+    no per-item scan triggers.
 
     Returns (n_moved, n_skipped, n_errors)."""
     routes = SORT_NEW_MOVIE_ROUTES or []
@@ -28814,10 +28816,12 @@ def _sort_new_movies(dry_run=False, target=None, yes=False):
 
     print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
 
-    # Resolve every Movie under each `from` library, apply `when` filter,
-    # first-match-wins.  Carry the matching rule for reporting.
+    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
     libs_present = set(PLEX_Library.OBJ_DICT.keys())
-    plan = []   # list of (key, obj, src_lib, dst_lib, rule_idx)
+
+    # Phase 1: build plan.  Each entry:
+    #   (key, obj, src_lib, dst_lib, src_wrapper_abs, dst_wrapper_abs, rule_idx)
+    plan = []
     claimed = set()
     for i, rule in enumerate(routes):
         src = rule.get('from')
@@ -28827,36 +28831,40 @@ def _sort_new_movies(dry_run=False, target=None, yes=False):
             print(f"  ⚠ rule #{i+1} malformed (missing from/when/to) — skipping: {rule}")
             continue
         if src not in libs_present:
-            print(f"  ⚠ rule #{i+1}: source library {src!r} not present in cache — skipping")
+            print(f"  ⚠ rule #{i+1}: source library {src!r} not present — skipping")
             continue
         if dst not in libs_present:
-            print(f"  ⚠ rule #{i+1}: destination library {dst!r} not present in cache — skipping")
+            print(f"  ⚠ rule #{i+1}: destination library {dst!r} not present — skipping")
             continue
-        # Honour --sort-new target: only process this source if it matches.
         if target and target != src:
             continue
-        # Compose final filter: source-library AND the user's `when` expression.
-        # Wildcard `*` means "everything in the source library not yet claimed".
         if when == '*':
             expr_tokens = [f"library:{src}", "AND", "type:movie"]
         else:
-            expr_tokens = [f"library:{src}", "AND", "type:movie", "AND", "("] \
-                          + when.split() + [")"]
+            expr_tokens = [f"library:{src}", "AND", "type:movie", "AND", "("] + when.split() + [")"]
         try:
             matches = _resolve_scope_filter_expr(expr_tokens)
         except Exception as e:
             print(f"  ⚠ rule #{i+1}: filter evaluation failed — {e}")
             continue
+        dst_roots = locations_by_lib.get(dst) or []
+        if not dst_roots:
+            print(f"  ⚠ rule #{i+1}: no rootpath known for destination library {dst!r}")
+            continue
+        dst_root = str(dst_roots[0]).rstrip('/')
         matched_now = 0
         for key, obj in matches:
-            if key in claimed:
+            if key in claimed or obj.get('type') != 'Movie' or obj.get('library') != src:
                 continue
-            if obj.get('type') != 'Movie':
+            src_wrapper = _derive_wrapper_path(obj)
+            if not src_wrapper:
                 continue
-            if obj.get('library') != src:
-                continue
+            clean_base = _strip_tvoon_suffix(os.path.basename(src_wrapper))
+            dst_wrapper = f"{dst_root}/{clean_base}"
+            if dst_wrapper == src_wrapper:
+                continue  # already in place
             claimed.add(key)
-            plan.append((key, obj, src, dst, i))
+            plan.append((key, obj, src, dst, src_wrapper, dst_wrapper, i))
             matched_now += 1
         print(f"  rule #{i+1}: {src!r} when={when!r} → {dst!r}  matched {matched_now} new item(s)")
 
@@ -28864,30 +28872,34 @@ def _sort_new_movies(dry_run=False, target=None, yes=False):
         print("\nNo movies matched any SORT_NEW_MOVIE_ROUTES rule.")
         return (0, 0, 0)
 
-    # ----- Plan preview -----
-    print(f"\n{'='*76}\n>>> {len(plan)} movie(s) queued for cross-library moves:\n{'='*76}")
-    # Group by destination for readability.
-    _by_dst = {}
-    for entry in plan:
-        _by_dst.setdefault(entry[3], []).append(entry)
-    for dst, items in sorted(_by_dst.items()):
-        print(f"\n  → {dst}  ({len(items)} item(s))")
-        for key, obj, src, _dst, rule_idx in items[:50]:
-            yr = obj.get('year') or '----'
-            fp = obj.get('file', '') or ''
-            print(f"      {key:<16} {yr}  {(obj.get('title') or '?')[:50]:<50}  [rule #{rule_idx+1}]  {fp}")
-        if len(items) > 50:
-            print(f"      … (+{len(items)-50} more)")
+    # Phase 2: preview.  One flat list grouped by destination.
+    def _print_plan(plan_to_show):
+        print(f"\n{'='*76}\n>>> {len(plan_to_show)} movie(s) queued for cross-library moves:\n{'='*76}")
+        _by_dst = {}
+        for entry in plan_to_show:
+            _by_dst.setdefault(entry[3], []).append(entry)
+        for dst, items in sorted(_by_dst.items()):
+            print(f"\n  → {dst}  ({len(items)} item(s))")
+            for key, obj, _src, _dst, sw, dw, rule_idx in items[:50]:
+                yr = obj.get('year') or '----'
+                marker = f"[rule #{rule_idx+1}]"
+                renamed = ' (cleaned)' if os.path.basename(sw) != os.path.basename(dw) else ''
+                print(f"      {key:<16} {yr}  {(obj.get('title') or '?')[:50]:<50}  {marker}{renamed}")
+                print(f"        FROM: {sw}")
+                print(f"        TO  : {dw}")
+            if len(items) > 50:
+                print(f"      … (+{len(items)-50} more)")
+    _print_plan(plan)
 
     if dry_run:
         print("\n>>> --try / --dry-run: no moves performed.")
         return (0, 0, 0)
 
+    # Phase 3: Y/N/E.
     if not yes:
-        # Y/N/E loop — same shape as --unmatched --resolve bulk-rename.
         while True:
             try:
-                confirm = input(f"\nExecute {len(plan)} cross-library move(s)? [Y(es) / N(o) / E(dit)] ").strip().lower()
+                confirm = input(f"\nExecute {len(plan)} cross-library move(s) in ONE SSH batch? [Y(es) / N(o) / E(dit)] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 confirm = 'no'
             if confirm in ('y', 'yes'):
@@ -28899,16 +28911,17 @@ def _sort_new_movies(dry_run=False, target=None, yes=False):
                 import tempfile, subprocess as _sp
                 editor = EDITOR or os.environ.get('EDITOR') or 'vim'
                 with tempfile.NamedTemporaryFile('w', suffix='.my-plex-sort-new', delete=False) as tf:
-                    tf.write("# my-plex --sort-new movie routes: edit before execution.\n")
-                    tf.write("# - Comments (#) ignored.  Empty lines ignored.\n")
-                    tf.write("# - Format: <KEY>\\t<DEST_LIB>\\t<src_file>\n")
-                    tf.write("# - Change DEST_LIB to retarget a movie.\n")
-                    tf.write("# - Delete a line to skip that move.\n")
-                    tf.write("# - Save empty to abort entirely.\n\n")
-                    for key, obj, src, dst, rule_idx in plan:
-                        fp = obj.get('file', '') or ''
-                        tf.write(f"# rule #{rule_idx+1}: {src} → {dst}  {(obj.get('title') or '?')!r}\n")
-                        tf.write(f"{key}\t{dst}\t{fp}\n\n")
+                    tf.write("# my-plex --sort-new — edit the plan before execution.\n")
+                    tf.write("# - Comments (#) and blank lines are ignored.\n")
+                    tf.write("# - One TAB-separated row per move:\n")
+                    tf.write("#       KEY <TAB> SRC_WRAPPER <TAB> DST_WRAPPER\n")
+                    tf.write("# - Delete a row to skip; change DST_WRAPPER to retarget; save empty to abort.\n")
+                    tf.write(f"# Rules in effect this run:\n")
+                    for idx, r in enumerate(routes):
+                        tf.write(f"#   #{idx+1}: from={r.get('from')!r}  when={r.get('when')!r}  to={r.get('to')!r}\n")
+                    tf.write("\n")
+                    for key, _obj, _src, _dst, sw, dw, _ri in plan:
+                        tf.write(f"{key}\t{sw}\t{dw}\n")
                     tmp_path = tf.name
                 try:
                     _sp.call([editor, tmp_path])
@@ -28921,47 +28934,130 @@ def _sort_new_movies(dry_run=False, target=None, yes=False):
                 new_plan = []
                 _by_key = {entry[0]: entry for entry in plan}
                 for ln in edited_lines:
-                    parts = ln.split('\t', 2)
-                    if len(parts) < 2:
+                    parts = ln.split('\t')
+                    if len(parts) < 3:
                         continue
-                    key, new_dst = parts[0].strip(), parts[1].strip()
+                    key, sw, dw = parts[0].strip(), parts[1].strip(), parts[2].strip()
                     base = _by_key.get(key)
                     if not base:
                         continue
-                    new_plan.append((base[0], base[1], base[2], new_dst, base[4]))
+                    # Re-derive dst_lib from dw if user retargeted.
+                    new_dst = base[3]
+                    for _lname, _roots in locations_by_lib.items():
+                        for _r in (_roots or []):
+                            if dw.startswith(str(_r).rstrip('/') + '/'):
+                                new_dst = _lname
+                                break
+                    new_plan.append((base[0], base[1], base[2], new_dst, sw, dw, base[6]))
                 if not new_plan:
                     print("Empty queue after edit — aborted.")
                     return (0, 0, 0)
                 plan = new_plan
-                print(f"\n{'='*76}\n>>> {len(plan)} movie(s) queued (after edit):\n{'='*76}")
+                _print_plan(plan)
                 continue
             print(f"  (didn't understand {confirm!r} — please answer y / n / e)")
 
-    # ----- Execute: per-item cmd_move (reuses proven cross-library logic).
-    # ControlMaster multiplexing keeps each cmd_move call cheap.
-    n_moved = n_skipped = n_errors = 0
-    grand_log_path = None
-    for key, obj, src, dst, _rule_idx in plan:
-        print(f"\n--- moving {key} ({src} → {dst}) ---")
-        # cmd_move's first arg is [DEST_LIB, SCOPE_TOKEN…].  Use the cache
-        # key as the scope so cmd_move targets exactly this item.
-        try:
-            mv_result = cmd_move([dst, key], dry_run=False, force=False, yes=True)
-            if isinstance(mv_result, tuple) and len(mv_result) == 3:
-                a, b, c = mv_result
-                n_moved += a; n_skipped += b; n_errors += c
-            else:
-                n_moved += 1
-        except Exception as e:
-            print(f"  ✗ ERROR cmd_move({dst}, {key}): {e}")
-            n_errors += 1
+    # Phase 4: bulk SSH mv.  ONE session.  Per-op outcome on its own
+    # stdout line so we can attribute MOVED/FAILED back to plan entries.
+    import subprocess
+    bulk = []
+    # `mv -n` (no-clobber) skips duplicates; `mv -f` (force) overwrites the
+    # existing wrapper.  --force flips to overwrite.  Cross-library duplicate
+    # detection is now responsibility of the user via the edit step + this
+    # switch — much simpler than the per-item Skip/Overwrite/SkipAll/OverwriteAll
+    # prompts that the legacy cmd_move per-item path used.
+    _mv_flag = '-f' if force else '-n'
+    for _key, _obj, _src, _dst, sw, dw, _ri in plan:
+        parent = os.path.dirname(dw)
+        bulk.append(
+            f"mkdir -p {shlex.quote(parent)} && "
+            f"mv {_mv_flag} {shlex.quote(sw)} {shlex.quote(dw)} "
+            f"&& echo MOVED || echo FAILED"
+        )
+    payload = " ; ".join(bulk)
+    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), payload]
+    print(f"\n>>> Executing {len(plan)} move(s) in ONE SSH session…")
+    if DBG: print(f"{DBGPFX}sort-new SSH bulk-mv ({len(plan)} ops)", file=sys.stderr)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        print(f"ERROR: SSH bulk-mv failed: {e}")
+        return (0, 0, len(plan))
+    outcomes = result.stdout.splitlines()
+    n_moved = sum(1 for ln in outcomes if ln.strip() == 'MOVED')
+    n_errors = len(plan) - n_moved
+    print(f">>> Bulk done: {n_moved} moved, {n_errors} failed.")
+    if n_errors and result.stderr:
+        print(f"    stderr: {result.stderr.strip()[:1000]}")
+
+    # Phase 5: cache invalidation.  Plex assigns NEW IDs on cross-library
+    # re-scan; remove the OLD cache entries so --update-cache cleanly picks
+    # up the destinations.  Pair each plan entry with its outcome line.
+    affected_libs = set()
+    moved_keys = []
+    for (key, obj, src, dst, _sw, _dw, _ri), outcome in zip(plan, outcomes):
+        if outcome.strip() != 'MOVED':
+            continue
+        moved_keys.append(key)
+        affected_libs.add(src); affected_libs.add(dst)
+        # Drop old cache entries (filepath / library / id / movie indices).
+        if src in PLEX_Media.OBJ_BY_LIBRARY and 'Movie' in PLEX_Media.OBJ_BY_LIBRARY[src]:
+            try: PLEX_Media.OBJ_BY_LIBRARY[src]['Movie'].remove(key)
+            except ValueError: pass
+        for _v, _fi in (obj.get('files', {}) or {}).items():
+            fp = _fi.get('filepath') if isinstance(_fi, dict) else None
+            if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[fp]
+        if key in PLEX_Media.OBJ_BY_MOVIE: del PLEX_Media.OBJ_BY_MOVIE[key]
+        if key in PLEX_Media.OBJ_BY_ID:    del PLEX_Media.OBJ_BY_ID[key]
+    if moved_keys and not READ_ONLY_MODE:
+        update_and_save_cache(CACHE)
+
+    # Phase 6: ONE library scan trigger per affected lib (unless Plex's
+    # filesystem watcher will pick it up automatically).
+    if moved_keys:
+        if _detect_plex_auto_scan_enabled():
+            print(">>> Plex auto-update-on-disk-change is enabled — skipping manual lib.update().")
+        else:
+            try:
+                plex = ensure_plex_api(required=False)
+                if plex:
+                    for lib_name in sorted(affected_libs):
+                        try:
+                            plex.library.section(lib_name).update()
+                            print(f"  ✓ triggered Plex scan of '{lib_name}'")
+                        except Exception as e:
+                            print(f"  ⚠ scan of '{lib_name}' failed: {e}")
+            except Exception as e:
+                print(f"  ⚠ scan trigger failed: {e}")
+
+    # Phase 7: JSON session log.
+    try:
+        import json as _json
+        from datetime import datetime as _dtm
+        _path = f"/tmp/my-plex.sort-new.{_dtm.now().strftime('%Y-%m-%dT%H-%M-%S')}.json"
+        _log = {
+            'started_at': _dtm.now().isoformat(timespec='seconds'),
+            'routes': routes,
+            'ops': [],
+        }
+        for (key, obj, src, dst, sw, dw, ri), outcome in zip(plan, outcomes):
+            _log['ops'].append({
+                'key': key, 'type': obj.get('type', ''), 'title': obj.get('title', ''),
+                'src_lib': src, 'dst_lib': dst, 'rule_idx': ri,
+                'src': sw, 'dst': dw, 'status': outcome.strip().lower() or 'unknown',
+            })
+        with open(_path, 'w') as _f:
+            _json.dump(_log, _f, indent=2, default=str)
+        print(f"  log     : {_path}")
+    except Exception as _e:
+        print(f"  log     : (failed to write — {_e})")
 
     print(f"\n{'='*76}\n--sort-new MOVIE ROUTING SUMMARY")
     print(f"  moved   : {n_moved}")
-    print(f"  skipped : {n_skipped}")
     print(f"  errors  : {n_errors}")
     print(f"{'='*76}")
-    return (n_moved, n_skipped, n_errors)
+    return (n_moved, 0, n_errors)
 
 
 def cmd_sort_new(args, dry_run=False, target=None):
@@ -29509,7 +29605,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
     # v2.24: after series sorting, also run MOVIE routing if the user has
     # SORT_NEW_MOVIE_ROUTES configured (default empty → no-op).
     _yes = safe_getattr(args, 'yes', False)
-    _sort_new_movies(dry_run=dry_run, target=target, yes=_yes)
+    _force = bool(safe_getattr(args, 'force', False))
+    _sort_new_movies(dry_run=dry_run, target=target, yes=_yes, force=_force)
 
 
 def _next_episode_in_dir(directory, season_num):
