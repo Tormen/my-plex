@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.44"
+SCRIPT_VERSION = "v2.45"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6731,13 +6731,35 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
 
 _BAD_STRUCTURE_MERGE_SH = r'''
-# v2.44 — recursive per-file merge of $1 (src) into $2 (dst).
-# Per-file conflict rules:
-#   both dirs       → recurse into both
-#   dir vs file     → FAIL (pathological)
-#   byte-identical  → rm source (leftover)
-#   different size  → keep the BIGGER one (mv -f if src bigger, rm if dst bigger)
-# Emits "FAIL|<i>|<reason>" via shared $_IDX and "exit 1" on fatal error.
+# v2.45 — recursive per-file merge of $1 (src) into $2 (dst).
+# Conflict resolution depends on the file kind:
+#
+#   * MEDIA files (video / audio / subtitle):
+#       any collision → FAIL (manual review).  These are user-curated
+#       artefacts; we never silently rm or overwrite them.
+#
+#   * NOISE files (.nfo, .jpg, .png, .url, .html, .txt, .nzb, .DS_Store,
+#     and anything else not in the media-ext set):
+#       byte-identical → rm source (leftover)
+#       different size → keep the BIGGER one
+#
+#   * Directories:
+#       both dirs    → recurse
+#       dir vs file  → FAIL (pathological)
+#
+# Emits "FAIL|<i>|<reason>" via shared $_IDX, "exit 1" on fatal error.
+_bs_is_media() {
+  # Returns 0 if filename ends in a media extension we won't silently touch.
+  local _name="$1"
+  local _lower
+  _lower=$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')
+  case "$_lower" in
+    *.mp4|*.mkv|*.avi|*.m4v|*.mov|*.wmv|*.mpg|*.mpeg|*.ts|*.flv|*.webm|*.vob|*.mts|*.m2ts) return 0 ;;
+    *.mp3|*.m4a|*.flac|*.ogg|*.wav|*.aiff|*.ape|*.opus|*.wma) return 0 ;;
+    *.srt|*.sub|*.ass|*.vtt|*.ssa|*.idx) return 0 ;;
+  esac
+  return 1
+}
 bs_merge_dir() {
   local _src="$1"
   local _dst="$2"
@@ -6759,6 +6781,12 @@ bs_merge_dir() {
           echo "FAIL|$_IDX|collision (dir/file mismatch): $_src/$_f"
           return 1
         fi
+        # both are regular files
+        if _bs_is_media "$_f"; then
+          echo "FAIL|$_IDX|media-file collision (manual review): $_src/$_f"
+          return 1
+        fi
+        # noise file — apply byte-identical / bigger-wins rules
         _ssz=$(stat -f%z "$_f" 2>/dev/null || stat -c%s "$_f" 2>/dev/null)
         _dsz=$(stat -f%z "$_dst/$_f" 2>/dev/null || stat -c%s "$_dst/$_f" 2>/dev/null)
         if [ -z "$_ssz" ] || [ -z "$_dsz" ]; then
