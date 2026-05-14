@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.59"
+SCRIPT_VERSION = "v2.60"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -335,7 +335,7 @@ _my-plex() {
             'list:List and filter media'
             'list-libraries:Library listing'
             'media:Media scope and query syntax'
-            'mismatch:Title/dirname mismatch'
+            'mismatched:Title/dirname + multi-version mismatch'
             'missing:Missing episode detection'
             'offline:Offline mode and access requirements'
             'plex2disk:Sync Plex metadata to disk'
@@ -450,7 +450,7 @@ _my-plex() {
         '(- -D -DD --debug --deep-debug)'{-DD,--deep-debug}'[Deep debug mode]'
         '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
-        '--mismatch[Potential title / dirname mismatch candidates]'
+        '--mismatched[Mismatches: title vs directory + multi-version Plex grouping]'
         '--multi-movie-folder[Wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder)]'
         '--library-language-mismatch[Items whose audio language disagrees with their library convention]'
         '(--bad-structure --nested-media)'{--bad-structure,--nested-media}'[Media files nested too deeply on disk (Movie ≤1 dir below library root, Episode ≤2). Optional SCOPE.]'
@@ -477,7 +477,6 @@ _my-plex() {
         '--force-metadata[With --update-cache: collect file metadata via ffmpeg/ffprobe]'
         '--force-plexdata[With --update-cache: re-fetch Plex metadata even when timestamps are unchanged]'
         '--episode-numbering-issues[List episodes with problematic S0xE0x in filename or Plex metadata]'
-        '(--mismatch --potential-mismatch)'{--mismatch,--potential-mismatch}'[Potential title / dirname mismatch candidates]'
         '(--english --en)'{--english,--en}'[List media with English audio]'
         '(--german --de)'{--german,--de}'[List media with German audio]'
         '(--french --fr)'{--french,--fr}'[List media with French audio]'
@@ -904,6 +903,18 @@ CONFIG_DEFAULTS = {
 
     # Broken File Detection Configuration
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
+
+    # Multi-Version Mismatch Detection Configuration (--mismatched)
+    # Flag Episodes/Movies where Plex has bundled what's almost certainly
+    # DIFFERENT content under a single ID (separate episodes wrongly grouped,
+    # alternate language cuts, unrelated DVD extras, etc.).
+    # Three independent signals; ANY one triggers the flag:
+    #   1. Version count exceeds the per-type limit below.
+    #   2. Duration spread (max-min)/max across versions exceeds the percentage below.
+    #   3. Versions live in different parent directories.
+    'MULTI_VERSION_MAX_MOVIE':                 2,     # >2 versions on one Movie => suspect grouping
+    'MULTI_VERSION_MAX_SERIES':                2,     # >2 versions on one Episode => suspect grouping
+    'MULTI_VERSION_MAX_DURATION_SPREAD_PCT':   2.0,   # spread > 2% across versions => suspect grouping
 
     # Reencode Candidate Detection Configuration
     # Reencode threshold — specify as a dict with ONE of the two keys:
@@ -1466,6 +1477,26 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
+
+###############################################################################
+# Multi-Version Mismatch Detection Configuration (--mismatched)
+###############################################################################
+
+# Flag Episodes/Movies where Plex has bundled what's almost certainly DIFFERENT
+# content under a single ID (separate episodes wrongly grouped, alternate
+# language cuts, unrelated DVD extras, etc.).
+#
+# Three independent signals; ANY one triggers the flag:
+#   1. Version count exceeds the per-type limit.
+#   2. Duration spread (max-min)/max across versions exceeds the percentage.
+#   3. Versions live in different parent directories.
+#
+# Tighten by lowering the limits / threshold; loosen by raising them.
+#
+# Defaults:
+# MULTI_VERSION_MAX_MOVIE                 = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_MOVIE']}
+# MULTI_VERSION_MAX_SERIES                = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_SERIES']}
+# MULTI_VERSION_MAX_DURATION_SPREAD_PCT   = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_DURATION_SPREAD_PCT']}
 
 ###############################################################################
 # Reencode Candidate Detection Configuration
@@ -2204,6 +2235,9 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
+MULTI_VERSION_MAX_MOVIE = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_MOVIE', 2)
+MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_SERIES', 2)
+MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', 2.0)
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
@@ -2368,7 +2402,7 @@ PROBLEM DETECTION:
   --excess-versions [N]    Entries with N+ file versions (default: 3)
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
   --no-audio-language      Items with missing audio language metadata
-  --mismatch [SCOPE]       Potential title / dirname mismatch candidates
+  --mismatched [SCOPE]     Mismatches: title vs directory + multi-version Plex grouping
   --reencode [SCOPE]       Reencode candidates above bitrate threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
   SERIES ONLY:
@@ -12501,7 +12535,7 @@ def collect_library_keys(library_name=None, media_type=None):
 def resolve_scope_to_keys(scope_val, media_type=None):
     """Resolve a scope value to cache keys — UNIVERSAL scope entry point for
     the listing / problem-detection commands (--broken, --unmatched, --unsorted,
-    --mismatch, --missing, --reencode, --problems, ...).
+    --mismatched, --missing, --reencode, --problems, ...).
 
     Accepts every shape the universal-scope helpers do:
       - None / True / '' / []    → all libraries
@@ -15357,7 +15391,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unmatched', action='store_true', help="List items not matched by Plex metadata agent. Use --help unmatched for details.")
     argparser.add_argument('--unsorted', action='store_true', help="List series with episodes directly in series dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
-    argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="List items where Plex title doesn't match directory name. Use --help mismatch for details.")
+    argparser.add_argument('--mismatched', action='store_true', dest='mismatched', help="List Plex mismatches: title vs directory + multi-version grouping. Use --help mismatched for details.")
     argparser.add_argument('--multi-movie-folder', action='store_true', help="List wrappers that host >=2 distinct Plex Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     argparser.add_argument('--library-language-mismatch', action='store_true', help="List items whose audio language disagrees with their library's configured language. Use --help library-language-mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
@@ -16940,12 +16974,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 print(f"\n--- Unsorted Shows in '{lib_name}' (episodes without season directories) ---")
                 PLEX_Media._list_unsorted(lib_obj_keys, library_name=lib_name)
 
-        if safe_getattr(obj_args, 'potential_mismatch', False):
+        if safe_getattr(obj_args, 'mismatched', False):
             lib_name = obj
             media_type = safe_getattr(obj_args, 'type', None)
             obj_keys = collect_library_keys(library_name=lib_name, media_type=media_type)
-            print(f"\n--- Potential Mismatches in '{lib_name}' (Plex title vs directory name) ---")
-            PLEX_Media._list_potential_mismatches(obj_keys, lib_name)
+            print(f"\n--- Mismatched in '{lib_name}' (title-vs-directory + multi-version grouping) ---")
+            PLEX_Media._list_mismatched(obj_keys, lib_name)
 
         if safe_getattr(obj_args, 'episode_numbering_issues', False):
             lib_name = obj
@@ -17671,7 +17705,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_unmatched= _silent(PLEX_Media._list_unmatched, all_obj_keys, None) or 0
         _pc_noaudio  = _silent(PLEX_Media._list_no_audio_language, all_obj_keys, None) or 0
         _pc_unsorted = _silent(PLEX_Media._list_unsorted, all_obj_keys, None) or 0
-        _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
+        _pc_mismatch = _silent(PLEX_Media._list_mismatched, all_obj_keys, None) or 0
         _pc_mmf      = _silent(PLEX_Media._list_multi_movie_folder, all_obj_keys, None) or 0
         _pc_llm      = _silent(PLEX_Media._list_library_language_mismatch, all_obj_keys, None) or 0
         _pc_badstruct= _silent(PLEX_Media._list_bad_structure, all_obj_keys, None) or 0
@@ -17705,7 +17739,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'unmatched':         _pc_unmatched,
             'no_audio_language': _pc_noaudio,
             'unsorted':          _pc_unsorted,
-            'potential_mismatch':_pc_mismatch,
+            'mismatched':        _pc_mismatch,
             'multi_movie_folder':_pc_mmf,
             'library_language_mismatch':_pc_llm,
             'bad_structure':     _pc_badstruct,
@@ -17954,7 +17988,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _problems_cache.get('unmatched', 0) +
                     _problems_cache.get('no_audio_language', 0) +
                     _problems_cache.get('unsorted', 0) +
-                    _problems_cache.get('potential_mismatch', 0) +
+                    _problems_cache.get('mismatched', 0) +
                     _problems_cache.get('multi_movie_folder', 0) +
                     _problems_cache.get('library_language_mismatch', 0) +
                     _problems_cache.get('bad_structure', 0) +
@@ -18174,7 +18208,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--plex', action='store_true',             help="With --renumber: show Plex metadata numbering issues instead of filename issues (replaces --episode-numbering-issues).")
     argparser.add_argument('--broken', action='store_true',           help="List broken/truncated media files for this item.")
     argparser.add_argument('--unmatched', action='store_true',        help="Check if this item is unmatched (no external IDs).")
-    argparser.add_argument('--mismatch', '--potential-mismatch', action='store_true', dest='potential_mismatch', help="Check title vs directory name for this item.")
+    argparser.add_argument('--mismatched', action='store_true', dest='mismatched', help="Check title vs directory + multi-version grouping for this item.")
     argparser.add_argument('--problems', action='store_true',         help="Run all problem checks for this item.")
     argparser.add_argument('--fix', action='store_true',              help="With --renumber: rename episode files to correct numbering. Respects --try for dry-run.")
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --reencode, --renumber
@@ -18272,11 +18306,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if item_keys:
                 print(f"\n--- Unmatched Items for '{obj}' ---")
                 PLEX_Media._list_unmatched(item_keys, None)
-        if safe_getattr(obj_args, 'potential_mismatch', False):
+        if safe_getattr(obj_args, 'mismatched', False):
             item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
             if item_keys:
-                print(f"\n--- Potential Mismatches for '{obj}' ---")
-                PLEX_Media._list_potential_mismatches(item_keys, None)
+                print(f"\n--- Mismatched for '{obj}' (title-vs-directory + multi-version grouping) ---")
+                PLEX_Media._list_mismatched(item_keys, None)
         if safe_getattr(obj_args, 'problems', False):
             import io, contextlib
             item_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(obj)
@@ -18294,7 +18328,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 tsv_count = _run_check_item(_list_tsv_problems, item_keys, None) or 0
                 unmatched_count = _run_check_item(PLEX_Media._list_unmatched, item_keys, None) or 0
                 unsorted_count = _run_check_item(PLEX_Media._list_unsorted, item_keys, None) or 0
-                mismatch_count = _run_check_item(PLEX_Media._list_potential_mismatches, item_keys, None) or 0
+                mismatch_count = _run_check_item(PLEX_Media._list_mismatched, item_keys, None) or 0
                 numbering_count = _run_check_item(PLEX_Media._list_episode_numbering_issues, item_keys, None) or 0
                 reencode_count = _run_check_item(PLEX_Media._list_reencode_candidates, item_keys, None) or 0
                 remux_count    = _run_check_item(PLEX_Media._count_remux_candidates, item_keys, None) or 0
@@ -18308,7 +18342,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 live_problems = {
                     'broken': broken_count, 'excess_versions': {'entries': excess_entry_count, 'files': excess_file_count},
                     'tsv': tsv_count, 'unmatched': unmatched_count, 'unsorted': unsorted_count,
-                    'potential_mismatch': mismatch_count, 'numbering_issues': numbering_count,
+                    'mismatched': mismatch_count, 'numbering_issues': numbering_count,
                     'reencode': reencode_count, 'remux': remux_count, 'renumber': renumber_count,
                     'renumber_nodata': renumber_nodata, 'renumber_season': renumber_season, 'renumber_abs': renumber_abs,
                 }
@@ -19189,14 +19223,33 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 video_duration = file_metadata.get('video_duration')
                                 _has_healthy_sibling = False
                                 if len(files_dict) > 1:
-                                    for _sfi in files_dict.values():
-                                        if _sfi is file_info:
-                                            continue
-                                        _sfm = _sfi.get('file_metadata') or {}
-                                        _scd = _sfm.get('container_duration')
-                                        if _scd and not _sfm.get('broken') and abs(_scd - plex_duration) / plex_duration < 0.01:
-                                            _has_healthy_sibling = True
-                                            break
+                                    # If the version durations themselves vary widely (>2%),
+                                    # the "versions" are different content (different DVD extras,
+                                    # different airings, language cuts) rather than alternate
+                                    # encodes of the same episode. The healthy-sibling rule then
+                                    # accuses unrelated short content of being truncated, so
+                                    # back off and rely on the cross-validation below.
+                                    _sib_durs = [
+                                        (_sfi.get('file_metadata') or {}).get('container_duration')
+                                        for _sfi in files_dict.values()
+                                        if not (_sfi.get('file_metadata') or {}).get('broken')
+                                    ]
+                                    _sib_durs = [_d for _d in _sib_durs if _d]
+                                    _sib_versions_are_alt_encodes = True
+                                    if len(_sib_durs) >= 2:
+                                        _mx = max(_sib_durs)
+                                        _spread_pct = (_mx - min(_sib_durs)) / _mx * 100.0 if _mx > 0 else 0.0
+                                        if _spread_pct > MULTI_VERSION_MAX_DURATION_SPREAD_PCT:
+                                            _sib_versions_are_alt_encodes = False
+                                    if _sib_versions_are_alt_encodes:
+                                        for _sfi in files_dict.values():
+                                            if _sfi is file_info:
+                                                continue
+                                            _sfm = _sfi.get('file_metadata') or {}
+                                            _scd = _sfm.get('container_duration')
+                                            if _scd and not _sfm.get('broken') and abs(_scd - plex_duration) / plex_duration < 0.01:
+                                                _has_healthy_sibling = True
+                                                break
                                 if _has_healthy_sibling:
                                     # Another file version of this same Episode/Movie matches
                                     # plex_duration → THIS file is the truncated outlier.  The
@@ -19979,6 +20032,129 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"  SIM = similarity between Plex title and directory name (higher = better match).")
         print(f"  These items may need Fix Match in Plex.")
         return len(mismatches)
+
+    @staticmethod
+    def _detect_multi_version_mismatch(obj):
+        """Return list[str] of reasons the version-grouping looks wrong, or None.
+
+        Three independent signals; ANY one triggers:
+          1. version count exceeds MULTI_VERSION_MAX_MOVIE / MULTI_VERSION_MAX_SERIES.
+          2. duration spread (max-min)/max across versions exceeds
+             MULTI_VERSION_MAX_DURATION_SPREAD_PCT.
+          3. files live in more than one parent directory.
+
+        Only fires for Movie / Episode with 2+ file versions.
+        """
+        obj_type = obj.get('type')
+        if obj_type not in ('Movie', 'Episode'):
+            return None
+        files = obj.get('files') or {}
+        if len(files) < 2:
+            return None
+
+        reasons = []
+
+        limit = MULTI_VERSION_MAX_MOVIE if obj_type == 'Movie' else MULTI_VERSION_MAX_SERIES
+        if len(files) > limit:
+            reasons.append(f"version count {len(files)} > {limit}")
+
+        durations = []
+        parent_dirs = set()
+        for fi in files.values():
+            if not isinstance(fi, dict):
+                continue
+            fm = fi.get('file_metadata') or {}
+            cd = fm.get('container_duration')
+            if cd:
+                durations.append(cd)
+            fp = fi.get('filepath') or ''
+            if fp:
+                parent_dirs.add(os.path.dirname(fp))
+
+        if len(durations) >= 2:
+            max_d = max(durations)
+            min_d = min(durations)
+            if max_d > 0:
+                spread_pct = (max_d - min_d) / max_d * 100.0
+                if spread_pct > MULTI_VERSION_MAX_DURATION_SPREAD_PCT:
+                    reasons.append(f"duration spread {spread_pct:.1f}% > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%")
+
+        if len(parent_dirs) > 1:
+            reasons.append(f"files in {len(parent_dirs)} different directories")
+
+        return reasons or None
+
+    @staticmethod
+    def _list_multi_version_mismatches(obj_keys, library_name):
+        """List Movies / Episodes where Plex has bundled what's almost certainly
+        DIFFERENT content under a single ID. See _detect_multi_version_mismatch
+        for the three signals."""
+        flagged = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            reasons = PLEX_Media._detect_multi_version_mismatch(obj)
+            if not reasons:
+                continue
+            flagged.append((key, obj, reasons))
+
+        if not flagged:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No multi-version mismatches found{scope} — every multi-version grouping looks coherent.")
+            return 0
+
+        # Sort: Movie first then Episode, then most files first, then library / title.
+        flagged.sort(key=lambda r: (
+            0 if r[1].get('type') == 'Movie' else 1,
+            -len(r[1].get('files') or {}),
+            (r[1].get('library') or '').lower(),
+            (r[1].get('title') or '').lower(),
+        ))
+
+        print(f"\n  {'KEY':<14} {'TYPE':<8} {'V':>3}  {'LIBRARY':<15} {'TITLE':<35}  REASONS")
+        print("  " + "-" * 130)
+        for key, obj, reasons in flagged:
+            obj_type = obj.get('type', '?')
+            ver_count = len(obj.get('files') or {})
+            library = (obj.get('library') or '?')[:15]
+            title = (obj.get('title') or '')[:35]
+            reasons_str = '; '.join(reasons)
+            print(f"  {key:<14} {obj_type:<8} {ver_count:>3}  {library:<15} {title:<35}  {reasons_str}")
+            for fi in (obj.get('files') or {}).values():
+                if not isinstance(fi, dict):
+                    continue
+                fm = fi.get('file_metadata') or {}
+                cd = fm.get('container_duration')
+                cd_str = f"{cd/60000:.2f}min" if cd else '?'
+                size = fi.get('filesize') or fi.get('size') or 0
+                size_str = f"{size/1048576:.0f}MB" if size else '?'
+                fp = fi.get('filepath') or ''
+                print(f"  {'':14} {'':8} {'':3}  {'':15} {cd_str:>8}  {size_str:>7}  {fp}")
+
+        print(f"\n  {len(flagged)} multi-version mismatch(es) found.")
+        print(f"  Cause: Plex matched multiple physically-different files into one Episode/Movie slot.")
+        print(f"  Fix in Plex: Split apart, then Fix Match each file individually.")
+        print(f"  Thresholds: count > {MULTI_VERSION_MAX_MOVIE} (Movie) / > {MULTI_VERSION_MAX_SERIES} (Series),")
+        print(f"              duration spread > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%, or files in >1 directory.")
+        return len(flagged)
+
+    @staticmethod
+    def _list_mismatched(obj_keys, library_name):
+        """Combined --mismatched listing: title-vs-directory mismatches +
+        multi-version mismatches (Plex grouping of unrelated files)."""
+        print("=== Title vs Directory mismatches ===")
+        title_n = PLEX_Media._list_potential_mismatches(obj_keys, library_name)
+        print()
+        print("=== Multi-version mismatches (suspect Plex grouping) ===")
+        multi_n = PLEX_Media._list_multi_version_mismatches(obj_keys, library_name)
+        return (title_n or 0) + (multi_n or 0)
 
     @staticmethod
     def _list_episode_numbering_issues(obj_keys, library_name=None):
@@ -23638,6 +23814,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'MEMBERS':             label = 'MEMBER:' if labeled else ''
                     case 'ONDISK_LABELS':       label = 'ONDISK-LABEL:' if labeled else ''
                     case 'MULTI_EPISODE_SIBLINGS': label = '' if labeled else ''
+                    case 'FILE_SEGMENTS':       label = 'SEGMENT:' if labeled else ''
+                    case 'FILE_SEGMENT_WORDS':  label = 'SEGWORDS:' if labeled else ''
                     case _:                     err(1058, f"Unknown list type (k={k})")
                 v = (label if len(v)>0 else'') + (','+label).join(str(x) for x in v)
             else:
@@ -24259,7 +24437,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -24329,7 +24507,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --excess-versions [N]    Entries with N+ file versions (default: 3)")
             print("  --unmatched [SCOPE]      Items not matched by Plex")
             print("  --no-audio-language      Items with missing audio language metadata")
-            print("  --mismatch [SCOPE]       Potential title / dirname mismatches")
+            print("  --mismatched [SCOPE]     Mismatches: title vs directory + multi-version Plex grouping")
             print("  --reencode [SCOPE]       Reencode candidates above bitrate threshold")
             print("  SERIES ONLY:")
             print("  --unsorted [SCOPE]       Series with episodes not in season subdirs")
@@ -24923,7 +25101,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Used by:  --list, --mv-to, --remux, --plex2disk, --disk2plex,")
             print("          --rename, --renumber, --reencode, --broken, --unmatched,")
-            print("          --unsorted, --mismatch, --missing, --problems,")
+            print("          --unsorted, --mismatched, --missing, --problems,")
             print("          --original-languages, --unrecognized — and any future verb.")
             print()
             print("TOKEN SHAPES (any SCOPE position accepts any of these):")
@@ -25247,7 +25425,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  5. --unsorted           Detect series with episodes directly in series dir")
             print("                          (missing season subdirectories). Use --fix to sort.")
             print()
-            print("  6. --mismatch           Detect items where Plex title doesn't match directory")
+            print("  6. --mismatched         Title vs directory + multi-version Plex grouping mismatches")
             print("                          (wrong metadata match — Fix Match needed)")
             print()
             print("  7. --renumber --plex    Detect series where Plex and scraped episode numbering")
@@ -25291,7 +25469,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --broken                # Series broken/truncated files only")
             print("  my-plex --unmatched             # Series unmatched items only")
             print("  my-plex --unsorted              # Series unsorted series only")
-            print("  my-plex --mismatch              # Series potential mismatches only")
+            print("  my-plex --mismatched            # Series mismatched items only")
             print("  my-plex --renumber --plex       # Series numbering issues only")
             print("  my-plex --reencode              # Series reencode candidates only")
             print()
@@ -25454,38 +25632,56 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
-        case 'mismatch' | 'potential-mismatch' | 'potential_mismatch':
+        case 'mismatched':
             print()
             print("=" * 76)
-            print("MISMATCH HELP")
+            print("MISMATCHED HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --mismatch [SCOPE]")
-            print("       my-plex [SCOPE] --mismatch")
+            print("Usage: my-plex --mismatched [SCOPE]")
+            print("       my-plex [SCOPE] --mismatched")
             print()
-            print("Detects items where the Plex title doesn't match the filesystem")
-            print("directory name. This usually indicates Plex matched the wrong series")
-            print("or movie (needs Fix Match in Plex).")
+            print("Two independent mismatch detectors, reported together:")
             print()
-            print("HOW IT WORKS:")
-            print("  Compares the Plex title (and originalTitle) against the directory")
-            print("  name using string similarity. Items below 35% similarity are flagged.")
+            print("1. TITLE vs DIRECTORY MISMATCH")
+            print("   Compares the Plex title (and originalTitle) against the directory")
+            print("   name using string similarity. Items below 35% similarity are flagged.")
+            print("   Usually indicates Plex matched the wrong series or movie (Fix Match).")
             print()
-            print("EXAMPLES OF MISMATCHES:")
-            print("  Dir: picket.fences/       Plex: 'Armored Troopers J-Phoenix PF LIPS'")
-            print("  Dir: greys.anatomy/       Plex: 'The G'")
+            print("   Example:")
+            print("     Dir: picket.fences/       Plex: 'Armored Troopers J-Phoenix PF LIPS'")
+            print("     Dir: greys.anatomy/       Plex: 'The G'")
             print()
-            print("TO FIX: Use Plex > Fix Match to re-identify the item correctly.")
+            print("2. MULTI-VERSION MISMATCH (suspect Plex grouping)")
+            print("   Flags Episodes/Movies where Plex has bundled what's almost certainly")
+            print("   DIFFERENT content under one ID (separate episodes wrongly grouped,")
+            print("   alternate language cuts, unrelated DVD extras, etc.).")
+            print()
+            print("   Three independent signals; ANY one triggers:")
+            print(f"     - version count > MULTI_VERSION_MAX_MOVIE  (= {MULTI_VERSION_MAX_MOVIE}) for Movies")
+            print(f"     - version count > MULTI_VERSION_MAX_SERIES (= {MULTI_VERSION_MAX_SERIES}) for Episodes")
+            print(f"     - duration spread (max-min)/max > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%")
+            print( "     - files live in more than one parent directory")
+            print()
+            print("   Tune thresholds in ~/.my-plex.conf — see --create-config output.")
+            print()
+            print("   Example (Castle S04 grouped as one Plex episode):")
+            print("     Episode:5194  Episode  13   series.en       Heroes & Villains   ")
+            print("                     version count 13 > 2; spread 1.84%")
+            print()
+            print("TO FIX:")
+            print("  Title/dir:        Plex > Fix Match (re-identify the item)")
+            print("  Multi-version:    Rename files to canonical SxxEyy (Plex's [NxNN] parser")
+            print("                    is unreliable and collapses different episodes into one)")
+            print("                    OR: in Plex UI, 'Split Apart' the combined item")
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --mismatch                    # All libraries")
-            print("  my-plex --mismatch lib6          # One library")
-            print("  my-plex lib6 --mismatch          # Same")
-            print("  my-plex --mismatch Series:4925          # One series")
+            print("  my-plex --mismatched                  # All libraries, both detectors")
+            print("  my-plex --mismatched lib6             # One library")
+            print("  my-plex lib6 --mismatched             # Same")
+            print("  my-plex --mismatched Series:4925      # One series")
             print("  my-plex --problems                    # Includes this in full report")
-            print()
-            print("  --potential-mismatch is an alias for --mismatch.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -26923,7 +27119,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  ─────────────────────────   ─────   ───   ───────   ────────")
             print("  --list, --info              read     -       -         -")
             print("  --broken, --problems        read     -       -         -")
-            print("  --missing, --mismatch       read     -       -         -")
+            print("  --missing, --mismatched     read     -       -         -")
             print("  --reencode, --renumber      read     -       -         -")
             print("  --unsorted, --unmatched     read     -       -         -")
             print("  --duplicates                read     -       -         -")
@@ -34134,8 +34330,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['no_audio_language']} items with no audio language   →  my-plex{lib_arg} --no-audio-language")
     if problems.get('unsorted', 0):
         print(f"  >> ⚠ {problems['unsorted']} unsorted series   →  my-plex{lib_arg} --unsorted")
-    if problems.get('potential_mismatch', 0):
-        print(f"  >> ⚠ {problems['potential_mismatch']} potential mismatches   →  my-plex{lib_arg} --mismatch")
+    if problems.get('mismatched', 0):
+        print(f"  >> ⚠ {problems['mismatched']} mismatched   →  my-plex{lib_arg} --mismatched")
     if problems.get('multi_movie_folder', 0):
         print(f"  >> ⚠ {problems['multi_movie_folder']} wrapper(s) shared by >=2 Movies   →  my-plex{lib_arg} --multi-movie-folder")
     if problems.get('library_language_mismatch', 0):
@@ -35345,9 +35541,9 @@ def execute_global_commands(args, cmd_args):
             print(f"  >> Unsorted Shows{lib_label}")
             unsorted_count = _run_check(PLEX_Media._list_unsorted, obj_keys, problems_library)
 
-            # 6. Potential mismatches
-            print(f"  >> Potential Mismatches{lib_label}")
-            mismatch_count = _run_check(PLEX_Media._list_potential_mismatches, obj_keys, None)
+            # 6. Mismatched (title-vs-directory + multi-version grouping)
+            print(f"  >> Mismatched{lib_label}")
+            mismatch_count = _run_check(PLEX_Media._list_mismatched, obj_keys, None)
 
         # 7. Episode numbering issues
         print(f"  >> Episode Numbering Issues{lib_label}")
@@ -35410,7 +35606,7 @@ def execute_global_commands(args, cmd_args):
             'unmatched':         unmatched_count if not tsv_only else 0,
             'no_audio_language': noaudio_count   if not tsv_only else 0,
             'unsorted':          unsorted_count  if not tsv_only else 0,
-            'potential_mismatch':mismatch_count  if not tsv_only else 0,
+            'mismatched':        mismatch_count  if not tsv_only else 0,
             'numbering_issues':  numbering_count,
             'reencode':          reencode_count  if not tsv_only else 0,
             'remux':             remux_count     if not tsv_only else 0,
@@ -35463,13 +35659,13 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_unsorted(obj_keys, library_name=library_name)
         return
 
-    # Handle --mismatch [SCOPE]: list items where Plex title doesn't match directory name
-    mismatch_val = safe_getattr(cmd_args, 'potential_mismatch', None)
+    # Handle --mismatched [SCOPE]: title-vs-directory + multi-version grouping mismatches
+    mismatch_val = safe_getattr(cmd_args, 'mismatched', None)
     if mismatch_val is not None:
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, library_name, scope = resolve_scope_to_keys(mismatch_val, media_type=media_type)
-        print(f"\n--- Potential Mismatches{scope} (Plex title vs directory name) ---")
-        PLEX_Media._list_potential_mismatches(obj_keys, library_name)
+        print(f"\n--- Mismatched{scope} (title-vs-directory + multi-version grouping) ---")
+        PLEX_Media._list_mismatched(obj_keys, library_name)
         return
 
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
@@ -35790,7 +35986,7 @@ def main():
     _OPTION_TO_HELP_TOPIC = {
         '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
-        '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
+        '--unsorted': 'unsorted', '--mismatched': 'mismatched',
         '--multi-movie-folder': 'multi-movie-folder',
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
@@ -35931,7 +36127,7 @@ def main():
         '--rename', '--renumber',
         # v2.0 (Phase E): listing / problem-detection commands also variadic
         '--broken', '--unmatched', '--unsorted',
-        '--mismatch', '--potential-mismatch',
+        '--mismatched',
         '--multi-movie-folder',
         '--library-language-mismatch',
         '--bad-structure', '--nested-media',
@@ -36517,7 +36713,7 @@ def main():
     main_parser.add_argument('--all', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -36587,11 +36783,11 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--duplicates', action='store_true', help="List duplicate media items. Can be combined with --resolve for interactive resolution.")
     GLOBAL_CMD_PARSER.add_argument('--broken', metavar='SCOPE', nargs='*', default=None, help="List broken/truncated media files. SCOPE: library / cache key / Plex ID / title / filter expression (multiple tokens AND-combine via universal scope).")
     GLOBAL_CMD_PARSER.add_argument('--excess-versions', metavar='LIMIT', type=int, help="List entries with LIMIT or more file versions (e.g. 3). One line per file. Use --help problems for details.")
-    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='*', default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --mismatch + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
+    GLOBAL_CMD_PARSER.add_argument('--problems', metavar='SCOPE', nargs='*', default=None, help="Run all problem detection checks (--broken + --excess-versions 3 + --unmatched + --unsorted + --mismatched + --renumber --plex + --reencode + --renumber). Add -V for full details. Use --help problems for details.")
     GLOBAL_CMD_PARSER.add_argument('--tsv', '--scrape', action='store_true', help="Filter --problems to show only episode data (TSV/scraping) issues.", default=False)
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
-    GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help="List Plex mismatches: title vs directory + multi-version Plex grouping. Use --help mismatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
@@ -36738,8 +36934,7 @@ def main():
                 '--list':                    'list',
                 '--unmatched':               'unmatched',
                 '--unsorted':                'unsorted',
-                '--mismatch':                'mismatch',
-                '--potential-mismatch':      'mismatch',
+                '--mismatched':              'mismatched',
                 '--episode-numbering-issues':'episode-numbering-issues',
                 '--missing':                 'missing',
                 '--sort-new':                'sort-new',
@@ -36954,7 +37149,7 @@ def main():
     _reinject_variadic('problems',                  '--problems')
     _reinject_variadic('unmatched',                 '--unmatched')
     _reinject_variadic('unsorted',                  '--unsorted')
-    _reinject_variadic('potential_mismatch',        '--mismatch')
+    _reinject_variadic('mismatched',                '--mismatched')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('bad_structure',             '--bad-structure')
