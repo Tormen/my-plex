@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.55"
+SCRIPT_VERSION = "v2.56"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -18480,6 +18480,77 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if VRB: print(f"\nMedia in '{library_name}' ({filter_str}):")
 
     @staticmethod
+    def _club_fully_matched_series(obj_keys):
+        """v2.56: when a filter returned ALL episodes of a series, collapse
+        them under a single Series row (prepend the Series key; drop the
+        per-episode rows).  Under -V the Series row is prepended AND the
+        per-episode rows are kept (so the user gets a header + the matched
+        eps below).
+
+        Other object kinds (Movies / Seasons / Series already in the list)
+        pass through unchanged.  Returns the new ordered list of keys.
+        """
+        if not obj_keys:
+            return obj_keys
+        # Group Episode keys in `obj_keys` by their series_key.
+        matched_eps_per_series = {}  # series_key -> set of episode keys in obj_keys
+        positions = {}               # series_key -> first index where one of its eps appears
+        non_episode_keys = []        # non-Episode items keep their original order
+        episode_pos = {}             # episode_key -> original index (for stable replay under -V)
+        for idx, k in enumerate(obj_keys):
+            o = PLEX_Media.OBJ_BY_ID.get(k) or {}
+            if o.get('type') != 'Episode':
+                non_episode_keys.append((idx, k))
+                continue
+            sk = o.get('series_key')
+            if not sk or sk not in PLEX_Media.OBJ_BY_SERIES_EPISODES:
+                non_episode_keys.append((idx, k))
+                continue
+            matched_eps_per_series.setdefault(sk, set()).add(k)
+            positions.setdefault(sk, idx)
+            episode_pos[k] = idx
+
+        # For each series in the match: count total cached episodes.
+        # If matched == total → CLUB.
+        clubbed_series = {}  # series_key -> first_position (for ordering)
+        kept_eps = []        # episode keys that were NOT clubbed
+        for sk, ep_set in matched_eps_per_series.items():
+            total = 0
+            for s_str, vmap in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(sk, {}).items():
+                if isinstance(vmap, dict):
+                    for _eklist in vmap.values():
+                        if isinstance(_eklist, list):
+                            total += len(_eklist)
+            if total > 0 and len(ep_set) == total:
+                clubbed_series[sk] = positions[sk]
+            else:
+                # Not fully matched — keep individual eps as before.
+                for ek in ep_set:
+                    kept_eps.append((episode_pos[ek], ek))
+
+        if not clubbed_series:
+            return obj_keys  # nothing to club
+
+        # Re-assemble preserving original ordering of unrelated items.
+        result_items = list(non_episode_keys) + list(kept_eps)
+        for sk, pos in clubbed_series.items():
+            result_items.append((pos, sk))
+        result_items.sort(key=lambda p: p[0])
+        result = [k for _, k in result_items]
+
+        # Under -V: ALSO keep the matched episodes (below the Series header).
+        if VRB:
+            ep_keys_clubbed = []
+            for sk in clubbed_series:
+                for ek in matched_eps_per_series.get(sk, ()):
+                    ep_keys_clubbed.append((episode_pos[ek], ek))
+            # Append after the clubbed list, keeping their original order.
+            ep_keys_clubbed.sort(key=lambda p: p[0])
+            result = result + [k for _, k in ep_keys_clubbed]
+
+        return result
+
+    @staticmethod
     def _list_broken_files(obj_keys, library_name):
         broken_files = []
         seen_keys = set()
@@ -20303,13 +20374,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _needle_words = {w for w in re.split(r'[\s._\-]+', needle) if w}
             _path_fallback = (len(_needle_words) >= 2)
             # Pre-build set of series keys whose title matches (for fast episode lookup)
+            # v2.56: also check a separator-normalised needle (replace
+            # `.` / `_` / `-` with space) so an input like
+            # `emily.in.paris` matches the series title `Emily in Paris`.
+            _needle_norm = re.sub(r'[._\-]+', ' ', needle)
             _matching_series = set()
             if not _ep_only:
                 for _sk2 in PLEX_Media.OBJ_BY_SERIES_EPISODES:
                     _sobj = PLEX_Media.OBJ_BY_ID.get(_sk2, {})
                     _st = (_sobj.get('title') or '').lower()
                     _sot = (_sobj.get('originalTitle') or '').lower()
-                    if needle in _st or needle in _sot:
+                    if (needle in _st or needle in _sot
+                            or (_needle_norm and (_needle_norm in _st or _needle_norm in _sot))):
                         _matching_series.add(_sk2)
             # v2.15: hot-path uses precomputed obj['file_segment_words']
             # (list[list[str]]) populated at --update-cache finalize time.
@@ -21302,7 +21378,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             for (_sk, _s), _grp in _season_grps.items():
                 _sigs = {_row_sig(r) for r in _grp}
-                if len(_sigs) <= 1:  # all matched episodes share the same display values
+                _total = _total_eps_in_season(_sk, _s)
+                _matched = len(_grp)
+                # v2.56: roll up when EITHER display sig is uniform OR every
+                # episode of this season is in the matched set.  The user's
+                # ask was "club the series if ALL episodes are matched" —
+                # display heterogeneity (different episode titles) shouldn't
+                # block that.  Under -V we KEEP all per-episode rows AND
+                # prepend the rollup row, so the user gets header + details.
+                _can_roll = (not VRB) and (len(_sigs) <= 1 or _matched == _total)
+                # -V still emits a Season header when fully matched (and a
+                # Series header at Phase 2) for navigability.
+                _emit_header_under_vrb = VRB and _matched == _total and _total > 0
+                if _can_roll or _emit_header_under_vrb:
                     _skey     = (PLEX_Media.OBJ_BY_SERIES.get(_sk) or {}).get(_s)
                     import os as _os
                     from collections import Counter as _Counter
@@ -21315,11 +21403,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _sr['_sk']    = _sk
                     _sr['_s']     = _s
                     _sr['_dir']   = _season_dir
-                    _total = _total_eps_in_season(_sk, _s)
-                    _matched = len(_grp)
                     _sr['_matched_eps'] = _matched
                     _sr['_total_eps']   = _total
                     _series_rows[_sk].append(_sr)
+                    if _emit_header_under_vrb:
+                        # -V: also keep individual episodes below the header.
+                        for r in _grp:
+                            r['_rtype'] = 'ep'
+                        _series_rows[_sk].extend(_grp)
                 else:
                     for r in _grp:
                         r['_rtype'] = 'ep'
@@ -22805,6 +22896,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if VRB:
                     # Column header for the overridden format above.
                     print("KEY\tLIBRARY\tTITLE\tVERSION\tFILE")
+
+            # v2.56: CLUB step.  When the filter returns ALL episodes of a
+            # series, collapse them under a single Series row.  Under -V the
+            # Series row is prepended AND the per-episode rows are kept.
+            obj_keys = PLEX_Media._club_fully_matched_series(obj_keys)
 
             for key in obj_keys: PLEX_Media.print_OBJ_BY_ID( key )
 
