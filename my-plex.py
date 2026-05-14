@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.35"
+SCRIPT_VERSION = "v2.36"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -453,6 +453,7 @@ _my-plex() {
         '--mismatch[Potential title / dirname mismatch candidates]'
         '--multi-movie-folder[Wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder)]'
         '--library-language-mismatch[Items whose audio language disagrees with their library convention]'
+        '(--bad-structure --nested-media)'{--bad-structure,--nested-media}'[Media files nested too deeply on disk (Movie ≤1 dir below library root, Episode ≤2). Optional SCOPE.]'
         '--unsorted[Series with episodes not in season subdirs]'
         '--missing[Missing episodes — scraped data vs Plex cache]'
         '--renumber[Episodes with incorrect S0xE0x in filename]'
@@ -16109,6 +16110,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_mismatch = _silent(PLEX_Media._list_potential_mismatches, all_obj_keys, None) or 0
         _pc_mmf      = _silent(PLEX_Media._list_multi_movie_folder, all_obj_keys, None) or 0
         _pc_llm      = _silent(PLEX_Media._list_library_language_mismatch, all_obj_keys, None) or 0
+        _pc_badstruct= _silent(PLEX_Media._list_bad_structure, all_obj_keys, None) or 0
         # v2.18: backfill renumber* + unrecognized — these were printed by
         # the summary but never populated, so they always displayed as 0
         # (i.e. never).  Audit by user.
@@ -16142,6 +16144,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'potential_mismatch':_pc_mismatch,
             'multi_movie_folder':_pc_mmf,
             'library_language_mismatch':_pc_llm,
+            'bad_structure':     _pc_badstruct,
             'renumber':          _pc_renumber,
             'renumber_nodata':   _pc_renumber_nodata,
             'renumber_season':   _pc_renumber_season,
@@ -16390,6 +16393,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _problems_cache.get('potential_mismatch', 0) +
                     _problems_cache.get('multi_movie_folder', 0) +
                     _problems_cache.get('library_language_mismatch', 0) +
+                    _problems_cache.get('bad_structure', 0) +
                     _problems_cache.get('numbering_issues', 0) +
                     _problems_cache.get('reencode', 0) +
                     _problems_cache.get('remux', 0) +
@@ -18084,6 +18088,90 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if VRB:
             print(f"  Plex expects one Movie per directory.  Split the wrapper into")
             print(f"  one folder per film and re-scan (or use Plex Fix Match).")
+        return len(flagged)
+
+    @staticmethod
+    def _list_bad_structure(obj_keys, library_name):
+        """List items whose on-disk path is nested too deeply.
+
+        Plex expects a FLAT structure for media files:
+          Movies:   <library_root>/<wrapper>/<file>     (or directly under root)
+          Episodes: <library_root>/<series>[/<season>]/<file>
+
+        Anything deeper than that is flagged.  Typical cause: a downloader
+        extracted an archive into a subdirectory inside the wrapper, leaving
+        the actual playable file two or more levels below the wrapper root
+        (e.g. `library/movie.dir/movie.dir.subdir/movie.mp4`).
+
+        Returns the count of flagged items.
+        """
+        flagged = []
+        seen_keys = set()
+        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            obj_type = obj.get('type')
+            if obj_type not in ('Movie', 'Episode'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            lib = obj.get('library', '')
+            roots = lib_locations.get(lib) or []
+            if not roots:
+                continue
+            # Walk over every file (Movies can have multiple versions).
+            files_dict = obj.get('files') or {}
+            file_entries = []
+            if files_dict:
+                for ver, fi in files_dict.items():
+                    fp = fi.get('filepath') if isinstance(fi, dict) else fi
+                    if fp:
+                        file_entries.append(fp)
+            else:
+                fp = obj.get('file')
+                if fp:
+                    file_entries.append(fp)
+            if not file_entries:
+                continue
+
+            max_depth_for_type = 1 if obj_type == 'Movie' else 2
+            for filepath in file_entries:
+                matched_root = None
+                for root in roots:
+                    root_n = root.rstrip('/')
+                    if filepath == root_n or filepath.startswith(root_n + '/'):
+                        matched_root = root_n
+                        break
+                if not matched_root:
+                    continue  # path doesn't live under any known rootpath — skip silently
+                rest = filepath[len(matched_root) + 1:] if filepath != matched_root else ''
+                depth = rest.count('/')  # 0 = file directly under root; 1 = one wrapper; …
+                if depth > max_depth_for_type:
+                    flagged.append((key, obj_type, lib, depth, max_depth_for_type, filepath))
+
+        if not flagged:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No bad-structure items found{scope} — every media file sits at the expected depth.")
+            return 0
+
+        flagged.sort(key=lambda r: (-r[3], r[2], r[0]))
+
+        if VRB:
+            print(f"  {'KEY':<16} {'TYPE':<8} {'LIBRARY':<15} {'DEPTH':>5}  PATH")
+            print("  " + "-" * 100)
+        for cache_key, obj_type, lib, depth, max_d, filepath in flagged:
+            depth_str = f"{depth}>{max_d}"
+            print(f"  {cache_key:<16} {obj_type:<8} {lib:<15} {depth_str:>5}  {filepath}")
+        print(f"\n  {len(flagged)} item(s) nested too deep.  Expected: Movie ≤1 dir below library root, Episode ≤2 dirs.")
+        if VRB:
+            print(f"  Fix: move the file (and its sibling .nfo/.srt/etc.) up to the expected level,")
+            print(f"  then trigger a Plex re-scan.  --duplicates --resolve with AUTO_TRASH_DUPLICATES")
+            print(f"  on will also clean up byte-identical leftovers automatically.")
         return len(flagged)
 
     @staticmethod
@@ -22351,7 +22439,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -23594,6 +23682,53 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex MOVIE_LIB --library-language-mismatch      # One library")
             print("  my-plex --library-language-mismatch -V             # With column header")
             print("  my-plex --problems                                 # Includes this count")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'bad-structure' | 'bad_structure' | 'nested-media' | 'nested_media':
+            print()
+            print("=" * 76)
+            print("BAD STRUCTURE / NESTED MEDIA HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --bad-structure [SCOPE]")
+            print("       my-plex [SCOPE] --bad-structure")
+            print("       my-plex --nested-media  (synonym)")
+            print()
+            print("Lists media files whose on-disk path is nested deeper than Plex's")
+            print("expected flat layout.  Plex assumes:")
+            print()
+            print("  Movies:   <library_root>/<wrapper>/<file>")
+            print("            (depth 1: one wrapper dir below the library root)")
+            print("  Episodes: <library_root>/<series>/[<season>/]<file>")
+            print("            (depth 1 or 2: series dir, optional season dir)")
+            print()
+            print("Anything deeper is flagged.  Typical cause: a downloader or archive")
+            print("extractor created a subdirectory inside the wrapper, leaving the")
+            print("actual playable file one or two levels too deep:")
+            print()
+            print("  library/movie.dir/movie.dir.subdir/movie.mp4    ← flagged (depth 2 > 1)")
+            print("  library/movie.dir/Subs/movie.mp4                ← flagged")
+            print("  library/series/season.1/extras/clip/clip.mp4    ← flagged (depth 3 > 2)")
+            print()
+            print("Each row reports:")
+            print("  KEY            TYPE     LIBRARY         DEPTH  PATH")
+            print("  Movie:12345    Movie    movies.en        2>1   /…/lib/wrapper/sub/file.mp4")
+            print()
+            print("Why this matters:")
+            print("  - Plex's matcher and scanner work best when the file sits directly")
+            print("    under the wrapper / season dir.  Nested files can still play but")
+            print("    metadata enrichment is unreliable.")
+            print("  - AUTO_TRASH_DUPLICATES (see --help duplicates) uses path length to")
+            print("    pick the duplicate to trash.  Flagging the nested file here also")
+            print("    aligns the auto-trash victim with the structural truth.")
+            print()
+            print("Fix:")
+            print("  Move the file (and any sibling .nfo / .srt / artwork) up to the")
+            print("  expected level, then trigger --update-cache (or a Plex re-scan).")
+            print("  If the nested file is a byte-identical copy of the parent-level")
+            print("  one, --duplicates --resolve will catch it.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -31962,6 +32097,8 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {problems['multi_movie_folder']} wrapper(s) shared by >=2 Movies   →  my-plex{lib_arg} --multi-movie-folder")
     if problems.get('library_language_mismatch', 0):
         print(f"  >> ⚠ {problems['library_language_mismatch']} items in the wrong-language library   →  my-plex{lib_arg} --library-language-mismatch")
+    if problems.get('bad_structure', 0):
+        print(f"  >> ⚠ {problems['bad_structure']} item(s) nested too deep on disk   →  my-plex{lib_arg} --bad-structure")
     if problems.get('numbering_issues', 0):
         print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
     if problems.get('reencode', 0):
@@ -33310,6 +33447,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_library_language_mismatch(obj_keys, library_name)
         return
 
+    # Handle --bad-structure [SCOPE]: media files nested too deeply on disk
+    bs_val = safe_getattr(cmd_args, 'bad_structure', None)
+    if bs_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(bs_val, media_type=media_type)
+        print(f"\n--- Bad-Structure Items{scope} (path nested deeper than Plex's expected flat layout) ---")
+        PLEX_Media._list_bad_structure(obj_keys, library_name)
+        return
+
     # Handle --episode-numbering-issues [SCOPE]: list series with Plex vs scraped numbering conflicts
     numbering_val = safe_getattr(cmd_args, 'episode_numbering_issues', None)
     if numbering_val is not None:
@@ -33595,6 +33741,7 @@ def main():
         '--unsorted': 'unsorted', '--mismatch': 'mismatch', '--potential-mismatch': 'mismatch',
         '--multi-movie-folder': 'multi-movie-folder',
         '--library-language-mismatch': 'library-language-mismatch',
+        '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--clean': 'pipelines',  # generic — all pipelines share one help page
@@ -33735,6 +33882,7 @@ def main():
         '--mismatch', '--potential-mismatch',
         '--multi-movie-folder',
         '--library-language-mismatch',
+        '--bad-structure', '--nested-media',
         '--missing', '--reencode', '--problems',
     }
     _in_variadic_window = False
@@ -34317,6 +34465,7 @@ def main():
     main_parser.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -34390,6 +34539,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--mismatch', '--potential-mismatch', metavar='SCOPE', nargs='*', default=None, dest='potential_mismatch', help="List potential title / dirname mismatches. Use --help mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
+    GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
     GLOBAL_CMD_PARSER.add_argument('--reencode', metavar='SCOPE', nargs='*', default=None, help=f"List media files that need reencode: high bitrate (≥ {REENCODE_THRESHOLD_MBPS} Mbps) OR outdated container with codecs that can't stream-copy.  Files with safe codecs in outdated containers go to --remux instead, not here.  Use --mark to write on-disk labels.")
     GLOBAL_CMD_PARSER.add_argument('--mark', action='store_true', default=False, help="Detect high-bitrate candidates and write on-disk labels (use with --reencode). Respects --try for dry-run.")
@@ -34745,6 +34895,7 @@ def main():
     _reinject_variadic('potential_mismatch',        '--mismatch')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
+    _reinject_variadic('bad_structure',             '--bad-structure')
     _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
     _reinject_variadic('reencode',                  '--reencode')
 
