@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.51"
+SCRIPT_VERSION = "v2.52"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -25176,7 +25176,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("       → also try previous day (for rebroadcasts after midnight)")
             print("    3. Rename to 'S##E## - original_filename' and move to s##/ directory")
             print()
-            print("  Special episodes (matching patterns like 'XXL', 'Promi', 'Spezial', etc.)")
+            print("  Special episodes (matching patterns like 'XXL', 'Promi', 'Spezial',")
+            print("  'Special', 'Behind the Scenes', 'BBC Visits', 'Featurette', 'Bonus',")
+            print("  'Extras', 'Deleted Scene', 'Making Of', 'Interview', etc.)")
             print("  go to specials/ as S00E##. If sort_specials.sh exists in the series directory,")
             print("  it is called instead for custom special handling.")
             print()
@@ -26756,7 +26758,17 @@ _BUILTIN_EXTRACTORS['ISO'] = _extract_date_ISO
 
 import re as _re
 _DEFAULT_SPECIALS_PATTERN = _re.compile(
-    r'(promi|faschings|spezial|weihnachts|sportler|jubil|xxl|quizmarathon|marathon|special)',
+    # v2.52: extended with bonus / extras / featurette keywords so
+    # behind-the-scenes content, interviews, BBC-Visits-style featurettes
+    # and similar bonus material gets routed to specials/ alongside the
+    # original DE-language special markers.
+    r'('
+    r'promi|faschings|spezial|weihnachts|sportler|jubil|xxl|quizmarathon|marathon|special'
+    r'|behind[._ -]?the[._ -]?scenes|bbc[._ -]?visits?'
+    r'|featurette|making[._ -]?of|interview'
+    r'|bonus|extras?'
+    r'|deleted[._ -]?scene'
+    r')',
     _re.IGNORECASE
 )
 
