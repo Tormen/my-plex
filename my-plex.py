@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.47"
+SCRIPT_VERSION = "v2.48"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6482,14 +6482,27 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             series_dir = f'{lib_root}/{series_seg}'
             target_season_dir = f'{series_dir}/{target_season_basename}'
             src_basename = _os.path.basename(src_dir)
-            # MVP: only auto-handle when the file already sits in a season-named
-            # parent dir AND that name matches the obj's season number.  Other
-            # cases (file not in a season dir, name mismatch, target already
-            # exists) punt to the interactive prompt.
             season_dir_re = re.compile(rf'^(?:S{int(season):02d}|S{int(season)}|Season\s*0?{int(season)})$', re.IGNORECASE)
             if int(season) == 0:
                 season_dir_re = re.compile(r'^(?:Specials|S00|Season\s*0)$', re.IGNORECASE)
             if not season_dir_re.match(src_basename):
+                # v2.48: if the file's GRANDPARENT is already a properly-named
+                # season dir at the right depth (i.e. lib/<series>/<season>/X/file),
+                # we just need to flatten X up into <season>.  Same shape as a
+                # Movie flatten — route through plan_auto.
+                parent_of_src = _os.path.dirname(src_dir)
+                parent_basename = _os.path.basename(parent_of_src)
+                # Compute the parent's depth (must be exactly max_depth=2 for Episode).
+                parent_rest = parent_of_src[len(lib_root) + 1:] if parent_of_src.startswith(lib_root + '/') else ''
+                parent_depth = parent_rest.count('/') + (1 if parent_rest else 0)
+                if (parent_depth == 2  # parent is at correct season-dir depth
+                        and season_dir_re.match(parent_basename)
+                        and overrun == 1):
+                    # Treat as a Movie-style flatten: src_dir → parent_of_src.
+                    # Reuse the same plan_auto entry shape so the batched
+                    # flatten + cache-update machinery works unchanged.
+                    plan_auto.append((key, obj, filepath, parent_of_src, src_dir, None))
+                    continue
                 plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
                                       [f"file's parent dir '{src_basename}' does not match the expected season name "
                                        f"({target_season_basename}) — manual review"],
@@ -6570,7 +6583,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print()
 
     if plan_auto:
-        print("--- Auto-flatten queue (Movies — promote sibling files up) ---")
+        print("--- Auto-flatten queue (promote sibling files up one level) ---")
         for key, _o, filepath, wrapper, src, _h in plan_auto:
             print(f"  {key}")
             print(f"      file:    {filepath}")
@@ -6666,21 +6679,39 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 failed += 1
                 print(f"  ✗ {key}: wrap failed — {reason}")
 
-    # v2.42: batch Movie flattens — one SSH session for all moves.
-    movie_moves = [(src, wrapper) for (_k, _o, _fp, wrapper, src, _h) in plan_auto]
+    # v2.42: batch Movie + Episode flattens — one SSH session for all moves.
+    # v2.48: dedupe by src_dir.  Multiple Episodes can share the same
+    # too-deep-by-one parent dir (e.g. all episodes of a season inside
+    # `Series/sNN/Pack-Name/`); the flatten happens ONCE per unique src.
+    auto_by_src = {}
+    for entry in plan_auto:
+        auto_by_src.setdefault(entry[4], []).append(entry)  # entry[4] = src
+    movie_moves = []   # parallel to auto_groups
+    auto_groups = []
+    for src, group in auto_by_src.items():
+        first = group[0]
+        _k, _o, _fp, wrapper, _src, _h = first
+        movie_moves.append((src, wrapper))
+        auto_groups.append((src, wrapper, group))
     if movie_moves:
-        print(f">>> Batched flatten: {len(movie_moves)} Movie(s) in one SSH session…")
+        n_keys = sum(len(g[2]) for g in auto_groups)
+        print(f">>> Batched flatten: {len(movie_moves)} unique move(s) covering {n_keys} item(s) in one SSH session…")
         movie_results = _bad_structure_flatten_batch(movie_moves)
-        for i, (key, obj, filepath, wrapper, src, _host) in enumerate(plan_auto):
+        for i, (src, wrapper, group) in enumerate(auto_groups):
             ok, reason = movie_results.get(i, (False, 'no result'))
             if ok:
-                flattened += 1
-                new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
-                _bad_structure_update_cache(key, filepath, new_fp)
-                print(f"  ✓ {key}: flattened → {new_fp}")
+                for key, obj, filepath, _w, _s, _h in group:
+                    flattened += 1
+                    new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
+                    _bad_structure_update_cache(key, filepath, new_fp)
+                    print(f"  ✓ {key}: flattened → {new_fp}")
             else:
-                failed += 1
-                print(f"  ✗ {key}: flatten failed — {reason}")
+                for _entry in group:
+                    failed += 1
+                if len(group) == 1:
+                    print(f"  ✗ {group[0][0]}: flatten failed — {reason}")
+                else:
+                    print(f"  ✗ flatten failed: {src} — {reason}  (affected {len(group)} item(s))")
 
     # Multiple Episodes of the same season share the same (src, target) move.
     # Group by src_dir → execute mv ONCE per group, then update cache for
@@ -6819,6 +6850,36 @@ _bs_is_media() {
   esac
   return 1
 }
+# v2.48: trash a single file instead of rm-ing it.  Mirrors move_to_trash():
+# /Volumes/<vol>/...  → /Volumes/<vol>/.Trashes/$_BS_UID/<ts>_<basename>
+# anything else        → $HOME/.Trash/<ts>_<basename>
+# Filename prefixed with a timestamp to avoid collisions inside the trash dir.
+_BS_UID=$(id -u 2>/dev/null || echo 1000)
+bs_trash() {
+  local _file="$1"
+  local _abs
+  case "$_file" in
+    /*) _abs="$_file" ;;
+    *)  _abs="$(pwd)/$_file" ;;
+  esac
+  local _trash_dir
+  case "$_abs" in
+    /Volumes/*)
+      local _vol="${_abs#/Volumes/}"
+      _vol="${_vol%%/*}"
+      _trash_dir="/Volumes/$_vol/.Trashes/$_BS_UID"
+      ;;
+    *)
+      _trash_dir="$HOME/.Trash"
+      ;;
+  esac
+  mkdir -p "$_trash_dir" 2>/dev/null || return 1
+  local _ts
+  _ts=$(date +%Y%m%d_%H%M%S)
+  local _base
+  _base=$(basename "$_file")
+  mv -- "$_file" "$_trash_dir/${_ts}_${_base}" || return 1
+}
 bs_merge_dir() {
   local _src="$1"
   local _dst="$2"
@@ -6852,13 +6913,15 @@ bs_merge_dir() {
           echo "FAIL|$_IDX|stat failed: $_src/$_f"; return 1
         fi
         if [ "$_ssz" = "$_dsz" ]; then
-          rm -- "$_f" || { echo "FAIL|$_IDX|rm leftover failed: $_src/$_f"; return 1; }
+          bs_trash "$_f" || { echo "FAIL|$_IDX|trash leftover failed: $_src/$_f"; return 1; }
           continue
         fi
         if [ "$_ssz" -gt "$_dsz" ]; then
-          mv -f -- "$_f" "$_dst/$_f" || { echo "FAIL|$_IDX|mv (src bigger) failed: $_src/$_f"; return 1; }
+          # dst is the smaller noise file — trash it first so we can mv src into its spot.
+          bs_trash "$_dst/$_f" || { echo "FAIL|$_IDX|trash smaller dst failed: $_dst/$_f"; return 1; }
+          mv -- "$_f" "$_dst/$_f" || { echo "FAIL|$_IDX|mv (src bigger) failed: $_src/$_f"; return 1; }
         else
-          rm -- "$_f" || { echo "FAIL|$_IDX|rm (dst bigger) failed: $_src/$_f"; return 1; }
+          bs_trash "$_f" || { echo "FAIL|$_IDX|trash smaller src failed: $_src/$_f"; return 1; }
         fi
         continue
       fi
