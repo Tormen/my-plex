@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.48"
+SCRIPT_VERSION = "v2.49"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6817,6 +6817,37 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     if flattened > 0:
         update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
         print(f"  cache updated.")
+        # v2.49: trigger Plex lib.update() on every library we touched so
+        # Plex re-walks disk and updates its media_parts paths — without
+        # this Plex still points at the OLD nested paths and the next
+        # --update-cache would happily overwrite our cache fixes with
+        # Plex's stale view.  Same pattern cmd_unmatched_resolve uses.
+        libs_affected = set()
+        # Cache was already updated in _bad_structure_update_cache; rescan
+        # all objects we operated on to pick up their library names.
+        for _entries in (plan_auto, plan_episode, plan_wrap):
+            for _entry in _entries:
+                _ko = _entry[1] if len(_entry) > 1 else None
+                if isinstance(_ko, dict):
+                    _lib = _ko.get('library')
+                    if _lib:
+                        libs_affected.add(_lib)
+        if libs_affected:
+            try:
+                _plex = ensure_plex_api(required=False)
+            except Exception as e:
+                _plex = None
+                print(f"  ⚠ Plex API connect failed (can't trigger lib scan): {e}")
+            if _plex:
+                if _detect_plex_auto_scan_enabled():
+                    print(">>> Plex auto-update-on-disk-change is enabled — skipping manual lib.update().")
+                else:
+                    for _lib_name in sorted(libs_affected):
+                        try:
+                            _plex.library.section(_lib_name).update()
+                            print(f"  ✓ triggered Plex scan of '{_lib_name}'")
+                        except Exception as e:
+                            print(f"  ⚠ scan of '{_lib_name}' failed: {e}")
     print()
 
 
