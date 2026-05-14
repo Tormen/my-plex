@@ -5915,7 +5915,19 @@ _ENGINE_DISPATCH = {
 #   `der_fall_jeanne_darc_24.11.23_21-00_phoenix_45_tvoon_de.mpg.hq`
 #   → `der_fall_jeanne_darc`).
 _TVOON_SUFFIX_RE = re.compile(
-    r'_\d{2}\.\d{2}\.\d{2}_\d{2}-\d{2}_[a-z0-9]+_\d+_tvoon_de(?:\.[a-z0-9]+)*$',
+    # The TVOON broadcast suffix appears in two separator dialects:
+    #   underscores  →  `..._14.08.06_20-15_ard_90_tvoon_de.mpg.hd`
+    #   dots         →  `....16.11.25.20-15.ard.90.tvoon.de.mpg.hq`
+    # And the wrapper may carry a trailing bracket tag (`.[vu]`,
+    # `.[reencode]`, etc.) that we must PRESERVE through the strip.
+    r'[._]\d{2}\.\d{2}\.\d{2}'   # date: NN.NN.NN
+    r'[._]\d{2}-\d{2}'           # time: NN-NN
+    r'[._][a-z0-9]+'             # channel
+    r'[._]\d+'                   # duration (minutes)
+    r'[._]tvoon[._]de'           # TVOON_DE / .tvoon.de
+    r'(?:[._][a-z0-9]+)*'        # optional quality tail (.mpg.hq / .mpg.hd / …)
+    r'(?P<tail>[._]\[[^\]]+\])?' # OPTIONAL trailing bracket tag — preserved
+    r'$',
     re.IGNORECASE
 )
 
@@ -5923,10 +5935,17 @@ _TVOON_SUFFIX_RE = re.compile(
 def _strip_tvoon_suffix(basename):
     """Strip the TVOON broadcast-metadata suffix from a wrapper basename.
 
+    Preserves any trailing bracket tag (e.g. `.[vu]`) — it's NOT TVOON
+    noise, it's the user's marker convention.
+
     No-op on basenames that don't match the pattern."""
     if not basename:
         return basename
-    return _TVOON_SUFFIX_RE.sub('', basename)
+    m = _TVOON_SUFFIX_RE.search(basename)
+    if not m:
+        return basename
+    tail = m.group('tail') or ''
+    return basename[:m.start()] + tail
 
 
 def _clean_query_from_wrapper(wrapper_basename):
@@ -6367,15 +6386,22 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # year=2007 returns "Making of Live Free or Die Hard" (pop 0.0).
         # Similarity of "die hard" ↔ "Live Free or Die Hard" is only ~60 %
         # but it's the ONLY popular hit for 2007.  Score it 100.
-        if _wrapper_has_year and scored:
+        if scored:
             top, top_score = scored[0]
+            # Single-candidate boost: when TMDB+TVDB combined return
+            # exactly ONE candidate for the search query, that IS the
+            # answer regardless of title similarity.  Examples:
+            #   `Almuth und Rita …` (post-TVOON-strip) → 1 hit, conf 70 → 100
+            #   `die hard` year=2007                   → 1 hit, conf 60 → 100
             if len(candidates) == 1:
                 scored = [(top, 100.0)]
-            elif len(scored) >= 2:
+            # Dominant-popularity boost (only with year_hint): protects
+            # against false-positives by requiring the runner-ups to be
+            # noise (Making-of, fan content, popularity ≈ 0).
+            elif _wrapper_has_year and len(scored) >= 2:
                 runner = scored[1][0]
                 top_pop    = float(top.get('popularity') or 0)
                 runner_pop = float(runner.get('popularity') or 0)
-                # Top has real popularity AND runner is essentially noise.
                 if top_pop >= 1.0 and runner_pop < 0.5:
                     scored = [(top, 100.0)] + scored[1:]
 
@@ -6395,12 +6421,17 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             if _auto_ok:
                 year = top.get('year')
                 if year:
-                    # If wrapper already has a year, the basename form is
-                    # what's tripping Plex — rebuild it from the canonical
-                    # title.  Otherwise just append the year.
+                    # Always rebuild the basename from the canonical TMDB
+                    # title — covers three cases at once:
+                    #   wrapper has no year      → was just appending year
+                    #     to a junk basename (TVOON noise, hash-tag tail, …)
+                    #   wrapper has year, still  → basename form is what's
+                    #     tripping Plex (apostrophes, orphan 's', …)
+                    #   wrapper already canonical → idempotent (new ==
+                    #     wrapper) → triggers the refresh_only branch
                     new_wrapper = _add_year_to_wrapper(
                         wrapper, year,
-                        canonical_title=top.get('title') if _wrapper_has_year else None,
+                        canonical_title=top.get('title'),
                         audio_lang_marker=_lang_marker,
                     )
                     if new_wrapper == wrapper:
@@ -6458,11 +6489,11 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 if not year:
                     print(f"  ⚠ candidate has no year — enter manually with yYYYY")
                     continue
-                # If wrapper already has a year, rebuild basename from the
-                # candidate's canonical title (the form Plex's matcher expects).
+                # Always rebuild from candidate's canonical title — same
+                # reasoning as the auto-pick branch above.
                 new_wrapper = _add_year_to_wrapper(
                     wrapper, year,
-                    canonical_title=cand.get('title') if _wrapper_has_year else None,
+                    canonical_title=cand.get('title'),
                     audio_lang_marker=_lang_marker,
                 )
                 if new_wrapper == wrapper:
