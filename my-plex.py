@@ -1558,6 +1558,50 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # CLI_TEXT_NORMALIZE_REGEX = {CONFIG_DEFAULTS['CLI_TEXT_NORMALIZE_REGEX']!r}
 
 ###############################################################################
+# Sort-new scan locations (SORT_NEW_SCAN_LOCATIONS)
+###############################################################################
+#
+# Paths --sort-new will scan inside each series dir (series-type
+# libraries) or each library root (movie / other libraries).
+#
+# Each entry is either:
+#   'path'              — scan only.
+#   (path, 'touch')     — after moving a file out, leave a zero-byte
+#                         placeholder with the SAME filename.  Useful
+#                         for auto-downloaders that decide "already
+#                         taken" by filename presence.
+#   (path, 'touch-all') — same as 'touch' but ALSO touches placeholders
+#                         for moved sidecars (.nfo / .srt / artwork / …).
+#
+# `.` = the dir itself (today's default behaviour).  Scans are depth-1.
+# Non-existent paths are silently skipped.  Order matters (top-to-bottom,
+# first match wins).  Placeholders accumulate forever (zero-byte).
+#
+# SORT_NEW_SCAN_LOCATIONS = {CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']!r}
+
+###############################################################################
+# Sort-new movie routing (SORT_NEW_MOVIE_ROUTES)
+###############################################################################
+#
+# Extends --sort-new to also ROUTE movies from a source library to per-
+# language destination libraries based on the filter grammar.  Ordered
+# list; first match wins.  Each entry:
+#   {{'from': 'SRC_LIB', 'when': '<filter-expression>', 'to': 'DST_LIB'}}
+# `when` uses the same grammar as --list (e.g. 'original_lang:de OR lang:de').
+# `when` = '*' is a catch-all.
+#
+# Empty default keeps my-plex GENERIC.  Examples (uncomment + adjust to
+# YOUR library names):
+#
+# SORT_NEW_MOVIE_ROUTES = [
+#     {{'from': ',unsorted', 'when': 'original_lang:de OR lang:de', 'to': 'movies.de'}},
+#     {{'from': ',unsorted', 'when': 'original_lang:fr OR lang:fr', 'to': 'movies.fr'}},
+#     {{'from': ',unsorted', 'when': '*',                           'to': 'movies.en'}},
+# ]
+#
+# SORT_NEW_MOVIE_ROUTES = {CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']!r}
+
+###############################################################################
 # Debug/Verbose Flags - These are defaults. They can be set via commandline.
 ###############################################################################
 
