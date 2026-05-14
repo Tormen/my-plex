@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.36"
+SCRIPT_VERSION = "v2.37"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -762,9 +762,13 @@ CONFIG_DEFAULTS = {
     #   resolution, video_codec, audio_codec,
     #   duration (within 1s), filesize (byte-exact).
     #
-    # Pick rule: the file with the LONGER absolute pathname is trashed.
-    # Rationale: Plex expects a flat structure (library / wrapper / file);
-    # the longer path is almost always a nested-extraction leftover.
+    # Pick rule (in order):
+    #   1. The file whose path violates Plex's flat-layout rule loses.
+    #      (Movie ≤1 dir below library root; Episode ≤2 dirs.)  If both
+    #      violate, the one with the LARGER overrun loses.  See
+    #      `my-plex --bad-structure` for the standalone listing.
+    #   2. Tie-break: longer absolute pathname loses — almost always a
+    #      nested-extraction leftover even when both are structurally OK.
     #
     # Auto-trash actions go through the same pending_operations queue as
     # interactive choices, so they're logged to the resolution JSON with
@@ -9145,13 +9149,52 @@ def _auto_trash_signals_match(keys):
     return True
 
 
+def _bad_structure_depth_violation(obj):
+    """Return the depth-overrun for a Movie/Episode, or 0 if at-or-below max.
+
+    A return value > 0 means the file lives N dirs deeper than Plex's
+    expected flat layout (Movie ≤1, Episode ≤2 below the library root).
+    Used both by the --bad-structure listing and by the auto-trash
+    victim picker to prefer keeping the structurally-correct file."""
+    if not obj:
+        return 0
+    obj_type = obj.get('type')
+    if obj_type not in ('Movie', 'Episode'):
+        return 0
+    lib = obj.get('library', '')
+    roots = ((CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}).get(lib) or []
+    filepath = obj.get('file') or ''
+    if not filepath or not roots:
+        return 0
+    matched_root = None
+    for root in roots:
+        root_n = root.rstrip('/')
+        if filepath == root_n or filepath.startswith(root_n + '/'):
+            matched_root = root_n
+            break
+    if not matched_root:
+        return 0
+    rest = filepath[len(matched_root) + 1:] if filepath != matched_root else ''
+    depth = rest.count('/')
+    max_depth = 1 if obj_type == 'Movie' else 2
+    return max(0, depth - max_depth)
+
+
 def _auto_trash_victim_index(keys):
     """Return 1 or 2 — index of the file (within `keys`) to trash.
 
-    Longer absolute pathname loses: it's almost always a nested-extraction
-    leftover violating Plex's expected library/wrapper/file flat layout."""
+    Decision rule (in order):
+      1. The file whose path violates Plex's flat-layout rule loses.
+         (Movie should sit ≤1 dir below the library root, Episode ≤2.)
+         If both violate, the one with the LARGER overrun loses.
+      2. Tie-break: the longer absolute pathname loses — almost always
+         a nested-extraction leftover even when both are structurally OK."""
     o1 = PLEX_Media.OBJ_BY_ID.get(keys[0]) or {}
     o2 = PLEX_Media.OBJ_BY_ID.get(keys[1]) or {}
+    v1 = _bad_structure_depth_violation(o1)
+    v2 = _bad_structure_depth_violation(o2)
+    if v1 != v2:
+        return 1 if v1 > v2 else 2
     p1 = o1.get('file') or ''
     p2 = o2.get('file') or ''
     return 2 if len(p2) >= len(p1) else 1
