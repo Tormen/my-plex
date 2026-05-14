@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.34"
+SCRIPT_VERSION = "v2.35"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -749,6 +749,28 @@ CONFIG_DEFAULTS = {
             ['--sort-new'],
         ],
     },
+
+    # AUTO_TRASH_DUPLICATES — when True, --duplicates --resolve silently
+    # queues byte-identical duplicate pairs for trashing instead of
+    # prompting per-pair.  At the end of the resolve loop, the existing
+    # "Apply N pending operations" prompt serves as a single batch confirm.
+    #
+    # A pair qualifies ONLY when every signal matches:
+    #   title, originalTitle, external IDs (imdb/tmdb/tvdb),
+    #   audio_languages_plex, original_language,
+    #   resolution, video_codec, audio_codec,
+    #   duration (within 1s), filesize (byte-exact).
+    #
+    # Pick rule: the file with the LONGER absolute pathname is trashed.
+    # Rationale: Plex expects a flat structure (library / wrapper / file);
+    # the longer path is almost always a nested-extraction leftover.
+    #
+    # Auto-trash actions go through the same pending_operations queue as
+    # interactive choices, so they're logged to the resolution JSON with
+    # the standard fields plus reason='byte-identical-auto'.
+    #
+    # Default OFF — opt in only when you trust the criteria.
+    'AUTO_TRASH_DUPLICATES': False,
 
     # MISSING_MIN_COMPLETION_PCT — for --missing AND for the --problems
     # summary aggregation: a series counts toward the "missing episodes"
@@ -1593,6 +1615,7 @@ MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
 MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
 SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
 PIPELINES = CONFIG_DEFAULTS['PIPELINES']
+AUTO_TRASH_DUPLICATES = CONFIG_DEFAULTS['AUTO_TRASH_DUPLICATES']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -9069,6 +9092,69 @@ def undo_resolution_action(undo_info, remote_host):
     else:
         print(f"✗ Unknown action type: {action}")
         return False
+
+def _auto_trash_signals_match(keys):
+    """Return True when every key in `keys` represents the same media down to
+    title, IDs, language, technical attributes and byte-exact filesize.
+
+    Only handles pairs for now; larger groups fall through to the prompt."""
+    if len(keys) != 2:
+        return False
+    objs = [PLEX_Media.OBJ_BY_ID.get(k) or {} for k in keys]
+    o1, o2 = objs[0], objs[1]
+
+    def _norm(s):
+        return (s or '').strip().lower() if isinstance(s, str) else s
+
+    if _norm(o1.get('title')) != _norm(o2.get('title')):
+        return False
+    if _norm(o1.get('originalTitle')) != _norm(o2.get('originalTitle')):
+        return False
+
+    e1 = o1.get('external_ids') or {}
+    e2 = o2.get('external_ids') or {}
+    for k in ('imdb', 'tmdb', 'tvdb'):
+        v1, v2 = e1.get(k), e2.get(k)
+        if v1 or v2:
+            if str(v1) != str(v2):
+                return False
+
+    if sorted(o1.get('audio_languages_plex') or []) != sorted(o2.get('audio_languages_plex') or []):
+        return False
+    if o1.get('original_language') != o2.get('original_language'):
+        return False
+
+    if o1.get('resolution') != o2.get('resolution'):
+        return False
+    if o1.get('video_codec') != o2.get('video_codec'):
+        return False
+    if o1.get('audio_codec') != o2.get('audio_codec'):
+        return False
+
+    d1 = int(o1.get('duration') or 0)
+    d2 = int(o2.get('duration') or 0)
+    if abs(d1 - d2) > 1000:  # ms
+        return False
+
+    s1 = o1.get('filesize')
+    s2 = o2.get('filesize')
+    if s1 is None or s2 is None or int(s1) <= 0 or int(s1) != int(s2):
+        return False
+
+    return True
+
+
+def _auto_trash_victim_index(keys):
+    """Return 1 or 2 — index of the file (within `keys`) to trash.
+
+    Longer absolute pathname loses: it's almost always a nested-extraction
+    leftover violating Plex's expected library/wrapper/file flat layout."""
+    o1 = PLEX_Media.OBJ_BY_ID.get(keys[0]) or {}
+    o2 = PLEX_Media.OBJ_BY_ID.get(keys[1]) or {}
+    p1 = o1.get('file') or ''
+    p2 = o2.get('file') or ''
+    return 2 if len(p2) >= len(p1) else 1
+
 
 def apply_pending_operations(pending_operations, resolution_log_data, default_remote_host=None):
     """Apply all pending operations that were recorded during resolution mode
@@ -20997,6 +21083,45 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
                         # Play options - use two-stage menu for 4+ files
                         num_files = len(keys)
+
+                        # AUTO_TRASH_DUPLICATES — silently queue byte-identical
+                        # pairs.  The user gets one batch confirm at the end
+                        # via the existing "Apply N pending operations" prompt.
+                        if AUTO_TRASH_DUPLICATES and num_files == 2 and not same_file and _auto_trash_signals_match(keys):
+                            victim_idx = _auto_trash_victim_index(keys)  # 1 or 2
+                            victim_path = file1_path if victim_idx == 1 else file2_path
+                            keeper_path = file2_path if victim_idx == 1 else file1_path
+                            print()
+                            print(f"  ▶ AUTO-TRASH (byte-identical, signals match):")
+                            print(f"      keep [{3 - victim_idx}]: {keeper_path}")
+                            print(f"      trash [{victim_idx}]:  {victim_path}")
+                            _auto_remote_host, _, _ = determine_remote_host(file1_path)
+                            operation_counter += 1
+                            actual_keys = keys
+                            if is_multi_version and keys:
+                                _first = PLEX_Media.OBJ_BY_ID.get(keys[0], {}) or {}
+                                _ok = _first.get('_original_key')
+                                if _ok:
+                                    actual_keys = [_ok]
+                            pending_operations.append({
+                                'operation_number': operation_counter,
+                                'choice': '3' if victim_idx == 1 else '4',
+                                'file1': file1_path,
+                                'file2': file2_path,
+                                'remote_host': _auto_remote_host,
+                                'all_files': [file1_path, file2_path],
+                                'keys': actual_keys,
+                                'same_file': same_file,
+                                'dup_key': dup_key,
+                                'is_multi_version': is_multi_version,
+                                'reason': 'byte-identical-auto',
+                            })
+                            # Cleanup synthetic objects same as the bottom of the loop body.
+                            if is_multi_version:
+                                for k in keys:
+                                    if k in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[k].get('_is_synthetic'):
+                                        del PLEX_Media.OBJ_BY_ID[k]
+                            continue  # next duplicate group
 
                         while True:
                             # Display menu inside loop so it refreshes after each undo
