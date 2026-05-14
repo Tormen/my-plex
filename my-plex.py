@@ -18514,9 +18514,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             for file_info in files_dict.values():
                 # v2.55: a file with NO actual disk content is effectively
                 # absent — counted by `--missing`, never by `--broken`.
-                # "No content" = filesize==0 OR file is sparse (logical
-                # size declared but disk_bytes==0, e.g. a placeholder
-                # from a failed download).
+                # Two flavours of "no content":
+                #   filesize == 0                — declared empty
+                #   disk_bytes == 0 (sparse)     — logical size declared but
+                #                                  no blocks allocated.
+                # Plausible causes for sparse: NZB/torrent client
+                # pre-allocated the full size but the body was never
+                # written (aborted download), an intentional placeholder,
+                # OR FILESYSTEM CORRUPTION (data blocks lost while the
+                # inode survived).  My-plex can't distinguish these from
+                # the metadata alone — for ALL of them the observable
+                # outcome is "Plex has the file indexed but it can't be
+                # played", so we surface them as missing, not broken.
+                # If the user suspects corruption, `fsck -fy` / Disk
+                # Utility First Aid on the volume is the right tool.
                 if file_info.get('filesize') == 0:
                     continue
                 _fm_pre = file_info.get('file_metadata') or {}
