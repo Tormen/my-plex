@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.49"
+SCRIPT_VERSION = "v2.50"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6485,18 +6485,27 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             season_dir_re = re.compile(rf'^(?:S{int(season):02d}|S{int(season)}|Season\s*0?{int(season)})$', re.IGNORECASE)
             if int(season) == 0:
                 season_dir_re = re.compile(r'^(?:Specials|S00|Season\s*0)$', re.IGNORECASE)
-            if not season_dir_re.match(src_basename):
+            # v2.50: strip on-disk marker tags (e.g. `s01 [vu]`, `Season 02 [reencode]`)
+            # before the season-name regex check.  Whitespace + `[…]` clusters are
+            # ignored as if they weren't part of the basename.
+            def _strip_dir_markers(name):
+                # Drop every `[…]` tag and surrounding whitespace.
+                _stripped = re.sub(r'\s*\[[^\]]*\]\s*', '', name).strip()
+                return _stripped or name
+            src_basename_clean = _strip_dir_markers(src_basename)
+            if not season_dir_re.match(src_basename_clean):
                 # v2.48: if the file's GRANDPARENT is already a properly-named
                 # season dir at the right depth (i.e. lib/<series>/<season>/X/file),
                 # we just need to flatten X up into <season>.  Same shape as a
                 # Movie flatten — route through plan_auto.
                 parent_of_src = _os.path.dirname(src_dir)
                 parent_basename = _os.path.basename(parent_of_src)
+                parent_basename_clean = _strip_dir_markers(parent_basename)
                 # Compute the parent's depth (must be exactly max_depth=2 for Episode).
                 parent_rest = parent_of_src[len(lib_root) + 1:] if parent_of_src.startswith(lib_root + '/') else ''
                 parent_depth = parent_rest.count('/') + (1 if parent_rest else 0)
                 if (parent_depth == 2  # parent is at correct season-dir depth
-                        and season_dir_re.match(parent_basename)
+                        and season_dir_re.match(parent_basename_clean)
                         and overrun == 1):
                     # Treat as a Movie-style flatten: src_dir → parent_of_src.
                     # Reuse the same plan_auto entry shape so the batched
