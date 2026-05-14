@@ -47,9 +47,10 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **fernsehserien.de** (web scraping, German TV, no key needed)
   - Automatic fallback: if primary source returns 0 episodes, tries next source
 - **Auto-detection** of episode source from library agent + language
-- **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings into season directories
+- **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings across **all libraries** (series-type AND movie-type)
   - Series libraries: matches file dates to episode data, renames with S##E## prefix
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
+  - **`SORT_NEW_SCAN_LOCATIONS`** (default `['.', 's0x', ',new']`) — list of paths to scan inside each series dir (series libs) or each library root (movie libs). Each entry is either a string path or `(path, 'touch')` / `(path, 'touch-all')` — `touch` leaves a zero-byte placeholder with the moved file's name so external auto-downloaders see "already taken"; `touch-all` extends that to sidecars too.
   - Scoped: `my-plex lib4 --sort-new --dry-run` or `my-plex 'Tagesschau' --unsorted --fix`
 - **Absolute numbering** detection (e.g. filename "101" → S01E01)
 - **Renumber episodes** (`--renumber`) — detect and fix incorrect S0xE0x numbering in filenames

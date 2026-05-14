@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.57"
+SCRIPT_VERSION = "v2.58"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -720,6 +720,25 @@ CONFIG_DEFAULTS = {
     # Empty default keeps my-plex GENERIC — user's library names live only
     # in their config, never in the script.
     'SORT_NEW_MOVIE_ROUTES': [],
+
+    # SORT_NEW_SCAN_LOCATIONS — locations that --sort-new scans for
+    # unsorted media files.  Applies to ALL libraries:
+    #   • Series-type libraries: each entry is RELATIVE TO EACH SERIES DIR
+    #   • Movie / other libraries: each entry is RELATIVE TO THE LIBRARY ROOT
+    # Each entry is either:
+    #   'path'              — scan only (no placeholder left behind)
+    #   (path, 'touch')     — after moving a file out, leave a zero-byte
+    #                         placeholder with the same filename.  Useful
+    #                         for auto-downloaders that check by filename
+    #                         whether something was already taken.
+    #   (path, 'touch-all') — same as 'touch' but ALSO leaves zero-byte
+    #                         placeholders for moved sidecars (.nfo /
+    #                         .srt / artwork / …).
+    # `.` = the dir itself (today's behavior — series root or library
+    # root depending on library type).  Scans are DEPTH-1 (no recursion
+    # into subdirs of `s0x` etc.).  Non-existent paths are silently
+    # skipped.  Order matters: locations are processed top-to-bottom.
+    'SORT_NEW_SCAN_LOCATIONS': ['.', 's0x', ',new'],
 
     # PIPELINES — dict of named pipelines that get registered as top-level
     # my-plex CLI flags.  Each key is the flag name (e.g. '--clean'); each
@@ -1656,6 +1675,48 @@ EDITOR = CONFIG_DEFAULTS['EDITOR']
 MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
 MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
 SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
+
+# SORT_NEW_SCAN_LOCATIONS — paths --sort-new will scan inside each
+# series dir (series-type libraries) or each library root (movie/other).
+# See CONFIG_DEFAULTS doc-block above for full syntax (incl. 'touch' modes).
+SORT_NEW_SCAN_LOCATIONS = CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']
+
+_SORT_NEW_LOCATIONS_COMPILED = None  # lazy: [(path_str, touch_mode), …]
+
+def _parse_sort_new_locations():
+    """Normalize SORT_NEW_SCAN_LOCATIONS into [(path, touch_mode), …].
+
+    touch_mode is one of None, 'main', 'all'.  Invalid entries are
+    skipped with a stderr warning.  Paths must be relative (no leading
+    '/', no '..' segment).  Cached in _SORT_NEW_LOCATIONS_COMPILED.
+    """
+    global _SORT_NEW_LOCATIONS_COMPILED
+    if _SORT_NEW_LOCATIONS_COMPILED is not None:
+        return _SORT_NEW_LOCATIONS_COMPILED
+    out = []
+    for entry in (SORT_NEW_SCAN_LOCATIONS or ()):
+        if isinstance(entry, str):
+            path, mode_str = entry, None
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[0], str):
+            path, mode_str = entry[0], entry[1]
+        else:
+            print(f"  > WARNING: SORT_NEW_SCAN_LOCATIONS entry {entry!r} ignored: bad shape", file=sys.stderr)
+            continue
+        if path.startswith('/') or '..' in path.split('/'):
+            print(f"  > WARNING: SORT_NEW_SCAN_LOCATIONS entry {entry!r} ignored: path must be relative without '..'", file=sys.stderr)
+            continue
+        if mode_str is None:
+            touch_mode = None
+        elif mode_str == 'touch':
+            touch_mode = 'main'
+        elif mode_str == 'touch-all':
+            touch_mode = 'all'
+        else:
+            print(f"  > WARNING: SORT_NEW_SCAN_LOCATIONS entry {entry!r} ignored: mode {mode_str!r} not in {{'touch','touch-all'}}", file=sys.stderr)
+            continue
+        out.append((path, touch_mode))
+    _SORT_NEW_LOCATIONS_COMPILED = out
+    return out
 PIPELINES = CONFIG_DEFAULTS['PIPELINES']
 AUTO_TRASH_DUPLICATES = CONFIG_DEFAULTS['AUTO_TRASH_DUPLICATES']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
@@ -25493,44 +25554,82 @@ def main_print_help(args, remaining_args, main_parser):
             print("SORT NEW RECORDINGS (--sort-new) HELP")
             print("=" * 76)
             print()
-            print("  --sort-new is a shortcut for --unsorted --fix.")
-            print("  See: my-plex --help unsorted")
+            print("  --sort-new processes ALL LIBRARIES — both series-type and movie-type.")
+            print("  It is a shortcut for --unsorted --fix.")
             print()
             print("Usage: my-plex --sort-new [--dry-run]")
             print("       my-plex [SCOPE] --sort-new [--dry-run]")
             print("       my-plex --unsorted --fix [--dry-run]          (equivalent)")
             print("       my-plex [SCOPE] --unsorted --fix [--dry-run]  (equivalent)")
             print()
-            print("  Scans series directories in series-type Plex libraries for unsorted")
-            print("  video files and sorts them into season subdirectories with S##E## naming.")
+            print("WHAT IS SCANNED — SORT_NEW_SCAN_LOCATIONS:")
             print()
-            print("  For each unsorted file in the series root directory:")
+            print("  --sort-new visits every library and, inside each library, scans the")
+            print("  locations listed in SORT_NEW_SCAN_LOCATIONS (default ['.', 's0x', ',new']):")
+            print()
+            print("    • Series-type libraries: each location is RELATIVE TO EACH SERIES DIR")
+            print("        '.'      = series root           (today's default behaviour)")
+            print("        's0x'    = <series>/s0x/         (staging area)")
+            print("        ',new'   = <series>/,new/        (auto-downloader drop)")
+            print()
+            print("    • Movie / other libraries: each location is RELATIVE TO THE LIBRARY ROOT")
+            print("        '.'      = library root          (today's default behaviour)")
+            print("        's0x'    = <lib>/s0x/")
+            print("        ',new'   = <lib>/,new/")
+            print()
+            print("  Each entry is either a string PATH or a tuple (PATH, MODE):")
+            print("    'path'              → scan only (no placeholder left behind)")
+            print("    (path, 'touch')     → after moving the video out, leave a zero-byte")
+            print("                          placeholder with the SAME filename — useful for")
+            print("                          auto-downloaders that decide 'already taken'")
+            print("                          purely by filename presence.")
+            print("    (path, 'touch-all') → same, but also touch placeholders for moved")
+            print("                          sidecar files (.nfo / .srt / artwork / …).")
+            print()
+            print("  Non-existent locations are silently skipped.  Scans are depth-1; no")
+            print("  recursion into subdirs of `s0x` etc.  Order matters: scanned top-to-bottom,")
+            print("  first match wins per filename.  Placeholders accumulate forever (zero-byte).")
+            print()
+            print("PER-FILE ROUTING:")
+            print()
+            print("  Series-type libraries — for each unsorted video in a scanned location:")
             print("    1. If filename contains S##E## (e.g. 'Show S01E05 - Title.mp4'):")
-            print("       → use season/episode directly, move to s##/ directory")
-            print("    2. Otherwise extract air date from filename (TVOON: YY.MM.DD_HH-MM_)")
-            print("       → look up date in episodes.tsv → get season + episode number")
-            print("       → also try previous day (for rebroadcasts after midnight)")
-            print("    3. Rename to 'S##E## - original_filename' and move to s##/ directory")
+            print("       → use season/episode directly, move to s##/ directory.")
+            print("    2. Otherwise extract air date from filename (TVOON: YY.MM.DD_HH-MM_):")
+            print("       → look up date in episodes.tsv → get season + episode number.")
+            print("       → also try previous day (for rebroadcasts after midnight).")
+            print("    3. Rename to 'S##E## - original_filename' and move to s##/ directory.")
+            print("    Sidecars (.nfo / .srt / artwork) follow the renamed video.")
             print()
-            print("  Special episodes (matching patterns like 'XXL', 'Promi', 'Spezial',")
-            print("  'Special', 'Behind the Scenes', 'BBC Visits', 'Featurette', 'Bonus',")
-            print("  'Extras', 'Deleted Scene', 'Making Of', 'Interview', etc.)")
-            print("  go to specials/ as S00E##. If sort_specials.sh exists in the series directory,")
-            print("  it is called instead for custom special handling.")
+            print("  Movie / other libraries — for each bare video in a scanned location:")
+            print("    → Wrap it in a per-movie subdir <stem-lowercased-dots>/ in the SAME")
+            print("      location.  Sidecars follow.  After that, SORT_NEW_MOVIE_ROUTES may")
+            print("      route the wrapped movie to a destination library by language / filter.")
             print()
-            print("  --dry-run / -n   Show what would be done without moving files")
+            print("  Special episodes (XXL, Promi, Spezial, Special, Behind the Scenes,")
+            print("  BBC Visits, Featurette, Bonus, Extras, Deleted Scene, Making Of,")
+            print("  Interview, etc.) go to specials/ as S00E##.  If sort_specials.sh exists")
+            print("  in the series directory, it is called instead.")
+            print()
+            print("  --dry-run / -n   Show what would be done without moving files.")
             print()
             print("  episodes.tsv is auto-updated from the episode data source (see")
             print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours.")
-            print("  If the source changes (e.g. due to config update), the TSV is re-scraped")
-            print("  automatically.")
+            print("  If the source changes (e.g. due to config update), the TSV is re-scraped.")
             print()
             print("EXAMPLES:")
             print()
             print("  my-plex --sort-new --dry-run              # Preview all libraries")
-            print("  my-plex lib6 --sort-new              # Sort in lib6 only")
+            print("  my-plex lib6 --sort-new                   # Sort lib6 only")
             print("  my-plex 'Tagesschau' --sort-new           # Sort a specific series")
             print("  my-plex --unsorted --fix --dry-run        # Equivalent to --sort-new --dry-run")
+            print()
+            print("CONFIG (in ~/.my-plex.conf):")
+            print()
+            print("  SORT_NEW_SCAN_LOCATIONS = ['.', 's0x', ',new']")
+            print("  SORT_NEW_SCAN_LOCATIONS = ['.', ('s0x', 'touch'), (',new', 'touch-all')]")
+            print()
+            print("  SORT_NEW_MOVIE_ROUTES — see `my-plex --help` (per-language movie routing).")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -31076,34 +31175,32 @@ def cmd_sort_new(args, dry_run=False, target=None):
         series_dir_local = get_local_path(series_dir_server)
         use_local = os.path.isdir(series_dir_local)
 
-        # Find unsorted video files in series root (not in subdirs)
+        # Find unsorted video files across every SORT_NEW_SCAN_LOCATIONS
+        # entry (relative to the series dir).  Each candidate carries the
+        # touch_mode of the location it was found in, so _sort_move can
+        # leave a zero-byte placeholder if requested.
+        # Candidate tuple: (filename, src_path_server, touch_mode, location_path)
         unsorted = []
-        if use_local:
-            try:
-                for fn in os.listdir(series_dir_local):
-                    if fn.startswith('.'):
-                        continue
-                    fp = os.path.join(series_dir_local, fn)
-                    if not os.path.isfile(fp):
-                        continue
-                    ext = os.path.splitext(fn)[1].lower()
-                    if ext not in VIDEO_EXTENSIONS:
-                        continue
-                    if _re.match(r'^S\d+E\d+', fn):
-                        continue
-                    if fn.endswith('.sh') or fn.endswith('.tsv'):
-                        continue
-                    unsorted.append((fn, os.path.join(series_dir_server, fn)))
-            except OSError:
-                continue
-        else:
-            # SSH fallback: list files on server
-            success, file_list = my_plex_file_operation('LIST_DIR', series_dir_server, remote_host, maxdepth=1)
-            if not success or not file_list:
-                continue
-            for server_fp in file_list:
-                fn = os.path.basename(server_fp)
+        seen_files = set()  # dedupe across locations (top-to-bottom first wins)
+        for location_path, touch_mode in _parse_sort_new_locations():
+            scan_dir_server = (series_dir_server if location_path == '.'
+                               else os.path.join(series_dir_server, location_path))
+            scan_dir_local = get_local_path(scan_dir_server) if use_local else None
+            files_here = []
+            if use_local and scan_dir_local and os.path.isdir(scan_dir_local):
+                try:
+                    files_here = [(fn, os.path.join(scan_dir_local, fn), os.path.join(scan_dir_server, fn))
+                                  for fn in os.listdir(scan_dir_local)]
+                except OSError:
+                    files_here = []
+            elif not use_local:
+                ok, file_list = my_plex_file_operation('LIST_DIR', scan_dir_server, remote_host, maxdepth=1)
+                if ok and file_list:
+                    files_here = [(os.path.basename(p), None, p) for p in file_list]
+            for fn, fp_local, src_server in files_here:
                 if fn.startswith('.'):
+                    continue
+                if fp_local is not None and not os.path.isfile(fp_local):
                     continue
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in VIDEO_EXTENSIONS:
@@ -31112,7 +31209,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     continue
                 if fn.endswith('.sh') or fn.endswith('.tsv'):
                     continue
-                unsorted.append((fn, os.path.join(series_dir_server, fn)))
+                if src_server in seen_files:
+                    continue
+                seen_files.add(src_server)
+                unsorted.append((fn, src_server, touch_mode, location_path))
 
         if not unsorted:
             continue
@@ -31161,6 +31261,9 @@ def cmd_sort_new(args, dry_run=False, target=None):
         else:
             has_specials_script = False  # Can't run local scripts via SSH
 
+        # Touch mode is set by the enclosing for-loop, read here.  None / 'main' / 'all'.
+        _current_touch_mode = None
+
         def _sort_move(src_server, target_dir_server, new_name):
             """mkdir + move via SSH (plus same-stem sidecar files like .nfo /
             .srt / artwork).  Returns True on success of the main file's mv.
@@ -31169,6 +31272,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
             starts with `<src_stem>.` (e.g. .nfo, .eng.srt, .jpg, .ttml).
             Sidecars get renamed with the same `<new_stem>.<rest>` so they
             stay grouped with the renamed video for Plex's sidecar pickup.
+
+            v2.58: when SORT_NEW_SCAN_LOCATIONS marks the source location
+            with 'touch' / 'touch-all', leave a zero-byte placeholder at
+            the original src path after the move succeeds.  'touch' covers
+            only the main file; 'touch-all' also touches every moved
+            sidecar.  Useful for external auto-downloaders that decide
+            "already taken" by filename presence.
             """
             escaped_dir = escape_path_for_ssh(target_dir_server)
             mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
@@ -31189,6 +31299,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 ok_ls, files_in_src_dir = my_plex_file_operation('LIST_DIR', src_dir, remote_host, maxdepth=1)
             except Exception:
                 ok_ls, files_in_src_dir = False, []
+            moved_sidecar_src_paths = []
             if ok_ls and files_in_src_dir:
                 for sib_path in files_in_src_dir:
                     sib_base = os.path.basename(sib_path)
@@ -31204,8 +31315,22 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     ok_sib, _ = my_plex_file_operation('MOVE', sib_src, remote_host, dest_path=new_sib_path)
                     if ok_sib:
                         print(f"      + sidecar: {sib_base} → {new_sib_name}")
+                        moved_sidecar_src_paths.append(sib_src)
                     else:
                         print(f"      ⚠ sidecar mv failed: {sib_base}")
+            # Touch placeholders so external tools see the filename as "already taken".
+            if _current_touch_mode in ('main', 'all'):
+                touch_paths = [src_server]
+                if _current_touch_mode == 'all':
+                    touch_paths += moved_sidecar_src_paths
+                for tp in touch_paths:
+                    escaped_tp = escape_path_for_ssh(tp)
+                    touch_cmd = [*_ssh_args(remote_host), f": > \"{escaped_tp}\""]
+                    tr = subprocess.run(touch_cmd, capture_output=True, text=True)
+                    if tr.returncode == 0:
+                        print(f"      · touch placeholder: {os.path.basename(tp)}")
+                    else:
+                        print(f"      ⚠ touch placeholder failed: {os.path.basename(tp)} ({tr.stderr.strip()})")
             return True
 
         # Sort files by name (chronological for TVOON dates)
@@ -31242,7 +31367,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 s_str = f"S{ep['season']:02d}"
                 max_ep_per_season[s_str] = max(max_ep_per_season.get(s_str, 0), ep['episode'])
 
-        for fn, fp in unsorted:
+        for fn, fp, _touch_mode, _loc_path in unsorted:
+            _current_touch_mode = _touch_mode  # read by _sort_move closure
             # 1. Check if filename already contains S##E## — use directly, no date needed
             sxex_match = _re.search(r'S(\d+)E(\d+)', fn, _re.IGNORECASE)
             if sxex_match:
@@ -31599,94 +31725,120 @@ def cmd_sort_new(args, dry_run=False, target=None):
         for lib_root_server in sorted(lib_roots):
             # READ: try local alternative path first, SSH fallback
             lib_root_local = get_local_path(lib_root_server)
-            use_local = os.path.isdir(lib_root_local)
+            root_use_local = os.path.isdir(lib_root_local)
 
-            if use_local:
-                # List files locally via alternative path
-                bare_files = []
-                all_root_files = []
-                try:
-                    for fn in os.listdir(lib_root_local):
+            # Iterate over every SORT_NEW_SCAN_LOCATIONS entry relative to
+            # the library root.  For each scan_dir we collect (bare_files,
+            # all_root_files) and remember the touch_mode so a placeholder
+            # can be left after the move if configured.
+            # Per-iteration: (scan_dir_server, bare_files_list, all_files_set, touch_mode)
+            location_scans = []
+            for location_path, touch_mode in _parse_sort_new_locations():
+                scan_dir_server = (lib_root_server if location_path == '.'
+                                   else os.path.join(lib_root_server, location_path))
+                scan_dir_local = get_local_path(scan_dir_server) if root_use_local else None
+                use_local_here = root_use_local and scan_dir_local is not None and os.path.isdir(scan_dir_local)
+                bare_files_local = []
+                all_files_local = []
+                if use_local_here:
+                    try:
+                        for fn in os.listdir(scan_dir_local):
+                            if fn.startswith('.'):
+                                continue
+                            fp = os.path.join(scan_dir_local, fn)
+                            if not os.path.isfile(fp):
+                                continue
+                            all_files_local.append(fn)
+                            ext = os.path.splitext(fn)[1].lower()
+                            if ext in VIDEO_EXTENSIONS:
+                                bare_files_local.append(fn)
+                    except OSError:
+                        continue
+                else:
+                    ok, file_list = my_plex_file_operation('LIST_DIR', scan_dir_server, remote_host, maxdepth=1)
+                    if not ok or not file_list:
+                        continue
+                    for fp in file_list:
+                        fn = os.path.basename(fp)
                         if fn.startswith('.'):
                             continue
-                        fp = os.path.join(lib_root_local, fn)
-                        if not os.path.isfile(fp):
-                            continue
-                        all_root_files.append(fn)
+                        all_files_local.append(fn)
                         ext = os.path.splitext(fn)[1].lower()
                         if ext in VIDEO_EXTENSIONS:
-                            bare_files.append(fn)
-                except OSError:
-                    continue
-            else:
-                # SSH fallback: list files on server
-                success, file_list = my_plex_file_operation('LIST_DIR', lib_root_server, remote_host, maxdepth=1)
-                if not success or not file_list:
-                    continue
-                all_root_files = []
-                bare_files = []
-                for fp in file_list:
-                    fn = os.path.basename(fp)
-                    if fn.startswith('.'):
-                        continue
-                    all_root_files.append(fn)
-                    ext = os.path.splitext(fn)[1].lower()
-                    if ext in VIDEO_EXTENSIONS:
-                        bare_files.append(fn)
+                            bare_files_local.append(fn)
+                if bare_files_local:
+                    location_scans.append((scan_dir_server, bare_files_local, all_files_local, touch_mode))
 
-            if not bare_files:
+            if not location_scans:
                 continue
 
+            total_bare = sum(len(b) for _, b, _, _ in location_scans)
             movie_libs_processed += 1
-            lib_bare_count += len(bare_files)
-            bare_files.sort()
-            print(f"\n[{lib_name}] {len(bare_files)} movie file(s) without directory")
+            lib_bare_count += total_bare
+            print(f"\n[{lib_name}] {total_bare} movie file(s) without directory")
 
-            for fn in bare_files:
-                stem = os.path.splitext(fn)[0]
-                # Directory name: lowercase, spaces/underscores → dots
-                dir_name = stem.lower()
-                dir_name = _re.sub(r'[\s_]+', '.', dir_name)
+            for scan_dir_server, bare_files, all_root_files, touch_mode in location_scans:
+                bare_files = sorted(bare_files)
+                for fn in bare_files:
+                    stem = os.path.splitext(fn)[0]
+                    # Directory name: lowercase, spaces/underscores → dots
+                    dir_name = stem.lower()
+                    dir_name = _re.sub(r'[\s_]+', '.', dir_name)
 
-                # Collect sibling files (same stem, different extensions including .de.srt etc.)
-                stem_dot = stem + '.'
-                siblings = [s for s in all_root_files if s != fn and s.startswith(stem_dot)]
-                all_files = [fn] + sorted(siblings)
+                    # Collect sibling files (same stem, different extensions including .de.srt etc.)
+                    stem_dot = stem + '.'
+                    siblings = [s for s in all_root_files if s != fn and s.startswith(stem_dot)]
+                    all_files = [fn] + sorted(siblings)
 
-                if dry_run:
-                    print(f"    [dry-run] mkdir {dir_name}/")
-                    for f in all_files:
-                        print(f"    [dry-run]   mv {f} → {dir_name}/{f}")
-                    movie_sorted += 1
-                    lib_sorted_count += 1
-                else:
-                    # WRITE: always use SSH on server path
-                    target_dir_server = os.path.join(lib_root_server, dir_name)
-                    escaped_dir = escape_path_for_ssh(target_dir_server)
-                    mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
-                    result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}")
-                        movie_failed += 1
-                        lib_failed_count += 1
-                        continue
-
-                    move_ok = True
-                    for f in all_files:
-                        src_server = os.path.join(lib_root_server, f)
-                        dst_server = os.path.join(target_dir_server, f)
-                        success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
-                        if not success:
-                            move_ok = False
-
-                    if move_ok:
-                        print(f"    {fn} → {dir_name}/ ({len(all_files)} file(s))")
+                    if dry_run:
+                        print(f"    [dry-run] mkdir {dir_name}/")
+                        for f in all_files:
+                            print(f"    [dry-run]   mv {f} → {dir_name}/{f}")
                         movie_sorted += 1
                         lib_sorted_count += 1
                     else:
-                        print(f"    ERROR: {fn}: some files failed to move")
-                        movie_failed += 1
-                        lib_failed_count += 1
+                        # WRITE: always use SSH on server path
+                        target_dir_server = os.path.join(scan_dir_server, dir_name)
+                        escaped_dir = escape_path_for_ssh(target_dir_server)
+                        mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
+                        result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+                        if result.returncode != 0:
+                            print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}")
+                            movie_failed += 1
+                            lib_failed_count += 1
+                            continue
+
+                        moved_paths = []
+                        move_ok = True
+                        for f in all_files:
+                            src_server = os.path.join(scan_dir_server, f)
+                            dst_server = os.path.join(target_dir_server, f)
+                            success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
+                            if success:
+                                moved_paths.append((src_server, f == fn))  # (src, is_main_video)
+                            else:
+                                move_ok = False
+
+                        if move_ok:
+                            print(f"    {fn} → {dir_name}/ ({len(all_files)} file(s))")
+                            movie_sorted += 1
+                            lib_sorted_count += 1
+                            # Touch placeholders if location requested it.
+                            if touch_mode in ('main', 'all'):
+                                for src_path, is_main in moved_paths:
+                                    if touch_mode == 'main' and not is_main:
+                                        continue
+                                    escaped_tp = escape_path_for_ssh(src_path)
+                                    touch_cmd = [*_ssh_args(remote_host), f": > \"{escaped_tp}\""]
+                                    tr = subprocess.run(touch_cmd, capture_output=True, text=True)
+                                    if tr.returncode == 0:
+                                        print(f"      · touch placeholder: {os.path.basename(src_path)}")
+                                    else:
+                                        print(f"      ⚠ touch placeholder failed: {os.path.basename(src_path)} ({tr.stderr.strip()})")
+                        else:
+                            print(f"    ERROR: {fn}: some files failed to move")
+                            movie_failed += 1
+                            lib_failed_count += 1
 
         if lib_bare_count > 0:
             movie_summaries.append((lib_name, lib_bare_count, lib_sorted_count, lib_failed_count))
