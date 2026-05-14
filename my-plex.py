@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.41"
+SCRIPT_VERSION = "v2.42"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6606,38 +6606,51 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     flattened = 0
     failed = 0
-    for key, obj, filepath, wrapper, src, host in plan_auto:
-        ok = _bad_structure_flatten(host, src, wrapper)
-        if ok:
-            flattened += 1
-            new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
-            _bad_structure_update_cache(key, filepath, new_fp)
-            print(f"  ✓ {key}: flattened → {new_fp}")
-        else:
-            failed += 1
-            print(f"  ✗ {key}: flatten failed (see error above)")
+
+    # v2.42: batch Movie flattens — one SSH session for all moves.
+    movie_moves = [(src, wrapper) for (_k, _o, _fp, wrapper, src, _h) in plan_auto]
+    if movie_moves:
+        print(f">>> Batched flatten: {len(movie_moves)} Movie(s) in one SSH session…")
+        movie_results = _bad_structure_flatten_batch(movie_moves)
+        for i, (key, obj, filepath, wrapper, src, _host) in enumerate(plan_auto):
+            ok, reason = movie_results.get(i, (False, 'no result'))
+            if ok:
+                flattened += 1
+                new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
+                _bad_structure_update_cache(key, filepath, new_fp)
+                print(f"  ✓ {key}: flattened → {new_fp}")
+            else:
+                failed += 1
+                print(f"  ✗ {key}: flatten failed — {reason}")
 
     # Multiple Episodes of the same season share the same (src, target) move.
-    # Group by src_dir → execute mv ONCE, then update cache for every Episode
-    # that lives under it.
+    # Group by src_dir → execute mv ONCE per group, then update cache for
+    # every Episode that lives under it.
     by_src = {}
     for entry in plan_episode:
         by_src.setdefault(entry[3], []).append(entry)  # entry[3] = src_dir
+    season_moves = []   # [(src, target, intermediates), …]  parallel to by_src.items() order
+    season_groups = []
     for src, group in by_src.items():
-        # All entries in `group` share src + target + intermediates + host.
         first = group[0]
-        _key, _obj, _fp, _src, target, intermediates, host = first
-        ok = _bad_structure_relocate_season(host, src, target, intermediates)
-        if ok:
-            for key, obj, filepath, _s, _t, _i, _h in group:
-                flattened += 1
-                new_fp = f'{target}/{_os.path.basename(filepath)}'
-                _bad_structure_update_cache(key, filepath, new_fp)
-            print(f"  ✓ season relocated: {src}  →  {target}  ({len(group)} episode(s))")
-        else:
-            for key, _o, _fp, _s, _t, _i, _h in group:
-                failed += 1
-            print(f"  ✗ season relocate failed: {src} (affected {len(group)} episode(s))")
+        _key, _obj, _fp, _src, target, intermediates, _host = first
+        season_moves.append((src, target, intermediates))
+        season_groups.append((src, target, group))
+    if season_moves:
+        print(f">>> Batched season-relocate: {len(season_moves)} season(s) in one SSH session…")
+        season_results = _bad_structure_relocate_season_batch(season_moves)
+        for i, (src, target, group) in enumerate(season_groups):
+            ok, reason = season_results.get(i, (False, 'no result'))
+            if ok:
+                for key, obj, filepath, _s, _t, _i, _h in group:
+                    flattened += 1
+                    new_fp = f'{target}/{_os.path.basename(filepath)}'
+                    _bad_structure_update_cache(key, filepath, new_fp)
+                print(f"  ✓ season relocated: {src}  →  {target}  ({len(group)} episode(s))")
+            else:
+                for _ in group:
+                    failed += 1
+                print(f"  ✗ season relocate failed: {src} — {reason}  (affected {len(group)} episode(s))")
 
     # ---------- 6.  Interactive prompt for conflicts ------------------
     if plan_conflict and auto:
@@ -6712,42 +6725,140 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print(f"  flattened : {flattened}")
     print(f"  failed    : {failed}")
     if flattened > 0:
-        save_cache()
+        update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
         print(f"  cache updated.")
     print()
 
 
-def _bad_structure_flatten(remote_host, src_dir, dst_dir):
-    """Move every entry from src_dir → dst_dir, then rmdir src_dir.
-    Aborts on filename collision.  Returns True on success."""
+def _bad_structure_flatten_batch(moves):
+    """v2.42: batched flatten — single SSH/bash session processes every (src, dst) pair.
+
+    `moves`: list of (src_dir, dst_dir).  Each move is wrapped in a subshell
+    so a failure on one item doesn't abort the rest of the batch.  Each
+    move emits exactly one line on stdout:
+        OK|<idx>             — succeeded
+        FAIL|<idx>|<reason>  — failed (idx is 0-based into `moves`).
+    Returns a dict {idx: (ok: bool, reason: str)}.
+
+    Always goes through SSH to PLEX_DB_REMOTE_HOST (the server-side paths
+    in the cache only resolve there).  ControlMaster amortizes the
+    handshake across the whole batch into a single TCP connection.
+    """
     import shlex as _shlex, subprocess as _sp
-    if src_dir == dst_dir or not src_dir or not dst_dir:
-        return False
-    # POSIX bash: enumerate hidden + visible, check collision, mv, rmdir.
-    src_q = _shlex.quote(src_dir)
-    dst_q = _shlex.quote(dst_dir)
-    script = (
-        f'set -e; cd {src_q}; '
-        f'shopt -s nullglob dotglob 2>/dev/null || true; '
-        # Iterate everything except . and ..
-        f'for f in * .[!.]* ..?*; do '
-        f'  [ -e "$f" ] || [ -L "$f" ] || continue; '
-        f'  if [ -e {dst_q}/"$f" ] || [ -L {dst_q}/"$f" ]; then '
-        f'    echo "ERROR: collision: {dst_q}/$f already exists" >&2; exit 2; '
-        f'  fi; '
-        f'  mv -- "$f" {dst_q}/"$f" || exit 3; '
-        f'done; '
-        f'cd /; rmdir {src_q} || {{ echo "ERROR: rmdir {src_q} failed (not empty?)" >&2; exit 4; }}'
-    )
-    if remote_host:
-        argv = _ssh_args(remote_host) + ['bash', '-s']
-    else:
-        argv = ['bash', '-s']
+    results = {}
+    if not moves:
+        return results
+    blocks = []
+    for i, (src, dst) in enumerate(moves):
+        if not src or not dst or src == dst:
+            results[i] = (False, "invalid src/dst")
+            continue
+        src_q = _shlex.quote(src)
+        dst_q = _shlex.quote(dst)
+        blocks.append(
+            f"(\n"
+            f"cd {src_q} 2>/dev/null || {{ echo \"FAIL|{i}|cd: source does not exist\"; exit 0; }}\n"
+            f"shopt -s nullglob dotglob 2>/dev/null || true\n"
+            f"for f in * .[!.]* ..?*; do\n"
+            f"  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n"
+            f"  if [ -e {dst_q}/\"$f\" ] || [ -L {dst_q}/\"$f\" ]; then\n"
+            f"    echo \"FAIL|{i}|collision: $f already at target\"; exit 0\n"
+            f"  fi\n"
+            f"  mv -- \"$f\" {dst_q}/\"$f\" || {{ echo \"FAIL|{i}|mv failed: $f\"; exit 0; }}\n"
+            f"done\n"
+            f"cd /\n"
+            f"rmdir {src_q} || {{ echo \"FAIL|{i}|rmdir failed (not empty?)\"; exit 0; }}\n"
+            f"echo \"OK|{i}\"\n"
+            f")"
+        )
+    script = "\n".join(blocks)
+    argv = _ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s']
     proc = _sp.run(argv, input=script, capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"      flatten error rc={proc.returncode}: {proc.stderr.strip()}")
-        return False
-    return True
+    for line in (proc.stdout or '').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split('|', 2)
+        if parts[0] == 'OK':
+            try:
+                results[int(parts[1])] = (True, '')
+            except (ValueError, IndexError):
+                pass
+        elif parts[0] == 'FAIL':
+            try:
+                idx = int(parts[1])
+                reason = parts[2] if len(parts) > 2 else '(no reason)'
+                results[idx] = (False, reason)
+            except (ValueError, IndexError):
+                pass
+    # Any move with no result line (SSH dropped, bash exited mid-batch, …)
+    # counts as failed with a connection-loss reason.
+    for i, _ in enumerate(moves):
+        if i not in results:
+            results[i] = (False, f"no response (rc={proc.returncode}, stderr: {(proc.stderr or '').strip()[:120]})")
+    return results
+
+
+def _bad_structure_flatten(remote_host, src_dir, dst_dir):
+    """Single-shot flatten — thin wrapper over the batch path.
+
+    Kept for the interactive `f` choice in the conflict-resolve loop;
+    `remote_host` is now ignored (batch always uses PLEX_DB_REMOTE_HOST).
+    """
+    results = _bad_structure_flatten_batch([(src_dir, dst_dir)])
+    ok, reason = results.get(0, (False, 'unknown'))
+    if not ok:
+        print(f"      flatten error: {reason}")
+    return ok
+
+
+def _bad_structure_relocate_season_batch(moves):
+    """v2.42: batched season-dir relocate — single SSH/bash session.
+
+    `moves`: list of (src_season_dir, target_season_dir, intermediates_to_rmdir).
+    Each move emits one line: OK|<idx> or FAIL|<idx>|<reason>.
+    Returns {idx: (ok, reason)}.  Always uses PLEX_DB_REMOTE_HOST.
+    """
+    import shlex as _shlex, subprocess as _sp
+    results = {}
+    if not moves:
+        return results
+    blocks = []
+    for i, (src, target, intermediates) in enumerate(moves):
+        if not src or not target or src == target:
+            results[i] = (False, "invalid src/target")
+            continue
+        src_q = _shlex.quote(src)
+        tgt_q = _shlex.quote(target)
+        rmdir_lines = '\n'.join(f"rmdir {_shlex.quote(p)} 2>/dev/null || true" for p in (intermediates or []))
+        blocks.append(
+            f"(\n"
+            f"if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo \"FAIL|{i}|target exists\"; exit 0; fi\n"
+            f"mv -- {src_q} {tgt_q} || {{ echo \"FAIL|{i}|mv failed (src missing?)\"; exit 0; }}\n"
+            f"{rmdir_lines}\n"
+            f"echo \"OK|{i}\"\n"
+            f")"
+        )
+    script = "\n".join(blocks)
+    argv = _ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s']
+    proc = _sp.run(argv, input=script, capture_output=True, text=True)
+    for line in (proc.stdout or '').splitlines():
+        line = line.strip()
+        if not line: continue
+        parts = line.split('|', 2)
+        if parts[0] == 'OK':
+            try: results[int(parts[1])] = (True, '')
+            except (ValueError, IndexError): pass
+        elif parts[0] == 'FAIL':
+            try:
+                idx = int(parts[1])
+                reason = parts[2] if len(parts) > 2 else '(no reason)'
+                results[idx] = (False, reason)
+            except (ValueError, IndexError): pass
+    for i, _ in enumerate(moves):
+        if i not in results:
+            results[i] = (False, f"no response (rc={proc.returncode}, stderr: {(proc.stderr or '').strip()[:120]})")
+    return results
 
 
 def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_dir, intermediates_to_rmdir):
