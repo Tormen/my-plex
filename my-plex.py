@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.58"
+SCRIPT_VERSION = "v2.59"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -656,7 +656,7 @@ CONFIG_DEFAULTS = {
     'PLEX_DB_REMOTE_HOST': 'my-plex',
     # Database path on the Plex server (accessed via SSH using PLEX_DB_REMOTE_HOST)
     'PLEX_DB_PATH': '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db',
-    'ALTERNATIVE_ROOTPATHS': [('/j2/watch.v/', '/Volumes/2/watch.v/')],
+    'ALTERNATIVE_ROOTPATHS': [],
 
     # Episode renaming pattern for --rename
     # Available elements: {S0XE0X} {TITLE} {ORIGINALTITLE} {SERIES} {LANG} {YEAR}
@@ -706,6 +706,17 @@ CONFIG_DEFAULTS = {
     # the runner-up's score.  Below the threshold, the interactive picker
     # is shown.  Default 90 = very conservative.
     'UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT': 90,
+
+    # UNMATCHED_RESOLVE_TITLE_NORMALIZE — extra (REGEX, REPLACEMENT)
+    # substitutions applied to the candidate query string before it goes
+    # to the lookup engines (TMDB / TVDB).  Applied AFTER the built-in
+    # cleanup (TVOON-suffix strip, year extraction, bracketed-tag drop,
+    # apostrophe strip, non-alphanumeric collapse).  Same shape as
+    # CLI_TEXT_NORMALIZE_REGEX: list of (FROM, TO) where FROM is a Python
+    # regex.  Use this to teach my-plex about title quirks specific to
+    # your collection (channel suffixes, release groups, etc.).
+    # Default is empty — the built-in cleanup is sufficient for most.
+    'UNMATCHED_RESOLVE_TITLE_NORMALIZE': [],
 
     # SORT_NEW_MOVIE_ROUTES — extend --sort-new to also route MOVIES from a
     # source library to per-language destination libraries based on the
@@ -1134,6 +1145,25 @@ ISO_639_1_TO_2 = {
     'uk': 'ukr', 'ro': 'ron',
 }
 
+# Pretty-print a CONFIG_DEFAULTS value for use inside the EXAMPLE_CONF
+# template.  For simple scalars/short collections, returns a single-line
+# `VAR = repr(val)`.  For dict/list values whose repr exceeds ~70 chars,
+# returns a multi-line block via pprint.pformat, with each line prefixed
+# by `# ` so the whole block stays commented out (the user uncomments
+# the entire block when opting in).
+def _fmt_default(var_name, value, indent='# '):
+    import pprint as _pp
+    one_line = f"{var_name} = {value!r}"
+    if len(one_line) <= 70 and '\n' not in one_line:
+        return f"{indent}{one_line}"
+    pretty = _pp.pformat(value, width=72, sort_dicts=False)
+    lines = pretty.splitlines()
+    # First line gets `VAR = `, the rest stay aligned.
+    out = [f"{indent}{var_name} = {lines[0]}"]
+    for ln in lines[1:]:
+        out.append(f"{indent}{ln}")
+    return '\n'.join(out)
+
 # Example configuration file template using f-string with CONFIG_DEFAULTS
 EXAMPLE_CONF = f"""# my-plex configuration file
 #
@@ -1152,26 +1182,64 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Plex Server Configuration (REQUIRED - uncomment and configure)
 ###############################################################################
 
-# NOTE: my-plex now uses direct database access instead of Plex API!
-# No PLEX_URL or PLEX_TOKEN needed for cache updates.
-# Configure database access instead:
+# my-plex has TWO data paths:
+#
+#   • CACHE UPDATES (--update-cache, --scan) — direct DB access via SSH.
+#       Configure PLEX_DB_REMOTE_HOST + PLEX_DB_PATH.  No API credentials
+#       needed for this path.
+#
+#   • PLEX API OPERATIONS (delete, markWatched, label edits, library
+#     refresh trigger, collection edits, …) — still go through plexapi
+#     and DO need credentials.  Either set PLEX_URL + PLEX_TOKEN, or
+#     paste PLEX_XML_URL (the "View XML" URL — my-plex extracts both
+#     from it).  --plex-xml-url / --plex-url / --plex-token on the
+#     command line override the config.
+#
+# Most users want BOTH paths configured:
+#   - PLEX_DB_REMOTE_HOST + PLEX_DB_PATH   (for fast cache updates)
+#   - PLEX_XML_URL                          (for write operations)
 
-# PLEX_DB_REMOTE_HOST: SSH host alias for the Plex server (default: 'my-plex')
+# --- Direct DB access (cache updates) ---
+# PLEX_DB_REMOTE_HOST: SSH host alias for the Plex server.
 # Used for DB queries, file operations (trash/rename/move), ffprobe, etc.
+# Configure this alias in your ~/.ssh/config (Host my-plex / HostName … /
+# User … / IdentityFile …).
+#
+# Default:
 # PLEX_DB_REMOTE_HOST = {CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST']!r}
 
-# PLEX_DB_PATH: Path to Plex database on the server (accessed via SSH)
+# PLEX_DB_PATH: Path to Plex database on the server (accessed via SSH).
+#
+# Default:
 # PLEX_DB_PATH = {CONFIG_DEFAULTS['PLEX_DB_PATH']!r}
 
-# Example with real values (uncomment and customize):
+# --- Plex API credentials (write operations only) ---
+# Option A: PLEX_URL + PLEX_TOKEN separately.
+#
+# Default (placeholder — must be configured if you want API operations):
+# PLEX_URL = {CONFIG_DEFAULTS['PLEX_URL']!r}
+# PLEX_TOKEN = {CONFIG_DEFAULTS['PLEX_TOKEN']!r}
+
+# Option B (recommended): paste the "View XML" URL — my-plex extracts
+# both the server URL and the token from it.
+#
+# Default (placeholder — must be configured if you want API operations):
+# PLEX_XML_URL = {CONFIG_DEFAULTS['PLEX_XML_URL']!r}
+#
+# How to get the token / XML URL:
+# https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+#
+# Example (uncomment + customize to use):
 # PLEX_DB_REMOTE_HOST = 'my-plex'
 # PLEX_DB_PATH = '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
+# PLEX_XML_URL = 'https://<server>.plex.direct:32400/library/metadata/<id>?X-Plex-Token=<token>'
 
-# NOTE: SSH access to the Plex server is required. Database is accessed via:
+# NOTE: SSH access to the Plex server is required for cache updates.
+# Database is accessed via:
 #   ssh PLEX_DB_REMOTE_HOST "sqlite3 '<PLEX_DB_PATH>' '<query>'"
 
 ###############################################################################
-# Preferred / Primary / Main / Favorite Audio Languages  ⚠ EVERYONE: review this
+# Preferred / Primary / Main / Favorite Audio Languages
 ###############################################################################
 # Ordered list of 2-letter ISO 639-1 codes.  Drives how the scalar AUDIO_LANG
 # plex_var is computed when a file has multiple audio tracks.
@@ -1191,19 +1259,31 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # only the scalar AUDIO_LANG is affected.  The lang:<code> filter still
 # matches against any track regardless of this setting.
 #
-# PREFERRED_AUDIO_LANGUAGES = {CONFIG_DEFAULTS['PREFERRED_AUDIO_LANGUAGES']!r}
+# Default: {CONFIG_DEFAULTS['PREFERRED_AUDIO_LANGUAGES']!r}  (empty → AUDIO_LANG = first track in the file)
+# Example — uncomment + customize to opt in:
+# PREFERRED_AUDIO_LANGUAGES = ['en','de','fr']
 
 ###############################################################################
 # Path Configuration
 ###############################################################################
 
-# Alternative root paths for symlinks or different mount points
-# ALTERNATIVE_ROOTPATHS = {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}
+# Alternative root paths for symlinks or different mount points.
+# List of (logical_prefix, physical_prefix) tuples — when my-plex sees
+# logical_prefix in a Plex DB path, it resolves to physical_prefix
+# locally.  Useful when Plex sees `/data/media` but you mount it as
+# `/Volumes/media` on the workstation.
+#
+# Default: {CONFIG_DEFAULTS['ALTERNATIVE_ROOTPATHS']!r}  (empty → no rewriting)
+#
+# Example (uncomment + customize to use):
+# ALTERNATIVE_ROOTPATHS = [('/data/media/', '/Volumes/media/')]
 
-# Custom filename date extractors for --sort-new (Python module path)
+# Custom filename date extractors for --sort-new (Python module path).
 # The module should define: EXTRACTORS = {{'format_name': extract_function, ...}}
-# Each extract_function takes a filename string and returns datetime.date or None
-# CUSTOM_DATE_EXTRACTORS = None
+# Each extract_function takes a filename string and returns datetime.date or None.
+#
+# Default:
+# CUSTOM_DATE_EXTRACTORS = {CONFIG_DEFAULTS['CUSTOM_DATE_EXTRACTORS']!r}
 
 ###############################################################################
 # Episode Source Configuration (--missing)
@@ -1214,29 +1294,49 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Plex only stores episodes that have files on disk — external sources provide the full list.
 #
 # TVDB v4 API key — register for free at https://thetvdb.com/dashboard
-# (Dashboard → Project → API Keys)
-# TVDB_API_KEY = None
+# (Dashboard → Project → API Keys).  Default None disables TVDB lookups.
 #
+# Default:
+# TVDB_API_KEY = {CONFIG_DEFAULTS['TVDB_API_KEY']!r}
+
 # TMDB API v3 key — register for free at https://www.themoviedb.org/settings/api
-# (Settings → API → Request an API Key → Developer)
-# TMDB_API_KEY = None
+# (Settings → API → Request an API Key → Developer).  Default None disables TMDB lookups.
+#
+# Default:
+# TMDB_API_KEY = {CONFIG_DEFAULTS['TMDB_API_KEY']!r}
 
 # Per-library episode source override for --missing.
 # By default, the source is auto-detected from the library's Plex agent + language:
 #   - German libraries (de-DE) → fernsehserien.de (web scraping, no API key needed)
 #   - Other libraries → tvdb (requires TVDB_API_KEY), fallback to tmdb
-# Override per library:
+#
+# Default: {CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']!r}  (empty → auto-detect per library)
+# Example — uncomment + customize to override per-library:
 # MISSING_EPISODES_SOURCE = {{'lib5': 'fernsehserien.de', 'lib6': 'tvdb', 'lib7': 'tmdb'}}
 
 ###############################################################################
 # Output Configuration
 ###############################################################################
+#
+# All values shown are the built-in defaults — uncomment any line to override.
 
+# Default output format for --list (tsv_labeled, tsv, json, pretty).
+# Default:
 # FORMAT = {CONFIG_DEFAULTS['FORMAT']!r}
+
+# TSV column layout when FORMAT == 'tsv_labeled'.  Uses {{KEY}}-style placeholders.
+# Default:
 # LIST_MEDIA_DEFAULT_TSV_FORMAT = {CONFIG_DEFAULTS['LIST_MEDIA_DEFAULT_TSV_FORMAT']!r}
+
+# Where the duplicates JSON log is written by --duplicates --resolve.
+# Default:
 # DUPLICATE_FILE = {CONFIG_DEFAULTS['DUPLICATE_FILE']!r}
+
+# Line prefixes used in stdout (debug / major-info / verbose).
+# Default:
 # DBGPFX = {CONFIG_DEFAULTS['DBGPFX']!r}
 # PRINTPFX = {CONFIG_DEFAULTS['PRINTPFX']!r}
+# VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}
 
 ###############################################################################
 # --info Field Visibility (INFO_FIELDS)
@@ -1260,6 +1360,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   Summary, Added, Updated, Labels, Duplicates, BROKEN,
 #   ScrapedData, SeasonTable, EpisodeTable, EpisodeFile
 #
+# Default:
 # INFO_FIELDS = {{
 #     # Movie: default fields
 #     'movie':      ['Key', 'Title', 'Library', 'Year',
@@ -1297,29 +1398,53 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #     '_series_extra.v':  ['EpisodeTable'],
 #     '_series_extra.vv': ['EpisodeFile'],
 # }}
-# VRBPFX = {CONFIG_DEFAULTS['VRBPFX']!r}
 
 ###############################################################################
 # Cache Configuration
 ###############################################################################
 
-# Cache and lock files are stored in ~/.my-plex/ by default.
+# Cache pickle file (per-user).  Path is relative to $HOME.
 # Legacy locations (~/.plex_media_cache.pkl) are auto-migrated on first run.
+#
+# Default:
 # CACHE_FILE = {CONFIG_DEFAULTS['CACHE_FILE']!r}
+
+# Lock file used to serialize concurrent --update-cache invocations.
+#
+# Default:
 # LOCK_FILE = {CONFIG_DEFAULTS['LOCK_FILE']!r}
+
+# How often (every N media items) --update-cache writes a partial-cache
+# checkpoint, so an interrupted run can resume without losing progress.
+#
+# Default:
 # CACHE_CHECKPOINT_INTERVAL = {CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']}
 
-# Auto-trigger Plex library scan on --update-cache (default: False)
-# When False, --update-cache only reads the database without scanning.
-# Use --scan explicitly to trigger a Plex library scan.
+# Auto-trigger Plex library scan on --update-cache.  When False,
+# --update-cache only reads the database; use --scan to force a scan.
+#
+# Default:
 # AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE = {CONFIG_DEFAULTS['AUTO_SCAN_PLEX_LIBRARIES_ON_UPDATE_CACHE']}
 
 ###############################################################################
 # Performance Configuration
 ###############################################################################
 
+# Max libraries processed concurrently during --update-cache.
+#
+# Default:
 # MAX_PARALLEL_WORKERS = {CONFIG_DEFAULTS['MAX_PARALLEL_WORKERS']}
+
+# Random delay range (seconds) inserted between per-item Plex API
+# requests to avoid throttling.  Tuple (min, max).
+#
+# Default:
 # RATE_LIMIT_DELAY_RANGE = {CONFIG_DEFAULTS['RATE_LIMIT_DELAY_RANGE']!r}
+
+# Stagger (seconds) between starting each library-worker thread.
+# Only relevant in legacy API mode; DB mode does not need it.
+#
+# Default:
 # LIBRARY_START_DELAY = {CONFIG_DEFAULTS['LIBRARY_START_DELAY']}
 
 ###############################################################################
@@ -1333,10 +1458,13 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Broken File Detection Configuration
 ###############################################################################
 
-# Threshold for detecting potentially truncated files (percentage)
-# Files are flagged if container duration is more than this percentage shorter than Plex duration
-# Default: 0.5% - catches meaningful truncation while avoiding false positives
-# Analysis: 80.72% of files are within ±0.1% (normal encoding variance)
+# Threshold for detecting potentially truncated files (percentage).
+# Files are flagged if container duration is more than this percentage
+# shorter than Plex duration.
+# Analysis: 80.72% of files are within ±0.1% (normal encoding variance);
+# 0.5% catches meaningful truncation while avoiding false positives.
+#
+# Default:
 # TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
 
 ###############################################################################
@@ -1354,13 +1482,18 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   {{'mbps': 20}}  /  {{'mb_per_hour':  9000}}  — high-bitrate 1080p / light BD rip
 #   {{'mbps': 40}}  /  {{'mb_per_hour': 18000}}  — BD remux / near-lossless encode
 #
+# Default:
 # REENCODE_THRESHOLD = {{'mbps': {CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps']}}}
+#
+# Alternative (same threshold expressed in MB/hour — pick whichever you prefer):
 # REENCODE_THRESHOLD = {{'mb_per_hour': {int(CONFIG_DEFAULTS['REENCODE_THRESHOLD']['mbps'] * 450)}}}
 
 # Skip reencode detection for files whose path contains any of these strings.
-# OTR (Online TV Recorder) files are typically low-bitrate recordings — excluding them
-# avoids false positives from files that are large for other reasons (e.g. no re-encoding).
-# REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']}
+# OTR (Online TV Recorder) files are typically low-bitrate recordings — excluding
+# them avoids false positives from files that are large for other reasons.
+#
+# Default:
+# REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']!r}
 
 ###############################################################################
 # On-disk Label Markers
@@ -1383,6 +1516,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   ALL episodes in one season  →  label on season directory
 #   Individual episodes  →  label on episode file
 #
+# Default:
 # PROBLEMS2DISK = {{
 #     'reencode': {{
 #         'AUTO_MARK_ON_DISK':      True,    # True = auto-mark on --reencode; False = need --reencode --mark
@@ -1401,6 +1535,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # means it IS a duplicate.
 # Example: A movie in lib2 AND lib3 only → NOT a duplicate (both in group).
 # But a movie in lib2 AND lib1 → IS a duplicate (lib1 not in group).
+#
+# Default: {CONFIG_DEFAULTS['DUPLICATES_IGNORE_LIBRARY_COMBINATIONS']!r}  (empty → every cross-library copy is a duplicate)
+# Example — uncomment + customize to opt in:
 # DUPLICATES_IGNORE_LIBRARY_COMBINATIONS = [['lib2', 'lib3', 'lib4']]
 
 ###############################################################################
@@ -1439,7 +1576,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   AUDIO_LANG, AUDIO_LANGS_LIST, RESOLUTION, YEAR (int|None), TITLE, SERIES
 #   IMDB_ID, TMDB_ID, TVDB_ID, LABELS, COLLECTIONS
 #
-# Example:
+# Default: {CONFIG_DEFAULTS['DISK_PLEX_MAP']!r}  (empty → no markers ever written; --plex2disk / --disk2plex do nothing)
+#
+# Example (uncomment + customize to use):
 # DISK_PLEX_MAP = {{
 #     # Audio language — filename only, disk wins (filename is ground truth):
 #     'AUDIO_LANG': {{
@@ -1480,9 +1619,14 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 ###############################################################################
 
 # LOCAL tools run on this machine, SERVER tools run on the Plex server (via SSH).
-# Set to None (default) to auto-detect from PATH.
+# Set a tool path to None to fall back to auto-detection via PATH.
+#
+# Default:
+{_fmt_default('EXTERNAL_TOOLS', CONFIG_DEFAULTS['EXTERNAL_TOOLS'])}
+#
+# Example (uncomment + customize to pin specific tool paths):
 # EXTERNAL_TOOLS = {{
-#     'LOCAL': {{'ssh': '/usr/bin/ssh', 'mpv': '/opt/homebrew/bin/mpv', 'open': '/usr/bin/open'}},
+#     'LOCAL':  {{'ssh': '/usr/bin/ssh', 'mpv': '/opt/homebrew/bin/mpv', 'open': '/usr/bin/open'}},
 #     'SERVER': {{'mp4box': '/opt/homebrew/bin/MP4Box', 'mkvpropedit': '/opt/homebrew/bin/mkvpropedit',
 #                'ffmpeg': '/opt/homebrew/bin/ffmpeg', 'sqlite3': '/usr/bin/sqlite3'}},
 # }}
@@ -1499,7 +1643,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   - 'MULTI' — library is mixed-language (Plex has no "mixed" flag).
 #     --resolve always PROMPTS for items in this library, and
 #     --list/--filter auto-shows the AUDIO column when results span it.
-# Example:
+# Default: {CONFIG_DEFAULTS['AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY']!r}  (empty → no auto-resolve, prompt every time)
+# Example — uncomment + customize to opt in:
 # AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY = [
 #     ('lib1',   'MULTI'),
 #     ('lib8', 'MULTI'),
@@ -1577,6 +1722,7 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # Non-existent paths are silently skipped.  Order matters (top-to-bottom,
 # first match wins).  Placeholders accumulate forever (zero-byte).
 #
+# Default:
 # SORT_NEW_SCAN_LOCATIONS = {CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']!r}
 
 ###############################################################################
@@ -1590,21 +1736,23 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # `when` uses the same grammar as --list (e.g. 'original_lang:de OR lang:de').
 # `when` = '*' is a catch-all.
 #
-# Empty default keeps my-plex GENERIC.  Examples (uncomment + adjust to
-# YOUR library names):
-#
+# Default: {CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']!r}  (empty → movies stay where they land; no cross-library routing)
+# Example — uncomment + adjust to YOUR library names to opt in:
 # SORT_NEW_MOVIE_ROUTES = [
 #     {{'from': ',unsorted', 'when': 'original_lang:de OR lang:de', 'to': 'movies.de'}},
 #     {{'from': ',unsorted', 'when': 'original_lang:fr OR lang:fr', 'to': 'movies.fr'}},
 #     {{'from': ',unsorted', 'when': '*',                           'to': 'movies.en'}},
 # ]
+
+###############################################################################
+# Debug / Verbose Flags
+###############################################################################
 #
-# SORT_NEW_MOVIE_ROUTES = {CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']!r}
+# All values shown are the built-in defaults.  Each can also be toggled
+# from the command line (--debug / -V / -VV / -D / --offline).  Setting
+# them here pins the behavior for every invocation.
 
-###############################################################################
-# Debug/Verbose Flags - These are defaults. They can be set via commandline.
-###############################################################################
-
+# Default:
 # DBG = {CONFIG_DEFAULTS['DBG']}
 # VRB = {CONFIG_DEFAULTS['VRB']}
 # VERYVRB = {CONFIG_DEFAULTS['VERYVRB']}
@@ -1612,12 +1760,195 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # OFFLINE = {CONFIG_DEFAULTS['OFFLINE']}
 
 ###############################################################################
-# Cache Flags - These are defaults. They can be set via commandline.
+# Cache Flags
 ###############################################################################
+#
+# All values shown are the built-in defaults.  Each can also be toggled
+# from the command line (--update-cache / --force-cache-update /
+# --from-scratch / --read-only).  Setting them here pins the behavior.
 
+# Default:
 # FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
 # FORCE_PLEXDATA = {CONFIG_DEFAULTS['FORCE_PLEXDATA']}
+# FROM_SCRATCH = {CONFIG_DEFAULTS['FROM_SCRATCH']}
 # READ_ONLY_MODE = {CONFIG_DEFAULTS['READ_ONLY_MODE']}
+
+###############################################################################
+# Pipelines (PIPELINES)
+###############################################################################
+#
+# Named pipelines that get registered as top-level my-plex CLI flags.
+# Each dict key is the flag name (e.g. '--clean'); each value is an
+# ordered list of phases.  Each phase is itself a list of CLI tokens
+# invoked as a subprocess.  The runner:
+#   • prepends the user's SCOPE (when given) to every phase
+#   • threads --try / --yes / --force when those are on the outer call
+#   • aborts the rest of the pipeline if any phase exits non-zero
+#
+# The default '--clean' chains: resolve unmatched → refresh cache →
+# backfill original_language → sort new arrivals.
+#
+# Default:
+{_fmt_default('PIPELINES', CONFIG_DEFAULTS['PIPELINES'])}
+
+###############################################################################
+# --unmatched --resolve automation
+###############################################################################
+
+# Lookup engines used by --unmatched --resolve (ordered, first-with-results wins).
+#
+# Default:
+# UNMATCHED_RESOLVE_LOOKUP_ENGINES = {CONFIG_DEFAULTS['UNMATCHED_RESOLVE_LOOKUP_ENGINES']!r}
+
+# --auto picks the top hit silently when its score is >= this %.  Below
+# the threshold the interactive picker is shown.  90 is conservative.
+#
+# Default:
+# UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = {CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT']}
+
+# After --unmatched --resolve renames a file, trigger a Plex scan of
+# the affected library so Plex picks up the new name immediately.
+#
+# Default:
+# UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = {CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']!r}
+
+# Extra title-normalization rules applied BEFORE the candidate query
+# goes to the lookup engines.  List of (FROM, TO) regex tuples; FROM is
+# a Python regex (escape literals with `\\`).  Applied AFTER the built-in
+# cleanup (TVOON suffix strip / year extract / bracket strip / apostrophe
+# strip / non-alphanumeric collapse), so use this only for quirks the
+# built-in cleanup misses.
+#
+# Default: {CONFIG_DEFAULTS['UNMATCHED_RESOLVE_TITLE_NORMALIZE']!r}  (empty → only built-in cleanup runs)
+#
+# Example (uncomment + customize to use):
+# UNMATCHED_RESOLVE_TITLE_NORMALIZE = [
+#     (r'\\bxvid\\b',           ''),     # drop XviD release tags
+#     (r'\\bwww\\.\\S+\\.org',  ''),     # drop mvgroup.org / similar
+#     (r'\\b\\d+of\\d+\\b',     ''),     # drop 1of2, 22of26 part markers
+# ]
+
+###############################################################################
+# Episode / renumber naming patterns
+###############################################################################
+#
+# Pattern used by --rename to compute the target filename.  Available
+# variables: {{S0XE0X}}, {{TITLE}}, {{ORIGINALTITLE}}, {{SERIES}},
+# {{YEAR}}, {{LANG}}, {{WATCHED}}, {{WATCHEDDATE}}, {{VIEWCOUNT}},
+# {{RESOLUTION}}, {{VIDEO_CODEC}}, {{AUDIO_CODEC}}, {{DURATION}}.
+# Default:
+# EPISODE_NAME_PATTERN = {CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']!r}
+#
+# Pattern used by --renumber --fix when renaming files to the correct
+# season/episode index.  Same variable set as EPISODE_NAME_PATTERN.
+# Default:
+# RENUMBER_NAME_PATTERN = {CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']!r}
+
+###############################################################################
+# --remux configuration
+###############################################################################
+
+# Target container for --remux (re-mux only — no re-encode).
+#
+# Default:
+# REMUX_TARGET_CONTAINER = {CONFIG_DEFAULTS['REMUX_TARGET_CONTAINER']!r}
+
+# Containers considered "outdated" and worth remuxing on sight.
+#
+# Default:
+{_fmt_default('OUTDATED_CONTAINERS', CONFIG_DEFAULTS['OUTDATED_CONTAINERS'])}
+
+# Video / audio codecs that can be stream-copied into the target
+# container (no transcode).  A file whose codecs are outside these
+# lists is NOT a --remux candidate (it would need a full re-encode).
+#
+# Default:
+{_fmt_default('REMUX_VIDEO_CODECS_OK', CONFIG_DEFAULTS['REMUX_VIDEO_CODECS_OK'])}
+{_fmt_default('REMUX_AUDIO_CODECS_OK', CONFIG_DEFAULTS['REMUX_AUDIO_CODECS_OK'])}
+
+# Require at least one audio track with a known language tag before
+# remuxing (avoids losing language info on tagless input).
+#
+# Default:
+# REMUX_REQUIRE_LANGUAGE = {CONFIG_DEFAULTS['REMUX_REQUIRE_LANGUAGE']!r}
+
+# After a successful remux, move the original to Trash (recoverable)
+# instead of leaving it in place.
+#
+# Default:
+# REMUX_TRASH_ORIGINAL = {CONFIG_DEFAULTS['REMUX_TRASH_ORIGINAL']!r}
+
+###############################################################################
+# --missing completion thresholds
+###############################################################################
+
+# A series is reported as "complete" when at least this % of scraped
+# episodes exist on disk.  Below the threshold it's flagged.
+#
+# Default:
+# MISSING_MIN_COMPLETION_PCT = {CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']}
+#
+# Series titles to exclude from the completion check (e.g. shows
+# without an authoritative episode list anywhere).
+#
+# Default:
+# MISSING_COMPLETION_EXCLUDE_SHOWS = {CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']!r}
+
+###############################################################################
+# Auto-trash duplicates / audio-language completion
+###############################################################################
+
+# Silently auto-trash byte-identical duplicates (longer-path-loses rule).
+# Off by default — opt in only when you trust the heuristic.
+#
+# Default:
+# AUTO_TRASH_DUPLICATES = {CONFIG_DEFAULTS['AUTO_TRASH_DUPLICATES']}
+
+# When True, my-plex tries to infer missing audio-language tags from
+# the filename (e.g. ".de.", ".en.") and from the library name.
+#
+# Default:
+# AUDIO_LANG_COMPLETE_FROM_FILENAME = {CONFIG_DEFAULTS['AUDIO_LANG_COMPLETE_FROM_FILENAME']!r}
+# AUDIO_LANG_COMPLETE_FROM_LIBRARY  = {CONFIG_DEFAULTS['AUDIO_LANG_COMPLETE_FROM_LIBRARY']!r}
+
+###############################################################################
+# Timeouts / retry delays / paths / editor
+###############################################################################
+
+# Plex API timeout in seconds (per-request).
+#
+# Default:
+# PLEX_TIMEOUT = {CONFIG_DEFAULTS['PLEX_TIMEOUT']}
+
+# Backoff delays (seconds) for retrying Plex API on transient errors.
+#
+# Default:
+# PLEX_RETRY_DELAYS = {CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']!r}
+
+# Backoff delays (seconds) for retrying SSH file operations.
+#
+# Default:
+# SSH_RETRY_DELAYS = {CONFIG_DEFAULTS['SSH_RETRY_DELAYS']!r}
+
+# Where the per-run cache-update log is written (JSON).
+#
+# Default:
+# CACHE_UPDATES_FILE = {CONFIG_DEFAULTS['CACHE_UPDATES_FILE']!r}
+#
+# Persistent sidecar JSON for the on-disk-marker feature.  Stores, per
+# media filepath, the markers my-plex has tagged the filename with
+# (e.g. .en. for AUDIO_LANG, [vu@2025-12-01] for WATCHED) and the
+# original "clean" filename, so the reverse operations can undo
+# exactly what was done — no guessing.  Written by --plex2disk,
+# --rename (with marker pattern bits), --reencode --mark, etc.
+# Read by --disk2plex, --strip, and --problems consistency checks.
+# Path is relative to $HOME (joined at runtime).  Almost never needs
+# overriding — only if you want the sidecar on a different volume.
+# Default:
+# DISK_MAP_FILE = {CONFIG_DEFAULTS['DISK_MAP_FILE']!r}
+#
+# Editor used by --resolve interactive prompts (None = $EDITOR / $VISUAL).
+# EDITOR = {CONFIG_DEFAULTS['EDITOR']!r}
 """
 
 def load_config_file(config_file=None):
@@ -1715,6 +2046,38 @@ TMDB_API_KEY = CONFIG_DEFAULTS['TMDB_API_KEY']
 UNMATCHED_RESOLVE_LOOKUP_ENGINES = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_LOOKUP_ENGINES']
 UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT']
 UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']
+UNMATCHED_RESOLVE_TITLE_NORMALIZE = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_TITLE_NORMALIZE']
+
+# Compiled cache for UNMATCHED_RESOLVE_TITLE_NORMALIZE (lazy).
+_UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+
+def _apply_unmatched_title_normalize(s):
+    """Apply UNMATCHED_RESOLVE_TITLE_NORMALIZE rules (extra user regexes)
+    on top of the built-in cleanup.  Returns the input unchanged when
+    rules are empty or when the result collapses to whitespace.
+    """
+    global _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED
+    if not s:
+        return s
+    if _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED is None:
+        out = []
+        for entry in (UNMATCHED_RESOLVE_TITLE_NORMALIZE or ()):
+            if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+                print(f"  > WARNING: UNMATCHED_RESOLVE_TITLE_NORMALIZE entry {entry!r} ignored: not a 2-tuple", file=sys.stderr)
+                continue
+            try:
+                out.append((re.compile(entry[0], re.IGNORECASE), entry[1]))
+            except re.error as e:
+                print(f"  > WARNING: UNMATCHED_RESOLVE_TITLE_NORMALIZE entry {entry!r} ignored: {e}", file=sys.stderr)
+        _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = out
+    if not _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED:
+        return s
+    result = s
+    for pat, repl in _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED:
+        result = pat.sub(repl, result)
+    # Collapse any runs of whitespace introduced by the rules.
+    result = re.sub(r'\s+', ' ', result).strip()
+    return result or s
 EDITOR = CONFIG_DEFAULTS['EDITOR']
 MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
 MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
@@ -6224,6 +6587,8 @@ def _clean_query_from_wrapper(wrapper_basename):
     base = re.sub(r"[’‘'“”`´]", '', base)
     # Collapse all non-alphanumeric runs to a single space.
     base = re.sub(r'[^a-z0-9]+', ' ', base, flags=re.IGNORECASE).strip()
+    # Apply user-configured extra normalization rules on top.
+    base = _apply_unmatched_title_normalize(base)
     return (base, year)
 
 
@@ -7530,7 +7895,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # go through _strip_query_tags so `#tag#` / `{tag}` / `[tag]` /
         # `(tag)` clutter doesn't poison the search.
         _clean_q, _wrapper_year = _clean_query_from_wrapper(os.path.basename(wrapper))
-        _title_for_search = _strip_query_tags(title)
+        _title_for_search = _apply_unmatched_title_normalize(_strip_query_tags(title))
         candidates = _search_unmatched_candidates(
             _title_for_search, kind,
             extra_query=_clean_q if _clean_q and _clean_q != _title_for_search.lower() else None,
@@ -12190,6 +12555,39 @@ def resolve_scope_to_keys(scope_val, media_type=None):
     resolved = PLEX_Media._resolve_to_media_keys(scope_val)
     obj_keys = resolved[0]
     if obj_keys:
+        # Append the canonical Plex KEY to the label so users can see
+        # *which* item my-plex resolved the free-text scope to.
+        # Three shapes worth surfacing:
+        #   • single key (Movie / Series / Season / Episode) → that key
+        #   • multiple keys all rooted at one Series         → the Series
+        #   • everything else                                 → no key suffix
+        _canon_key = None
+        if len(obj_keys) == 1:
+            _canon_key = obj_keys[0]
+        else:
+            _series_keys = set()
+            _has_other = False
+            for _k in obj_keys:
+                _o = PLEX_Media.OBJ_BY_ID.get(_k, {})
+                _t = _o.get('type')
+                if _t == 'Series':
+                    _series_keys.add(_k)
+                elif _t in ('Season', 'Episode'):
+                    _sk = _o.get('series_key')
+                    if _sk:
+                        _series_keys.add(_sk)
+                    else:
+                        _has_other = True
+                else:
+                    _has_other = True
+                if _has_other or len(_series_keys) > 1:
+                    break
+            if not _has_other and len(_series_keys) == 1:
+                _canon_key = next(iter(_series_keys))
+        # Suppress the [key] suffix when scope_val IS the canonical key
+        # (would be redundant noise: "for 'Series:5829' [Series:5829]").
+        if _canon_key and _canon_key != scope_val:
+            return (obj_keys, None, f" for '{scope_val}' [{_canon_key}]")
         return (obj_keys, None, f" for '{scope_val}'")
 
     # Nothing found
@@ -18747,19 +19145,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             plex_duration = obj.get('duration') or 0
             files_dict = obj.get('files', {})
-            # v2.51: detect whether a SIBLING version of this Episode/Movie has
-            # `container_duration` close to plex_duration (within 1%).  If so,
-            # any short sibling cannot fall back on the "Plex measured wrong"
-            # exception — internal consistency of the short version doesn't
-            # rescue it when the long version proves Plex was right.
-            _has_healthy_sibling = False
-            if plex_duration > 0:
-                for _sfi in files_dict.values():
-                    _sfm = _sfi.get('file_metadata') or {}
-                    _scd = _sfm.get('container_duration')
-                    if _scd and not _sfm.get('broken') and abs(_scd - plex_duration) / plex_duration < 0.01:
-                        _has_healthy_sibling = True
-                        break
+            # Healthy-sibling detection is computed PER FILE inside the loop
+            # below (so the file being evaluated is never counted as its own
+            # sibling).  A single-file object whose own duration drifts
+            # slightly from plex_duration must NOT exempt itself from the
+            # container-vs-video cross-validation.
             for file_info in files_dict.values():
                 # v2.55: a file with NO actual disk content is effectively
                 # absent — counted by `--missing`, never by `--broken`.
@@ -18797,6 +19187,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                             if diff_pct < -TRUNCATION_THRESHOLD_PCT:
                                 video_duration = file_metadata.get('video_duration')
+                                _has_healthy_sibling = False
+                                if len(files_dict) > 1:
+                                    for _sfi in files_dict.values():
+                                        if _sfi is file_info:
+                                            continue
+                                        _sfm = _sfi.get('file_metadata') or {}
+                                        _scd = _sfm.get('container_duration')
+                                        if _scd and not _sfm.get('broken') and abs(_scd - plex_duration) / plex_duration < 0.01:
+                                            _has_healthy_sibling = True
+                                            break
                                 if _has_healthy_sibling:
                                     # Another file version of this same Episode/Movie matches
                                     # plex_duration → THIS file is the truncated outlier.  The
