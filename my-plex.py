@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.52"
+SCRIPT_VERSION = "v2.54"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -30826,7 +30826,14 @@ def cmd_sort_new(args, dry_run=False, target=None):
             has_specials_script = False  # Can't run local scripts via SSH
 
         def _sort_move(src_server, target_dir_server, new_name):
-            """mkdir + move via SSH. Returns True on success."""
+            """mkdir + move via SSH (plus same-stem sidecar files like .nfo /
+            .srt / artwork).  Returns True on success of the main file's mv.
+
+            v2.53: also pulls SIDECARS — files in the source dir whose name
+            starts with `<src_stem>.` (e.g. .nfo, .eng.srt, .jpg, .ttml).
+            Sidecars get renamed with the same `<new_stem>.<rest>` so they
+            stay grouped with the renamed video for Plex's sidecar pickup.
+            """
             escaped_dir = escape_path_for_ssh(target_dir_server)
             mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
             result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
@@ -30835,7 +30842,35 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 return False
             dst_server = os.path.join(target_dir_server, new_name)
             success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
-            return success
+            if not success:
+                return False
+            # Sidecar sweep — same parent dir, name starts with `<src_stem>.`.
+            src_dir = os.path.dirname(src_server)
+            src_base = os.path.basename(src_server)
+            src_stem = os.path.splitext(src_base)[0]
+            new_stem = os.path.splitext(new_name)[0]
+            try:
+                ok_ls, files_in_src_dir = my_plex_file_operation('LIST_DIR', src_dir, remote_host, maxdepth=1)
+            except Exception:
+                ok_ls, files_in_src_dir = False, []
+            if ok_ls and files_in_src_dir:
+                for sib_path in files_in_src_dir:
+                    sib_base = os.path.basename(sib_path)
+                    if sib_base == src_base:
+                        continue
+                    if not sib_base.startswith(src_stem + '.'):
+                        continue
+                    # `.<rest>` after the stem.
+                    rest = sib_base[len(src_stem):]
+                    new_sib_name = new_stem + rest
+                    new_sib_path = os.path.join(target_dir_server, new_sib_name)
+                    sib_src = os.path.join(src_dir, sib_base)
+                    ok_sib, _ = my_plex_file_operation('MOVE', sib_src, remote_host, dest_path=new_sib_path)
+                    if ok_sib:
+                        print(f"      + sidecar: {sib_base} → {new_sib_name}")
+                    else:
+                        print(f"      ⚠ sidecar mv failed: {sib_base}")
+            return True
 
         # Sort files by name (chronological for TVOON dates)
         unsorted.sort(key=lambda x: x[0])
@@ -30843,6 +30878,18 @@ def cmd_sort_new(args, dry_run=False, target=None):
         sorted_count = 0
         failed_count = 0
         dry_run_lines = []  # (sort_key, line) for sorted dry-run output
+
+        # v2.53: per-season episode-number counter that increments PER CALL.
+        # Without this, dry-run + back-to-back calls within one run all
+        # return E01 because the disk doesn't yet have the planned files.
+        _ep_counters = {}
+        def _take_next_ep(target_dir_server, season):
+            key = target_dir_server
+            if key not in _ep_counters:
+                _ep_counters[key] = _next_episode_in_dir(target_dir_server, season, remote_host=remote_host)
+            n = _ep_counters[key]
+            _ep_counters[key] = n + 1
+            return n
 
         # Determine max episode number per season from cache (for absolute numbering detection)
         series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
@@ -30963,15 +31010,19 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     sorted_count += 1
                     continue
 
-            # 1d.5 (v2.26).  Specials / Pilot keyword has HIGHER precedence
-            # than the abs-idx lookup so a filename like `… Millionen-Special
-            # [1of4]` is correctly routed to s00/ instead of being parsed
-            # as abs-idx=3 = S01E03.  Keeps the descriptive part of the
-            # filename so the user can still tell which special it is.
-            if _re.search(r'\b(special|pilot|bonus|extra)\b', fn, _re.IGNORECASE):
+            # 1d.5 (v2.26 / extended v2.53).  Specials keyword has HIGHER
+            # precedence than the abs-idx lookup so a filename like
+            # `… Millionen-Special [1of4]` is correctly routed to s00/
+            # instead of being parsed as abs-idx=3 = S01E03.  v2.53: route
+            # through `is_special_episode()` which uses the full v2.52
+            # default regex (Behind the Scenes / BBC Visits / Featurette /
+            # Bonus / Extras / Deleted Scene / Interview / Making of /
+            # Pilot etc.) — captures every kind of bonus content here
+            # so it doesn't fall through to "no date in" and get skipped.
+            if is_special_episode(fn, specials_pattern) or _re.search(r'\bpilot\b', fn, _re.IGNORECASE):
                 season = 0
                 target_dir = os.path.join(series_dir, 's00')
-                next_ep = _next_episode_in_dir(target_dir, season)
+                next_ep = _take_next_ep(target_dir, season)
                 ep_num = next_ep
                 new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                 if dry_run:
@@ -31114,7 +31165,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 else:
                     # Default: move to specials/ as S00Exx
                     target_dir = os.path.join(series_dir, 'specials')
-                    ep_num = _next_episode_in_dir(target_dir, 0)
+                    ep_num = _take_next_ep(target_dir, 0)
                     new_name = PLEX_Media._build_sxex_filename(0, ep_num, fn)
                     target_path = os.path.join(target_dir, new_name)
                     if dry_run:
@@ -31161,7 +31212,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 else:
                     latest_season = 1
                 target_dir = os.path.join(series_dir, f"s{latest_season:02d}")
-                ep_num = _next_episode_in_dir(target_dir, latest_season)
+                ep_num = _take_next_ep(target_dir, latest_season)
                 new_name = PLEX_Media._build_sxex_filename(latest_season, ep_num, fn)
 
                 if dry_run:
@@ -31340,18 +31391,41 @@ def cmd_sort_new(args, dry_run=False, target=None):
     _sort_new_movies(dry_run=dry_run, target=target, yes=_yes, force=_force)
 
 
-def _next_episode_in_dir(directory, season_num):
-    """Find the next available episode number in a season directory."""
+def _next_episode_in_dir(directory, season_num, remote_host=None):
+    """Find the next available episode number in a season directory.
+
+    v2.53: the directory may live only on the Plex server (e.g.
+    /Volumes/2/watch.v/.../s00 doesn't exist locally on horse).  Tries:
+      1. local with ALTERNATIVE_ROOTPATHS resolution
+      2. SSH listdir on the Plex server
+    """
     import os
     spad = f"S{season_num:02d}"
     max_ep = 0
-    if os.path.isdir(directory):
-        for fn in os.listdir(directory):
-            m = _re.search(rf'{spad}E(\d+)', fn)
-            if m:
-                ep = int(m.group(1))
-                if ep > max_ep:
-                    max_ep = ep
+    entries = []
+    # 1. Try local (post-ALTERNATIVE_ROOTPATHS resolution).
+    try:
+        local_dir = get_local_path(directory) if 'get_local_path' in globals() else directory
+        if os.path.isdir(local_dir):
+            entries = os.listdir(local_dir)
+    except Exception:
+        entries = []
+    # 2. Fallback to SSH if the local check found nothing AND the path
+    # looks like a server-side path (heuristic: starts with /Volumes/).
+    if not entries and directory.startswith('/Volumes/'):
+        host = remote_host or PLEX_DB_REMOTE_HOST
+        try:
+            success, file_list = my_plex_file_operation('LIST_DIR', directory, host, maxdepth=1)
+            if success and file_list:
+                entries = [os.path.basename(p) for p in file_list]
+        except Exception:
+            entries = []
+    for fn in entries:
+        m = _re.search(rf'{spad}E(\d+)', fn)
+        if m:
+            ep = int(m.group(1))
+            if ep > max_ep:
+                max_ep = ep
     return max_ep + 1
 
 
