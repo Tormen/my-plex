@@ -30298,6 +30298,9 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
 
     print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
 
+    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+    libs_present = set(PLEX_Library.OBJ_DICT.keys())
+
     # NOTE: bare-movie wrap is handled UPSTREAM in `cmd_sort_new` (disk-scan
     # path, around line 31154+).  That logic catches files newly arrived on
     # disk before Plex has indexed them — exactly what's needed.  The
