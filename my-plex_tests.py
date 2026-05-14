@@ -12,7 +12,7 @@ import pickle
 import io
 import subprocess
 
-MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'my-plex.py')
+MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
 ############################################################
 #### REGRESSION TESTING
@@ -1006,17 +1006,19 @@ Summary must report metadata probing separately from library changes (added/remo
         self.assertIn("json.dumps(", func_body,
             "Collector script must output JSON via json.dumps")
 
-    def test_add_media_obj_via_PLEX_API_uses_determine_remote_host(self):
-        """add_media_obj_via_PLEX_API must use determine_remote_host() not getattr(library, 'remote_host')."""
+    def test_add_media_obj_via_PLEX_API_does_not_use_broken_remote_host_pattern(self):
+        """add_media_obj_via_PLEX_API must NOT use the broken getattr(library, 'remote_host') pattern.
+        Remote-host detection is deferred to the metadata batch processor, which calls
+        determine_remote_host(filepath) for each queued file (see _process_metadata_batch_queue)."""
         content = self._read_script()
         import re
         match = re.search(r'(def add_media_obj_via_PLEX_API\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         self.assertIsNotNone(match, "add_media_obj_via_PLEX_API function must exist")
         func_body = match.group(1)
         self.assertNotIn("getattr(library, 'remote_host'", func_body,
-            "Must not use getattr(library, 'remote_host') — use determine_remote_host()")
-        self.assertIn("determine_remote_host(", func_body,
-            "Must use determine_remote_host() for proper remote detection")
+            "Must not use getattr(library, 'remote_host') — host detection is the batch processor's job")
+        self.assertIn("_metadata_batch_queue.append(", func_body,
+            "Files must be queued for the parallel metadata batch processor (which calls determine_remote_host per file)")
 
     def test_get_video_file_metadata_uses_run_tool(self):
         """get_video_file_metadata must use run_tool_on_PLEX_server for ffmpeg (local and remote)."""
@@ -5096,7 +5098,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_rename_single_episode_uses_shared_primitive(self):
         """_rename_single_episode should delegate to _rename_episode_file (code structure check)."""
-        src_path = os.path.join(os.path.dirname(__file__), 'my-plex.py')
+        src_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
         with open(src_path, 'r') as f:
             src = f.read()
         # Find _rename_single_episode body and verify it calls _rename_episode_file
@@ -5108,7 +5110,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_sort_new_uses_build_sxex_filename(self):
         """cmd_sort_new should use _build_sxex_filename instead of hardcoded f-strings."""
-        src_path = os.path.join(os.path.dirname(__file__), 'my-plex.py')
+        src_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
         with open(src_path, 'r') as f:
             src = f.read()
         # Find cmd_sort_new and verify no hardcoded S{season:02d}E{ep_num:02d} in new_name assignments
@@ -5592,7 +5594,7 @@ class TestUnsorted(unittest.TestCase):
         import re
         content = self._read_script()
         # Global dispatch: --unsorted --fix → cmd_sort_new
-        match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --mismatch)", content, re.DOTALL)
+        match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --mismatched)", content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('fix', body, "Global --unsorted handler must check --fix flag")
@@ -5903,17 +5905,20 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
             return f.read()
 
 
-class TestPotentialMismatch(unittest.TestCase):
-    """Test --potential-mismatch command integration."""
+class TestMismatched(unittest.TestCase):
+    """Test --mismatched command integration (title-vs-dir + multi-version grouping)."""
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
     def test_function_exists(self):
-        """_list_potential_mismatches must exist."""
+        """_list_mismatched + _list_potential_mismatches + _detect_multi_version_mismatch must exist."""
         content = self._read_script()
+        self.assertIn('def _list_mismatched(', content)
         self.assertIn('def _list_potential_mismatches(', content)
+        self.assertIn('def _detect_multi_version_mismatch(', content)
+        self.assertIn('def _list_multi_version_mismatches(', content)
 
     def test_normalize_exists(self):
         """_normalize_for_comparison must exist."""
@@ -5926,47 +5931,98 @@ class TestPotentialMismatch(unittest.TestCase):
         self.assertIn('def _title_similarity(', content)
 
     def test_library_argparser(self):
-        """--potential-mismatch must be in library argparser."""
+        """--mismatched must be in library argparser."""
         content = self._read_script()
-        self.assertIn("'--potential-mismatch'", content)
+        self.assertIn("'--mismatched'", content)
 
     def test_global_cmd_parser(self):
-        """--potential-mismatch must be in GLOBAL_CMD_PARSER."""
+        """--mismatched must be in GLOBAL_CMD_PARSER."""
         content = self._read_script()
         idx = content.index('GLOBAL_CMD_PARSER.add_argument')
-        self.assertIn('--potential-mismatch', content[idx:])
+        self.assertIn('--mismatched', content[idx:])
 
     def test_problems_integration(self):
-        """--problems must include potential mismatches section."""
+        """--problems must include the mismatched section."""
         content = self._read_script()
-        self.assertIn('Potential Mismatches', content)
+        self.assertIn('Mismatched', content)
         self.assertIn('mismatch_count', content)
 
     def test_help_exists(self):
-        """--help potential-mismatch must work."""
+        """--help mismatched must work and show both detectors."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--help', 'potential-mismatch'],
+            [sys.executable, MAIN_SCRIPT, '--help', 'mismatched'],
             capture_output=True, text=True, timeout=30)
-        self.assertEqual(result.returncode, 0, f"--help potential-mismatch failed: {result.stderr}")
-        self.assertIn('MISMATCH', result.stdout)
+        self.assertEqual(result.returncode, 0, f"--help mismatched failed: {result.stderr}")
+        self.assertIn('MISMATCHED', result.stdout)
+        self.assertIn('TITLE vs DIRECTORY', result.stdout)
+        self.assertIn('MULTI-VERSION', result.stdout)
 
     def test_e2e_runs(self):
-        """--potential-mismatch must run without error."""
+        """--mismatched must run without error."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--potential-mismatch'],
+            [sys.executable, MAIN_SCRIPT, '--mismatched'],
             capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, f"--potential-mismatch failed: {result.stderr}")
+        self.assertEqual(result.returncode, 0, f"--mismatched failed: {result.stderr}")
 
     def test_re_injection(self):
-        """--potential-mismatch must be re-injected into remaining_args."""
+        """--mismatched must be re-injected into remaining_args."""
         content = self._read_script()
-        self.assertIn("'potential_mismatch'", content)
-        self.assertIn("'--potential-mismatch'", content)
+        self.assertIn("'mismatched'", content)
+        self.assertIn("'--mismatched'", content)
 
     def test_has_standalone_cmd(self):
-        """--potential-mismatch must be in has_standalone_cmd check."""
+        """--mismatched must be in has_standalone_cmd check."""
         content = self._read_script()
-        self.assertIn("'potential_mismatch'", content)
+        self.assertIn("'mismatched'", content)
+
+    def test_no_old_aliases(self):
+        """Old --mismatch / --potential-mismatch must NOT be wired (renamed cleanly)."""
+        content = self._read_script()
+        self.assertNotIn("'--potential-mismatch'", content)
+        self.assertNotIn("'--mismatch'", content)
+
+    def test_config_defaults_present(self):
+        """Multi-version thresholds must be exposed via CONFIG_DEFAULTS + module globals."""
+        content = self._read_script()
+        self.assertIn("'MULTI_VERSION_MAX_MOVIE'", content)
+        self.assertIn("'MULTI_VERSION_MAX_SERIES'", content)
+        self.assertIn("'MULTI_VERSION_MAX_DURATION_SPREAD_PCT'", content)
+        self.assertIn("MULTI_VERSION_MAX_MOVIE = CONFIG_DEFAULTS.get(", content)
+        self.assertIn("MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get(", content)
+        self.assertIn("MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get(", content)
+
+    def test_detect_multi_version_count(self):
+        """_detect_multi_version_mismatch must flag count > limit."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("my_plex_mod", MAIN_SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        # Don't execute (heavy); just inspect _detect_multi_version_mismatch via AST patterns.
+        # Instead, integration-test the logic via the script content:
+        content = self._read_script()
+        self.assertIn("len(files) > limit", content)
+        self.assertIn("duration spread", content)
+        self.assertIn("different directories", content)
+
+    def test_broken_spread_rescue_present(self):
+        """--broken must back off the healthy-sibling rule when version durations are widely spread."""
+        content = self._read_script()
+        # The rescue is gated on MULTI_VERSION_MAX_DURATION_SPREAD_PCT inside _list_broken_files.
+        idx = content.index('def _list_broken_files(')
+        end = content.index('\n    @staticmethod', idx)
+        body = content[idx:end]
+        self.assertIn('_sib_versions_are_alt_encodes', body)
+        self.assertIn('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', body)
+
+    def test_broken_healthy_sibling_excludes_self(self):
+        """--broken's healthy-sibling scan must skip the file being evaluated (Bug A fix)."""
+        content = self._read_script()
+        idx = content.index('def _list_broken_files(')
+        end = content.index('\n    @staticmethod', idx)
+        body = content[idx:end]
+        self.assertIn('if _sfi is file_info:', body)
+        self.assertIn('continue', body)
+        # And must only run when there's more than one file
+        self.assertIn('len(files_dict) > 1', body)
 
 
 class TestShowDirDerivation(unittest.TestCase):
@@ -6499,10 +6555,19 @@ class TestRenumber(unittest.TestCase):
         self.assertIn("'--renumber'", section)
 
     def test_command_registration_global_parser(self):
-        """--renumber must be registered in GLOBAL_CMD_PARSER."""
+        """--renumber and --fix must both be registered in GLOBAL_CMD_PARSER."""
         content = self._read_script()
-        idx = content.index('GLOBAL_CMD_PARSER.add_argument')
-        section = content[idx:idx+5000]
+        # Scan the entire GLOBAL_CMD_PARSER section, not an arbitrary 5000-char window
+        # (which has silently grown stale as new flags pushed --fix's registration past it).
+        first = content.index('GLOBAL_CMD_PARSER.add_argument')
+        # Find a safe end-of-block marker: argparser_main_parsed or end-of-function.
+        end_markers = ['GLOBAL_CMD_PARSER.parse_known_args', 'GLOBAL_CMD_PARSER = None', 'argparser_main_parsed']
+        end = len(content)
+        for m in end_markers:
+            i = content.find(m, first)
+            if i != -1:
+                end = min(end, i)
+        section = content[first:end]
         self.assertIn("'--renumber'", section)
         self.assertIn("'--fix'", section)
 
@@ -6730,8 +6795,8 @@ class TestEpisodeNumberingIssues(unittest.TestCase):
         content = self._read_script()
         self.assertIn("main_parser.add_argument('--episode-numbering-issues'", content)
 
-    def test_potential_mismatch_uses_key_format(self):
-        """--potential-mismatch output must use cache key format (Type:ID), not separate TYPE+ID columns."""
+    def test_mismatched_title_dir_uses_key_format(self):
+        """--mismatched (title-vs-directory section) output must use cache key format (Type:ID), not separate TYPE+ID columns."""
         content = self._read_script()
         idx = content.index('def _list_potential_mismatches(')
         end = content.index('\n    @staticmethod', idx + 1)
@@ -6742,8 +6807,8 @@ class TestEpisodeNumberingIssues(unittest.TestCase):
         # Must have KEY column
         self.assertIn("{'KEY'", section)
 
-    def test_potential_mismatch_comparison_column(self):
-        """--potential-mismatch output must have COMPARISON column."""
+    def test_mismatched_title_dir_comparison_column(self):
+        """--mismatched (title-vs-directory section) output must have COMPARISON column."""
         content = self._read_script()
         idx = content.index('def _list_potential_mismatches(')
         end = content.index('\n    @staticmethod', idx + 1)
@@ -9004,7 +9069,7 @@ class TestUnmatchedResolve(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import importlib.util, sys as _sys, os as _os
-        here = _os.path.dirname(_os.path.abspath(__file__))
+        here = _os.path.dirname(_os.path.realpath(__file__))
         spec = importlib.util.spec_from_file_location('_myplex_under_test',
             _os.path.join(here, 'my-plex.py'))
         cls.m = importlib.util.module_from_spec(spec)
@@ -9257,7 +9322,7 @@ class TestAudioLangPureVsCompleted(unittest.TestCase):
 
     def _read_script(self):
         import os
-        here = os.path.dirname(os.path.abspath(__file__))
+        here = os.path.dirname(os.path.realpath(__file__))
         with open(os.path.join(here, 'my-plex.py'), 'r') as f:
             return f.read()
 
@@ -9332,7 +9397,7 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
 
     def _read_script(self):
         import os
-        here = os.path.dirname(os.path.abspath(__file__))
+        here = os.path.dirname(os.path.realpath(__file__))
         with open(os.path.join(here, 'my-plex.py'), 'r') as f:
             return f.read()
 
@@ -9399,7 +9464,7 @@ _UNITTEST_SCOPES = {
     'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
-                   TestShowInfoSeasonTable, TestPotentialMismatch,
+                   TestShowInfoSeasonTable, TestMismatched,
                    TestShowDirDerivation],
     'renumber':   [TestRenumber],
     'move':       [TestMove],
