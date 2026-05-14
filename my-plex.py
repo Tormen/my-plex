@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.46"
+SCRIPT_VERSION = "v2.47"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6871,13 +6871,28 @@ bs_merge_dir() {
 
 def _bad_structure_flatten_block(i, src_q, dst_q):
     """Bash block (string) that flattens one src_q → dst_q.
+
+    v2.47: PRE-RENAME the source dir to a temp name before merging.  On
+    case-insensitive filesystems (macOS APFS default), if `src_dir` has the
+    same name as a file inside it (e.g.  TVOON wrappers where the dir is
+    named like `xxx.mpg.hq.avi/` and contains `XXX.MPG.HQ.avi`), the
+    per-file collision check sees the source dir as the conflict and bails
+    with "dir/file mismatch".  Renaming src first sidesteps this entirely.
+
     Uses bs_merge_dir() (defined once at the top of the batched script) for
     per-file resolution.  Caller emits OK|<i> or FAIL|<i>|<reason>."""
     return (
         f"(\n"
         f"_IDX={i}\n"
-        f"bs_merge_dir {src_q} {dst_q} || exit 0\n"
-        f"rmdir {src_q} || {{ echo \"FAIL|{i}|rmdir failed (not empty?)\"; exit 0; }}\n"
+        f"_orig_src={src_q}\n"
+        f"_tmp_src=$_orig_src.__bs_tmp.$$\n"
+        f"mv -- {src_q} \"$_tmp_src\" || {{ echo \"FAIL|{i}|pre-rename src failed\"; exit 0; }}\n"
+        f"bs_merge_dir \"$_tmp_src\" {dst_q} || {{\n"
+        # Best-effort rollback so we don't leave the user with a renamed src.
+        f"  mv -- \"$_tmp_src\" {src_q} 2>/dev/null || true\n"
+        f"  exit 0\n"
+        f"}}\n"
+        f"rmdir \"$_tmp_src\" || {{ echo \"FAIL|{i}|rmdir tmp src failed (not empty?)\"; exit 0; }}\n"
         f"echo \"OK|{i}\"\n"
         f")"
     )
