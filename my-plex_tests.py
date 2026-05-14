@@ -3994,12 +3994,19 @@ class TestScan(unittest.TestCase):
         self.assertIn("FORCE_CACHE_UPDATE = True", src,
             "--scan must set FORCE_CACHE_UPDATE = True")
 
-    def test_scan_implies_force_metadata(self):
-        """--scan must enable FORCE_METADATA so file durations are re-read."""
+    def test_scan_does_not_force_metadata(self):
+        """v2.41 invariant: --scan must NOT force ffmpeg re-probe.
+
+        Earlier versions OR'd `has_scan` into FORCE_METADATA, which made
+        every --scan re-probe ~10k files.  The fix in v2.41 was to drop
+        `has_scan` from that OR clause.  This test guards against the
+        regression by asserting `has_scan` never appears in a
+        FORCE_METADATA assignment line.
+        """
         src = self._read_script()
-        self.assertIn("has_scan", src, "has_scan variable must exist")
-        self.assertRegex(src, r'FORCE_METADATA.*has_scan',
-            "--scan must enable FORCE_METADATA")
+        for line in src.splitlines():
+            if 'FORCE_METADATA' in line and '=' in line and 'has_scan' in line:
+                self.fail(f"v2.41 invariant violated: FORCE_METADATA must not be derived from has_scan (line: {line!r})")
 
     def test_scan_uses_lib_refresh(self):
         """--scan must use lib.refresh() to force Plex to re-read file metadata."""
@@ -5388,7 +5395,7 @@ class TestUnmatched(unittest.TestCase):
         body = match.group(1)
         self.assertIn('UNMATCHED', body)
         self.assertIn('local://', body)
-        self.assertIn('Fix Match', body)
+        self.assertIn('--resolve', body)
 
     def test_cache_format_check_for_guid(self):
         """Cache must detect missing guid field and warn at point of use."""
@@ -5404,7 +5411,71 @@ class TestUnmatched(unittest.TestCase):
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, f"--help unmatched failed: {result.stderr}")
         self.assertIn('UNMATCHED', result.stdout)
-        self.assertIn('Fix Match', result.stdout)
+        self.assertIn('--resolve', result.stdout)
+
+
+class TestSortNewScanLocations(unittest.TestCase):
+    """v2.58: SORT_NEW_SCAN_LOCATIONS config + _parse_sort_new_locations()."""
+
+    def _import_main(self):
+        import importlib.util, os
+        spec = importlib.util.spec_from_file_location('mp', MAIN_SCRIPT)
+        mp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mp)
+        return mp
+
+    def test_default_locations(self):
+        """Default must include '.' plus 's0x' and ',new' subdir scans."""
+        mp = self._import_main()
+        self.assertEqual(mp.CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS'],
+                         ['.', 's0x', ',new'])
+
+    def test_parser_plain_strings(self):
+        mp = self._import_main()
+        mp.SORT_NEW_SCAN_LOCATIONS = ['.', 's0x', ',new']
+        mp._SORT_NEW_LOCATIONS_COMPILED = None
+        self.assertEqual(mp._parse_sort_new_locations(),
+                         [('.', None), ('s0x', None), (',new', None)])
+
+    def test_parser_touch_modes(self):
+        mp = self._import_main()
+        mp.SORT_NEW_SCAN_LOCATIONS = ['.', ('s0x', 'touch'), (',new', 'touch-all')]
+        mp._SORT_NEW_LOCATIONS_COMPILED = None
+        self.assertEqual(mp._parse_sort_new_locations(),
+                         [('.', None), ('s0x', 'main'), (',new', 'all')])
+
+    def test_parser_rejects_absolute_paths(self):
+        mp = self._import_main()
+        mp.SORT_NEW_SCAN_LOCATIONS = ['.', '/etc/bad']
+        mp._SORT_NEW_LOCATIONS_COMPILED = None
+        result = mp._parse_sort_new_locations()
+        self.assertEqual(result, [('.', None)])
+
+    def test_parser_rejects_dotdot(self):
+        mp = self._import_main()
+        mp.SORT_NEW_SCAN_LOCATIONS = ['.', '../escape']
+        mp._SORT_NEW_LOCATIONS_COMPILED = None
+        result = mp._parse_sort_new_locations()
+        self.assertEqual(result, [('.', None)])
+
+    def test_parser_rejects_unknown_mode(self):
+        mp = self._import_main()
+        mp.SORT_NEW_SCAN_LOCATIONS = [('s0x', 'destroy')]
+        mp._SORT_NEW_LOCATIONS_COMPILED = None
+        result = mp._parse_sort_new_locations()
+        self.assertEqual(result, [])
+
+    def test_help_mentions_config_and_modes(self):
+        """--help sort-new must document SORT_NEW_SCAN_LOCATIONS and the touch modes."""
+        import subprocess, sys
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'sort-new'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('SORT_NEW_SCAN_LOCATIONS', result.stdout)
+        self.assertIn("'touch'", result.stdout)
+        self.assertIn("'touch-all'", result.stdout)
+        self.assertIn('ALL LIBRARIES', result.stdout)
 
 
 class TestUnsorted(unittest.TestCase):
@@ -9267,7 +9338,7 @@ _UNITTEST_SCOPES = {
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename, TestRenameShared],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
-                   TestSortNew, TestUnmatched, TestUnsorted],
+                   TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
