@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.54"
+SCRIPT_VERSION = "v2.55"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -12656,14 +12656,20 @@ for line in sys.stdin:
         if not os.path.exists(fp):
             print(json.dumps({{"path": fp, "n": n, "error": "file not found"}}), flush=True)
             continue
-        filesize = os.path.getsize(fp)
+        _st = os.stat(fp)
+        filesize = _st.st_size
+        # v2.55: ALSO collect disk_blocks (st_blocks * 512).  Sparse files
+        # (declared size but no allocated blocks) report disk_blocks=0
+        # even though filesize is large.  Used to classify a "broken"
+        # file as missing-content vs genuinely corrupt.
+        disk_bytes = _st.st_blocks * 512 if hasattr(_st, "st_blocks") else None
         ext = os.path.splitext(fp)[1].lower()
-        result = {{"path": fp, "n": n, "filesize": filesize, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}
+        result = {{"path": fp, "n": n, "filesize": filesize, "disk_bytes": disk_bytes, "scanned_at": datetime.now().isoformat(), "file_type": ext[1:]}}
         r = subprocess.run([ffmpeg, "-i", fp], capture_output=True, timeout=30)
         stderr_text = r.stderr.decode("utf-8", errors="replace")
         m = re.search(r"Duration: (\\d+):(\\d+):(\\d+\\.\\d+)", stderr_text)
         if not m:
-            print(json.dumps({{"path": fp, "n": n, "error": "ffprobe_error", "stderr": stderr_text.strip()[:200]}}), flush=True)
+            print(json.dumps({{"path": fp, "n": n, "filesize": filesize, "disk_bytes": disk_bytes, "error": "ffprobe_error", "stderr": stderr_text.strip()[:200]}}), flush=True)
             continue
         result["container_duration"] = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
         if has_ffprobe:
@@ -12862,13 +12868,16 @@ for line in sys.stdin:
                         obj = PLEX_Media.OBJ_BY_ID[obj_key]
                         files_dict = obj.get('files', {})
                         if version in files_dict:
-                            files_dict[version]['file_metadata'] = {
+                            _broken_md = {
                                 'broken': True,
                                 'reason': 'ffprobe_error',
                                 'stderr': stderr_msg[:200],
                                 'filesize': files_dict[version].get('filesize'),
                                 'marked_at': datetime.now().isoformat()
                             }
+                            if entry.get('disk_bytes') is not None:
+                                _broken_md['disk_bytes'] = entry['disk_bytes']
+                            files_dict[version]['file_metadata'] = _broken_md
                     if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                         PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
                 continue
@@ -12896,6 +12905,8 @@ for line in sys.stdin:
                             metadata['video_duration'] = entry['video_duration']
                         if 'file_ends_cleanly' in entry:
                             metadata['file_ends_cleanly'] = entry['file_ends_cleanly']
+                        if entry.get('disk_bytes') is not None:
+                            metadata['disk_bytes'] = entry['disk_bytes']
                         file_info['file_metadata'] = metadata
 
                 if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
@@ -13014,6 +13025,8 @@ for line in sys.stdin:
                                     metadata['video_duration'] = entry['video_duration']
                                 if 'file_ends_cleanly' in entry:
                                     metadata['file_ends_cleanly'] = entry['file_ends_cleanly']
+                                if entry.get('disk_bytes') is not None:
+                                    metadata['disk_bytes'] = entry['disk_bytes']
                                 file_info['file_metadata'] = metadata
                         if hasattr(PLEX_Media, 'library_delta_counters') and display_title in PLEX_Media.library_delta_counters:
                             PLEX_Media.library_delta_counters[display_title]['metadata_probed'] += 1
@@ -18499,6 +18512,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         _has_healthy_sibling = True
                         break
             for file_info in files_dict.values():
+                # v2.55: a file with NO actual disk content is effectively
+                # absent — counted by `--missing`, never by `--broken`.
+                # "No content" = filesize==0 OR file is sparse (logical
+                # size declared but disk_bytes==0, e.g. a placeholder
+                # from a failed download).
+                if file_info.get('filesize') == 0:
+                    continue
+                _fm_pre = file_info.get('file_metadata') or {}
+                if isinstance(_fm_pre, dict) and _fm_pre.get('disk_bytes') == 0:
+                    continue
                 file_metadata = file_info.get('file_metadata')
                 is_broken = False
                 diff_pct = None
@@ -18772,7 +18795,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not all_episodes:
                 continue
 
-            # Build have_set from cached episodes
+            # Build have_set from cached episodes.
+            # v2.55: an Episode whose ONLY file version is 0 bytes is
+            # effectively absent — treat it as missing (don't add to
+            # have_set) so --missing reports it.  --broken skips 0-byte
+            # files for the same reason (they aren't truncated; they're
+            # not there at all).
+            def _ep_has_real_content(ek):
+                _eo = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+                _fdict = _eo.get('files') or {}
+                if not _fdict:
+                    return False
+                for _fi in _fdict.values():
+                    if not isinstance(_fi, dict):
+                        continue
+                    if (_fi.get('filesize') or 0) == 0:
+                        continue
+                    _fm = _fi.get('file_metadata') or {}
+                    # Sparse (logical size but 0 blocks allocated) → no content.
+                    if isinstance(_fm, dict) and _fm.get('disk_bytes') == 0:
+                        continue
+                    return True
+                return False
             cached_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
             have_set = set()
             for s_str, eps in cached_episodes.items():
@@ -18781,7 +18825,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 except (ValueError, IndexError):
                     continue
                 e_nums = []
-                for e_str in eps:
+                for e_str, vmap in eps.items():
+                    # vmap: {version: [episode_keys]}; an Episode counts as
+                    # "have" only if SOME version of it has filesize > 0.
+                    if isinstance(vmap, dict):
+                        ep_keys = []
+                        for _eks in vmap.values():
+                            if isinstance(_eks, list):
+                                ep_keys.extend(_eks)
+                        if ep_keys and not any(_ep_has_real_content(ek) for ek in ep_keys):
+                            continue  # all-empty → treat as missing
                     try:
                         e_nums.append(int(e_str[1:]))
                     except (ValueError, IndexError):
