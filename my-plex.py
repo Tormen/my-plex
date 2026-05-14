@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.38"
+SCRIPT_VERSION = "v2.40"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6454,16 +6454,60 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print(f">>> --bad-structure --resolve: {len(candidates)} candidate file(s) found")
     print()
 
+    # Plan a separate queue for Episode atomic season-dir relocations.
+    plan_episode = []  # (key, obj, filepath, src_dir, target_season_dir, intermediates, host)
+
     for key, obj, filepath, lib_root, overrun, wrapper_dir, src_dir in candidates:
-        # v2.38 auto-resolves Movies only — Episode flattening needs season-aware
-        # logic (look up obj['season'] → choose/create the matching S0X dir),
-        # which is deferred to a future revision.  All Episodes land in the
-        # conflict pile with a clear reason.
-        if obj.get('type') != 'Movie':
-            plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
-                                  [f"Episode flatten requires manual review (season={obj.get('S_str','?')}, E={obj.get('E_str','?')})"],
-                                  'episode-needs-season-logic'))
+        # ---------- Episode path ---------- v2.39
+        if obj.get('type') == 'Episode':
+            season = obj.get('season')
+            if season is None:
+                plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
+                                      [f"obj has no season field — manual review"],
+                                      'episode-no-season'))
+                continue
+            target_season_basename = 'Specials' if int(season) == 0 else f'S{int(season):02d}'
+            # series_dir = lib_root / first segment past root.
+            rest = filepath[len(lib_root) + 1:]
+            series_seg = rest.split('/', 1)[0]
+            series_dir = f'{lib_root}/{series_seg}'
+            target_season_dir = f'{series_dir}/{target_season_basename}'
+            src_basename = _os.path.basename(src_dir)
+            # MVP: only auto-handle when the file already sits in a season-named
+            # parent dir AND that name matches the obj's season number.  Other
+            # cases (file not in a season dir, name mismatch, target already
+            # exists) punt to the interactive prompt.
+            season_dir_re = re.compile(rf'^(?:S{int(season):02d}|S{int(season)}|Season\s*0?{int(season)})$', re.IGNORECASE)
+            if int(season) == 0:
+                season_dir_re = re.compile(r'^(?:Specials|S00|Season\s*0)$', re.IGNORECASE)
+            if not season_dir_re.match(src_basename):
+                plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
+                                      [f"file's parent dir '{src_basename}' does not match the expected season name "
+                                       f"({target_season_basename}) — manual review"],
+                                      'episode-no-season-parent'))
+                continue
+            # Walk intermediates between series_dir and src_dir (parents to rmdir later).
+            intermediates = []
+            cur = _os.path.dirname(src_dir)
+            while cur != series_dir and cur.startswith(series_dir + '/'):
+                intermediates.append(cur)
+                cur = _os.path.dirname(cur)
+            remote_host, _, _ = determine_remote_host(filepath)
+            # Check target doesn't already exist.
+            check = _sp.run(_ssh_args(remote_host) + [f'test -e {_shlex.quote(target_season_dir)} && echo EXISTS || echo MISSING'],
+                            capture_output=True, text=True, timeout=15) if remote_host else \
+                    _sp.run(['sh', '-c', f'test -e {_shlex.quote(target_season_dir)} && echo EXISTS || echo MISSING'],
+                            capture_output=True, text=True, timeout=15)
+            exists = 'EXISTS' in (check.stdout or '')
+            if exists:
+                plan_conflict.append((key, obj, filepath, target_season_dir, src_dir,
+                                      [f"target {target_season_dir} already exists — would need file-by-file merge"],
+                                      'episode-target-exists'))
+                continue
+            plan_episode.append((key, obj, filepath, src_dir, target_season_dir, intermediates, remote_host))
             continue
+
+        # ---------- Movie path ----------
         # Depth overrun > 1 (file two or more levels too deep) is also
         # punted to conflict pile — _bad_structure_flatten only moves up
         # by one level per call.
@@ -6511,17 +6555,37 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         plan_auto.append((key, obj, filepath, wrapper_dir, src_dir, remote_host))
 
     # ---------- 4.  Report plan ----------------------------------------
-    print(f"  AUTO-RESOLVABLE: {len(plan_auto)}")
-    print(f"  CONFLICTS:       {len(plan_conflict)}  (will prompt interactively)")
+    print(f"  AUTO-RESOLVABLE Movies:   {len(plan_auto)}")
+    print(f"  AUTO-RESOLVABLE Episodes: {len(plan_episode)}")
+    print(f"  CONFLICTS:                {len(plan_conflict)}  (will prompt interactively)")
     print()
 
     if plan_auto:
-        print("--- Auto-flatten queue ---")
+        print("--- Auto-flatten queue (Movies — promote sibling files up) ---")
         for key, _o, filepath, wrapper, src, _h in plan_auto:
             print(f"  {key}")
             print(f"      file:    {filepath}")
             print(f"      src_dir: {src}")
             print(f"      dst_dir: {wrapper}")
+        print()
+
+    if plan_episode:
+        # Deduplicate by (src_dir) — many episodes share one season-dir move.
+        _ep_by_src = {}
+        for entry in plan_episode:
+            _ep_by_src.setdefault(entry[3], []).append(entry)
+        print(f"--- Auto-flatten queue (Episodes — relocate season dir up to series level, "
+              f"{len(_ep_by_src)} unique move(s) covering {len(plan_episode)} episode(s)) ---")
+        for src, group in _ep_by_src.items():
+            first = group[0]
+            _key, _obj, _fp, _s, target, intermediates, _h = first
+            print(f"  {len(group)} episode(s) of {_obj.get('series') or _obj.get('title','?')}")
+            print(f"      mv:      {src}")
+            print(f"          →    {target}")
+            for inter in intermediates:
+                print(f"      rmdir:   {inter}")
+            for k, o, _, _, _, _, _ in group:
+                print(f"        + {k}  (S{int(o.get('season') or 0):02d}E{int(o.get('episode') or 0):02d})  {_os.path.basename(o.get('file') or '')}")
         print()
 
     if dry_run:
@@ -6531,11 +6595,14 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         return
 
     # ---------- 5.  Confirm + execute auto plan -----------------------
-    if plan_auto and not auto and not yes:
-        resp = input(f"\nFlatten {len(plan_auto)} auto-resolvable item(s)? [y/N] ").strip().lower()
+    total_auto = len(plan_auto) + len(plan_episode)
+    if total_auto and not auto and not yes:
+        resp = input(f"\nFlatten {total_auto} auto-resolvable item(s) "
+                     f"({len(plan_auto)} Movies, {len(plan_episode)} Episodes)? [y/N] ").strip().lower()
         if resp != 'y':
             print(">>> Skipped auto-flatten.")
             plan_auto = []
+            plan_episode = []
 
     flattened = 0
     failed = 0
@@ -6549,6 +6616,28 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         else:
             failed += 1
             print(f"  ✗ {key}: flatten failed (see error above)")
+
+    # Multiple Episodes of the same season share the same (src, target) move.
+    # Group by src_dir → execute mv ONCE, then update cache for every Episode
+    # that lives under it.
+    by_src = {}
+    for entry in plan_episode:
+        by_src.setdefault(entry[3], []).append(entry)  # entry[3] = src_dir
+    for src, group in by_src.items():
+        # All entries in `group` share src + target + intermediates + host.
+        first = group[0]
+        _key, _obj, _fp, _src, target, intermediates, host = first
+        ok = _bad_structure_relocate_season(host, src, target, intermediates)
+        if ok:
+            for key, obj, filepath, _s, _t, _i, _h in group:
+                flattened += 1
+                new_fp = f'{target}/{_os.path.basename(filepath)}'
+                _bad_structure_update_cache(key, filepath, new_fp)
+            print(f"  ✓ season relocated: {src}  →  {target}  ({len(group)} episode(s))")
+        else:
+            for key, _o, _fp, _s, _t, _i, _h in group:
+                failed += 1
+            print(f"  ✗ season relocate failed: {src} (affected {len(group)} episode(s))")
 
     # ---------- 6.  Interactive prompt for conflicts ------------------
     if plan_conflict and auto:
@@ -6651,12 +6740,49 @@ def _bad_structure_flatten(remote_host, src_dir, dst_dir):
         f'cd /; rmdir {src_q} || {{ echo "ERROR: rmdir {src_q} failed (not empty?)" >&2; exit 4; }}'
     )
     if remote_host:
-        argv = _ssh_args(remote_host) + ['bash', '-c', script]
+        argv = _ssh_args(remote_host) + ['bash', '-s']
     else:
-        argv = ['bash', '-c', script]
-    proc = _sp.run(argv, capture_output=True, text=True)
+        argv = ['bash', '-s']
+    proc = _sp.run(argv, input=script, capture_output=True, text=True)
     if proc.returncode != 0:
         print(f"      flatten error rc={proc.returncode}: {proc.stderr.strip()}")
+        return False
+    return True
+
+
+def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_dir, intermediates_to_rmdir):
+    """v2.39: atomically move src_season_dir → target_season_dir and rmdir
+    intermediate empty dirs.  Used when an Episode is at series/x/.../Sxx/file
+    and we want to lift Sxx up to series/Sxx.
+
+    intermediates_to_rmdir is a list of paths between series_dir and src,
+    deepest-first; each is rmdir'd only if empty (so we don't accidentally
+    discard other content)."""
+    import shlex as _shlex, subprocess as _sp
+    if not src_season_dir or not target_season_dir or src_season_dir == target_season_dir:
+        return False
+    src_q = _shlex.quote(src_season_dir)
+    tgt_q = _shlex.quote(target_season_dir)
+    # Build a single bash script: verify target missing → mv → rmdir intermediates.
+    rmdir_lines = ' && '.join(f'rmdir {_shlex.quote(p)} 2>/dev/null || true' for p in intermediates_to_rmdir) or 'true'
+    script = (
+        f'set -e; '
+        f'if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo "ERROR: target {tgt_q} already exists" >&2; exit 2; fi; '
+        f'mv -- {src_q} {tgt_q} || exit 3; '
+        f'{rmdir_lines}'
+    )
+    if remote_host:
+        argv = _ssh_args(remote_host) + ['bash', '-s']
+    else:
+        argv = ['bash', '-s']
+    if DBG:
+        print(f"{DBGPFX}_bad_structure_relocate_season script:\n--- begin script ---\n{script}\n--- end script ---", file=sys.stderr)
+    proc = _sp.run(argv, input=script, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"      season-relocate error rc={proc.returncode}")
+        print(f"        stderr: {proc.stderr!r}")
+        print(f"        stdout: {proc.stdout!r}")
+        print(f"        argv:   {argv!r}")
         return False
     return True
 
@@ -11898,28 +12024,17 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
                 need_metadata = True
 
         if need_metadata:
-            # Collect metadata from video file
-            # Determine if file is remote (checking for remote_host in filepath or library config)
-            remote_host, _exists, _resolved = determine_remote_host(filepath)
-
-            file_metadata = get_video_file_metadata(filepath, part_size, remote_host)
-
-            if file_metadata:
-                file_info['file_metadata'] = file_metadata
-            else:
-                # Failed to collect metadata - mark as broken
-                from datetime import datetime
-                file_info['file_metadata'] = {
-                    'broken': True,
-                    'filesize': part_size,
-                    'marked_at': datetime.now().isoformat(),
-                    'reason': 'ffprobe_failed'
-                }
-
-            # Track metadata probed count per library
+            # v2.39: don't probe inline (slow: serial + one SSH per file).  Queue
+            # the file for the existing parallel batch collector — it spawns up
+            # to 8 SSH workers running the same ffmpeg/ffprobe routine, each
+            # streaming JSON-lines back, and writes results into file_info at
+            # the end of --update-cache.
             lib_key = display_title if display_title else library.title
-            if hasattr(PLEX_Media, 'library_delta_counters') and lib_key in PLEX_Media.library_delta_counters:
-                PLEX_Media.library_delta_counters[lib_key]['metadata_probed'] += 1
+            _metadata_batch_queue.append((filepath, key, version, lib_key))
+            # NOTE: file_info['file_metadata'] stays unset until the batch
+            # processor runs; consumers that look at it during the same
+            # update-cache pass will see "missing" and skip — that's fine,
+            # they'll pick it up the next time.
 
     PLEX_Media.OBJ_BY_ID[key] = val
 
@@ -18523,11 +18638,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         flagged.sort(key=lambda r: (-r[3], r[2], r[0]))
 
         if VRB:
-            print(f"  {'KEY':<16} {'TYPE':<8} {'LIBRARY':<15} {'DEPTH':>5}  PATH")
+            print(f"  {'KEY':<16} {'LIBRARY':<15} {'DEPTH':>5}  PATH")
             print("  " + "-" * 100)
-        for cache_key, obj_type, lib, depth, max_d, filepath in flagged:
+        for cache_key, _obj_type, lib, depth, max_d, filepath in flagged:
             depth_str = f"{depth}>{max_d}"
-            print(f"  {cache_key:<16} {obj_type:<8} {lib:<15} {depth_str:>5}  {filepath}")
+            print(f"  {cache_key:<16} {lib:<15} {depth_str:>5}  {filepath}")
         print(f"\n  {len(flagged)} item(s) nested too deep.  Expected: Movie ≤1 dir below library root, Episode ≤2 dirs.")
         if VRB:
             print(f"  Fix: move the file (and its sibling .nfo/.srt/etc.) up to the expected level,")
