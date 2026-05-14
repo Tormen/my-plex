@@ -9198,6 +9198,53 @@ class TestUnmatchedResolve(unittest.TestCase):
         self.assertTrue(cd['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME'])
         self.assertIsNone(cd['EDITOR'])  # default None → resolves to $EDITOR or 'vim' at use time
 
+    def test_unmatched_resolve_title_normalize_default_empty(self):
+        """v2.59: UNMATCHED_RESOLVE_TITLE_NORMALIZE default is [] (empty list)."""
+        cd = self.m.CONFIG_DEFAULTS
+        self.assertEqual(cd['UNMATCHED_RESOLVE_TITLE_NORMALIZE'], [])
+
+    def test_apply_unmatched_title_normalize_no_op_when_empty(self):
+        """With empty rule list, _apply_unmatched_title_normalize returns input unchanged."""
+        self.m.UNMATCHED_RESOLVE_TITLE_NORMALIZE = []
+        self.m._UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+        self.assertEqual(self.m._apply_unmatched_title_normalize('french revolution 1of2'),
+                         'french revolution 1of2')
+
+    def test_apply_unmatched_title_normalize_with_user_rules(self):
+        """User rules drop release/part tags; whitespace collapses; empty result → falls back to original."""
+        self.m.UNMATCHED_RESOLVE_TITLE_NORMALIZE = [
+            (r'\bxvid\b', ''),
+            (r'\bwww\.\S+\.org', ''),
+            (r'\b\d+of\d+\b', ''),
+        ]
+        self.m._UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+        self.assertEqual(self.m._apply_unmatched_title_normalize('french revolution 1of2'),
+                         'french revolution')
+        self.assertEqual(self.m._apply_unmatched_title_normalize('once upon a time man 22of26'),
+                         'once upon a time man')
+        self.assertEqual(self.m._apply_unmatched_title_normalize('foo XVID www.mvgroup.org bar'),
+                         'foo bar')
+        # Empty result must fall back to the original input.
+        self.m.UNMATCHED_RESOLVE_TITLE_NORMALIZE = [(r'.*', '')]
+        self.m._UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+        self.assertEqual(self.m._apply_unmatched_title_normalize('anything'), 'anything')
+
+    def test_apply_unmatched_title_normalize_ignores_bad_entries(self):
+        """Bad regexes / wrong-shape entries are warned about, not crashed."""
+        import io as _io, sys as _sys
+        old = _sys.stderr
+        _sys.stderr = _io.StringIO()
+        try:
+            self.m.UNMATCHED_RESOLVE_TITLE_NORMALIZE = [
+                ('valid', 'OK'),
+                ('lonely_no_replacement',),    # bad shape (1-tuple)
+                (r'[unclosed', 'X'),           # bad regex
+            ]
+            self.m._UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+            self.assertEqual(self.m._apply_unmatched_title_normalize('valid foo'), 'OK foo')
+        finally:
+            _sys.stderr = old
+
 
 class TestAudioLangPureVsCompleted(unittest.TestCase):
     """v2.9: --update-cache must store TWO views per Movie/Episode:
