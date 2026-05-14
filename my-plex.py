@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.33"
+SCRIPT_VERSION = "v2.34"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -468,7 +468,8 @@ _my-plex() {
         '(--original-languages --collect-original-languages)'{--original-languages,--collect-original-languages}'[Backfill obj.original_language from TMDB API for cached Movies/Series. Required for original_lang: / originallang: filter tokens. Optional SCOPE.]'
         '(--unrecognized --alien)'{--unrecognized,--alien}'[List top-level entries in each library rootpath that Plex DB does NOT index (no matching media_part). Optional LIB scope. Synonyms.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
-        '--clean[With --plex2disk: strip all markers from disk]'
+        '--strip[With --plex2disk: strip all markers from disk]'
+        '--clean[Bundled pipeline: --unmatched --resolve --auto + --original-languages + --sort-new. Optional SCOPE. Honours --try, --yes, --force.]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
         '(--map-to-filename --map-from-filename)'{--map-to-filename,--map-from-filename}'[Legacy alias for --plex2disk]'
         '--from-scratch[With --update-cache: drop existing cache and rebuild]'
@@ -718,6 +719,36 @@ CONFIG_DEFAULTS = {
     # Empty default keeps my-plex GENERIC — user's library names live only
     # in their config, never in the script.
     'SORT_NEW_MOVIE_ROUTES': [],
+
+    # PIPELINES — dict of named pipelines that get registered as top-level
+    # my-plex CLI flags.  Each key is the flag name (e.g. '--clean'); each
+    # value is an ordered list of phases.  Each phase is itself a list of
+    # CLI tokens to invoke as a subprocess.  The runner:
+    #   • prepends the user's SCOPE (when given) to every phase
+    #   • threads --try / --yes / --force when those flags are on the
+    #     outer pipeline invocation
+    #   • aborts the rest of the pipeline if any phase exits non-zero
+    #
+    # The default '--clean' pipeline implements the standard maintenance
+    # flow: resolve unmatched → refresh cache → backfill original_language
+    # → sort new arrivals.
+    #
+    # Add your own pipelines in ~/.my-plex.conf, e.g.:
+    #   PIPELINES = {
+    #       '--clean': [...],
+    #       '--full-refresh': [['--update-cache', '--from-scratch'],
+    #                          ['--original-languages']],
+    #       '--nightly': [['--update-cache'], ['--problems']],
+    #   }
+    # Each key becomes a usable my-plex flag.
+    'PIPELINES': {
+        '--clean': [
+            ['--unmatched', '--resolve', '--auto'],
+            ['--update-cache'],
+            ['--original-languages'],
+            ['--sort-new'],
+        ],
+    },
 
     # MISSING_MIN_COMPLETION_PCT — for --missing AND for the --problems
     # summary aggregation: a series counts toward the "missing episodes"
@@ -1561,6 +1592,7 @@ EDITOR = CONFIG_DEFAULTS['EDITOR']
 MISSING_MIN_COMPLETION_PCT = CONFIG_DEFAULTS['MISSING_MIN_COMPLETION_PCT']
 MISSING_COMPLETION_EXCLUDE_SHOWS = CONFIG_DEFAULTS['MISSING_COMPLETION_EXCLUDE_SHOWS']
 SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
+PIPELINES = CONFIG_DEFAULTS['PIPELINES']
 MISSING_EPISODES_SOURCE = CONFIG_DEFAULTS['MISSING_EPISODES_SOURCE']
 EPISODE_NAME_PATTERN = CONFIG_DEFAULTS['EPISODE_NAME_PATTERN']
 RENUMBER_NAME_PATTERN = CONFIG_DEFAULTS['RENUMBER_NAME_PATTERN']
@@ -6870,6 +6902,69 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+
+
+def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
+    """v2.34: run a named pipeline from the PIPELINES CONF dict.
+
+    `name` is the pipeline key (e.g. '--clean').  Each phase is invoked as
+    a subprocess so its output streams naturally; any non-zero exit aborts
+    the rest of the pipeline.
+
+    Per-phase flag threading:
+      • SCOPE  — prepended to every phase (each phase resolves it on its own).
+      • --try / --dry-run — appended to every phase whose first token is in
+        DRY_RUN_AWARE_PHASES.  Phases that don't honour --try (like
+        --update-cache) get it skipped automatically.
+      • --yes / -Y, --force — appended when the phase honours them.
+    """
+    import subprocess as _sp
+    if name not in PIPELINES:
+        err(1190, f"Unknown pipeline '{name}'. Available: {sorted(PIPELINES)}")
+    phases = PIPELINES[name]
+    if not phases:
+        print(f">>> Pipeline {name!r} is empty — nothing to do.")
+        return
+
+    DRY_RUN_AWARE = {'--unmatched', '--sort-new', '--original-languages',
+                     '--plex2disk', '--disk2plex', '--rename', '--mv-to', '--remux',
+                     '--renumber'}
+    YES_AWARE = {'--sort-new', '--remux', '--mv-to', '--update-cache'}
+    FORCE_AWARE = {'--sort-new', '--mv-to', '--reencode'}
+
+    _self = sys.argv[0]
+    _scope_args = [scope] if scope else []
+    total = len(phases)
+
+    print("=" * 76)
+    print(f">>> PIPELINE {name}  ({total} phase(s)) scope={scope or '(all)'}  dry-run={dry_run}  yes={yes}  force={force}")
+    print("=" * 76)
+
+    for i, phase in enumerate(phases, 1):
+        if not isinstance(phase, (list, tuple)) or not phase:
+            err(1191, f"Pipeline {name!r} phase #{i}: expected non-empty list of CLI tokens, got {phase!r}")
+        cli_head = phase[0]
+        argv = _scope_args + list(phase)
+        if dry_run and cli_head in DRY_RUN_AWARE and '--try' not in argv and '--dry-run' not in argv:
+            argv.append('--try')
+        if yes and cli_head in YES_AWARE and '--yes' not in argv and '-Y' not in argv:
+            argv.append('--yes')
+        if force and cli_head in FORCE_AWARE and '--force' not in argv:
+            argv.append('--force')
+
+        print()
+        print("=" * 76)
+        print(f">>> {name} :: phase {i}/{total}  →  {' '.join(argv)}")
+        print("=" * 76)
+        rc = _sp.call([_self] + argv)
+        if rc != 0:
+            print(f"\nERROR: pipeline {name!r} phase {i}/{total} exited with status {rc} — aborting.", file=sys.stderr)
+            sys.exit(rc)
+
+    print()
+    print("=" * 76)
+    print(f">>> PIPELINE {name}: complete.")
+    print("=" * 76)
 
 
 def cmd_original_languages(target=None, dry_run=False):
@@ -22131,7 +22226,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'potential_mismatch', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -23719,6 +23814,63 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
+        case 'pipelines' | 'pipeline' | 'clean':
+            print()
+            print("=" * 76)
+            print("PIPELINES (--clean and friends) HELP")
+            print("=" * 76)
+            print()
+            print("  PIPELINES is a CONF dict that maps a flag name → ordered list of")
+            print("  my-plex sub-invocations.  Each key becomes a top-level command.")
+            print()
+            print("Usage: my-plex [SCOPE] <pipeline-flag> [--try] [--yes] [--force]")
+            print()
+            print("REGISTERED PIPELINES:")
+            for _pflag, _phases in PIPELINES.items():
+                print(f"  {_pflag}")
+                for _i, _ph in enumerate(_phases, 1):
+                    print(f"    phase {_i}: {' '.join(_ph)}")
+            print()
+            print("FLAG THREADING:")
+            print("  SCOPE        prepended to every phase (resolved per-phase)")
+            print("  --try / -n   appended to phases that honour dry-run")
+            print("               (--unmatched, --sort-new, --original-languages,")
+            print("                --plex2disk, --disk2plex, --rename, --mv-to, --remux,")
+            print("                --renumber).  Phases like --update-cache ignore --try")
+            print("                because they have nothing to write to disk.")
+            print("  --yes / -Y   appended to --sort-new / --remux / --mv-to / --update-cache")
+            print("  --force      appended to --sort-new / --mv-to / --reencode")
+            print()
+            print("FAILURE HANDLING:")
+            print("  Each phase runs as a subprocess.  A non-zero exit aborts the rest")
+            print("  of the pipeline; the same exit code is propagated to the caller.")
+            print()
+            print("DEFINING YOUR OWN PIPELINE:")
+            print("  Edit ~/.my-plex.conf:")
+            print()
+            print("    PIPELINES = {")
+            print("        '--clean': [                                # default")
+            print("            ['--unmatched', '--resolve', '--auto'],")
+            print("            ['--update-cache'],")
+            print("            ['--original-languages'],")
+            print("            ['--sort-new'],")
+            print("        ],")
+            print("        '--nightly': [                              # custom")
+            print("            ['--update-cache'],")
+            print("            ['--problems'],")
+            print("        ],")
+            print("        '--full-refresh': [")
+            print("            ['--update-cache', '--from-scratch'],")
+            print("            ['--original-languages'],")
+            print("        ],")
+            print("    }")
+            print()
+            print("  Each dict key MUST start with '--' and use kebab-case.  The runner")
+            print("  registers it at startup and dispatches it like any built-in flag.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'sort-new' | 'sort_new':
             print()
             print("=" * 76)
@@ -23870,7 +24022,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --plex2disk <MEDIA> [--dry-run]        # One item")
             print("       my-plex --plex2disk --force [--dry-run]        # Plex is authoritative")
             print("       my-plex --plex2disk --replace [--dry-run]      # Re-canonicalise markers")
-            print("       my-plex --plex2disk --clean [--dry-run]        # Strip all markers")
+            print("       my-plex --plex2disk --strip [--dry-run]        # Strip all markers")
             print()
             print("  Encodes Plex metadata into filenames and directory names using")
             print("  DISK_PLEX_MAP.  Each entry's `plex2disk` template (str.format(**vars)")
@@ -23885,7 +24037,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("                          markers that match a non-canonical 'disk2plex'")
             print("                          regex back into the entry's canonical 'plex2disk'")
             print("                          form (e.g. [german] → [de], [vu] → [vu@DATE]).")
-            print("  --clean                 Strip all markers from disk (reverse of --plex2disk)")
+            print("  --strip                 Strip all markers from disk (reverse of --plex2disk)")
             print()
             print("CONFIGURATION (in ~/.my-plex.conf):")
             print()
@@ -23928,7 +24080,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex lib3 --plex2disk              # Map metadata for English movies")
             print("  my-plex --plex2disk --force --try          # Preview destructive sync (Plex wins)")
             print("  my-plex --plex2disk --replace --try        # Preview canonicalising rename")
-            print("  my-plex --plex2disk --clean                # Strip all markers")
+            print("  my-plex --plex2disk --strip                # Strip all markers")
             print()
             print("WATCHED STATE FOR SERIES (applies to --plex2disk and --disk2plex):")
             print()
@@ -24339,9 +24491,9 @@ def main_print_help(args, remaining_args, main_parser):
             sys.exit(0)
 
         case 'map-from-filename' | 'map_from_filename':
-            # Redirect to plex2disk help (--map-from-filename is now --plex2disk --clean)
+            # Redirect to plex2disk help (--map-from-filename is now --plex2disk --strip)
             print()
-            print("  --map-from-filename is now --plex2disk --clean")
+            print("  --map-from-filename is now --plex2disk --strip")
             print("  Use --help plex2disk for details.")
             print()
             print("=" * 76)
@@ -27589,7 +27741,7 @@ def cmd_plex2disk_clean(target, dry_run=False):
         return
 
     if dry_run:
-        print(f"DRY RUN: --plex2disk --clean ({len(items)} items)")
+        print(f"DRY RUN: --plex2disk --strip ({len(items)} items)")
     else:
         print(f"Removing disk markers ({len(items)} items)...")
 
@@ -32516,6 +32668,17 @@ def execute_global_commands(args, cmd_args):
         cmd_missing(_target, source_override=safe_getattr(cmd_args, 'source', None))
         sys.exit(0)
 
+    # Handle PIPELINES dict flags (top-level --clean, --nightly, …)
+    for _pflag in PIPELINES:
+        _pattr = _pflag.lstrip('-').replace('-', '_')
+        if safe_getattr(cmd_args, _pattr, False):
+            dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            yes = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
+            force = bool(safe_getattr(args, 'force', False) or safe_getattr(cmd_args, 'force', False))
+            target = args.CMD_OR_PLEXOBJECT if args.CMD_OR_PLEXOBJECT else None
+            cmd_pipeline(_pflag, scope=target, dry_run=dry_run, yes=yes, force=force)
+            sys.exit(0)
+
     # Handle --sort-new command (shortcut for --unsorted --fix)
     if safe_getattr(cmd_args, 'sort_new', False):
         print(">>> Shortcut for: --unsorted --fix")
@@ -32560,10 +32723,10 @@ def execute_global_commands(args, cmd_args):
     if plex2disk_target is not None:
         dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
         force = args.force
-        clean = safe_getattr(cmd_args, 'clean', False) or safe_getattr(cmd_args, 'map_from_filename', None) is not None
+        strip = safe_getattr(cmd_args, 'strip', False) or safe_getattr(cmd_args, 'map_from_filename', None) is not None
         replace = safe_getattr(cmd_args, 'replace', False)
         target = _collapse_scope_arg(plex2disk_target)
-        if clean:
+        if strip:
             cmd_plex2disk_clean(target, dry_run=dry_run)
         else:
             cmd_plex2disk(target, dry_run=dry_run, force=force, replace=replace)
@@ -33309,6 +33472,7 @@ def main():
         '--library-language-mismatch': 'library-language-mismatch',
         '--episode-numbering-issues': 'episode-numbering-issues',
         '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
+        '--clean': 'pipelines',  # generic — all pipelines share one help page
         '--remux': 'remux',
         '--mv-to': 'mv', '--move-to': 'mv',
         '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
@@ -34047,7 +34211,10 @@ def main():
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
-    main_parser.add_argument('--clean', action='store_true', default=False, help=argparse.SUPPRESS)
+    main_parser.add_argument('--strip', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in --plex2disk
+    # Dynamic: register each PIPELINES key as its own flag.
+    for _pipeline_flag in PIPELINES:
+        main_parser.add_argument(_pipeline_flag, action='store_true', default=False, help=argparse.SUPPRESS)
     main_parser.add_argument('--map-to-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias
     main_parser.add_argument('--map-from-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias
     main_parser.add_argument('--rename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in library/media parsers
@@ -34134,10 +34301,15 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
     GLOBAL_CMD_PARSER.add_argument('--sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex-disk-sync
-    GLOBAL_CMD_PARSER.add_argument('--clean', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
+    GLOBAL_CMD_PARSER.add_argument('--strip', action='store_true', default=False, help="Used with --plex2disk: strip all markers from disk instead of adding them.")
+    # Dynamic: each PIPELINES key becomes a top-level command.
+    for _pipeline_flag, _pipeline_phases in PIPELINES.items():
+        _summary = ' → '.join(' '.join(p) for p in _pipeline_phases) if _pipeline_phases else '(empty)'
+        GLOBAL_CMD_PARSER.add_argument(_pipeline_flag, action='store_true', default=False,
+            help=f"PIPELINE: {_summary}. Optional SCOPE applies to every phase. Honours --try, --yes/-Y, --force. Define / edit via PIPELINES dict in your config. Use --help pipelines for details.")
     GLOBAL_CMD_PARSER.add_argument('--replace', action='store_true', default=False, help="Used with --plex2disk: also strip every disk2plex-matching marker (non-canonical aliases) before writing the canonical plex2disk marker. Use this to normalise filenames after adding new aliases (e.g. consolidating [german] -> [de] when [de] is the canonical form).")
     GLOBAL_CMD_PARSER.add_argument('--map-to-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk
-    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --clean
+    GLOBAL_CMD_PARSER.add_argument('--map-from-filename', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden alias for --plex2disk --strip
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
@@ -34539,17 +34711,23 @@ def main():
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
 
-    # Re-inject --clean into remaining_args
-    if safe_getattr(args, 'clean', False):
-        remaining_args.insert(0, '--clean')
+    # Re-inject --strip into remaining_args (sub-flag of --plex2disk)
+    if safe_getattr(args, 'strip', False):
+        remaining_args.insert(0, '--strip')
 
-    # Re-inject --map-from-filename alias (→ --plex2disk --clean), nargs='*'
+    # Re-inject top-level pipeline flags (PIPELINES dict keys) into remaining_args
+    for _pflag in PIPELINES:
+        _pattr = _pflag.lstrip('-').replace('-', '_')
+        if safe_getattr(args, _pattr, False):
+            remaining_args.insert(0, _pflag)
+
+    # Re-inject --map-from-filename alias (→ --plex2disk --strip), nargs='*'
     if safe_getattr(args, 'map_from_filename', None) is not None:
         _vals = args.map_from_filename if isinstance(args.map_from_filename, list) else ([args.map_from_filename] if args.map_from_filename and args.map_from_filename is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
-        remaining_args.insert(0, '--clean')
+        remaining_args.insert(0, '--strip')
 
     # Re-inject --rename into remaining_args (nargs='*' → list of tokens)
     # Two cases (mimics --info/--missing pattern):
