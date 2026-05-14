@@ -12,7 +12,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
-- **Title search** — bare words search movies/series by title: `my-plex tagesschau` (episode title search with `ep:word`)
+- **Title search** — bare words search movies/series by title AND filepath: `my-plex tagesschau` (episode title search with `ep:word`). Free text is normalized via `CLI_TEXT_NORMALIZE_REGEX` (default: collapse non-alphanumerics to spaces) on both sides, so `emily.in.paris` matches "Emily in Paris" and `who's-that-girl` matches "Who's That Girl". When the search resolves to a single Series (every hit traces to one series, no stray rows), my-plex renders the multi-line detail view — identical to `my-plex Series:NNN`. Use `-V` to keep the table view.
 - **Column hiding** — `-field` removes columns: `my-plex lib1 -file` hides FILEPATH
 - **Filter + hide** — `-field:value` filters AND hides the column: `my-plex lib1 -genre:comedy` filters by comedy without showing the GENRE column
 - **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
