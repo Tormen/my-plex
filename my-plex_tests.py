@@ -3594,7 +3594,7 @@ class TestDefaultScope(unittest.TestCase):
         """_parse_filter_sub_expr must handle +field tokens (display-only, no filtering)."""
         src = self._read_script()
         idx = src.index('def _parse_filter_sub_expr(')
-        snippet = src[idx:idx+2000]
+        snippet = src[idx:idx+8000]
         self.assertIn("sub.startswith('+')", snippet, "_parse_filter_sub_expr must handle +field tokens")
 
     def test_cat_c_token_regex_exists(self):

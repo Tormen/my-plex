@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.56"
+SCRIPT_VERSION = "v2.57"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -831,6 +831,22 @@ CONFIG_DEFAULTS = {
     # Set to '' to disable (no default filter).
     'DEFAULT_SCOPE': 'watched:no',
 
+    # Free-text matching normalization: list of (REGEX, REPLACEMENT) tuples
+    # applied CHAINED via re.sub to produce ONE normalized variant of any
+    # user-typed text (bare-text search, title~…, originaltitle~…). Both
+    # the needle AND the haystack (title, originalTitle, filepath) go
+    # through the same chain, then the original AND normalized forms are
+    # substring-compared. FROM is a Python regex — escape literal
+    # metacharacters (e.g. \. for a literal dot). If normalization
+    # collapses input to empty/whitespace, the original is used as a
+    # safety net (so the user never accidentally matches everything).
+    # Default rule collapses ANY run of non-alphanumerics into a single
+    # space — so `emily.in.paris`, `emily_in_paris`, `who's-that-girl`
+    # all match their canonical title forms.
+    'CLI_TEXT_NORMALIZE_REGEX': [
+        (r'[^a-zA-Z0-9]+', ' '),
+    ],
+
     # Debug/Verbose Flags
     'DBG': False,
     'VRB': False,
@@ -1502,6 +1518,27 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 
 ###############################################################################
+# CLI Free-Text Normalization (CLI_TEXT_NORMALIZE_REGEX)
+###############################################################################
+#
+# List of (REGEX, REPLACEMENT) tuples applied CHAINED to any user-typed
+# free text (bare-text search, title~…, originaltitle~…) AND to the
+# searched fields (title, originalTitle, filepath) — producing one
+# normalized variant alongside the original. Match succeeds if EITHER
+# the original needle OR the normalized needle is a case-insensitive
+# substring of EITHER the original OR the normalized haystack.
+#
+# FROM is a Python regex — escape literal metacharacters (\\., \\-).
+# If normalization collapses to empty/whitespace, the original is kept
+# (defensive: avoid matching everything).
+#
+# Default rule collapses every run of non-alphanumerics to a single
+# space, so `emily.in.paris`, `emily_in_paris`, `who's-that-girl`
+# match their canonical title forms.
+#
+# CLI_TEXT_NORMALIZE_REGEX = {CONFIG_DEFAULTS['CLI_TEXT_NORMALIZE_REGEX']!r}
+
+###############################################################################
 # Debug/Verbose Flags - These are defaults. They can be set via commandline.
 ###############################################################################
 
@@ -1730,6 +1767,42 @@ INFO_FIELDS = CONFIG_DEFAULTS['INFO_FIELDS']
 
 # Default scope: space-separated filter tokens applied to all listing commands
 DEFAULT_SCOPE = CONFIG_DEFAULTS['DEFAULT_SCOPE']
+
+# CLI free-text normalization rules (regex, replacement) applied chained
+# to needle AND haystack during bare-text / title-search matching.
+CLI_TEXT_NORMALIZE_REGEX = CONFIG_DEFAULTS['CLI_TEXT_NORMALIZE_REGEX']
+
+# Compiled cache for CLI_TEXT_NORMALIZE_REGEX — lazily built on first use.
+_CLI_TEXT_NORMALIZE_COMPILED = None
+
+def _normalize_text(s):
+    """Apply CLI_TEXT_NORMALIZE_REGEX rules chained via re.sub to produce
+    ONE normalized variant of `s`. Returns the original `s` unchanged
+    when the result collapses to empty/whitespace (defensive guard
+    against accidentally matching everything).
+
+    Rules are compiled once per session; if the config is reloaded the
+    caller must reset _CLI_TEXT_NORMALIZE_COMPILED to None.
+    """
+    global _CLI_TEXT_NORMALIZE_COMPILED
+    if not s:
+        return s
+    if _CLI_TEXT_NORMALIZE_COMPILED is None:
+        _CLI_TEXT_NORMALIZE_COMPILED = []
+        for entry in (CLI_TEXT_NORMALIZE_REGEX or ()):
+            if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+                continue
+            try:
+                _CLI_TEXT_NORMALIZE_COMPILED.append((re.compile(entry[0]), entry[1]))
+            except re.error as e:
+                print(f"  > WARNING: CLI_TEXT_NORMALIZE_REGEX entry {entry!r} ignored: {e}", file=sys.stderr)
+    out = s
+    for pat, repl in _CLI_TEXT_NORMALIZE_COMPILED:
+        out = pat.sub(repl, out)
+    out = out.strip()
+    if not out:
+        return s
+    return out
 
 # Parallel processing configuration for cache rebuilds
 # Controls how many libraries are processed concurrently during --update-cache
@@ -20373,19 +20446,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # all needle-words must appear in a SINGLE path component.
             _needle_words = {w for w in re.split(r'[\s._\-]+', needle) if w}
             _path_fallback = (len(_needle_words) >= 2)
-            # Pre-build set of series keys whose title matches (for fast episode lookup)
-            # v2.56: also check a separator-normalised needle (replace
-            # `.` / `_` / `-` with space) so an input like
-            # `emily.in.paris` matches the series title `Emily in Paris`.
-            _needle_norm = re.sub(r'[._\-]+', ' ', needle)
+            # Pre-build set of series keys whose title matches (for fast episode lookup).
+            # The needle is also matched in its normalized form (via
+            # CLI_TEXT_NORMALIZE_REGEX); titles are normalized the same
+            # way before comparison so `emily.in.paris` finds "Emily in
+            # Paris" and `who s that girl` finds "Who's That Girl".
+            _needle_norm = _normalize_text(needle)
+            _needle_norm_eq_orig = (_needle_norm == needle)
             _matching_series = set()
             if not _ep_only:
                 for _sk2 in PLEX_Media.OBJ_BY_SERIES_EPISODES:
                     _sobj = PLEX_Media.OBJ_BY_ID.get(_sk2, {})
                     _st = (_sobj.get('title') or '').lower()
                     _sot = (_sobj.get('originalTitle') or '').lower()
-                    if (needle in _st or needle in _sot
-                            or (_needle_norm and (_needle_norm in _st or _needle_norm in _sot))):
+                    if needle in _st or needle in _sot:
+                        _matching_series.add(_sk2)
+                        continue
+                    if _needle_norm_eq_orig:
+                        continue
+                    _stn = _normalize_text(_st)
+                    _sotn = _normalize_text(_sot)
+                    if _needle_norm in _stn or _needle_norm in _sotn:
                         _matching_series.add(_sk2)
             # v2.15: hot-path uses precomputed obj['file_segment_words']
             # (list[list[str]]) populated at --update-cache finalize time.
@@ -20415,12 +20496,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if all(any(nw in w for w in cw) for nw in _nw):
                         return True
                 return False
-            def _title_fn(obj, fi, _n=needle, _ep_only=_ep_only, _ms=_matching_series,
+            def _title_fn(obj, fi, _n=needle, _nn=_needle_norm, _eq=_needle_norm_eq_orig,
+                          _ep_only=_ep_only, _ms=_matching_series,
                           _pf=_path_fallback, _swm=_segwords_match, _lpm=_filepath_match_live):
                 t = (obj.get('title') or '').lower()
                 ot = (obj.get('originalTitle') or '').lower()
                 if _n in t or _n in ot:
                     return True
+                if not _eq and _nn:
+                    if _nn in _normalize_text(t) or _nn in _normalize_text(ot):
+                        return True
                 if not _ep_only and _ms and obj.get('series_key', '') in _ms:
                     return True
                 if not _pf:
@@ -20788,12 +20873,40 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return None
 
     @staticmethod
+    def _is_pure_title_search(expr):
+        """True when `expr` is a non-empty AND-chain whose every sub-expression
+        is a free-text title search: `title~…`, `title:…`, `title=…`,
+        `originaltitle~…/:…/=…`, or bare `~…`.
+
+        Used to decide:
+          - whether DEFAULT_SCOPE should be skipped (user intent is "find
+            this", not "find unwatched things that match this")
+          - whether to auto-dispatch to the detail view when the result
+            resolves to exactly one Series.
+        """
+        if not expr:
+            return False
+        _subs = [s.strip() for s in re.split(r'\bAND\b', expr, flags=re.IGNORECASE) if s.strip()]
+        return bool(_subs) and all(
+            re.match(r'^(?:title|originaltitle)?[~:=]', s, re.IGNORECASE) or s.startswith('~')
+            for s in _subs
+        )
+
+    @staticmethod
     def _apply_default_scope(expr, watched_only, unwatched_only, audio_filter):
         """Merge DEFAULT_SCOPE tokens into filter params, skipping fields already set by user.
 
         Returns (expr, watched_only, unwatched_only, audio_filter) with defaults applied.
+
+        When the user's filter is JUST a free-text title search,
+        SKIP applying DEFAULT_SCOPE.  Their intent is "find this thing",
+        not "show me unwatched stuff that matches".  Otherwise a search
+        for a fully-watched series returns "no items match".
         """
         if not DEFAULT_SCOPE or not DEFAULT_SCOPE.strip():
+            return expr, watched_only, unwatched_only, audio_filter
+        if (not watched_only and not unwatched_only and not audio_filter
+                and PLEX_Media._is_pure_title_search(expr)):
             return expr, watched_only, unwatched_only, audio_filter
 
         # Parse DEFAULT_SCOPE into individual tokens
@@ -21458,6 +21571,44 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             _final_ep.extend(_no_show)
             rows = _movie_rows + _final_ep
+
+        # Auto-detail-view dispatch:
+        # When the filter is purely a free-text title search AND every
+        # surviving row (after rollup) traces back to one and the same
+        # Series — with no Movie rows and no stray non-series hits —
+        # render the detail view of that series, same as
+        # `my-plex Series:NNN`. Under -V the user explicitly asked for
+        # per-row output, so skip the dispatch and keep the table.
+        if not VRB and PLEX_Media._is_pure_title_search(expr) and rows:
+            _sk_set = set()
+            _ok = True
+            for _r in rows:
+                _k = _r.get('key', '')
+                if _k.startswith('Series:'):
+                    _sk_set.add(_k)
+                    continue
+                if _k.startswith('Season:'):
+                    _so = PLEX_Media.OBJ_BY_ID.get(_k, {})
+                    _psk = _so.get('series_key')
+                    if not _psk:
+                        _ok = False; break
+                    _sk_set.add(_psk)
+                    continue
+                if _k.startswith('Episode:'):
+                    _eo = PLEX_Media.OBJ_BY_ID.get(_k, {})
+                    _esk = _eo.get('series_key')
+                    if not _esk:
+                        _ok = False; break
+                    _sk_set.add(_esk)
+                    continue
+                # Movie, Collection, or anything else → not a single-series result.
+                _ok = False
+                break
+            if _ok and len(_sk_set) == 1:
+                _sole_sk = next(iter(_sk_set))
+                if _sole_sk in PLEX_Media.OBJ_BY_ID:
+                    show_item_info(_sole_sk)
+                    return
 
         # Auto-fit column widths to actual data (never narrower than the header)
         if rows and extra_cols:
@@ -24202,16 +24353,30 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  Episodes inherit the parent series' external IDs.")
             print()
-            print("TITLE SEARCH  (bare word — full-text search on title/originalTitle):")
+            print("TITLE SEARCH  (bare word — full-text search on title/originalTitle/filepath):")
             print()
             print("  my-plex tagesschau                         search movies + series")
             print("  my-plex tagesschau genre title              search + add columns")
             print("  my-plex tagesschau -file                   search, hide FILEPATH")
             print()
-            print("  Matches movies/series by title. Episodes are included if their")
-            print("  series title matches. For episode-only title search, use ep:word:")
+            print("  Matches movies/series by title AND by filepath. Episodes are")
+            print("  included if their series title matches or their filepath matches.")
+            print("  For episode-only title search, use ep:word:")
             print()
             print("  my-plex lib1 ep:pilot                 episodes with 'pilot' in title")
+            print()
+            print("  Free text is normalized via CLI_TEXT_NORMALIZE_REGEX before")
+            print("  matching: default rule collapses every run of non-alphanumerics")
+            print("  to a single space on BOTH sides (needle AND haystack). So")
+            print("  `emily.in.paris`, `emily_in_paris`, `who's-that-girl` all match")
+            print("  their canonical title forms.")
+            print()
+            print("  AUTO-DETAIL-VIEW: when a bare-text (or explicit title~) search")
+            print("  resolves to a single Series (every matched row traces back to one")
+            print("  and the same series, no movies, no other series, no stray hits),")
+            print("  my-plex renders the multi-line detail view of that series —")
+            print("  identical to `my-plex Series:NNN`. Use -V to keep the table view")
+            print("  and see all matched rows individually.")
             print()
             print("END-OF-FILTERS MARKER  (--):")
             print()
@@ -24460,12 +24625,23 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex -- imdb genre      ← match titles containing 'imdb' AND 'genre' literally")
             print("  Use this to match words that would otherwise be filter keywords.")
             print()
-            print("TITLE SEARCH (bare word — full-text search on title/originalTitle):")
-            print("  my-plex tagesschau         ← search movies + series by title")
+            print("TITLE SEARCH (bare word — full-text search on title/originalTitle/filepath):")
+            print("  my-plex tagesschau         ← search movies + series by title and filepath")
             print("  my-plex tagesschau genre   ← search + add GENRE column")
-            print("  Matches movies/series by title. Episodes are included if their")
-            print("  series title matches. For episode-only title search, use ep:word:")
+            print("  Matches movies/series by title AND filepath. Episodes are included if")
+            print("  their series title matches or their filepath matches. For episode-only")
+            print("  title search, use ep:word:")
             print("  my-plex ep:pilot           ← episodes with 'pilot' in title")
+            print()
+            print("  Free text is normalized via CLI_TEXT_NORMALIZE_REGEX on both sides:")
+            print("  default rule collapses every run of non-alphanumerics to a single space,")
+            print("  so `emily.in.paris`, `emily_in_paris`, `who's-that-girl` all match")
+            print("  their canonical title forms.")
+            print()
+            print("  AUTO-DETAIL-VIEW: when the search resolves to a single Series (every")
+            print("  matched row traces to one and the same series, no movies, no stray hits),")
+            print("  my-plex renders the multi-line detail view — identical to")
+            print("  `my-plex Series:NNN`. Use -V to keep the table view.")
             print()
             print("SCOPE:")
             print("  my-plex 'EXPR'                  # all libraries")
@@ -35205,7 +35381,8 @@ def main():
             # flags (anything starting with `-`) continue normal processing so
             # things like `-V` / `--debug` still work after the marker.
             if not arg.startswith('-'):
-                _filter_exprs.append(f"title~{arg}")
+                # v2.56: avoid double-prefix when user already typed `title~…`.
+                _filter_exprs.append(arg if arg.startswith(('title~','title:','title=','originaltitle~','originaltitle:','originaltitle=','~')) else f"title~{arg}")
                 _translations.append((arg, f"--list search (after --): title~{arg}"))
                 _i += 1
                 continue
@@ -35290,7 +35467,8 @@ def main():
                 _filter_exprs.append(arg)
                 _translations.append((arg, f"--list atom (inside parens): {arg}"))
             elif _explicit_library_used:
-                _filter_exprs.append(f"title~{arg}")
+                # v2.56: avoid double-prefix when user already typed `title~…`.
+                _filter_exprs.append(arg if arg.startswith(('title~','title:','title=','originaltitle~','originaltitle:','originaltitle=','~')) else f"title~{arg}")
                 _translations.append((arg, f"--list atom (inside parens, explicit library:): title~{arg}"))
             else:
                 _filter_exprs.append(arg)
@@ -35396,7 +35574,8 @@ def main():
                           and not _is_library_name
                           and _prev_arg not in _VALUE_FLAGS)  # skip values of --type, --info, etc.
             if _is_search and not arg.startswith('-'):
-                _filter_exprs.append(f"title~{arg}")
+                # v2.56: avoid double-prefix when user already typed `title~…`.
+                _filter_exprs.append(arg if arg.startswith(('title~','title:','title=','originaltitle~','originaltitle:','originaltitle=','~')) else f"title~{arg}")
                 _translations.append((arg, f"--list search: title~{arg}"))
                 if DBG: print(f" ~~~ Search token '{arg}' → title~{arg}", file=sys.stderr)
             else:
