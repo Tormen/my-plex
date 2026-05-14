@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.37"
+SCRIPT_VERSION = "v2.38"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6360,6 +6360,324 @@ def _print_candidate_row(idx, cand, score):
     ov = cand.get('overview') or ''
     if ov:
         print(f"       {ov}")
+
+
+def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
+    """v2.38: --bad-structure --resolve — flatten nested wrappers.
+
+    For each item flagged by --bad-structure (Movie/Episode file nested
+    deeper than Plex's expected flat layout), if the wrapper contains
+    NO other indexed movie and NO other on-disk video, automatically:
+      1. Move the indexed file (and every sibling in the deeper dir) up
+         to the expected wrapper level.
+      2. Remove the now-empty nested dir.
+
+    Conflict path (another movie/video found): prompt interactively per
+    item — flatten anyway / skip / ls / quit.
+
+    --auto       skip the interactive prompt when conflicts arise — those
+                 candidates are reported and skipped.
+    --try        dry-run: list the plan only, no SSH writes.
+    """
+    import shlex as _shlex, subprocess as _sp, os as _os
+
+    obj_keys = []
+    if scope:
+        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
+        obj_keys = [k for (k, _o) in (scope_items or [])]
+    else:
+        obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+
+    lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+
+    # ---------- 1.  Collect candidates -----------------------------------
+    candidates = []  # (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
+    seen = set()
+    for key in obj_keys:
+        if key in seen: continue
+        seen.add(key)
+        obj = PLEX_Media.OBJ_BY_ID.get(key)
+        if not obj or obj.get('type') not in ('Movie', 'Episode'): continue
+        lib = obj.get('library', '')
+        roots = lib_locations.get(lib) or []
+        # Walk every per-version file (Movies can have multi-version).
+        files_dict = obj.get('files') or {}
+        file_entries = []
+        if files_dict:
+            for ver, fi in files_dict.items():
+                fp = fi.get('filepath') if isinstance(fi, dict) else fi
+                if fp: file_entries.append(fp)
+        else:
+            fp = obj.get('file')
+            if fp: file_entries.append(fp)
+        for filepath in file_entries:
+            matched_root = None
+            for root in roots:
+                root_n = root.rstrip('/')
+                if filepath == root_n or filepath.startswith(root_n + '/'):
+                    matched_root = root_n
+                    break
+            if not matched_root: continue
+            rest = filepath[len(matched_root) + 1:]
+            depth = rest.count('/')
+            max_depth = 1 if obj.get('type') == 'Movie' else 2
+            if depth <= max_depth: continue
+            # target_dir = library_root / first (max_depth) segments.
+            #   Movies (max=1):   lib_root/<wrapper>
+            #   Episodes (max=2): lib_root/<series>/<season-or-equiv>
+            # If the existing path has only 1 segment between root and the
+            # intermediate dir (Episode without a season dir already), the
+            # target collapses to the series level.
+            components = rest.split('/')
+            target_components = components[:max_depth]
+            target_dir = matched_root + '/' + '/'.join(target_components)
+            src_dir = _os.path.dirname(filepath)
+            candidates.append((key, obj, filepath, matched_root, depth - max_depth, target_dir, src_dir))
+
+    if not candidates:
+        print(">>> --bad-structure --resolve: no nested items in scope — nothing to flatten.")
+        return
+
+    # ---------- 2.  Pre-build wrapper → Movie-key index (multi-movie check) -----
+    wrapper_to_keys = {}
+    for k, o in PLEX_Media.OBJ_BY_ID.items():
+        if o.get('type') != 'Movie': continue
+        w = _derive_wrapper_path(o)
+        if w:
+            wrapper_to_keys.setdefault(w, set()).add(k)
+
+    # ---------- 3.  Per-candidate planning -------------------------------
+    plan_auto = []   # (key, obj, filepath, wrapper_dir, src_dir, ssh_host)
+    plan_conflict = []  # same shape + 'reason'
+    VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg', '.ts', '.flv', '.webm')
+
+    print(f">>> --bad-structure --resolve: {len(candidates)} candidate file(s) found")
+    print()
+
+    for key, obj, filepath, lib_root, overrun, wrapper_dir, src_dir in candidates:
+        # v2.38 auto-resolves Movies only — Episode flattening needs season-aware
+        # logic (look up obj['season'] → choose/create the matching S0X dir),
+        # which is deferred to a future revision.  All Episodes land in the
+        # conflict pile with a clear reason.
+        if obj.get('type') != 'Movie':
+            plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
+                                  [f"Episode flatten requires manual review (season={obj.get('S_str','?')}, E={obj.get('E_str','?')})"],
+                                  'episode-needs-season-logic'))
+            continue
+        # Depth overrun > 1 (file two or more levels too deep) is also
+        # punted to conflict pile — _bad_structure_flatten only moves up
+        # by one level per call.
+        if overrun > 1:
+            plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir,
+                                  [f"depth overrun = {overrun} (only 1-level flattening auto-handled)"],
+                                  'overrun-gt-1'))
+            continue
+        # Multi-movie wrapper?  → conflict.
+        other_keys = wrapper_to_keys.get(wrapper_dir, set()) - {key}
+        if other_keys:
+            plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir, list(other_keys), 'shared-wrapper'))
+            continue
+
+        # On-disk check: any OTHER video file inside the wrapper?  Need SSH.
+        remote_host, _exists, _resolved = determine_remote_host(filepath)
+        # `find wrapper -type f -iname '*.ext'` to enumerate videos.
+        find_cmd = (
+            f'find {_shlex.quote(wrapper_dir)} -type f '
+            + ' -o '.join([f"-iname '*{ext}'" for ext in VIDEO_EXTS]).replace('-o', '\\( -iname', 1)
+            + ' \\)'
+        )
+        # Simpler: globstar via -regex
+        find_cmd = (
+            f"find {_shlex.quote(wrapper_dir)} -type f \\( "
+            + ' -o '.join(f"-iname '*{ext}'" for ext in VIDEO_EXTS)
+            + " \\) -print"
+        )
+        videos_on_disk = []
+        try:
+            if remote_host:
+                rc = _sp.run(_ssh_args(remote_host) + [find_cmd], capture_output=True, text=True, timeout=20)
+            else:
+                rc = _sp.run(['sh', '-c', find_cmd], capture_output=True, text=True, timeout=20)
+            videos_on_disk = [v for v in (rc.stdout or '').splitlines() if v.strip()]
+        except Exception as e:
+            print(f"  ⚠ {key}: could not scan {wrapper_dir} ({e!r}) — skipping.")
+            continue
+
+        other_videos = [v for v in videos_on_disk if v != filepath]
+        if other_videos:
+            plan_conflict.append((key, obj, filepath, wrapper_dir, src_dir, other_videos, 'other-video-on-disk'))
+            continue
+
+        plan_auto.append((key, obj, filepath, wrapper_dir, src_dir, remote_host))
+
+    # ---------- 4.  Report plan ----------------------------------------
+    print(f"  AUTO-RESOLVABLE: {len(plan_auto)}")
+    print(f"  CONFLICTS:       {len(plan_conflict)}  (will prompt interactively)")
+    print()
+
+    if plan_auto:
+        print("--- Auto-flatten queue ---")
+        for key, _o, filepath, wrapper, src, _h in plan_auto:
+            print(f"  {key}")
+            print(f"      file:    {filepath}")
+            print(f"      src_dir: {src}")
+            print(f"      dst_dir: {wrapper}")
+        print()
+
+    if dry_run:
+        print("[--try] No changes made.  Re-run without --try to execute.")
+        if plan_conflict:
+            print(f"\nThe {len(plan_conflict)} conflict candidate(s) would prompt interactively at that point.")
+        return
+
+    # ---------- 5.  Confirm + execute auto plan -----------------------
+    if plan_auto and not auto and not yes:
+        resp = input(f"\nFlatten {len(plan_auto)} auto-resolvable item(s)? [y/N] ").strip().lower()
+        if resp != 'y':
+            print(">>> Skipped auto-flatten.")
+            plan_auto = []
+
+    flattened = 0
+    failed = 0
+    for key, obj, filepath, wrapper, src, host in plan_auto:
+        ok = _bad_structure_flatten(host, src, wrapper)
+        if ok:
+            flattened += 1
+            new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
+            _bad_structure_update_cache(key, filepath, new_fp)
+            print(f"  ✓ {key}: flattened → {new_fp}")
+        else:
+            failed += 1
+            print(f"  ✗ {key}: flatten failed (see error above)")
+
+    # ---------- 6.  Interactive prompt for conflicts ------------------
+    if plan_conflict and auto:
+        print(f"\n>>> AUTO mode: {len(plan_conflict)} conflict candidate(s) skipped (require manual review).")
+        for key, _o, fp, wrapper, _src, others, reason in plan_conflict:
+            print(f"  SKIP {key} [{reason}]")
+            print(f"       file: {fp}")
+            if reason == 'shared-wrapper':
+                print(f"       wrapper shared with: {', '.join(others)}")
+            else:
+                for v in others[:3]:
+                    print(f"       other video: {v}")
+                if len(others) > 3:
+                    print(f"       ... and {len(others) - 3} more")
+    elif plan_conflict:
+        print(f"\n>>> Interactive: {len(plan_conflict)} conflict candidate(s)")
+        try:
+            for i, (key, obj, filepath, wrapper, src, others, reason) in enumerate(plan_conflict, 1):
+                print()
+                print(f"──────────────────────────────────────────────────────────────────────────")
+                print(f"[{i}/{len(plan_conflict)}] {key}  ({obj.get('title','?')})")
+                print(f"      file:    {filepath}")
+                print(f"      src_dir: {src}")
+                print(f"      dst_dir: {wrapper}")
+                if reason == 'shared-wrapper':
+                    print(f"      ⚠ wrapper shared with other indexed Movie(s): {', '.join(others)}")
+                else:
+                    print(f"      ⚠ other video file(s) on disk inside wrapper:")
+                    for v in others:
+                        print(f"        - {v}")
+                print()
+                print("  f) flatten anyway (move my src_dir contents up; aborts on filename collision)")
+                print("  s) skip")
+                print("  ?) ls -la wrapper")
+                print("  q) quit")
+                _picked = False
+                while not _picked:
+                    pick = input("  pick> ").strip().lower()
+                    if pick == 'q':
+                        print(">>> Quit interactive resolve.")
+                        return
+                    if pick == 's' or pick == '':
+                        _picked = True
+                        break
+                    if pick == '?':
+                        _host, _, _ = determine_remote_host(filepath)
+                        _ls = _shlex.quote(wrapper)
+                        if _host:
+                            _sp.call(_ssh_args(_host) + [f'ls -la {_ls}'])
+                        else:
+                            _sp.call(['ls', '-la', wrapper])
+                        continue
+                    if pick == 'f':
+                        _host, _, _ = determine_remote_host(filepath)
+                        ok = _bad_structure_flatten(_host, src, wrapper)
+                        if ok:
+                            flattened += 1
+                            new_fp = f'{wrapper}/{_os.path.basename(filepath)}'
+                            _bad_structure_update_cache(key, filepath, new_fp)
+                            print(f"  ✓ flattened → {new_fp}")
+                        else:
+                            failed += 1
+                            print(f"  ✗ flatten failed (see error above)")
+                        _picked = True
+                        break
+                    print("  Invalid — pick one of: f, s, ?, q")
+        except (KeyboardInterrupt, EOFError):
+            print("\n>>> Interrupted.")
+
+    # ---------- 7.  Summary + cache save ------------------------------
+    print(f"\n--- SUMMARY ---")
+    print(f"  flattened : {flattened}")
+    print(f"  failed    : {failed}")
+    if flattened > 0:
+        save_cache()
+        print(f"  cache updated.")
+    print()
+
+
+def _bad_structure_flatten(remote_host, src_dir, dst_dir):
+    """Move every entry from src_dir → dst_dir, then rmdir src_dir.
+    Aborts on filename collision.  Returns True on success."""
+    import shlex as _shlex, subprocess as _sp
+    if src_dir == dst_dir or not src_dir or not dst_dir:
+        return False
+    # POSIX bash: enumerate hidden + visible, check collision, mv, rmdir.
+    src_q = _shlex.quote(src_dir)
+    dst_q = _shlex.quote(dst_dir)
+    script = (
+        f'set -e; cd {src_q}; '
+        f'shopt -s nullglob dotglob 2>/dev/null || true; '
+        # Iterate everything except . and ..
+        f'for f in * .[!.]* ..?*; do '
+        f'  [ -e "$f" ] || [ -L "$f" ] || continue; '
+        f'  if [ -e {dst_q}/"$f" ] || [ -L {dst_q}/"$f" ]; then '
+        f'    echo "ERROR: collision: {dst_q}/$f already exists" >&2; exit 2; '
+        f'  fi; '
+        f'  mv -- "$f" {dst_q}/"$f" || exit 3; '
+        f'done; '
+        f'cd /; rmdir {src_q} || {{ echo "ERROR: rmdir {src_q} failed (not empty?)" >&2; exit 4; }}'
+    )
+    if remote_host:
+        argv = _ssh_args(remote_host) + ['bash', '-c', script]
+    else:
+        argv = ['bash', '-c', script]
+    proc = _sp.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"      flatten error rc={proc.returncode}: {proc.stderr.strip()}")
+        return False
+    return True
+
+
+def _bad_structure_update_cache(key, old_filepath, new_filepath):
+    """After a successful flatten, update cache indices for `key`."""
+    obj = PLEX_Media.OBJ_BY_ID.get(key)
+    if not obj: return
+    if obj.get('file') == old_filepath:
+        obj['file'] = new_filepath
+    # Multi-version: update files dict entry whose filepath matches.
+    files = obj.get('files') or {}
+    for ver, fi in files.items():
+        if isinstance(fi, dict) and fi.get('filepath') == old_filepath:
+            fi['filepath'] = new_filepath
+    # Cross-index: PLEX_Media.OBJ_BY_FILEPATH if present.
+    fbi = getattr(PLEX_Media, 'OBJ_BY_FILEPATH', None)
+    if isinstance(fbi, dict):
+        if old_filepath in fbi:
+            entries = fbi.pop(old_filepath)
+            fbi[new_filepath] = entries
 
 
 def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
@@ -23735,8 +24053,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("BAD STRUCTURE / NESTED MEDIA HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --bad-structure [SCOPE]")
+            print("Usage: my-plex --bad-structure [SCOPE]                       List mode")
             print("       my-plex [SCOPE] --bad-structure")
+            print("       my-plex --bad-structure --resolve [--auto] [--try]   Auto-flatten")
             print("       my-plex --nested-media  (synonym)")
             print()
             print("Lists media files whose on-disk path is nested deeper than Plex's")
@@ -23768,10 +24087,25 @@ def main_print_help(args, remaining_args, main_parser):
             print("    aligns the auto-trash victim with the structural truth.")
             print()
             print("Fix:")
-            print("  Move the file (and any sibling .nfo / .srt / artwork) up to the")
-            print("  expected level, then trigger --update-cache (or a Plex re-scan).")
+            print("  Manually: move the file (and any sibling .nfo / .srt / artwork) up")
+            print("  to the expected level, then trigger --update-cache.")
+            print()
+            print("  Or auto: my-plex --bad-structure --resolve")
+            print("    For each Movie with depth-overrun=1 and no conflicting sibling,")
+            print("    move every entry from the deeper dir up to the wrapper level,")
+            print("    then rmdir the now-empty subdir.  Safety bails:")
+            print("      - wrapper hosts >=2 distinct Movies (--multi-movie-folder)")
+            print("      - on-disk video file already exists at the target level")
+            print("      - filename collision when promoting siblings")
+            print("    Conflicts prompt interactively (f / s / ? / q).  Episode handling")
+            print("    is deferred (season-aware logic comes in a later revision) —")
+            print("    all flagged Episodes fall through to the prompt with reason.")
+            print()
+            print("    --auto  flatten safe candidates silently; skip conflicts.")
+            print("    --try   preview only.  --yes  skip the auto-flatten batch confirm.")
+            print()
             print("  If the nested file is a byte-identical copy of the parent-level")
-            print("  one, --duplicates --resolve will catch it.")
+            print("  one, --duplicates --resolve (with AUTO_TRASH_DUPLICATES) will catch it.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -33493,6 +33827,15 @@ def execute_global_commands(args, cmd_args):
     # Handle --bad-structure [SCOPE]: media files nested too deeply on disk
     bs_val = safe_getattr(cmd_args, 'bad_structure', None)
     if bs_val is not None:
+        # --bad-structure --resolve [--auto] [--try]: auto-flatten when safe,
+        # interactive prompt on conflicts.
+        if safe_getattr(cmd_args, 'resolve', False):
+            dry_run_bs = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
+            auto_bs = safe_getattr(cmd_args, 'auto', False) or safe_getattr(args, 'auto', False)
+            yes_bs = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
+            scope_arg = bs_val if (isinstance(bs_val, list) and bs_val) else (args.CMD_OR_PLEXOBJECT or None)
+            cmd_bad_structure_resolve(scope=scope_arg, auto=auto_bs, dry_run=dry_run_bs, yes=yes_bs)
+            sys.exit(0)
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, library_name, scope = resolve_scope_to_keys(bs_val, media_type=media_type)
         print(f"\n--- Bad-Structure Items{scope} (path nested deeper than Plex's expected flat layout) ---")
