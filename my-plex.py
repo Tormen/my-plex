@@ -6683,6 +6683,44 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         if failed_count and result.stderr:
             print(f"    stderr: {result.stderr.strip()}")
 
+        # v2.32: invalidate OLD cache entries for items that successfully
+        # moved.  Without this pass, a subsequent run of --unmatched
+        # --resolve reads stale OBJ_BY_ID and re-suggests the same item.
+        # Plex assigns NEW ratingKeys on rescan; --update-cache (or the
+        # FSEvents-driven cache refresh) picks them up later.
+        _moved_keys = []
+        for (key, obj, _src, _dst, _yr, _tmdb), outcome in zip(rename_queue, outcomes):
+            if outcome.strip() != 'MOVED':
+                continue
+            _moved_keys.append(key)
+            obj_type_str = obj.get('type', '')
+            # Per-version filepath entries
+            for _v, _fi in (obj.get('files', {}) or {}).items():
+                fp = _fi.get('filepath') if isinstance(_fi, dict) else None
+                if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
+                    del PLEX_Media.OBJ_BY_FILEPATH[fp]
+            # Top-level path (Series/Season point at the dir)
+            obj_fp = obj.get('file', '')
+            if obj_fp and obj_fp in PLEX_Media.OBJ_BY_FILEPATH:
+                del PLEX_Media.OBJ_BY_FILEPATH[obj_fp]
+            # Library-type index
+            lib = obj.get('library', '')
+            if lib in PLEX_Media.OBJ_BY_LIBRARY and obj_type_str in PLEX_Media.OBJ_BY_LIBRARY[lib]:
+                try: PLEX_Media.OBJ_BY_LIBRARY[lib][obj_type_str].remove(key)
+                except ValueError: pass
+            # Type-specific indices
+            if obj_type_str == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
+                del PLEX_Media.OBJ_BY_MOVIE[key]
+            if obj_type_str == 'Series' and key in PLEX_Media.OBJ_BY_SERIES:
+                del PLEX_Media.OBJ_BY_SERIES[key]
+            if obj_type_str == 'Series' and key in PLEX_Media.OBJ_BY_SERIES_EPISODES:
+                del PLEX_Media.OBJ_BY_SERIES_EPISODES[key]
+            # Main index
+            if key in PLEX_Media.OBJ_BY_ID:
+                del PLEX_Media.OBJ_BY_ID[key]
+        if _moved_keys and not READ_ONLY_MODE:
+            update_and_save_cache(CACHE)
+
     # libs_affected: from both rename_queue and refresh_only — both need
     # scan + refresh to actually update Plex state.
     for _key, obj, src, dst, _yr, _tmdb in rename_queue:
