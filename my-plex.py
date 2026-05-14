@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.45"
+SCRIPT_VERSION = "v2.46"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6391,7 +6391,8 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
 
     # ---------- 1.  Collect candidates -----------------------------------
-    candidates = []  # (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
+    candidates = []           # too-deep: (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
+    candidates_shallow = []   # too-shallow Movie: (key, obj, filepath, lib_root, target_wrapper)
     seen = set()
     for key in obj_keys:
         if key in seen: continue
@@ -6420,22 +6421,30 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             if not matched_root: continue
             rest = filepath[len(matched_root) + 1:]
             depth = rest.count('/')
-            max_depth = 1 if obj.get('type') == 'Movie' else 2
-            if depth <= max_depth: continue
-            # target_dir = library_root / first (max_depth) segments.
-            #   Movies (max=1):   lib_root/<wrapper>
-            #   Episodes (max=2): lib_root/<series>/<season-or-equiv>
-            # If the existing path has only 1 segment between root and the
-            # intermediate dir (Episode without a season dir already), the
-            # target collapses to the series level.
-            components = rest.split('/')
-            target_components = components[:max_depth]
-            target_dir = matched_root + '/' + '/'.join(target_components)
-            src_dir = _os.path.dirname(filepath)
-            candidates.append((key, obj, filepath, matched_root, depth - max_depth, target_dir, src_dir))
+            obj_type = obj.get('type')
+            max_depth = 1 if obj_type == 'Movie' else 2
+            if depth > max_depth:
+                # too deep — collect as a flatten candidate
+                components = rest.split('/')
+                target_components = components[:max_depth]
+                target_dir = matched_root + '/' + '/'.join(target_components)
+                src_dir = _os.path.dirname(filepath)
+                candidates.append((key, obj, filepath, matched_root, depth - max_depth, target_dir, src_dir))
+            elif depth < 1 and obj_type == 'Movie':
+                # v2.46: too shallow — bare Movie at library root.  Wrap it
+                # in a directory whose basename derives from the file stem
+                # (with TVOON noise stripped where applicable).
+                bare_base = _os.path.basename(filepath)
+                stem = _os.path.splitext(bare_base)[0]
+                # Apply the same noise-strip we use elsewhere.  If the strip
+                # leaves nothing usable, fall back to the raw stem.
+                cleaned = _strip_tvoon_suffix(stem) if '_strip_tvoon_suffix' in globals() else stem
+                cleaned = cleaned.strip(' ._-') or stem
+                target_wrapper = f'{matched_root}/{cleaned}'
+                candidates_shallow.append((key, obj, filepath, matched_root, target_wrapper))
 
-    if not candidates:
-        print(">>> --bad-structure --resolve: no nested items in scope — nothing to flatten.")
+    if not candidates and not candidates_shallow:
+        print(">>> --bad-structure --resolve: nothing to do — every file is at the expected depth.")
         return
 
     # ---------- 2.  Pre-build wrapper → Movie-key index (multi-movie check) -----
@@ -6588,6 +6597,38 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 print(f"        + {k}  (S{int(o.get('season') or 0):02d}E{int(o.get('episode') or 0):02d})  {_os.path.basename(o.get('file') or '')}")
         print()
 
+    # v2.46: too-shallow Movies — wrap candidates.  Conflict if target wrapper
+    # already exists; otherwise queued for auto-wrap.
+    plan_wrap = []  # (key, obj, filepath, target_wrapper)
+    if candidates_shallow:
+        # Detect dest-exists conflicts (multi-key SSH stat in one call).
+        targets = sorted({tw for (_k, _o, _fp, _lr, tw) in candidates_shallow})
+        existing = set()
+        if targets:
+            import shlex as _shlex, subprocess as _sp
+            check_script = "\n".join(f"[ -e {_shlex.quote(t)} ] && echo EXISTS|{t}" for t in targets)
+            proc = _sp.run(_ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s'],
+                           input=check_script, capture_output=True, text=True)
+            for line in (proc.stdout or '').splitlines():
+                if line.startswith('EXISTS|'):
+                    existing.add(line[len('EXISTS|'):])
+        for key, obj, filepath, _lr, target_wrapper in candidates_shallow:
+            if target_wrapper in existing:
+                plan_conflict.append((key, obj, filepath, target_wrapper, '',
+                                      [f"target wrapper {target_wrapper} already exists — manual review"],
+                                      'wrap-target-exists'))
+            else:
+                plan_wrap.append((key, obj, filepath, target_wrapper))
+
+    if plan_wrap:
+        print(f"--- Auto-wrap queue (bare Movies — mkdir wrapper + mv file into it) "
+              f"({len(plan_wrap)} item(s)) ---")
+        for key, obj, filepath, target_wrapper in plan_wrap:
+            print(f"  {key}  {(obj.get('title') or '?')[:50]}")
+            print(f"      file:   {filepath}")
+            print(f"      wrap →  {target_wrapper}/")
+        print()
+
     if dry_run:
         print("[--try] No changes made.  Re-run without --try to execute.")
         if plan_conflict:
@@ -6595,17 +6636,35 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         return
 
     # ---------- 5.  Confirm + execute auto plan -----------------------
-    total_auto = len(plan_auto) + len(plan_episode)
+    total_auto = len(plan_auto) + len(plan_episode) + len(plan_wrap)
     if total_auto and not auto and not yes:
-        resp = input(f"\nFlatten {total_auto} auto-resolvable item(s) "
-                     f"({len(plan_auto)} Movies, {len(plan_episode)} Episodes)? [y/N] ").strip().lower()
+        resp = input(f"\nResolve {total_auto} item(s) "
+                     f"({len(plan_auto)} flatten / {len(plan_episode)} season-relocate / {len(plan_wrap)} wrap)? "
+                     f"[y/N] ").strip().lower()
         if resp != 'y':
-            print(">>> Skipped auto-flatten.")
+            print(">>> Skipped auto-resolve.")
             plan_auto = []
             plan_episode = []
+            plan_wrap = []
 
     flattened = 0
     failed = 0
+
+    # v2.46: wrap bare Movies — one batched SSH call.
+    if plan_wrap:
+        wrap_moves = [(fp, tw) for (_k, _o, fp, tw) in plan_wrap]
+        print(f">>> Batched wrap: {len(wrap_moves)} bare Movie(s) in one SSH session…")
+        wrap_results = _bad_structure_wrap_batch(wrap_moves)
+        for i, (key, obj, filepath, target_wrapper) in enumerate(plan_wrap):
+            ok, reason = wrap_results.get(i, (False, 'no result'))
+            if ok:
+                flattened += 1
+                new_fp = f'{target_wrapper}/{_os.path.basename(filepath)}'
+                _bad_structure_update_cache(key, filepath, new_fp)
+                print(f"  ✓ {key}: wrapped → {new_fp}")
+            else:
+                failed += 1
+                print(f"  ✗ {key}: wrap failed — {reason}")
 
     # v2.42: batch Movie flattens — one SSH session for all moves.
     movie_moves = [(src, wrapper) for (_k, _o, _fp, wrapper, src, _h) in plan_auto]
@@ -6822,6 +6881,77 @@ def _bad_structure_flatten_block(i, src_q, dst_q):
         f"echo \"OK|{i}\"\n"
         f")"
     )
+
+
+def _bad_structure_wrap_batch(moves):
+    """v2.46: batched wrap — for each (bare_filepath, wrapper_dir) pair,
+    `mkdir wrapper_dir && mv bare_filepath wrapper_dir/`, plus any sibling
+    files (same basename-stem, e.g. .nfo / .srt / .jpg / artwork) get
+    pulled into the same wrapper.
+
+    Bails when:
+      - wrapper_dir already exists (manual review — could be a different
+        movie with the same name).
+      - the move itself fails.
+
+    Always SSHes to PLEX_DB_REMOTE_HOST.  Returns {idx: (ok, reason)}.
+    """
+    import shlex as _shlex, subprocess as _sp, os as _os
+    results = {}
+    if not moves:
+        return results
+    blocks = []
+    for i, (bare_fp, wrapper_dir) in enumerate(moves):
+        if not bare_fp or not wrapper_dir:
+            results[i] = (False, "invalid filepath / wrapper")
+            continue
+        bare_q = _shlex.quote(bare_fp)
+        wrap_q = _shlex.quote(wrapper_dir)
+        parent_q = _shlex.quote(_os.path.dirname(bare_fp))
+        bare_base = _os.path.basename(bare_fp)
+        stem = _os.path.splitext(bare_base)[0]
+        bare_base_q = _shlex.quote(bare_base)
+        stem_q = _shlex.quote(stem)
+        # In bash: cd parent; mkdir wrapper; mv bare + every sibling whose
+        # name starts with "<stem>." into the wrapper.
+        blocks.append(
+            f"(\n"
+            f"_IDX={i}\n"
+            f"if [ -e {wrap_q} ] || [ -L {wrap_q} ]; then echo \"FAIL|{i}|wrapper already exists: {wrap_q}\"; exit 0; fi\n"
+            f"cd {parent_q} 2>/dev/null || {{ echo \"FAIL|{i}|cd parent failed\"; exit 0; }}\n"
+            f"mkdir -- {wrap_q} || {{ echo \"FAIL|{i}|mkdir wrapper failed\"; exit 0; }}\n"
+            f"mv -- {bare_base_q} {wrap_q}/ || {{ echo \"FAIL|{i}|mv main file failed\"; exit 0; }}\n"
+            # Sibling sweep: files whose name is `<stem>.<anything>` (excluding
+            # the bare file itself, already moved).  Glob expanded by bash;
+            # nullglob ensures no error if no siblings.
+            f"shopt -s nullglob 2>/dev/null || true\n"
+            f"for _s in {stem_q}.*; do\n"
+            f"  [ -e \"$_s\" ] || [ -L \"$_s\" ] || continue\n"
+            f"  [ -d \"$_s\" ] && continue\n"  # don't pull in entire same-stem-prefixed dirs
+            f"  mv -- \"$_s\" {wrap_q}/ || echo \"WARN|{i}|sibling mv failed: $_s\" >&2\n"
+            f"done\n"
+            f"echo \"OK|{i}\"\n"
+            f")"
+        )
+    script = "\n".join(blocks)
+    argv = _ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s']
+    proc = _sp.run(argv, input=script, capture_output=True, text=True)
+    for line in (proc.stdout or '').splitlines():
+        line = line.strip()
+        if not line: continue
+        parts = line.split('|', 2)
+        if parts[0] == 'OK':
+            try: results[int(parts[1])] = (True, '')
+            except (ValueError, IndexError): pass
+        elif parts[0] == 'FAIL':
+            try:
+                idx = int(parts[1])
+                results[idx] = (False, parts[2] if len(parts) > 2 else '(no reason)')
+            except (ValueError, IndexError): pass
+    for i, _ in enumerate(moves):
+        if i not in results:
+            results[i] = (False, f"no response (rc={proc.returncode}, stderr: {(proc.stderr or '').strip()[:120]})")
+    return results
 
 
 def _bad_structure_flatten_batch(moves):
@@ -18866,7 +18996,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not file_entries:
                 continue
 
+            # v2.46: ideal depth is exactly 1 for Movies (lib/<wrapper>/<file>) and
+            # 1-2 for Episodes (lib/<series>[/<season>]/<file>).  Anything outside
+            # this band is flagged — either too DEEP (nested extraction leftover)
+            # or too SHALLOW (bare file at library root, no wrapper).
             max_depth_for_type = 1 if obj_type == 'Movie' else 2
+            min_depth_for_type = 1  # both Movie and Episode want at least one wrapper
             for filepath in file_entries:
                 matched_root = None
                 for root in roots:
@@ -18879,26 +19014,34 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 rest = filepath[len(matched_root) + 1:] if filepath != matched_root else ''
                 depth = rest.count('/')  # 0 = file directly under root; 1 = one wrapper; …
                 if depth > max_depth_for_type:
-                    flagged.append((key, obj_type, lib, depth, max_depth_for_type, filepath))
+                    flagged.append((key, obj_type, lib, depth, max_depth_for_type, 'deep', filepath))
+                elif depth < min_depth_for_type:
+                    flagged.append((key, obj_type, lib, depth, min_depth_for_type, 'shallow', filepath))
 
         if not flagged:
             scope = f" in '{library_name}'" if library_name else ""
             print(f"  No bad-structure items found{scope} — every media file sits at the expected depth.")
             return 0
 
-        flagged.sort(key=lambda r: (-r[3], r[2], r[0]))
+        # Sort: deep cases (worst overrun first) before shallow cases, then by library + key.
+        flagged.sort(key=lambda r: (0 if r[5] == 'deep' else 1, -r[3] if r[5] == 'deep' else r[3], r[2], r[0]))
 
         if VRB:
             print(f"  {'KEY':<16} {'LIBRARY':<15} {'DEPTH':>5}  PATH")
             print("  " + "-" * 100)
-        for cache_key, _obj_type, lib, depth, max_d, filepath in flagged:
-            depth_str = f"{depth}>{max_d}"
+        n_deep = sum(1 for r in flagged if r[5] == 'deep')
+        n_shallow = sum(1 for r in flagged if r[5] == 'shallow')
+        for cache_key, _obj_type, lib, depth, ref_d, kind, filepath in flagged:
+            depth_str = f"{depth}>{ref_d}" if kind == 'deep' else f"{depth}<{ref_d}"
             print(f"  {cache_key:<16} {lib:<15} {depth_str:>5}  {filepath}")
-        print(f"\n  {len(flagged)} item(s) nested too deep.  Expected: Movie ≤1 dir below library root, Episode ≤2 dirs.")
+        msg = []
+        if n_deep:    msg.append(f"{n_deep} too deep")
+        if n_shallow: msg.append(f"{n_shallow} too shallow (bare at library root)")
+        print(f"\n  {len(flagged)} item(s) flagged: {', '.join(msg)}.")
+        print(f"  Expected: Movie at depth 1, Episode at depth 1-2.")
         if VRB:
-            print(f"  Fix: move the file (and its sibling .nfo/.srt/etc.) up to the expected level,")
-            print(f"  then trigger a Plex re-scan.  --duplicates --resolve with AUTO_TRASH_DUPLICATES")
-            print(f"  on will also clean up byte-identical leftovers automatically.")
+            print(f"  Fix: --bad-structure --resolve  (wraps shallow Movies, flattens deep cases).")
+            print(f"  Or: --duplicates --resolve with AUTO_TRASH_DUPLICATES for byte-identical leftovers.")
         return len(flagged)
 
     @staticmethod
@@ -30155,8 +30298,10 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
 
     print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
 
-    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
-    libs_present = set(PLEX_Library.OBJ_DICT.keys())
+    # NOTE: bare-movie wrap is handled UPSTREAM in `cmd_sort_new` (disk-scan
+    # path, around line 31154+).  That logic catches files newly arrived on
+    # disk before Plex has indexed them — exactly what's needed.  The
+    # cache-based path here would miss those (they're not in OBJ_BY_ID yet).
 
     # Phase 1: build plan.  Each entry:
     #   (key, obj, src_lib, dst_lib, src_wrapper_abs, dst_wrapper_abs, rule_idx)
