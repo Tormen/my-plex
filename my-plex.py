@@ -6365,12 +6365,17 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             skipped.append((key, 'no-candidates'))
             continue
 
-        # Score & sort
+        # Score & sort.  Prefer the wrapper-derived `_clean_q` for the
+        # score query — it strips TVOON noise and other release tags far
+        # more aggressively than `_strip_query_tags(obj.title)`.  Falls
+        # back to the stripped Plex title, then the raw title.  Example:
+        #   obj.title  = 'My Big Fat Greek Wedding 12 10 28 20 15 Arte 95 Tvoon De Hq'
+        #   _clean_q   = 'my big fat greek wedding'
+        # Without this, the TMDB candidate 'My Big Fat Greek Wedding'
+        # only scored 61 (raw obj.title polluted the similarity).
+        _score_query = _clean_q or _title_for_search or title
         scored = sorted(
-            # Score against the CLEANED title (no #tag# / [tag] / etc.) so a
-            # title that's clean except for surrounding clutter scores 100%
-            # instead of 66% (the clutter dragged the similarity ratio down).
-            ((c, _score_candidate(_title_for_search or title, c)) for c in candidates),
+            ((c, _score_candidate(_score_query, c)) for c in candidates),
             key=lambda x: x[1], reverse=True,
         )[:5]   # show top 5
 
