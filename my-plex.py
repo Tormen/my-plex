@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.32"
+SCRIPT_VERSION = "v2.33"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -5783,7 +5783,7 @@ def _search_tmdb_titles(title, kind='movie', max_retries=3):
                     'title':          r.get('title') if endpoint == 'movie' else r.get('name'),
                     'original_title': r.get('original_title') if endpoint == 'movie' else r.get('original_name'),
                     'year':           year,
-                    'tmdb_id':        r.get('id'),
+                    'tmdb_id':        str(r.get('id')) if r.get('id') is not None else None,
                     'imdb_id':        None,   # not in search result; would need /find call
                     'tvdb_id':        None,
                     'popularity':     r.get('popularity') or 0.0,
@@ -5871,9 +5871,9 @@ def _search_tvdb_titles(title, kind='movie', max_retries=3):
                     'title':          r.get('name') or r.get('translations', {}).get('eng') or '',
                     'original_title': r.get('name') or '',
                     'year':           year,
-                    'tmdb_id':        tmdb_id,
-                    'imdb_id':        imdb_id,
-                    'tvdb_id':        r.get('tvdb_id') or r.get('id'),
+                    'tmdb_id':        str(tmdb_id) if tmdb_id is not None else None,
+                    'imdb_id':        str(imdb_id) if imdb_id is not None else None,
+                    'tvdb_id':        (lambda v: str(v) if v is not None else None)(r.get('tvdb_id') or r.get('id')),
                     'popularity':     0.0,  # TVDB doesn't expose a popularity score
                     'overview':       (r.get('overview') or '')[:140],
                     'lang':           r.get('primary_language') or '',
@@ -5922,7 +5922,8 @@ _TVOON_SUFFIX_RE = re.compile(
     # `.[reencode]`, etc.) that we must PRESERVE through the strip.
     r'[._]\d{2}\.\d{2}\.\d{2}'   # date: NN.NN.NN
     r'[._]\d{2}-\d{2}'           # time: NN-NN
-    r'[._][a-z0-9]+'             # channel
+    r'[._][a-z0-9]+'             # channel (first token)
+    r'(?:[._][a-z][a-z0-9]*)*'   # optional extra channel tokens (e.g. FUCK_TV, PRAY_TV)
     r'[._]\d+'                   # duration (minutes)
     r'[._]tvoon[._]de'           # TVOON_DE / .tvoon.de
     r'(?:[._][a-z0-9]+)*'        # optional quality tail (.mpg.hq / .mpg.hd / …)
@@ -6004,6 +6005,9 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
     if extra_query and extra_query.strip().lower() != (title or '').strip().lower():
         queries.append(extra_query)
     seen = set()
+    seen_tmdb = set()
+    seen_imdb = set()
+    seen_tvdb = set()
     merged = []
     for q in queries:
         if not q:
@@ -6016,10 +6020,22 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
             for r in fn(q, kind=kind):
                 if year_hint and r.get('year') and r['year'] != year_hint:
                     continue
+                # Multi-axis dedupe: a film returned by both TMDB and TVDB
+                # may carry different localised titles (e.g. TMDB "The
+                # Kangaroo Chronicles" / TVDB "Die Känguru-Chroniken")
+                # but share the same external IDs.  Drop the second hit
+                # when ANY external ID matches.
+                _tmdb = r.get('tmdb_id'); _imdb = r.get('imdb_id'); _tvdb = r.get('tvdb_id')
+                if _tmdb and _tmdb in seen_tmdb: continue
+                if _imdb and _imdb in seen_imdb: continue
+                if _tvdb and _tvdb in seen_tvdb: continue
                 dedup_key = ((r.get('title') or '').lower(), r.get('year'))
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
+                if _tmdb: seen_tmdb.add(_tmdb)
+                if _imdb: seen_imdb.add(_imdb)
+                if _tvdb: seen_tvdb.add(_tvdb)
                 merged.append(r)
     return merged
 
@@ -6033,13 +6049,25 @@ def _score_candidate(query_title, candidate):
     import difflib
     if not query_title:
         return 0
-    q = query_title.lower().strip()
+    def _norm(s):
+        s = s.lower()
+        for a, b in (('ä','ae'), ('ö','oe'), ('ü','ue'), ('ß','ss'),
+                     ('á','a'),('à','a'),('â','a'),('ã','a'),('å','a'),
+                     ('é','e'),('è','e'),('ê','e'),('ë','e'),
+                     ('í','i'),('ì','i'),('î','i'),('ï','i'),
+                     ('ó','o'),('ò','o'),('ô','o'),('õ','o'),
+                     ('ú','u'),('ù','u'),('û','u'),
+                     ('ñ','n'),('ç','c')):
+            s = s.replace(a, b)
+        s = re.sub(r'[^a-z0-9]+', ' ', s).strip()
+        return s
+    q = _norm(query_title)
     titles = [candidate.get('title'), candidate.get('original_title')]
     sim = 0.0
     for t in titles:
         if not t:
             continue
-        s = difflib.SequenceMatcher(None, q, str(t).lower()).ratio()
+        s = difflib.SequenceMatcher(None, q, _norm(str(t))).ratio()
         if s > sim:
             sim = s
     score = sim * 100.0
@@ -6121,6 +6149,24 @@ def _strip_query_tags(text):
     #    non-whitespace (greedy), so `#Melissa#mccarthy#` is one cluster
     #    that drops entirely.  Loose `#foo` without a closing `#` also drops.
     s = re.sub(r'#\S*', ' ', s)
+    # 3b. Strip TVOON broadcast metadata when carried into a SPACE-separated
+    #     title.  When Plex couldn't match a TVOON recording it derives the
+    #     title from the filename — keeping the broadcast date, time,
+    #     channel, duration, "TVOON DE", and quality marker as
+    #     space-separated tokens at the END of the title.  Example input:
+    #       `Die Kaenguru Chroniken 22 08 04 20 15 3sat 85 TVOON DE HQ`
+    #     Pattern: `<title> <YY> <MM> <DD> <HH> <MM> <channel> <duration> TVOON DE [<quality>…]`
+    s = re.sub(
+        r'\s+\d{2}\s+\d{2}\s+\d{2}'   # date YY MM DD
+        r'\s+\d{2}\s+\d{2}'           # time HH MM
+        r'\s+[A-Za-z0-9]+'            # channel (first token)
+        r'(?:\s+[A-Za-z]+)*'          # optional extra channel tokens (FUCK TV, PRAY TV, …)
+        r'\s+\d+'                     # duration
+        r'\s+TVOON\s+DE'              # TVOON DE
+        r'(?:\s+[A-Za-z0-9]+)*'       # optional quality tail
+        r'\s*$',
+        '', s, flags=re.IGNORECASE
+    )
     # 4. Strip `a.k.a.` / `a k a` plus everything after — alternate-title
     #    noise pollutes the engine query.  `Society of the Snow a k a La
     #    Sociedad De La Nieve` → keep only `Society of the Snow`.
@@ -6365,15 +6411,25 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             skipped.append((key, 'no-candidates'))
             continue
 
-        # Score & sort.  Prefer the wrapper-derived `_clean_q` for the
-        # score query — it strips TVOON noise and other release tags far
-        # more aggressively than `_strip_query_tags(obj.title)`.  Falls
-        # back to the stripped Plex title, then the raw title.  Example:
-        #   obj.title  = 'My Big Fat Greek Wedding 12 10 28 20 15 Arte 95 Tvoon De Hq'
-        #   _clean_q   = 'my big fat greek wedding'
-        # Without this, the TMDB candidate 'My Big Fat Greek Wedding'
-        # only scored 61 (raw obj.title polluted the similarity).
-        _score_query = _clean_q or _title_for_search or title
+        # Score & sort.  Pick the longest (most-informative) of the two
+        # cleaned forms as the score query.  Examples:
+        #   wrapper basename `my.big.fat.greek.wedding.…tvoon.de.mpg.hq`
+        #     _clean_q          = 'my big fat greek wedding'   (5 tokens)
+        #     _title_for_search = 'My Big Fat Greek Wedding'   (5 tokens)
+        #     → either works; pick _clean_q.
+        #   wrapper basename `tv` (multi-movie shared folder)
+        #     _clean_q          = 'tv'                         (1 token)
+        #     _title_for_search = 'Die Kaenguru Chroniken'     (3 tokens)
+        #     → must pick the longer one, otherwise the right
+        #       candidate ('The Kangaroo Chronicles') scores ~0
+        #       against 'tv' and falls off the top-5 list.
+        def _query_strength(q):
+            if not q: return 0
+            return len([w for w in re.split(r'\W+', q) if w])
+        if _query_strength(_clean_q) >= _query_strength(_title_for_search):
+            _score_query = _clean_q or _title_for_search or title
+        else:
+            _score_query = _title_for_search or _clean_q or title
         scored = sorted(
             ((c, _score_candidate(_score_query, c)) for c in candidates),
             key=lambda x: x[1], reverse=True,
