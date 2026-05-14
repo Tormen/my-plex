@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.42"
+SCRIPT_VERSION = "v2.43"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6762,7 +6762,18 @@ def _bad_structure_flatten_batch(moves):
             f"for f in * .[!.]* ..?*; do\n"
             f"  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n"
             f"  if [ -e {dst_q}/\"$f\" ] || [ -L {dst_q}/\"$f\" ]; then\n"
-            f"    echo \"FAIL|{i}|collision: $f already at target\"; exit 0\n"
+            # v2.43: byte-identical collision = source is a leftover; rm it.
+            # Different size = genuine conflict; bail out.
+            f"    if [ -d \"$f\" ] || [ -d {dst_q}/\"$f\" ]; then\n"
+            f"      echo \"FAIL|{i}|collision (directory): $f\"; exit 0\n"
+            f"    fi\n"
+            f"    src_sz=$(stat -f%z \"$f\" 2>/dev/null || stat -c%s \"$f\" 2>/dev/null)\n"
+            f"    dst_sz=$(stat -f%z {dst_q}/\"$f\" 2>/dev/null || stat -c%s {dst_q}/\"$f\" 2>/dev/null)\n"
+            f"    if [ -n \"$src_sz\" ] && [ \"$src_sz\" = \"$dst_sz\" ]; then\n"
+            f"      rm -- \"$f\" || {{ echo \"FAIL|{i}|rm leftover failed: $f\"; exit 0; }}\n"
+            f"      continue\n"
+            f"    fi\n"
+            f"    echo \"FAIL|{i}|collision (different size: src=$src_sz dst=$dst_sz): $f\"; exit 0\n"
             f"  fi\n"
             f"  mv -- \"$f\" {dst_q}/\"$f\" || {{ echo \"FAIL|{i}|mv failed: $f\"; exit 0; }}\n"
             f"done\n"
