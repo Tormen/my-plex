@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.50"
+SCRIPT_VERSION = "v2.51"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -18485,6 +18485,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             plex_duration = obj.get('duration') or 0
             files_dict = obj.get('files', {})
+            # v2.51: detect whether a SIBLING version of this Episode/Movie has
+            # `container_duration` close to plex_duration (within 1%).  If so,
+            # any short sibling cannot fall back on the "Plex measured wrong"
+            # exception — internal consistency of the short version doesn't
+            # rescue it when the long version proves Plex was right.
+            _has_healthy_sibling = False
+            if plex_duration > 0:
+                for _sfi in files_dict.values():
+                    _sfm = _sfi.get('file_metadata') or {}
+                    _scd = _sfm.get('container_duration')
+                    if _scd and not _sfm.get('broken') and abs(_scd - plex_duration) / plex_duration < 0.01:
+                        _has_healthy_sibling = True
+                        break
             for file_info in files_dict.values():
                 file_metadata = file_info.get('file_metadata')
                 is_broken = False
@@ -18500,16 +18513,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         if container_duration:
                             diff_pct = ((container_duration - plex_duration) / plex_duration) * 100
                             if diff_pct < -TRUNCATION_THRESHOLD_PCT:
-                                # Cross-validate: if container and video stream durations agree
-                                # (within 2s), the file is internally consistent — Plex just
-                                # measured a different duration. Not a real truncation.
                                 video_duration = file_metadata.get('video_duration')
-                                if video_duration and abs(container_duration - video_duration) < 2000:
+                                if _has_healthy_sibling:
+                                    # Another file version of this same Episode/Movie matches
+                                    # plex_duration → THIS file is the truncated outlier.  The
+                                    # container≈video / file_ends_cleanly exceptions DO NOT apply.
+                                    is_broken = True
+                                elif video_duration and abs(container_duration - video_duration) < 2000:
                                     pass  # File is healthy, Plex duration is just inaccurate
                                 elif file_metadata.get('file_ends_cleanly'):
                                     pass  # No stream duration but file decodes cleanly to end
                                 else:
                                     is_broken = True
+                                if is_broken:
                                     if diff_pct < -10:      severity = 'severe'
                                     elif diff_pct < -5:     severity = 'moderate'
                                     elif diff_pct < -1:     severity = 'mild'
