@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.43"
+SCRIPT_VERSION = "v2.44"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -6730,6 +6730,72 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print()
 
 
+_BAD_STRUCTURE_MERGE_SH = r'''
+# v2.44 — recursive per-file merge of $1 (src) into $2 (dst).
+# Per-file conflict rules:
+#   both dirs       → recurse into both
+#   dir vs file     → FAIL (pathological)
+#   byte-identical  → rm source (leftover)
+#   different size  → keep the BIGGER one (mv -f if src bigger, rm if dst bigger)
+# Emits "FAIL|<i>|<reason>" via shared $_IDX and "exit 1" on fatal error.
+bs_merge_dir() {
+  local _src="$1"
+  local _dst="$2"
+  local _f
+  ( cd "$_src" || { echo "FAIL|$_IDX|cd: $_src"; return 1; }
+    shopt -s nullglob dotglob 2>/dev/null || true
+    for _f in * .[!.]* ..?*; do
+      [ -e "$_f" ] || [ -L "$_f" ] || continue
+      if [ -e "$_dst/$_f" ] || [ -L "$_dst/$_f" ]; then
+        _src_is_dir=0; _dst_is_dir=0
+        [ -d "$_f" ] && [ ! -L "$_f" ] && _src_is_dir=1
+        [ -d "$_dst/$_f" ] && [ ! -L "$_dst/$_f" ] && _dst_is_dir=1
+        if [ "$_src_is_dir" = 1 ] && [ "$_dst_is_dir" = 1 ]; then
+          bs_merge_dir "$_src/$_f" "$_dst/$_f" || return 1
+          rmdir "$_f" 2>/dev/null || true
+          continue
+        fi
+        if [ "$_src_is_dir" != "$_dst_is_dir" ]; then
+          echo "FAIL|$_IDX|collision (dir/file mismatch): $_src/$_f"
+          return 1
+        fi
+        _ssz=$(stat -f%z "$_f" 2>/dev/null || stat -c%s "$_f" 2>/dev/null)
+        _dsz=$(stat -f%z "$_dst/$_f" 2>/dev/null || stat -c%s "$_dst/$_f" 2>/dev/null)
+        if [ -z "$_ssz" ] || [ -z "$_dsz" ]; then
+          echo "FAIL|$_IDX|stat failed: $_src/$_f"; return 1
+        fi
+        if [ "$_ssz" = "$_dsz" ]; then
+          rm -- "$_f" || { echo "FAIL|$_IDX|rm leftover failed: $_src/$_f"; return 1; }
+          continue
+        fi
+        if [ "$_ssz" -gt "$_dsz" ]; then
+          mv -f -- "$_f" "$_dst/$_f" || { echo "FAIL|$_IDX|mv (src bigger) failed: $_src/$_f"; return 1; }
+        else
+          rm -- "$_f" || { echo "FAIL|$_IDX|rm (dst bigger) failed: $_src/$_f"; return 1; }
+        fi
+        continue
+      fi
+      mv -- "$_f" "$_dst/$_f" || { echo "FAIL|$_IDX|mv failed: $_src/$_f"; return 1; }
+    done
+  )
+}
+'''
+
+
+def _bad_structure_flatten_block(i, src_q, dst_q):
+    """Bash block (string) that flattens one src_q → dst_q.
+    Uses bs_merge_dir() (defined once at the top of the batched script) for
+    per-file resolution.  Caller emits OK|<i> or FAIL|<i>|<reason>."""
+    return (
+        f"(\n"
+        f"_IDX={i}\n"
+        f"bs_merge_dir {src_q} {dst_q} || exit 0\n"
+        f"rmdir {src_q} || {{ echo \"FAIL|{i}|rmdir failed (not empty?)\"; exit 0; }}\n"
+        f"echo \"OK|{i}\"\n"
+        f")"
+    )
+
+
 def _bad_structure_flatten_batch(moves):
     """v2.42: batched flatten — single SSH/bash session processes every (src, dst) pair.
 
@@ -6755,34 +6821,8 @@ def _bad_structure_flatten_batch(moves):
             continue
         src_q = _shlex.quote(src)
         dst_q = _shlex.quote(dst)
-        blocks.append(
-            f"(\n"
-            f"cd {src_q} 2>/dev/null || {{ echo \"FAIL|{i}|cd: source does not exist\"; exit 0; }}\n"
-            f"shopt -s nullglob dotglob 2>/dev/null || true\n"
-            f"for f in * .[!.]* ..?*; do\n"
-            f"  [ -e \"$f\" ] || [ -L \"$f\" ] || continue\n"
-            f"  if [ -e {dst_q}/\"$f\" ] || [ -L {dst_q}/\"$f\" ]; then\n"
-            # v2.43: byte-identical collision = source is a leftover; rm it.
-            # Different size = genuine conflict; bail out.
-            f"    if [ -d \"$f\" ] || [ -d {dst_q}/\"$f\" ]; then\n"
-            f"      echo \"FAIL|{i}|collision (directory): $f\"; exit 0\n"
-            f"    fi\n"
-            f"    src_sz=$(stat -f%z \"$f\" 2>/dev/null || stat -c%s \"$f\" 2>/dev/null)\n"
-            f"    dst_sz=$(stat -f%z {dst_q}/\"$f\" 2>/dev/null || stat -c%s {dst_q}/\"$f\" 2>/dev/null)\n"
-            f"    if [ -n \"$src_sz\" ] && [ \"$src_sz\" = \"$dst_sz\" ]; then\n"
-            f"      rm -- \"$f\" || {{ echo \"FAIL|{i}|rm leftover failed: $f\"; exit 0; }}\n"
-            f"      continue\n"
-            f"    fi\n"
-            f"    echo \"FAIL|{i}|collision (different size: src=$src_sz dst=$dst_sz): $f\"; exit 0\n"
-            f"  fi\n"
-            f"  mv -- \"$f\" {dst_q}/\"$f\" || {{ echo \"FAIL|{i}|mv failed: $f\"; exit 0; }}\n"
-            f"done\n"
-            f"cd /\n"
-            f"rmdir {src_q} || {{ echo \"FAIL|{i}|rmdir failed (not empty?)\"; exit 0; }}\n"
-            f"echo \"OK|{i}\"\n"
-            f")"
-        )
-    script = "\n".join(blocks)
+        blocks.append(_bad_structure_flatten_block(i, src_q, dst_q))
+    script = _BAD_STRUCTURE_MERGE_SH + "\n" + "\n".join(blocks)
     argv = _ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s']
     proc = _sp.run(argv, input=script, capture_output=True, text=True)
     for line in (proc.stdout or '').splitlines():
@@ -6842,15 +6882,25 @@ def _bad_structure_relocate_season_batch(moves):
         src_q = _shlex.quote(src)
         tgt_q = _shlex.quote(target)
         rmdir_lines = '\n'.join(f"rmdir {_shlex.quote(p)} 2>/dev/null || true" for p in (intermediates or []))
+        # v2.44: when target already exists, recursively merge instead of failing.
         blocks.append(
             f"(\n"
-            f"if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo \"FAIL|{i}|target exists\"; exit 0; fi\n"
-            f"mv -- {src_q} {tgt_q} || {{ echo \"FAIL|{i}|mv failed (src missing?)\"; exit 0; }}\n"
+            f"_IDX={i}\n"
+            f"if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then\n"
+            f"  if [ -d {src_q} ] && [ -d {tgt_q} ]; then\n"
+            f"    bs_merge_dir {src_q} {tgt_q} || exit 0\n"
+            f"    rmdir {src_q} || {{ echo \"FAIL|{i}|rmdir src failed after merge\"; exit 0; }}\n"
+            f"  else\n"
+            f"    echo \"FAIL|{i}|target exists and src or target is not a dir\"; exit 0\n"
+            f"  fi\n"
+            f"else\n"
+            f"  mv -- {src_q} {tgt_q} || {{ echo \"FAIL|{i}|mv failed (src missing?)\"; exit 0; }}\n"
+            f"fi\n"
             f"{rmdir_lines}\n"
             f"echo \"OK|{i}\"\n"
             f")"
         )
-    script = "\n".join(blocks)
+    script = _BAD_STRUCTURE_MERGE_SH + "\n" + "\n".join(blocks)
     argv = _ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s']
     proc = _sp.run(argv, input=script, capture_output=True, text=True)
     for line in (proc.stdout or '').splitlines():
