@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.40"
+SCRIPT_VERSION = "v2.41"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -11992,8 +11992,37 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
             else:
                 # Force reprocessing to update Plex metadata
                 if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): REPROCESSING key '{key}' version '{version}' (FORCE_PLEXDATA)")
+        # v2.41: detect "same file, version-string drifted".  Plex's
+        # library.refresh() (triggered by --scan / --force-plexdata) re-probes
+        # files and may report a marginally different duration_ms that rounds
+        # to a different `dur_min` in _build_version_string — yielding a new
+        # version key for the SAME physical file.  Without this guard, the
+        # old entry stays as an orphan and the new entry has no file_metadata
+        # → gets re-queued for ffmpeg probe.  Bulk --scan made this explode
+        # to ~9600 redundant probes on series.de.
+        #
+        # If any existing entry shares this filepath + filesize, drop the
+        # stale version key and carry its file_metadata over to the new key.
+        _carried_metadata = None
+        _stale_keys = [_v for _v, _fi in existing_files.items()
+                       if isinstance(_fi, dict) and _fi.get('filepath') == filepath
+                       and _fi.get('filesize') == part_size
+                       and _v != version]
+        if _stale_keys:
+            for _sv in _stale_keys:
+                _sfi = existing_files[_sv]
+                _sm = _sfi.get('file_metadata') if isinstance(_sfi, dict) else None
+                if _sm and isinstance(_sm, dict) and _sm.get('filesize') == part_size and not _sm.get('broken'):
+                    _carried_metadata = _sm
+                    break
+            for _sv in _stale_keys:
+                del existing_files[_sv]
+            if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): dropped {len(_stale_keys)} stale version key(s) for {filepath} "
+                          f"(carry-over metadata: {'yes' if _carried_metadata else 'no'})")
         # New version of existing object - merge files dict
         existing_files[version] = {'filepath': filepath, 'filesize': part_size}
+        if _carried_metadata:
+            existing_files[version]['file_metadata'] = _carried_metadata
         val['files'] = existing_files
         if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): ADDING version '{version}' to existing key '{key}' in library '{library.title:<22s}'")
 
@@ -13106,14 +13135,36 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
                 is_new_episode = episode_key not in PLEX_Media.OBJ_BY_ID
                 processed_count += 1
 
-                # Preserve file_metadata from existing cache entry (expensive to re-collect via ffmpeg)
+                # Preserve file_metadata from existing cache entry (expensive to re-collect via ffmpeg).
+                # v2.41: also match by filepath+filesize when the version string has drifted —
+                # Plex's library.refresh() re-probes files and may report a slightly different
+                # duration that rounds to a different `dur_min` in _build_version_string,
+                # producing a new version key for the SAME physical file.  Without this fallback
+                # every --scan re-queues all 9000+ episode files for ffmpeg probing.
                 if not is_new_episode:
                     cached_files = PLEX_Media.OBJ_BY_ID[episode_key].get('files', {})
+                    # Index cached entries by filepath for fallback lookup.
+                    by_filepath = {}
+                    for _cv, _cfi in cached_files.items():
+                        if isinstance(_cfi, dict) and _cfi.get('filepath') and _cfi.get('file_metadata'):
+                            by_filepath.setdefault(_cfi['filepath'], []).append(_cfi)
                     for ver, new_fi in episode_dict.get('files', {}).items():
-                        if isinstance(new_fi, dict) and new_fi.get('file_metadata') is None:
-                            cached_fi = cached_files.get(ver)
-                            if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
-                                new_fi['file_metadata'] = cached_fi['file_metadata']
+                        if not (isinstance(new_fi, dict) and new_fi.get('file_metadata') is None):
+                            continue
+                        # 1. exact version-key match
+                        cached_fi = cached_files.get(ver)
+                        if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
+                            new_fi['file_metadata'] = cached_fi['file_metadata']
+                            continue
+                        # 2. filepath+filesize fallback (version drift across --scan)
+                        new_fp = new_fi.get('filepath')
+                        new_sz = new_fi.get('filesize')
+                        for _alt in by_filepath.get(new_fp, []):
+                            _alt_fm = _alt.get('file_metadata')
+                            if (isinstance(_alt_fm, dict) and not _alt_fm.get('broken')
+                                    and _alt_fm.get('filesize') == new_sz):
+                                new_fi['file_metadata'] = _alt_fm
+                                break
 
                 # Rewrite the display-only S0XE0X string using this series's padding
                 # widths. S_str/E_str stay at 2-digit (structural keys used in
@@ -35226,7 +35277,14 @@ def main():
     # --force triggers both --force-plexdata AND --force-metadata
     # Each can also be used independently
     FORCE_PLEXDATA = (args.force or args.force_plexdata) and args.update_cache
-    FORCE_METADATA = (args.force or args.force_metadata or has_scan) and args.update_cache
+    # v2.41: removed `has_scan` from this clause — `--scan` is for triggering
+    # Plex's library scan + refreshing the my-plex cache, NOT for forcing an
+    # ffmpeg re-probe of every file (which is what --force-metadata is for).
+    # The previous code unconditionally re-queued every cached file on every
+    # --scan even when the existing file_metadata was still valid, defeating
+    # the cache.  Now --scan only re-probes when --force / --force-metadata
+    # is explicitly given.
+    FORCE_METADATA = (args.force or args.force_metadata) and args.update_cache
     RESCAN_BROKEN = args.update_cache and has_broken  # --update-cache --broken: rescan broken files
 
     FROM_SCRATCH = args.from_scratch and args.update_cache  # Only delete cache files with both flags
