@@ -6051,10 +6051,13 @@ class TestJunk(unittest.TestCase):
         self.assertIn("JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING = CONFIG_DEFAULTS.get(", content)
 
     def test_library_argparser(self):
-        """--junk + --trash must be in library argparser."""
+        """--junk must be in library argparser; --trash flag must NOT exist (use --resolve)."""
         content = self._read_script()
         self.assertIn("'--junk'", content)
-        self.assertIn("'--trash'", content)
+        # --resolve is the canonical action verb (matches --unmatched --resolve,
+        # --duplicates --resolve, --bad-structure --resolve)
+        self.assertNotIn("dest='trash'", content,
+            "--trash flag was renamed to --resolve for consistency")
 
     def test_global_cmd_parser(self):
         """--junk must be in GLOBAL_CMD_PARSER."""
@@ -6072,7 +6075,7 @@ class TestJunk(unittest.TestCase):
         self.assertIn("'junk'", line)
 
     def test_help_exists(self):
-        """--help junk must work and mention all 3 signals."""
+        """--help junk must work, mention all 3 signals, and use --resolve as the action verb."""
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--help', 'junk'],
             capture_output=True, text=True, timeout=30)
@@ -6081,6 +6084,19 @@ class TestJunk(unittest.TestCase):
         self.assertIn('FILENAME PATTERN', result.stdout)
         self.assertIn('TINY SIZE', result.stdout)
         self.assertIn('TINY DURATION', result.stdout)
+        self.assertIn('--resolve', result.stdout, "Help must use --resolve as the action verb")
+
+    def test_problems_integration(self):
+        """--junk must be wired into --problems suite + --update-cache summary."""
+        content = self._read_script()
+        # _problems_cache must have a 'junk' key (populated during --update-cache)
+        self.assertIn("'junk':              _pc_junk,", content,
+            "--update-cache must populate _problems_cache['junk']")
+        # _print_problem_warnings must surface it with the --junk --resolve fix command
+        self.assertIn("--junk --resolve", content,
+            "Problem warning row must point to --junk --resolve")
+        # The --problems detail run must include _list_junk_files
+        self.assertIn("_run_check(PLEX_Media._list_junk_files,", content)
 
     def test_e2e_runs(self):
         """--junk must run without error."""
@@ -6100,16 +6116,14 @@ class TestJunk(unittest.TestCase):
         self.assertIn('len(siblings) <= 2', body,
             "Both size and duration signals must gate on len(siblings) <= 2")
 
-    def test_clean_pipeline_includes_junk_trash(self):
-        """--clean pipeline must include ['--junk', '--trash'] as a step."""
+    def test_clean_pipeline_includes_junk_resolve(self):
+        """--clean pipeline must include ['--junk', '--resolve'] as a step."""
         content = self._read_script()
         idx = content.index("'--clean': [")
-        # Find the closing `],` of the outer --clean list (look for `\n        ],`
-        # which is the indentation of pipeline-key lines).
         end = content.index("\n        ],", idx)
         section = content[idx:end]
-        self.assertIn("'--junk', '--trash'", section,
-            f"PIPELINES['--clean'] must run --junk --trash; got: {section}")
+        self.assertIn("'--junk', '--resolve'", section,
+            f"PIPELINES['--clean'] must run --junk --resolve; got: {section}")
 
     def test_pipeline_dry_run_and_yes_propagation(self):
         """--junk must be in DRY_RUN_AWARE and YES_AWARE sets so --clean propagates --try / --yes."""
