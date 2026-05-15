@@ -945,9 +945,8 @@ CONFIG_DEFAULTS = {
         r'(?i)thumbs\.db$',       # Windows Explorer index
     ],
 
-    # Standalone size threshold (MB).  Any file at or below this size in
-    # a scoped media directory is flagged as junk.  Set to 0 to disable
-    # the size criterion entirely.
+    # Size threshold (MB).  Any file at or below this size in a scoped
+    # media directory is flagged as junk.  Set to 0 to disable.
     'JUNK_MAX_SIZE_MB': 0,
 
     # Reencode Candidate Detection Configuration
@@ -1553,7 +1552,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #    artwork / Windows-shortcut / HTML-clutter names.  Customise to
 #    add release-group-specific patterns (e.g. r'(?i)RARBG\\.com').
 # 2. JUNK_MAX_SIZE_MB — flag every file whose size is ≤ this many MB.
-#    Standalone trigger (no sibling comparison).  Set to 0 to disable.
+#    Set to 0 to disable.
 #
 # Scope is whatever you give my-plex on the command line:
 #   my-plex --junk                   # all libraries
@@ -20287,11 +20286,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return sorted(paths)
 
     @staticmethod
-    def _list_junk_files(scope_val, resolve=False, dry_run=False, yes=False):
+    def _list_junk_files(scope_val, resolve=False, dry_run=False, yes=False, recursive=True):
         """Pure disk-walk junk detection.  Scope is translated to disk
         root path(s) via _resolve_scope_to_disk_paths; each root is
-        walked RECURSIVELY (no depth limit) on the Plex server.  A file
-        is flagged when it triggers EITHER:
+        walked on the Plex server.
+
+        recursive=True  (default) → no depth limit (full subtree).
+        recursive=False           → depth-1 only (files directly in the root).
+
+        A file is flagged when it triggers EITHER:
 
           • JUNK_FILENAME_PATTERNS — basename matches any regex.
           • JUNK_MAX_SIZE_MB       — file size ≤ this many MB
@@ -20319,11 +20322,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # avoid the system Trash (.Trashes), .DS_Store-style noise,
             # and any other dotted bookkeeping.
             escaped = escape_path_for_ssh(d)
+            # Depth limit applies only when recursive=False; otherwise walk full subtree.
+            depth_args_remote = '' if recursive else ' -maxdepth 1'
+            depth_args_local  = [] if recursive else ['-maxdepth', '1']
             if PLEX_DB_REMOTE_HOST:
                 cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                       f'find "{escaped}" -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
+                       f'find "{escaped}"{depth_args_remote} -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
             else:
-                cmd = ['find', d, '-name', '.*', '-prune', '-o', '-type', 'f',
+                cmd = ['find', d, *depth_args_local, '-name', '.*', '-prune', '-o', '-type', 'f',
                        '-exec', 'stat', '-f', '%z %N', '{}', '+']
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
@@ -25934,13 +25940,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("JUNK FILES HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --junk [SCOPE] [--resolve] [--try]")
+            print("Usage: my-plex --junk [SCOPE] [--resolve] [--no-recursive] [--try]")
             print()
             print("Pure DISK-BASED clutter detection.  Plex's index is NOT consulted —")
             print("works on files Plex never indexed (.htm, .lnk, .url, thumbs.db, etc.).")
             print()
+            print("RECURSION:")
+            print("  --recursive       (default) walk the full subtree under each scope root")
+            print("  --no-recursive    only files directly in each scope root (depth-1)")
+            print()
             print("SCOPE is translated to disk root path(s); each root is then walked")
-            print("RECURSIVELY on the Plex server.  Translation rules:")
+            print("on the Plex server.  Translation rules:")
             print("  (no scope)         → every library's root paths")
             print("  /abs/path          → just that directory tree")
             print("  <library-name>     → that library's root paths")
@@ -25977,6 +25987,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --junk                       # Every library, recursive")
             print("  my-plex --junk movies.en             # One library, recursive")
             print("  my-plex --junk /Volumes/2/foo        # One directory tree")
+            print("  my-plex --junk movies.en --no-recursive  # depth-1 in library roots only")
             print("  my-plex Movie:115523 --junk          # One movie's wrapper dir")
             print("  my-plex 'Tagesschau' --junk          # One series's directory")
             print("  my-plex --junk --resolve             # Trash with prompt")
@@ -35974,17 +35985,22 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_mismatched(obj_keys, library_name)
         return
 
-    # Handle --junk [SCOPE] [--resolve]: pure disk-walk junk detection.
-    # Scope is translated to disk root path(s) inside _list_junk_files;
-    # walks RECURSIVELY — no dependency on Plex's index.
+    # Handle --junk [SCOPE] [--resolve] [--no-recursive]: pure disk-walk
+    # junk detection.  Scope is translated to disk root path(s) inside
+    # _list_junk_files; recursion is on by default (--no-recursive limits
+    # the walk to depth-1).  No dependency on Plex's index.
     junk_val = safe_getattr(cmd_args, 'junk', None)
     if junk_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
         yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
+        _rec    = safe_getattr(cmd_args, 'recursive', None)
+        if _rec is None: _rec = safe_getattr(args, 'recursive', None)
+        recursive = True if _rec is None else bool(_rec)
         _scope_label = f" {junk_val!r}" if junk_val and junk_val not in (True, '', [], ['']) else ""
-        print(f"\n--- Junk Files{_scope_label} ---")
-        PLEX_Media._list_junk_files(junk_val, resolve=resolve, dry_run=dry_run, yes=yes)
+        _depth_label = "" if recursive else " (depth-1)"
+        print(f"\n--- Junk Files{_scope_label}{_depth_label} ---")
+        PLEX_Media._list_junk_files(junk_val, resolve=resolve, dry_run=dry_run, yes=yes, recursive=recursive)
         return
 
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
@@ -37035,6 +37051,7 @@ def main():
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -37109,7 +37126,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help="List Plex mismatches: title vs directory + multi-version Plex grouping. Use --help mismatched for details.")
-    GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="List junk files (samples / RARBG promos / .nfo / tiny placeholders) bundled with healthy media. Add --resolve to move them to Finder Trash. Use --help junk for details.")
+    GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="Pure disk-walk clutter detection in scope (recursive by default; --no-recursive for depth-1). Add --resolve to trash matches. Use --help junk for details.")
+    GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
