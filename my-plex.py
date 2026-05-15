@@ -924,7 +924,6 @@ CONFIG_DEFAULTS = {
     # independent signals; ANY one triggers, but only when a healthy sibling
     # exists in the same slot (so a lone short film is never flagged).
     'JUNK_FILENAME_PATTERNS': [
-        r'(?i)RARBG\.com',
         r'(?i)(^|[._/-])sample([._-]|$)',
         r'(?i)^readme',
         r'(?i)\.(nfo|txt)$',
@@ -1537,11 +1536,14 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # (extras packages, large broadcast-recording slots, etc.).
 #
 # 1. JUNK_FILENAME_PATTERNS — list of regex strings; ANY match triggers.
-#    Default patterns cover the common torrent-promo / sample / readme /
-#    sidecar names.  Customise to add release-group-specific clutter.
-# 2. JUNK_MAX_SIZE_MB — file ≤ this size AND a sibling ≥ 10× larger.
-# 3. JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING — file's container duration
-#    < this % of the largest sibling's duration.
+#    Default patterns cover the common sample / readme / sidecar names.
+#    Customise to add release-group-specific clutter (e.g. r'(?i)RARBG\\.com').
+# 2. JUNK_MAX_SIZE_MB — flag a file when its size is ≤ this many MB
+#    AND a sibling in the same Plex slot is ≥ 10× larger.
+# 3. JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING — flag a file when its
+#    duration is < this % of the LONGEST sibling's duration.
+#    Example with the default 5%: a 4-min clip sharing a Plex slot with
+#    a 100-min movie is junk (4/100 = 4% < 5%).
 #
 # Defaults:
 # JUNK_FILENAME_PATTERNS = {CONFIG_DEFAULTS['JUNK_FILENAME_PATTERNS']!r}
