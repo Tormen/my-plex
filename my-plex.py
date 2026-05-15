@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.63"
+SCRIPT_VERSION = "v2.64"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -918,36 +918,80 @@ CONFIG_DEFAULTS = {
     'MULTI_VERSION_MAX_SERIES':                2,     # >2 versions on one Episode => suspect grouping
     'MULTI_VERSION_MAX_DURATION_SPREAD_PCT':   2.0,   # spread > 2% across versions => suspect grouping
 
-    # Junk-file Detection Configuration (--junk, --clean) — DISK-BASED.
-    # For every directory that contains a Plex-indexed media file (in
-    # the current scope: global, library, series dir, filepath prefix,
-    # …), --junk walks the directory at depth-1 and flags every file
-    # that triggers EITHER of two independent criteria:
+    # Junk-file Detection Configuration (--junk, --clean) — PURE DISK-WALK.
     #
-    #   • Filename-pattern match — basename matches any regex in
-    #     JUNK_FILENAME_PATTERNS.
-    #   • Size threshold       — file size ≤ JUNK_MAX_SIZE_MB
-    #                             (0 = disabled).
+    # `JUNK_PATTERNS` is a dict.  Each KEY is a pattern name (used to
+    # invoke that pattern explicitly via `my-plex --junk <name>`).
+    # `my-plex --junk` without arguments runs ALL patterns.
     #
-    # Plex's index isn't consulted — these files don't have to be
-    # cached; the disk is the source of truth.
-    # Used by `my-plex --junk` (preview) and `my-plex --junk --resolve`
-    # (move flagged files to Trash via move_to_trash — recoverable).
-    'JUNK_FILENAME_PATTERNS': [
-        r'(?i)(^|[._/-])sample([._-]|$)',
-        r'(?i)^readme',
-        r'(?i)\.(nfo|txt)$',
-        r'(?i)screens?\.(jpe?g|png)$',
-        r'(?i)\.html?$',          # web pages / download landers
-        r'(?i)\.lnk$',            # Windows shortcuts
-        r'(?i)\.url$',            # web shortcuts
-        r'(?i)\.ds_store$',       # macOS Finder index
-        r'(?i)thumbs\.db$',       # Windows Explorer index
-    ],
-
-    # Size threshold (MB).  Any file at or below this size in a scoped
-    # media directory is flagged as junk.  Set to 0 to disable.
-    'JUNK_MAX_SIZE_MB': 0,
+    # Each VALUE is itself a dict with four fields:
+    #
+    #   SCOPE             Where this pattern applies — anything my-plex
+    #                     accepts as a scope:
+    #                       ''                            all libraries
+    #                       '/abs/path'                   one directory tree
+    #                       '<library-name>'              one library
+    #                       '<cache-key>'                 one media item
+    #                       '<title>' / filter expression resolved-objects' dirs
+    #
+    #   FILENAME_REGEXP   Python regex tested against each file's BASENAME
+    #                     (not the full path).  Prefix '(?i)' to make
+    #                     the regex case-insensitive.  Full regex syntax
+    #                     reference: https://docs.python.org/3/library/re.html
+    #                     Set to '' to disable filename matching.
+    #
+    #   MAX_SIZE_MB       File size threshold in MB; any file ≤ this size
+    #                     is flagged.  Set to 0 to disable size matching.
+    #
+    #   RECURSIVE         'yes' → walk the scope's directory tree fully.
+    #                     'no'  → only files at depth-1 in the scope root(s).
+    #
+    # If BOTH FILENAME_REGEXP and MAX_SIZE_MB are set, the pattern only
+    # flags files that satisfy BOTH (AND semantics).  At least one of
+    # the two must be active — patterns with both disabled are skipped
+    # with a warning.
+    #
+    # Logging: every --junk --resolve run writes
+    # ~/.my-plex/logs/junk_<YYYYMMDD_HHMMSS>.json with the per-file
+    # action record (path, pattern, reason, trash destination, status).
+    'JUNK_PATTERNS': {
+        'samples': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)(^|[._/-])sample([._-]|$)',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+        'readme': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)^readme',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+        'sidecars': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)\.(nfo|txt)$',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+        'web_shortcuts': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)\.(htm|html|lnk|url)$',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+        'os_index': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)(\.ds_store$|^thumbs\.db$)',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+        'screenshots': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'(?i)screens?\.(jpe?g|png)$',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
+    },
 
     # Reencode Candidate Detection Configuration
     # Reencode threshold — specify as a dict with ONE of the two keys:
@@ -1542,29 +1586,50 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Junk-file Detection Configuration (--junk, --clean)
 ###############################################################################
 
-# DISK-BASED: for every directory that contains a Plex-indexed media
-# file in scope (global / library / series dir / filepath prefix / …),
-# walk the directory at depth-1 and flag each file that triggers
-# EITHER of two independent criteria.
+# JUNK_PATTERNS is a dict of NAMED junk-detection patterns.  Each key
+# is invocable as `my-plex --junk <name>`; `my-plex --junk` (no name)
+# runs ALL patterns.  Each value is itself a dict with four fields:
 #
-# 1. JUNK_FILENAME_PATTERNS — list of regex strings; ANY match triggers.
-#    Default patterns cover common sample / readme / sidecar / sample
-#    artwork / Windows-shortcut / HTML-clutter names.  Customise to
-#    add release-group-specific patterns (e.g. r'(?i)RARBG\\.com').
-# 2. JUNK_MAX_SIZE_MB — flag every file whose size is ≤ this many MB.
-#    Set to 0 to disable.
+#   SCOPE            Where this pattern applies — anything my-plex
+#                    accepts as a scope (empty = all libraries):
+#                      ''                            all libraries
+#                      '/abs/path'                   one directory tree
+#                      '<library-name>'              one library
+#                      '<cache-key>'                 one media item
+#                      '<title>' / filter expression resolved-objects' dirs
 #
-# Scope is whatever you give my-plex on the command line:
-#   my-plex --junk                   # all libraries
-#   my-plex lib6 --junk              # one library
-#   my-plex 'Tagesschau' --junk      # one series
-#   my-plex /Volumes/2/watch.v/movies.en/foo --junk   # one directory
+#   FILENAME_REGEXP  Python regex tested against each file's BASENAME.
+#                    Prefix the pattern with '(?i)' to make it
+#                    case-insensitive.  Full regex syntax reference:
+#                      https://docs.python.org/3/library/re.html
+#                    Set to '' to disable filename matching.
+#
+#   MAX_SIZE_MB      File-size threshold in MB; flag files ≤ this size.
+#                    Set to 0 to disable size matching.
+#
+#   RECURSIVE        'yes' → walk the scope's directory tree fully.
+#                    'no'  → only files at depth-1 in the scope root(s).
+#                    Also accepts True / False / 'true' / 'false' /
+#                    '1' / '0' (case-insensitive).
+#
+# When BOTH FILENAME_REGEXP and MAX_SIZE_MB are set, the pattern only
+# flags files that satisfy BOTH (AND semantics).  At least one of the
+# two must be active — entries with both disabled are skipped with a
+# warning.
+#
+# Logging: every `--junk --resolve` run writes
+#   ~/.my-plex/logs/junk_<YYYYMMDD_HHMMSS>.json
+# with one record per file (filepath, pattern, reason, trash dest, status).
+#
+# CLI:
+#   my-plex --junk                          # all patterns
+#   my-plex --junk samples sidecars         # only these two
+#   my-plex --junk --resolve --try          # preview what would be trashed
+#   my-plex --junk --resolve                # trash with prompt + log
+#   my-plex --junk --no-recursive           # global override of RECURSIVE
 #
 # Default:
-{_fmt_default('JUNK_FILENAME_PATTERNS', CONFIG_DEFAULTS['JUNK_FILENAME_PATTERNS'])}
-
-# Default:
-# JUNK_MAX_SIZE_MB = {CONFIG_DEFAULTS['JUNK_MAX_SIZE_MB']}
+{_fmt_default('JUNK_PATTERNS', CONFIG_DEFAULTS['JUNK_PATTERNS'])}
 
 ###############################################################################
 # Reencode Candidate Detection Configuration
@@ -2307,9 +2372,64 @@ BROKEN_MIN_BYTERATE_KBYTE_PER_S = CONFIG_DEFAULTS.get('BROKEN_MIN_BYTERATE_KBYTE
 MULTI_VERSION_MAX_MOVIE = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_MOVIE', 2)
 MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_SERIES', 2)
 MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', 2.0)
-JUNK_FILENAME_PATTERNS = CONFIG_DEFAULTS.get('JUNK_FILENAME_PATTERNS', [])
-JUNK_FILENAME_PATTERNS_COMPILED = [re.compile(p) for p in JUNK_FILENAME_PATTERNS]
-JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get('JUNK_MAX_SIZE_MB', 0)
+JUNK_PATTERNS = CONFIG_DEFAULTS.get('JUNK_PATTERNS', {})
+
+# Compiled JUNK_PATTERNS cache: {name: (scope, compiled_regex_or_None, max_bytes_or_0, recursive_bool)}
+_JUNK_PATTERNS_COMPILED = None
+
+def _parse_yes_no(val, default=None):
+    """Accept 'yes'/'no'/True/False/'true'/'false'/1/0 (case-insensitive).
+    Returns True / False / `default` when unparseable."""
+    if val is True or val is False:
+        return val
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return bool(val)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ('yes', 'y', 'true', 'on', '1'):
+            return True
+        if v in ('no', 'n', 'false', 'off', '0', ''):
+            return False
+    return default
+
+def _compile_junk_patterns():
+    """Validate + compile JUNK_PATTERNS into _JUNK_PATTERNS_COMPILED.
+    Invalid patterns are skipped with a stderr warning.
+    Returns the compiled dict {name: (scope, regex_or_None, max_bytes, recursive)}.
+    """
+    global _JUNK_PATTERNS_COMPILED
+    if _JUNK_PATTERNS_COMPILED is not None:
+        return _JUNK_PATTERNS_COMPILED
+    out = {}
+    if not isinstance(JUNK_PATTERNS, dict):
+        print(f"  > WARNING: JUNK_PATTERNS must be a dict, got {type(JUNK_PATTERNS).__name__} — feature disabled.", file=sys.stderr)
+        _JUNK_PATTERNS_COMPILED = out
+        return out
+    for name, spec in JUNK_PATTERNS.items():
+        if not isinstance(spec, dict):
+            print(f"  > WARNING: JUNK_PATTERNS[{name!r}] must be a dict — skipping.", file=sys.stderr)
+            continue
+        scope     = spec.get('SCOPE', '')
+        regexp    = spec.get('FILENAME_REGEXP', '')
+        max_mb    = spec.get('MAX_SIZE_MB', 0)
+        recursive = _parse_yes_no(spec.get('RECURSIVE', 'yes'), default=True)
+        compiled_re = None
+        if isinstance(regexp, str) and regexp:
+            try:
+                compiled_re = re.compile(regexp)
+            except re.error as e:
+                print(f"  > WARNING: JUNK_PATTERNS[{name!r}].FILENAME_REGEXP {regexp!r} ignored: {e}", file=sys.stderr)
+        try:
+            max_bytes = int(float(max_mb) * 1024 * 1024) if max_mb else 0
+        except (TypeError, ValueError):
+            print(f"  > WARNING: JUNK_PATTERNS[{name!r}].MAX_SIZE_MB {max_mb!r} ignored (not a number).", file=sys.stderr)
+            max_bytes = 0
+        if compiled_re is None and max_bytes <= 0:
+            print(f"  > WARNING: JUNK_PATTERNS[{name!r}] has both FILENAME_REGEXP and MAX_SIZE_MB disabled — skipping.", file=sys.stderr)
+            continue
+        out[name] = (scope, compiled_re, max_bytes, recursive)
+    _JUNK_PATTERNS_COMPILED = out
+    return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
@@ -5242,6 +5362,36 @@ def has_other_video_files_in_dir(directory, exclude_file, remote_host=None):
             return True
 
     return False
+
+def _write_resolve_log(command_name, payload):
+    """Write a JSON log for a --resolve run.  Returns the log path or None.
+
+    Convention used across every --resolve-style command in my-plex:
+      • Logs go to ~/.my-plex/logs/<command>_<YYYYMMDD_HHMMSS>.json
+      • Payload is wrapped with a top-level meta block
+        ({'command', 'timestamp', 'script_version'}).
+      • Errors are non-fatal — a failed log write WARNs to stderr and
+        returns None; the underlying operation is not rolled back.
+    """
+    try:
+        import json
+        from datetime import datetime as _dt
+        log_dir = os.path.join(os.path.expanduser('~'), '.my-plex', 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+        path = os.path.join(log_dir, f'{command_name}_{ts}.json')
+        wrapped = {
+            'command':        command_name,
+            'timestamp':      _dt.now().isoformat(timespec='seconds'),
+            'script_version': SCRIPT_VERSION,
+            **(payload if isinstance(payload, dict) else {'data': payload}),
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(wrapped, f, indent=2, ensure_ascii=False)
+        return path
+    except Exception as e:
+        print(f"  > WARNING: could not write {command_name} resolve log: {e}", file=sys.stderr)
+        return None
 
 def move_to_trash(filepath, remote_host=None):
     """Move file or directory to trash
@@ -20286,98 +20436,103 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return sorted(paths)
 
     @staticmethod
-    def _list_junk_files(scope_val, resolve=False, dry_run=False, yes=False, recursive=True):
-        """Pure disk-walk junk detection.  Scope is translated to disk
-        root path(s) via _resolve_scope_to_disk_paths; each root is
-        walked on the Plex server.
+    def _list_junk_files(pattern_names=None, resolve=False, dry_run=False, yes=False, recursive_override=None):
+        """Pure disk-walk junk detection driven by JUNK_PATTERNS (dict).
 
-        recursive=True  (default) → no depth limit (full subtree).
-        recursive=False           → depth-1 only (files directly in the root).
+        pattern_names       None or [] → run every pattern.
+                            list[str]  → run only the named patterns.
+        recursive_override  None        → honor each pattern's RECURSIVE.
+                            True/False  → force every pattern that way.
 
-        A file is flagged when it triggers EITHER:
+        Each pattern carries SCOPE / FILENAME_REGEXP / MAX_SIZE_MB /
+        RECURSIVE.  A file is flagged when it satisfies the pattern's
+        active criteria (AND semantics when both regexp and size are
+        set).  Plex's index is NOT consulted — pure on-disk inspection.
 
-          • JUNK_FILENAME_PATTERNS — basename matches any regex.
-          • JUNK_MAX_SIZE_MB       — file size ≤ this many MB
-                                     (0 disables this check).
-
-        Plex's index is NOT consulted for the file checks — works on
-        files Plex never indexed (.htm, .lnk, .url, thumbs.db, etc.).
+        --resolve writes ~/.my-plex/logs/junk_<TS>.json.
         """
-        if not JUNK_FILENAME_PATTERNS_COMPILED and not (JUNK_MAX_SIZE_MB and JUNK_MAX_SIZE_MB > 0):
-            print("  Both JUNK_FILENAME_PATTERNS and JUNK_MAX_SIZE_MB are empty/0 —")
-            print("  nothing to scan for.  Set at least one in ~/.my-plex.conf.")
+        compiled = _compile_junk_patterns()
+        if not compiled:
+            print("  No usable JUNK_PATTERNS defined.  Configure JUNK_PATTERNS in ~/.my-plex.conf.")
             return 0
 
-        roots = PLEX_Media._resolve_scope_to_disk_paths(scope_val)
-        if not roots:
-            print(f"  Scope did not resolve to any disk path — nothing to walk.")
-            return 0
+        if pattern_names:
+            requested = [n for n in pattern_names if n]
+            unknown = [n for n in requested if n not in compiled]
+            if unknown:
+                print(f"  Unknown JUNK_PATTERNS entries: {unknown}")
+                print(f"  Available: {sorted(compiled.keys())}")
+                return 0
+            selected = [(n, compiled[n]) for n in requested]
+        else:
+            selected = list(compiled.items())
 
-        size_threshold_bytes = int(JUNK_MAX_SIZE_MB * 1024 * 1024) if (JUNK_MAX_SIZE_MB and JUNK_MAX_SIZE_MB > 0) else 0
+        print(f"  Patterns selected: {[n for n, _ in selected]}")
 
-        flagged = []  # list of (filepath, reason)
-        for d in roots:
-            # One SSH/local call per root: RECURSIVE list with sizes.
-            # BSD-stat compatible (macOS server).  Skip hidden dirs to
-            # avoid the system Trash (.Trashes), .DS_Store-style noise,
-            # and any other dotted bookkeeping.
-            escaped = escape_path_for_ssh(d)
-            # Depth limit applies only when recursive=False; otherwise walk full subtree.
+        flagged = []  # list of (filepath, pattern_name, reason)
+        roots_seen = set()
+        for pat_name, (scope, regex, max_bytes, pat_recursive) in selected:
+            roots = PLEX_Media._resolve_scope_to_disk_paths(scope)
+            if not roots:
+                print(f"  [{pat_name}] scope {scope!r} did not resolve to any disk path — skipped.")
+                continue
+            roots_seen.update(roots)
+            recursive = pat_recursive if recursive_override is None else bool(recursive_override)
             depth_args_remote = '' if recursive else ' -maxdepth 1'
             depth_args_local  = [] if recursive else ['-maxdepth', '1']
-            if PLEX_DB_REMOTE_HOST:
-                cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                       f'find "{escaped}"{depth_args_remote} -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
-            else:
-                cmd = ['find', d, *depth_args_local, '-name', '.*', '-prune', '-o', '-type', 'f',
-                       '-exec', 'stat', '-f', '%z %N', '{}', '+']
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0:
-                if VRB:
-                    print(f"  ⚠ scan failed for {d}: {r.stderr.strip()}")
-                continue
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if not line:
+            for d in roots:
+                escaped = escape_path_for_ssh(d)
+                if PLEX_DB_REMOTE_HOST:
+                    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
+                           f'find "{escaped}"{depth_args_remote} -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
+                else:
+                    cmd = ['find', d, *depth_args_local, '-name', '.*', '-prune', '-o', '-type', 'f',
+                           '-exec', 'stat', '-f', '%z %N', '{}', '+']
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    if VRB:
+                        print(f"  ⚠ scan failed for {d}: {r.stderr.strip()}")
                     continue
-                # Format: "<size> <path>".  Path may contain spaces — split once.
-                parts = line.split(' ', 1)
-                if len(parts) != 2:
-                    continue
-                try:
-                    sz = int(parts[0])
-                except ValueError:
-                    continue
-                fp = parts[1]
-                fname = fp.rsplit('/', 1)[-1]
-                # Pattern criterion first (cheaper than size).
-                pat_hit = None
-                for pat in JUNK_FILENAME_PATTERNS_COMPILED:
-                    if pat.search(fname):
-                        pat_hit = pat.pattern
-                        break
-                if pat_hit:
-                    flagged.append((fp, f"pattern /{pat_hit}/"))
-                    continue
-                # Size criterion (only when threshold > 0).
-                if size_threshold_bytes > 0 and sz <= size_threshold_bytes:
-                    flagged.append((fp, f"size {sz/1048576:.2f} MB ≤ {JUNK_MAX_SIZE_MB} MB"))
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(' ', 1)
+                    if len(parts) != 2:
+                        continue
+                    try:
+                        sz = int(parts[0])
+                    except ValueError:
+                        continue
+                    fp = parts[1]
+                    fname = fp.rsplit('/', 1)[-1]
+                    # AND semantics: every active criterion must match.
+                    regex_pass = (regex is None) or bool(regex.search(fname))
+                    size_pass  = (max_bytes <= 0) or (sz <= max_bytes)
+                    if not (regex_pass and size_pass):
+                        continue
+                    bits = []
+                    if regex is not None:
+                        bits.append(f"regex /{regex.pattern}/")
+                    if max_bytes > 0:
+                        bits.append(f"size {sz/1048576:.2f} MB ≤ {max_bytes/1048576:.1f} MB")
+                    flagged.append((fp, pat_name, " AND ".join(bits) or "no criteria"))
 
         if not flagged:
-            print(f"  No junk files found across {len(roots)} root(s).")
+            print(f"  No junk files found across {len(roots_seen)} root(s).")
             return 0
 
-        flagged.sort(key=lambda r: r[0].lower())
+        flagged.sort(key=lambda r: (r[1], r[0].lower()))
 
-        print(f"\n  {'REASON':<46}  FILE")
-        print("  " + "-" * 140)
-        for fp, reason in flagged:
-            print(f"  {reason[:44]:<46}  {fp}")
+        print(f"\n  {'PATTERN':<18}  {'REASON':<60}  FILE")
+        print("  " + "-" * 160)
+        for fp, pat_name, reason in flagged:
+            print(f"  {pat_name:<18}  {reason[:58]:<60}  {fp}")
 
-        print(f"\n  {len(flagged)} junk file(s) found across {len(roots)} root(s).")
+        print(f"\n  {len(flagged)} junk file(s) found across {len(roots_seen)} root(s).")
         if not resolve:
             print(f"  To trash these (move to system Trash, recoverable): my-plex --junk --resolve")
-            print(f"  Configurable: JUNK_FILENAME_PATTERNS  JUNK_MAX_SIZE_MB={JUNK_MAX_SIZE_MB}  (in ~/.my-plex.conf)")
+            print(f"  Configurable: JUNK_PATTERNS dict (in ~/.my-plex.conf)")
             return len(flagged)
 
         if dry_run:
@@ -20393,15 +20548,31 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"  Aborted — no files trashed.")
                 return len(flagged)
 
+        log_entries = []
         trashed = 0
-        for fp, _pat in flagged:
-            ok, _ = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
+        for fp, pat_name, reason in flagged:
+            ok, info = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
+            log_entries.append({
+                'filepath':          fp,
+                'pattern':           pat_name,
+                'reason':            reason,
+                'status':            'trashed' if ok else 'failed',
+                'trash_destination': info if (ok and isinstance(info, str)) else None,
+            })
             if ok:
                 trashed += 1
                 print(f"  ✓ trashed: {fp}")
             else:
                 print(f"  ✗ FAILED:  {fp}")
+        log_path = _write_resolve_log('junk', {
+            'patterns_run':  [n for n, _ in selected],
+            'total_flagged': len(flagged),
+            'total_trashed': trashed,
+            'entries':       log_entries,
+        })
         print(f"\n  Trashed {trashed} / {len(flagged)} junk file(s).")
+        if log_path:
+            print(f"  Log: {log_path}")
         return len(flagged)
 
     @staticmethod
@@ -25940,38 +26111,52 @@ def main_print_help(args, remaining_args, main_parser):
             print("JUNK FILES HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --junk [SCOPE] [--resolve] [--no-recursive] [--try]")
+            print("Usage: my-plex --junk [PATTERN_NAMES...] [--resolve]")
+            print("                      [--recursive | --no-recursive] [--try]")
             print()
-            print("Pure DISK-BASED clutter detection.  Plex's index is NOT consulted —")
-            print("works on files Plex never indexed (.htm, .lnk, .url, thumbs.db, etc.).")
+            print("Pure DISK-BASED clutter detection driven by the JUNK_PATTERNS dict")
+            print("in your config.  Plex's index is NOT consulted — works on files")
+            print("Plex never indexed (.htm / .lnk / .url / thumbs.db / .ds_store etc.).")
             print()
-            print("RECURSION:")
-            print("  --recursive       (default) walk the full subtree under each scope root")
-            print("  --no-recursive    only files directly in each scope root (depth-1)")
+            print("PATTERNS:")
+            print("  Each entry in JUNK_PATTERNS is a NAMED pattern.  Each carries its")
+            print("  own SCOPE / FILENAME_REGEXP / MAX_SIZE_MB / RECURSIVE.")
             print()
-            print("SCOPE is translated to disk root path(s); each root is then walked")
-            print("on the Plex server.  Translation rules:")
-            print("  (no scope)         → every library's root paths")
-            print("  /abs/path          → just that directory tree")
-            print("  <library-name>     → that library's root paths")
-            print("  <cache-key>        → that item's wrapper directory")
-            print("  <title> / filter   → resolved-objects' wrapper directories")
+            print("  my-plex --junk                  Run ALL patterns.")
+            print("  my-plex --junk samples          Run only the 'samples' pattern.")
+            print("  my-plex --junk samples sidecars Run those two patterns.")
             print()
-            print("CRITERIA (independent — ANY match flags the file):")
+            print("PER-PATTERN FIELDS:")
+            print("  SCOPE              Where the pattern applies (resolved to disk path(s)):")
+            print("                       ''                            all libraries")
+            print("                       '/abs/path'                   one directory tree")
+            print("                       '<library-name>'              one library")
+            print("                       '<cache-key>'                 one media item")
+            print("                       '<title>' / filter expression resolved-objects' dirs")
             print()
-            print("  1. FILENAME PATTERN")
-            print("     Regex match against JUNK_FILENAME_PATTERNS in config.")
-            print("     Default patterns: /sample/, ^readme, .nfo|.txt, screens.jpg|png,")
-            print("     .htm|.html, .lnk, .url, .ds_store, thumbs.db.")
+            print("  FILENAME_REGEXP    Python regex tested against each file's basename.")
+            print("                     '(?i)' prefix → case-insensitive.")
+            print("                     Full syntax: https://docs.python.org/3/library/re.html")
+            print("                     '' to disable filename matching.")
             print()
-            print("  2. SIZE THRESHOLD")
-            print(f"     file size ≤ JUNK_MAX_SIZE_MB (= {JUNK_MAX_SIZE_MB} MB).  Set to 0 to")
-            print(f"     disable the size criterion.  Standalone — no sibling comparison.")
+            print("  MAX_SIZE_MB        File size threshold (MB); flag files ≤ this size.")
+            print("                     0 to disable size matching.")
+            print()
+            print("  RECURSIVE          'yes' → walk subtree; 'no' → depth-1 only.")
+            print("                     Also accepts True/False/1/0 (case-insensitive).")
+            print()
+            print("  Both FILENAME_REGEXP and MAX_SIZE_MB active → AND semantics.")
+            print("  Both disabled → pattern is skipped with a warning.")
+            print()
+            print("RECURSION OVERRIDE (CLI, optional, applies to all selected patterns):")
+            print("  --recursive       Force every pattern to recurse.")
+            print("  --no-recursive    Force depth-1 only.")
             print()
             print("ACTIONS:")
             print("  --junk                  List candidates (read-only).")
             print("  --junk --resolve        Move detected files to system Trash")
-            print("                          (recoverable via Finder).")
+            print("                          (recoverable via Finder).  Writes a JSON log:")
+            print("                            ~/.my-plex/logs/junk_<TS>.json")
             print("  --junk --resolve --try  Dry run — show what would be trashed.")
             print("  --junk --resolve --yes  Trash without per-run confirmation.")
             print()
@@ -25980,18 +26165,16 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --clean pipeline runs --junk --resolve after --update-cache.")
             print()
             print("CONFIG (in ~/.my-plex.conf — see --create-config):")
-            print("  JUNK_FILENAME_PATTERNS = [<regex>, ...]")
-            print(f"  JUNK_MAX_SIZE_MB       = {JUNK_MAX_SIZE_MB}")
+            print("  JUNK_PATTERNS = { '<name>': { 'SCOPE': ..., 'FILENAME_REGEXP': ...,")
+            print("                                'MAX_SIZE_MB': ..., 'RECURSIVE': ... } , ... }")
             print()
             print("EXAMPLES:")
-            print("  my-plex --junk                       # Every library, recursive")
-            print("  my-plex --junk movies.en             # One library, recursive")
-            print("  my-plex --junk /Volumes/2/foo        # One directory tree")
-            print("  my-plex --junk movies.en --no-recursive  # depth-1 in library roots only")
-            print("  my-plex Movie:115523 --junk          # One movie's wrapper dir")
-            print("  my-plex 'Tagesschau' --junk          # One series's directory")
-            print("  my-plex --junk --resolve             # Trash with prompt")
-            print("  my-plex --junk --resolve --try       # Preview only")
+            print("  my-plex --junk                              # All patterns")
+            print("  my-plex --junk samples                      # Just 'samples'")
+            print("  my-plex --junk web_shortcuts os_index       # Two patterns")
+            print("  my-plex --junk --no-recursive               # Force depth-1 globally")
+            print("  my-plex --junk --resolve                    # Trash with prompt")
+            print("  my-plex --junk --resolve --try              # Preview only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -35985,10 +36168,11 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_mismatched(obj_keys, library_name)
         return
 
-    # Handle --junk [SCOPE] [--resolve] [--no-recursive]: pure disk-walk
-    # junk detection.  Scope is translated to disk root path(s) inside
-    # _list_junk_files; recursion is on by default (--no-recursive limits
-    # the walk to depth-1).  No dependency on Plex's index.
+    # Handle --junk [PATTERN_NAMES...] [--resolve] [--recursive/--no-recursive]:
+    # JUNK_PATTERNS-driven disk-walk.  Positional args are PATTERN NAMES
+    # (each from JUNK_PATTERNS dict keys); empty → run all patterns.
+    # Each pattern carries its own SCOPE; --recursive/--no-recursive on
+    # the CLI globally overrides every pattern's RECURSIVE field.
     junk_val = safe_getattr(cmd_args, 'junk', None)
     if junk_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
@@ -35996,11 +36180,17 @@ def execute_global_commands(args, cmd_args):
         yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
         _rec    = safe_getattr(cmd_args, 'recursive', None)
         if _rec is None: _rec = safe_getattr(args, 'recursive', None)
-        recursive = True if _rec is None else bool(_rec)
-        _scope_label = f" {junk_val!r}" if junk_val and junk_val not in (True, '', [], ['']) else ""
-        _depth_label = "" if recursive else " (depth-1)"
-        print(f"\n--- Junk Files{_scope_label}{_depth_label} ---")
-        PLEX_Media._list_junk_files(junk_val, resolve=resolve, dry_run=dry_run, yes=yes, recursive=recursive)
+        # Pattern selection: junk_val == [] / None / True → all; list → named.
+        if isinstance(junk_val, list):
+            pattern_names = [n for n in junk_val if n]
+        elif isinstance(junk_val, str) and junk_val:
+            pattern_names = [junk_val]
+        else:
+            pattern_names = None  # all
+        _label = f" {pattern_names}" if pattern_names else " (all patterns)"
+        _depth_label = "" if _rec is None else (" [--recursive]" if _rec else " [--no-recursive]")
+        print(f"\n--- Junk Files{_label}{_depth_label} ---")
+        PLEX_Media._list_junk_files(pattern_names, resolve=resolve, dry_run=dry_run, yes=yes, recursive_override=_rec)
         return
 
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
