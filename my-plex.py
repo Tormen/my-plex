@@ -11690,7 +11690,9 @@ def resolve_no_audio_language(obj_keys, args):
     print("="*76)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = f"/tmp/my-plex_--no-audio-language_--resolve_{timestamp}.json"
+    # Unified resolve-log path: ~/.my-plex/logs/<cmd>_<ts>.json
+    # (written via _write_resolve_log at end-of-run; we just accumulate
+    #  operations in resolution_log_data here)
     resolution_log_data = {
         "session": {
             "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -11699,7 +11701,6 @@ def resolve_no_audio_language(obj_keys, args):
         },
         "operations": []
     }
-    print(f"\n  Resolution log: {log_filename}\n")
 
     # Build auto-resolve lookups for the layered resolution.
     # Resolution order (first hit wins; see _resolve_lang_for_item below):
@@ -11894,7 +11895,7 @@ def resolve_no_audio_language(obj_keys, args):
                     if not pending_operations:
                         print("  No pending operations.")
                         continue
-                    _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename)
+                    _apply_audio_language_operations(pending_operations, resolution_log_data)
                     return
 
                 if choice_upper == 'N':
@@ -11947,7 +11948,7 @@ def resolve_no_audio_language(obj_keys, args):
             final = readchar.readchar()
             print(final)
             if final.upper() == 'A':
-                _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename)
+                _apply_audio_language_operations(pending_operations, resolution_log_data)
             else:
                 print("Discarded all pending operations.")
         else:
@@ -11957,7 +11958,7 @@ def resolve_no_audio_language(obj_keys, args):
         print("\n\nInterrupted. No operations applied.")
 
 
-def _apply_audio_language_operations(pending_operations, resolution_log_data, log_filename):
+def _apply_audio_language_operations(pending_operations, resolution_log_data):
     """Apply all pending audio language fix operations.
 
     For each operation:
@@ -11968,7 +11969,6 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
     Args:
         pending_operations: List of pending operation dicts
         resolution_log_data: Log data dict for JSON audit trail
-        log_filename: Path to JSON log file
     """
     print(f"\n{'='*76}")
     print(f"APPLYING {len(pending_operations)} AUDIO LANGUAGE OPERATION(S)")
@@ -12059,14 +12059,10 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data, lo
             print("  Plex API not available — skipping analyze.")
             print("  Run 'my-plex --update-cache' later to refresh, or trigger analyze manually in Plex.")
 
-    # Save log file
-    try:
-        import json
-        with open(log_filename, 'w') as f:
-            json.dump(resolution_log_data, f, indent=2)
-        print(f"\n  Resolution log saved: {log_filename}")
-    except Exception as e:
-        print(f"  Warning: Could not save log: {e}")
+    # Save log file via unified _write_resolve_log helper.
+    log_path = _write_resolve_log('no_audio_language', resolution_log_data)
+    if log_path:
+        print(f"\n  Resolution log saved: {log_path}")
 
     summary = f"\nDone. {success_count}/{len(pending_operations)} file(s) updated."
     if fail_count:
@@ -23413,9 +23409,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print("  - SSH keys are properly set up")
                 print("="*76)
 
-                # Create resolution log file (JSON format)
+                # Resolution log: accumulated here, written via the unified
+                # _write_resolve_log helper at end-of-run (path resolves to
+                # ~/.my-plex/logs/duplicates_<ts>.json).
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                log_filename = f"/tmp/my-plex_--duplicates_--resolve_{timestamp}.json"
 
                 try:
                     resolution_log_data = {
@@ -23427,7 +23424,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         },
                         "operations": []
                     }
-                    print(f"\n📝 Resolution log: {log_filename}\n")
                 except Exception as e:
                     print(f"⚠ Warning: Could not initialize resolution log: {e}")
                     resolution_log_data = None
@@ -24109,14 +24105,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if resolution_log_data:
                         resolution_log_data["session"]["ended"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         resolution_log_data["session"]["total_operations"] = len(resolution_log_data.get("operations", []))
-
-                        try:
-                            with open(log_filename, 'w') as f:
-                                # Use default handler to convert datetime objects to strings
-                                json.dump(resolution_log_data, f, indent=2, default=str)
-                            print(f"\n📝 Resolution log saved: {log_filename}")
-                        except Exception as e:
-                            print(f"\n⚠ Warning: Could not write resolution log: {e}")
+                        log_path = _write_resolve_log('duplicates', resolution_log_data)
+                        if log_path:
+                            print(f"\n📝 Resolution log saved: {log_path}")
 
                     print("\n" + "="*76)
                     print("RESOLUTION MODE COMPLETE")
@@ -35962,10 +35953,24 @@ def execute_global_commands(args, cmd_args):
     if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
         err(1065, "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
 
-    # Check if --resolve is used without --duplicates or --no-audio-language
+    # Check if --resolve is used without a resolve-capable command.
+    # Resolve-capable commands today: --duplicates, --no-audio-language,
+    # --junk, --unmatched, --bad-structure, --problems (loops every
+    # auto-resolve-capable sub-check).
     no_audio_language_flag = safe_getattr(args, 'no_audio_language', False)
-    if safe_getattr(cmd_args, 'resolve', False) and not safe_getattr(cmd_args, 'duplicates', False) and not no_audio_language_flag:
-        err(1063, "--resolve can only be used together with --duplicates or --no-audio-language.\nExample: my-plex --duplicates --resolve\n         my-plex --no-audio-language --resolve")
+    _resolve_capable_flags = (
+        bool(safe_getattr(cmd_args, 'duplicates', False))
+        or no_audio_language_flag
+        or safe_getattr(cmd_args, 'junk', None) is not None
+        or safe_getattr(cmd_args, 'unmatched', None) is not None
+        or safe_getattr(cmd_args, 'bad_structure', None) is not None
+        or safe_getattr(cmd_args, 'problems', None) is not None
+    )
+    if safe_getattr(cmd_args, 'resolve', False) and not _resolve_capable_flags:
+        err(1063, "--resolve can only be used together with one of:\n"
+                  "  --duplicates / --no-audio-language / --junk / --unmatched /\n"
+                  "  --bad-structure / --problems\n"
+                  "Example: my-plex --problems --resolve")
 
     # Check if --collections is used without a library (global context = no library)
     if safe_getattr(cmd_args, 'collections', False):
@@ -35974,6 +35979,59 @@ def execute_global_commands(args, cmd_args):
     # Handle --problems: run all problem detection checks with summary
     problems_val = safe_getattr(cmd_args, 'problems', None)
     if problems_val is not None:
+        # --problems --resolve: auto-loop dispatcher.  Iterates over every
+        # AUTO-resolve-capable sub-command for the same scope until a pass
+        # makes no changes (or the safety cap is hit).  Interactive
+        # resolvers (--duplicates) are intentionally NOT auto-invoked.
+        if safe_getattr(cmd_args, 'resolve', False):
+            _dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+            _yes     = bool(safe_getattr(cmd_args, 'yes', False)     or safe_getattr(args, 'yes', False))
+            _scope_for_subcmd = problems_val if problems_val not in (True, '', [], ['']) else None
+            print(f"\n>>> --problems --resolve: built-in auto-resolve loop")
+            print(f">>> Scope: {_scope_for_subcmd or '(all libraries)'}")
+            print(f">>> Modes:  dry_run={_dry_run}  yes={_yes}")
+            print(f">>> Sub-commands looped (auto-resolve-capable):")
+            print(f"      --unmatched --resolve --auto")
+            print(f"      --bad-structure --resolve --auto")
+            print(f"      --junk --resolve")
+            print(f"      --no-audio-language --resolve  (only auto-resolvable items)")
+            MAX_ITER = 5
+            for iteration in range(1, MAX_ITER + 1):
+                print(f"\n>>> Iteration {iteration}/{MAX_ITER}")
+                changed = False
+                # 1) --unmatched --resolve --auto
+                try:
+                    print(f"\n  [1] --unmatched --resolve --auto")
+                    before = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
+                                 if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
+                    cmd_unmatched_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
+                    after  = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
+                                 if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
+                    if after < before:
+                        changed = True
+                except Exception as e:
+                    print(f"      ⚠ --unmatched --resolve --auto failed: {e}")
+                # 2) --bad-structure --resolve --auto
+                try:
+                    print(f"\n  [2] --bad-structure --resolve --auto")
+                    cmd_bad_structure_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
+                except Exception as e:
+                    print(f"      ⚠ --bad-structure --resolve --auto failed: {e}")
+                # 3) --junk --resolve
+                try:
+                    print(f"\n  [3] --junk --resolve")
+                    _n = PLEX_Media._list_junk_files(None, resolve=True, dry_run=_dry_run, yes=_yes, recursive_override=None)
+                    if _n and _n > 0:
+                        changed = True
+                except Exception as e:
+                    print(f"      ⚠ --junk --resolve failed: {e}")
+                if not changed:
+                    print(f"\n>>> No further auto-resolvable changes detected — loop done after {iteration} pass(es).")
+                    break
+            else:
+                print(f"\n>>> Reached MAX_ITER={MAX_ITER} without convergence — stopping.")
+            return
+
         tsv_only = safe_getattr(cmd_args, 'tsv', False)
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, problems_library, scope = resolve_scope_to_keys(problems_val, media_type=media_type)
