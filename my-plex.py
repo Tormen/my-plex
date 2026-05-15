@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.62"
+SCRIPT_VERSION = "v2.63"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -918,19 +918,37 @@ CONFIG_DEFAULTS = {
     'MULTI_VERSION_MAX_SERIES':                2,     # >2 versions on one Episode => suspect grouping
     'MULTI_VERSION_MAX_DURATION_SPREAD_PCT':   2.0,   # spread > 2% across versions => suspect grouping
 
-    # Junk-file Detection Configuration (--junk, --clean)
-    # Identify spurious files (RARBG.com promos, sample clips, etc.) that
-    # share a Plex Movie/Episode slot with a healthy main file.  Three
-    # independent signals; ANY one triggers, but only when a healthy sibling
-    # exists in the same slot (so a lone short film is never flagged).
+    # Junk-file Detection Configuration (--junk, --clean) — DISK-BASED.
+    # For every directory that contains a Plex-indexed media file (in
+    # the current scope: global, library, series dir, filepath prefix,
+    # …), --junk walks the directory at depth-1 and flags every file
+    # that triggers EITHER of two independent criteria:
+    #
+    #   • Filename-pattern match — basename matches any regex in
+    #     JUNK_FILENAME_PATTERNS.
+    #   • Size threshold       — file size ≤ JUNK_MAX_SIZE_MB
+    #                             (0 = disabled).
+    #
+    # Plex's index isn't consulted — these files don't have to be
+    # cached; the disk is the source of truth.
+    # Used by `my-plex --junk` (preview) and `my-plex --junk --resolve`
+    # (move flagged files to Trash via move_to_trash — recoverable).
     'JUNK_FILENAME_PATTERNS': [
         r'(?i)(^|[._/-])sample([._-]|$)',
         r'(?i)^readme',
         r'(?i)\.(nfo|txt)$',
         r'(?i)screens?\.(jpe?g|png)$',
+        r'(?i)\.html?$',          # web pages / download landers
+        r'(?i)\.lnk$',            # Windows shortcuts
+        r'(?i)\.url$',            # web shortcuts
+        r'(?i)\.ds_store$',       # macOS Finder index
+        r'(?i)thumbs\.db$',       # Windows Explorer index
     ],
-    'JUNK_MAX_SIZE_MB':                          10,    # file <= this size AND sibling > 10x larger => junk
-    'JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING':  5.0,   # duration < this % of biggest sibling => junk
+
+    # Standalone size threshold (MB).  Any file at or below this size in
+    # a scoped media directory is flagged as junk.  Set to 0 to disable
+    # the size criterion entirely.
+    'JUNK_MAX_SIZE_MB': 0,
 
     # Reencode Candidate Detection Configuration
     # Reencode threshold — specify as a dict with ONE of the two keys:
@@ -1525,30 +1543,29 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Junk-file Detection Configuration (--junk, --clean)
 ###############################################################################
 
-# Identify spurious files (RARBG.com promos, sample clips, .nfo / .txt
-# sidecars, screenshots, tiny placeholders) bundled inside a Plex
-# Movie/Episode slot alongside a healthy main file.
-#
-# Three independent signals; ANY one triggers, but only when a healthy
-# sibling exists in the same Plex slot (so a lone short file is never
-# flagged).  The size + duration signals further require a SMALL cluster
-# (total V ≤ 3) to avoid false positives in legit multi-version groupings
-# (extras packages, large broadcast-recording slots, etc.).
+# DISK-BASED: for every directory that contains a Plex-indexed media
+# file in scope (global / library / series dir / filepath prefix / …),
+# walk the directory at depth-1 and flag each file that triggers
+# EITHER of two independent criteria.
 #
 # 1. JUNK_FILENAME_PATTERNS — list of regex strings; ANY match triggers.
-#    Default patterns cover the common sample / readme / sidecar names.
-#    Customise to add release-group-specific clutter (e.g. r'(?i)RARBG\\.com').
-# 2. JUNK_MAX_SIZE_MB — flag a file when its size is ≤ this many MB
-#    AND a sibling in the same Plex slot is ≥ 10× larger.
-# 3. JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING — flag a file when its
-#    duration is < this % of the LONGEST sibling's duration.
-#    Example with the default 5%: a 4-min clip sharing a Plex slot with
-#    a 100-min movie is junk (4/100 = 4% < 5%).
+#    Default patterns cover common sample / readme / sidecar / sample
+#    artwork / Windows-shortcut / HTML-clutter names.  Customise to
+#    add release-group-specific patterns (e.g. r'(?i)RARBG\\.com').
+# 2. JUNK_MAX_SIZE_MB — flag every file whose size is ≤ this many MB.
+#    Standalone trigger (no sibling comparison).  Set to 0 to disable.
 #
-# Defaults:
-# JUNK_FILENAME_PATTERNS = {CONFIG_DEFAULTS['JUNK_FILENAME_PATTERNS']!r}
-# JUNK_MAX_SIZE_MB                          = {CONFIG_DEFAULTS['JUNK_MAX_SIZE_MB']}
-# JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING  = {CONFIG_DEFAULTS['JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING']}
+# Scope is whatever you give my-plex on the command line:
+#   my-plex --junk                   # all libraries
+#   my-plex lib6 --junk              # one library
+#   my-plex 'Tagesschau' --junk      # one series
+#   my-plex /Volumes/2/watch.v/movies.en/foo --junk   # one directory
+#
+# Default:
+{_fmt_default('JUNK_FILENAME_PATTERNS', CONFIG_DEFAULTS['JUNK_FILENAME_PATTERNS'])}
+
+# Default:
+# JUNK_MAX_SIZE_MB = {CONFIG_DEFAULTS['JUNK_MAX_SIZE_MB']}
 
 ###############################################################################
 # Reencode Candidate Detection Configuration
@@ -2293,8 +2310,7 @@ MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_SERIES', 2)
 MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', 2.0)
 JUNK_FILENAME_PATTERNS = CONFIG_DEFAULTS.get('JUNK_FILENAME_PATTERNS', [])
 JUNK_FILENAME_PATTERNS_COMPILED = [re.compile(p) for p in JUNK_FILENAME_PATTERNS]
-JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get('JUNK_MAX_SIZE_MB', 10)
-JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING = CONFIG_DEFAULTS.get('JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING', 5.0)
+JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get('JUNK_MAX_SIZE_MB', 0)
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
@@ -20220,118 +20236,142 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return (title_n or 0) + (multi_n or 0)
 
     @staticmethod
-    def _detect_junk_file(file_info, sibling_files):
-        """Return a (reason_str, signal) tuple if file_info looks like junk
-        (e.g. RARBG.com promo, sample clip, tiny placeholder) bundled with a
-        real media file in the same Plex slot.  Returns None otherwise.
+    def _resolve_scope_to_disk_paths(scope_val):
+        """Translate a --junk scope into a list of disk root paths to walk
+        RECURSIVELY (on the Plex server, via SSH).  Pure-filesystem
+        operation — does NOT require the file to be in Plex's index.
 
-        sibling_files: iterable of *other* file_info dicts for the same
-        Plex object.  Required because a lone tiny file is NOT junk
-        (it might be a legitimate short film, S00 extra, etc.) — we only
-        flag when a healthy main sibling exists alongside.
+          None / True / '' / []         → every library's root paths
+          '/abs/path' or list[abs path] → just that path
+          library name                  → that library's root paths
+          cache key / title / filter    → wrapper dirs of resolved objects
         """
-        if not isinstance(file_info, dict):
-            return None
-        fp = file_info.get('filepath') or ''
-        if not fp:
-            return None
-        fname = fp.rsplit('/', 1)[-1]
-
-        siblings = [s for s in sibling_files if isinstance(s, dict) and s is not file_info]
-        if not siblings:
-            return None
-
-        max_sib_size = 0
-        max_sib_dur = 0
-        for s in siblings:
-            ssz = s.get('filesize') or s.get('size') or 0
-            if ssz and ssz > max_sib_size:
-                max_sib_size = ssz
-            sfm = s.get('file_metadata') or {}
-            scd = sfm.get('container_duration') or 0
-            if scd and scd > max_sib_dur:
-                max_sib_dur = scd
-        if max_sib_size == 0:
-            return None
-
-        for pat in JUNK_FILENAME_PATTERNS_COMPILED:
-            if pat.search(fname):
-                return (f"filename matches /{pat.pattern}/", 'pattern')
-
-        size = file_info.get('filesize') or file_info.get('size') or 0
-        size_mb = size / 1048576 if size else 0
-        # Size signal: only fires in SMALL clusters (≤2 siblings → total V≤3).
-        # In large multi-version groupings (e.g. an Episode bundling many distinct
-        # specials/extras of varying sizes), the "10× larger sibling" pattern
-        # produces false positives — all the smaller items are legitimate content,
-        # just at different sizes than the largest one.
-        if size > 0 and size_mb <= JUNK_MAX_SIZE_MB and max_sib_size >= 10 * size and len(siblings) <= 2:
-            return (f"size {size_mb:.1f} MB ≤ {JUNK_MAX_SIZE_MB} MB and sibling ≥ 10× larger ({max_sib_size/1048576:.1f} MB)", 'size')
-
-        fm = file_info.get('file_metadata') or {}
-        cd = fm.get('container_duration') or 0
-        # Duration signal: only meaningful in SMALL clusters (≤2 siblings → total V≤3).
-        # In big multi-version groups (e.g. 1000+ broadcast recordings of one show),
-        # natural duration variance dominates and "largest sibling" stops being a
-        # reliable reference for "this one is junk".
-        if cd and max_sib_dur > 0 and len(siblings) <= 2:
-            ratio_pct = cd / max_sib_dur * 100.0
-            if ratio_pct < JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING:
-                return (f"duration {cd/60000:.2f} min is {ratio_pct:.1f}% of largest sibling ({max_sib_dur/60000:.2f} min), under {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}%", 'duration')
-
-        return None
+        paths = set()
+        # Empty scope → every library root.
+        if scope_val is None or scope_val is True or scope_val == '' or scope_val == [] or scope_val == ['']:
+            for lib_name, lib_obj in PLEX_Library.OBJ_DICT.items():
+                for loc in (getattr(lib_obj, 'locations', None) or []):
+                    if loc:
+                        paths.add(loc.rstrip('/'))
+            return sorted(paths)
+        # Single filesystem path (string or 1-element list).
+        candidate_str = None
+        if isinstance(scope_val, str):
+            candidate_str = scope_val
+        elif isinstance(scope_val, list) and len(scope_val) == 1 and isinstance(scope_val[0], str):
+            candidate_str = scope_val[0]
+        if candidate_str and candidate_str.startswith('/'):
+            return [candidate_str.rstrip('/')]
+        # Library name?
+        if candidate_str and candidate_str in PLEX_Library.OBJ_DICT:
+            lib_obj = PLEX_Library.OBJ_DICT[candidate_str]
+            for loc in (getattr(lib_obj, 'locations', None) or []):
+                if loc:
+                    paths.add(loc.rstrip('/'))
+            return sorted(paths)
+        # Fall through: resolve to keys, derive wrapper dirs.
+        obj_keys, _lib, _scope = resolve_scope_to_keys(scope_val)
+        for k in (obj_keys or []):
+            obj = PLEX_Media.OBJ_BY_ID.get(k) or {}
+            wrapper = ''
+            try:
+                wrapper = _derive_wrapper_path(obj) or ''
+            except Exception:
+                wrapper = ''
+            if not wrapper:
+                fp = obj.get('file') or ''
+                if fp:
+                    wrapper = fp.rsplit('/', 1)[0]
+            if wrapper:
+                paths.add(wrapper.rstrip('/'))
+        return sorted(paths)
 
     @staticmethod
-    def _list_junk_files(obj_keys, library_name, resolve=False, dry_run=False, yes=False):
-        """List (or trash) files inside Plex Movie/Episode slots that look
-        like junk: short promo files, samples, .nfo / readme / screenshots,
-        tiny-vs-sibling, or extreme-duration-mismatch within a multi-version
-        grouping.  See _detect_junk_file for the signals."""
-        flagged = []
-        seen_keys = set()
-        for key in obj_keys:
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
-            if not obj:
-                continue
-            if obj.get('type') not in ('Movie', 'Episode'):
-                continue
-            if library_name and obj.get('library') != library_name:
-                continue
-            files = list((obj.get('files') or {}).values())
-            if len(files) < 2:
-                continue
-            for fi in files:
-                if not isinstance(fi, dict):
-                    continue
-                hit = PLEX_Media._detect_junk_file(fi, files)
-                if hit:
-                    reason, signal = hit
-                    flagged.append((key, obj, fi, reason, signal))
+    def _list_junk_files(scope_val, resolve=False, dry_run=False, yes=False):
+        """Pure disk-walk junk detection.  Scope is translated to disk
+        root path(s) via _resolve_scope_to_disk_paths; each root is
+        walked RECURSIVELY (no depth limit) on the Plex server.  A file
+        is flagged when it triggers EITHER:
 
-        if not flagged:
-            scope = f" in '{library_name}'" if library_name else ""
-            print(f"  No junk files found{scope}.")
+          • JUNK_FILENAME_PATTERNS — basename matches any regex.
+          • JUNK_MAX_SIZE_MB       — file size ≤ this many MB
+                                     (0 disables this check).
+
+        Plex's index is NOT consulted for the file checks — works on
+        files Plex never indexed (.htm, .lnk, .url, thumbs.db, etc.).
+        """
+        if not JUNK_FILENAME_PATTERNS_COMPILED and not (JUNK_MAX_SIZE_MB and JUNK_MAX_SIZE_MB > 0):
+            print("  Both JUNK_FILENAME_PATTERNS and JUNK_MAX_SIZE_MB are empty/0 —")
+            print("  nothing to scan for.  Set at least one in ~/.my-plex.conf.")
             return 0
 
-        flagged.sort(key=lambda r: ((r[1].get('library') or '').lower(),
-                                    (r[1].get('title') or '').lower(),
-                                    r[0]))
+        roots = PLEX_Media._resolve_scope_to_disk_paths(scope_val)
+        if not roots:
+            print(f"  Scope did not resolve to any disk path — nothing to walk.")
+            return 0
 
-        print(f"\n  {'KEY':<14} {'LIBRARY':<15} {'SIGNAL':<10} REASON   →  FILE")
-        print("  " + "-" * 130)
-        for key, obj, fi, reason, signal in flagged:
-            lib = (obj.get('library') or '?')[:15]
-            print(f"  {key:<14} {lib:<15} {signal:<10} {reason}")
-            print(f"  {'':14} {'':15} {'':<10}    {fi.get('filepath','')}")
+        size_threshold_bytes = int(JUNK_MAX_SIZE_MB * 1024 * 1024) if (JUNK_MAX_SIZE_MB and JUNK_MAX_SIZE_MB > 0) else 0
 
-        print(f"\n  {len(flagged)} junk file(s) found across {len(set(k for k,_,_,_,_ in flagged))} Movies/Episodes.")
+        flagged = []  # list of (filepath, reason)
+        for d in roots:
+            # One SSH/local call per root: RECURSIVE list with sizes.
+            # BSD-stat compatible (macOS server).  Skip hidden dirs to
+            # avoid the system Trash (.Trashes), .DS_Store-style noise,
+            # and any other dotted bookkeeping.
+            escaped = escape_path_for_ssh(d)
+            if PLEX_DB_REMOTE_HOST:
+                cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
+                       f'find "{escaped}" -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
+            else:
+                cmd = ['find', d, '-name', '.*', '-prune', '-o', '-type', 'f',
+                       '-exec', 'stat', '-f', '%z %N', '{}', '+']
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                if VRB:
+                    print(f"  ⚠ scan failed for {d}: {r.stderr.strip()}")
+                continue
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Format: "<size> <path>".  Path may contain spaces — split once.
+                parts = line.split(' ', 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    sz = int(parts[0])
+                except ValueError:
+                    continue
+                fp = parts[1]
+                fname = fp.rsplit('/', 1)[-1]
+                # Pattern criterion first (cheaper than size).
+                pat_hit = None
+                for pat in JUNK_FILENAME_PATTERNS_COMPILED:
+                    if pat.search(fname):
+                        pat_hit = pat.pattern
+                        break
+                if pat_hit:
+                    flagged.append((fp, f"pattern /{pat_hit}/"))
+                    continue
+                # Size criterion (only when threshold > 0).
+                if size_threshold_bytes > 0 and sz <= size_threshold_bytes:
+                    flagged.append((fp, f"size {sz/1048576:.2f} MB ≤ {JUNK_MAX_SIZE_MB} MB"))
+
+        if not flagged:
+            print(f"  No junk files found across {len(roots)} root(s).")
+            return 0
+
+        flagged.sort(key=lambda r: r[0].lower())
+
+        print(f"\n  {'REASON':<46}  FILE")
+        print("  " + "-" * 140)
+        for fp, reason in flagged:
+            print(f"  {reason[:44]:<46}  {fp}")
+
+        print(f"\n  {len(flagged)} junk file(s) found across {len(roots)} root(s).")
         if not resolve:
-            print(f"  To trash these (move to Finder's Trash, undoable): my-plex --junk --resolve")
-            print(f"  Configurable thresholds: JUNK_FILENAME_PATTERNS, JUNK_MAX_SIZE_MB={JUNK_MAX_SIZE_MB},")
-            print(f"                           JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING={JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}")
+            print(f"  To trash these (move to system Trash, recoverable): my-plex --junk --resolve")
+            print(f"  Configurable: JUNK_FILENAME_PATTERNS  JUNK_MAX_SIZE_MB={JUNK_MAX_SIZE_MB}  (in ~/.my-plex.conf)")
             return len(flagged)
 
         if dry_run:
@@ -20348,23 +20388,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return len(flagged)
 
         trashed = 0
-        for key, obj, fi, reason, _ in flagged:
-            fp = fi.get('filepath','')
+        for fp, _pat in flagged:
             ok, _ = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
             if ok:
                 trashed += 1
-                files_dict = obj.get('files') or {}
-                ver_to_drop = None
-                for ver, fi2 in files_dict.items():
-                    if fi2 is fi:
-                        ver_to_drop = ver
-                        break
-                if ver_to_drop is not None:
-                    files_dict.pop(ver_to_drop, None)
                 print(f"  ✓ trashed: {fp}")
             else:
                 print(f"  ✗ FAILED:  {fp}")
-        print(f"\n  Trashed {trashed} / {len(flagged)} junk file(s).  Cache updated in-memory; run --update-cache to persist.")
+        print(f"\n  Trashed {trashed} / {len(flagged)} junk file(s).")
         return len(flagged)
 
     @staticmethod
@@ -25905,49 +25936,51 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Usage: my-plex --junk [SCOPE] [--resolve] [--try]")
             print()
-            print("Detects spurious files bundled inside Plex Movie/Episode slots:")
-            print("  - RARBG.com promo files, sample clips, .nfo / .txt sidecars,")
-            print("    screenshots, tiny placeholders, etc.")
+            print("Pure DISK-BASED clutter detection.  Plex's index is NOT consulted —")
+            print("works on files Plex never indexed (.htm, .lnk, .url, thumbs.db, etc.).")
             print()
-            print("Three independent signals; ANY one triggers, but ONLY when a")
-            print("healthy sibling exists in the same Plex slot (a lone small file")
-            print("is never flagged):")
+            print("SCOPE is translated to disk root path(s); each root is then walked")
+            print("RECURSIVELY on the Plex server.  Translation rules:")
+            print("  (no scope)         → every library's root paths")
+            print("  /abs/path          → just that directory tree")
+            print("  <library-name>     → that library's root paths")
+            print("  <cache-key>        → that item's wrapper directory")
+            print("  <title> / filter   → resolved-objects' wrapper directories")
+            print()
+            print("CRITERIA (independent — ANY match flags the file):")
             print()
             print("  1. FILENAME PATTERN")
             print("     Regex match against JUNK_FILENAME_PATTERNS in config.")
-            print("     Default patterns: RARBG.com, /sample/, ^readme, .nfo|.txt,")
-            print("     screens.jpg|.png.")
+            print("     Default patterns: /sample/, ^readme, .nfo|.txt, screens.jpg|png,")
+            print("     .htm|.html, .lnk, .url, .ds_store, thumbs.db.")
             print()
-            print(f"  2. TINY SIZE")
-            print(f"     file ≤ JUNK_MAX_SIZE_MB (= {JUNK_MAX_SIZE_MB} MB) AND a sibling is")
-            print(f"     ≥ 10× larger.")
-            print()
-            print(f"  3. TINY DURATION RELATIVE TO SIBLING")
-            print(f"     file's container_duration < {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}% of the")
-            print(f"     largest sibling's duration.")
+            print("  2. SIZE THRESHOLD")
+            print(f"     file size ≤ JUNK_MAX_SIZE_MB (= {JUNK_MAX_SIZE_MB} MB).  Set to 0 to")
+            print(f"     disable the size criterion.  Standalone — no sibling comparison.")
             print()
             print("ACTIONS:")
             print("  --junk                  List candidates (read-only).")
-            print("  --junk --resolve        Move detected files to Finder Trash")
-            print("                          (undoable via Finder; cache updated).")
+            print("  --junk --resolve        Move detected files to system Trash")
+            print("                          (recoverable via Finder).")
             print("  --junk --resolve --try  Dry run — show what would be trashed.")
+            print("  --junk --resolve --yes  Trash without per-run confirmation.")
             print()
             print("INTEGRATION:")
             print("  Reported in --update-cache + --problems summary.")
             print("  --clean pipeline runs --junk --resolve after --update-cache.")
             print()
             print("CONFIG (in ~/.my-plex.conf — see --create-config):")
-            print("  JUNK_FILENAME_PATTERNS  = [<regex>, ...]")
-            print(f"  JUNK_MAX_SIZE_MB                          = {JUNK_MAX_SIZE_MB}")
-            print(f"  JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING  = {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}")
+            print("  JUNK_FILENAME_PATTERNS = [<regex>, ...]")
+            print(f"  JUNK_MAX_SIZE_MB       = {JUNK_MAX_SIZE_MB}")
             print()
             print("EXAMPLES:")
-            print("  my-plex --junk                  # All libraries, list only")
-            print("  my-plex --junk movies.en        # One library")
-            print("  my-plex Movie:115523 --junk     # One item")
-            print("  my-plex --junk --resolve        # Trash all detected junk (prompts once)")
-            print("  my-plex --junk --resolve --yes  # Trash without confirmation")
-            print("  my-plex --junk --resolve --try  # Preview what would be trashed")
+            print("  my-plex --junk                       # Every library, recursive")
+            print("  my-plex --junk movies.en             # One library, recursive")
+            print("  my-plex --junk /Volumes/2/foo        # One directory tree")
+            print("  my-plex Movie:115523 --junk          # One movie's wrapper dir")
+            print("  my-plex 'Tagesschau' --junk          # One series's directory")
+            print("  my-plex --junk --resolve             # Trash with prompt")
+            print("  my-plex --junk --resolve --try       # Preview only")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -35941,16 +35974,17 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_mismatched(obj_keys, library_name)
         return
 
-    # Handle --junk [SCOPE] [--trash]: list (or trash) junk files in Plex slots
+    # Handle --junk [SCOPE] [--resolve]: pure disk-walk junk detection.
+    # Scope is translated to disk root path(s) inside _list_junk_files;
+    # walks RECURSIVELY — no dependency on Plex's index.
     junk_val = safe_getattr(cmd_args, 'junk', None)
     if junk_val is not None:
-        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
-        obj_keys, library_name, scope = resolve_scope_to_keys(junk_val, media_type=media_type)
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
         yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
-        print(f"\n--- Junk Files{scope} ---")
-        PLEX_Media._list_junk_files(obj_keys, library_name, resolve=resolve, dry_run=dry_run, yes=yes)
+        _scope_label = f" {junk_val!r}" if junk_val and junk_val not in (True, '', [], ['']) else ""
+        print(f"\n--- Junk Files{_scope_label} ---")
+        PLEX_Media._list_junk_files(junk_val, resolve=resolve, dry_run=dry_run, yes=yes)
         return
 
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
