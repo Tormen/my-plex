@@ -1047,10 +1047,12 @@ Summary must report metadata probing separately from library changes (added/remo
     def test_broken_detection_filesize_heuristic(self):
         """Broken file detection must include filesize vs duration fallback heuristic."""
         content = self._read_script()
-        self.assertIn("avg_kbps", content,
-            "Broken detection must compute average bitrate as fallback")
-        self.assertIn("avg_kbps < 10", content,
-            "Files with <10 KB/s average bitrate should be flagged as broken")
+        self.assertIn("avg_kbyte_per_s", content,
+            "Broken detection must compute average KB/s as fallback")
+        self.assertIn("avg_kbyte_per_s < BROKEN_MIN_BYTERATE_KBYTE_PER_S", content,
+            "Files with average byte-rate below BROKEN_MIN_BYTERATE_KBYTE_PER_S should be flagged as broken")
+        self.assertIn("'BROKEN_MIN_BYTERATE_KBYTE_PER_S'", content,
+            "Threshold must be a CONFIG_DEFAULTS key (default 10 KB/s)")
 
     def test_broken_table_has_diff_explanation(self):
         """--broken output must explain the DIFF% column."""
@@ -6025,6 +6027,101 @@ class TestMismatched(unittest.TestCase):
         self.assertIn('len(files_dict) > 1', body)
 
 
+class TestJunk(unittest.TestCase):
+    """Test --junk command + auto-detection helper."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_functions_exist(self):
+        """_detect_junk_file + _list_junk_files must exist."""
+        content = self._read_script()
+        self.assertIn('def _detect_junk_file(', content)
+        self.assertIn('def _list_junk_files(', content)
+
+    def test_config_defaults_present(self):
+        """Junk-file thresholds must be in CONFIG_DEFAULTS + module-level loaders."""
+        content = self._read_script()
+        self.assertIn("'JUNK_FILENAME_PATTERNS'", content)
+        self.assertIn("'JUNK_MAX_SIZE_MB'", content)
+        self.assertIn("'JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING'", content)
+        self.assertIn("JUNK_FILENAME_PATTERNS_COMPILED = [re.compile(", content)
+        self.assertIn("JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get(", content)
+        self.assertIn("JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING = CONFIG_DEFAULTS.get(", content)
+
+    def test_library_argparser(self):
+        """--junk + --trash must be in library argparser."""
+        content = self._read_script()
+        self.assertIn("'--junk'", content)
+        self.assertIn("'--trash'", content)
+
+    def test_global_cmd_parser(self):
+        """--junk must be in GLOBAL_CMD_PARSER."""
+        content = self._read_script()
+        idx = content.index('GLOBAL_CMD_PARSER.add_argument')
+        section = content[idx:]
+        self.assertIn("'--junk'", section)
+
+    def test_has_standalone_cmd(self):
+        """--junk must be in has_standalone_cmd check."""
+        content = self._read_script()
+        idx = content.index('has_standalone_cmd')
+        line_end = content.index('\n', idx)
+        line = content[idx:line_end]
+        self.assertIn("'junk'", line)
+
+    def test_help_exists(self):
+        """--help junk must work and mention all 3 signals."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--help', 'junk'],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f"--help junk failed: {result.stderr}")
+        self.assertIn('JUNK FILES', result.stdout)
+        self.assertIn('FILENAME PATTERN', result.stdout)
+        self.assertIn('TINY SIZE', result.stdout)
+        self.assertIn('TINY DURATION', result.stdout)
+
+    def test_e2e_runs(self):
+        """--junk must run without error."""
+        result = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--junk'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, f"--junk failed: {result.stderr}")
+
+    def test_size_and_duration_signals_gate_on_small_cluster(self):
+        """Size and duration signals must only fire when len(siblings) <= 2.
+        Big multi-version groupings (e.g. 1000+ broadcast recordings) produce
+        false positives if every short member is compared to the longest one."""
+        content = self._read_script()
+        idx = content.index('def _detect_junk_file(')
+        end = content.index('\n    @staticmethod', idx)
+        body = content[idx:end]
+        self.assertIn('len(siblings) <= 2', body,
+            "Both size and duration signals must gate on len(siblings) <= 2")
+
+    def test_clean_pipeline_includes_junk_trash(self):
+        """--clean pipeline must include ['--junk', '--trash'] as a step."""
+        content = self._read_script()
+        idx = content.index("'--clean': [")
+        # Find the closing `],` of the outer --clean list (look for `\n        ],`
+        # which is the indentation of pipeline-key lines).
+        end = content.index("\n        ],", idx)
+        section = content[idx:end]
+        self.assertIn("'--junk', '--trash'", section,
+            f"PIPELINES['--clean'] must run --junk --trash; got: {section}")
+
+    def test_pipeline_dry_run_and_yes_propagation(self):
+        """--junk must be in DRY_RUN_AWARE and YES_AWARE sets so --clean propagates --try / --yes."""
+        content = self._read_script()
+        idx = content.index('DRY_RUN_AWARE = {')
+        end = content.index('}', idx)
+        self.assertIn("'--junk'", content[idx:end])
+        idx2 = content.index('YES_AWARE = {')
+        end2 = content.index('}', idx2)
+        self.assertIn("'--junk'", content[idx2:end2])
+
+
 class TestShowDirDerivation(unittest.TestCase):
     """Test series_dir derivation uses PATHS_DICT (library root from section_locations)."""
 
@@ -9464,7 +9561,7 @@ _UNITTEST_SCOPES = {
     'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
-                   TestShowInfoSeasonTable, TestMismatched,
+                   TestShowInfoSeasonTable, TestMismatched, TestJunk,
                    TestShowDirDerivation],
     'renumber':   [TestRenumber],
     'move':       [TestMove],

@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.60"
+SCRIPT_VERSION = "v2.61"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -775,6 +775,7 @@ CONFIG_DEFAULTS = {
         '--clean': [
             ['--unmatched', '--resolve', '--auto'],
             ['--update-cache'],
+            ['--junk', '--trash'],
             ['--original-languages'],
             ['--sort-new'],
         ],
@@ -903,6 +904,7 @@ CONFIG_DEFAULTS = {
 
     # Broken File Detection Configuration
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
+    'BROKEN_MIN_BYTERATE_KBYTE_PER_S': 10,  # Fallback heuristic: files below this average byte-rate (KB/s) are flagged as broken even when ffprobe metadata is missing. 10 KB/s ≈ 80 kbps, below any real video.
 
     # Multi-Version Mismatch Detection Configuration (--mismatched)
     # Flag Episodes/Movies where Plex has bundled what's almost certainly
@@ -915,6 +917,21 @@ CONFIG_DEFAULTS = {
     'MULTI_VERSION_MAX_MOVIE':                 2,     # >2 versions on one Movie => suspect grouping
     'MULTI_VERSION_MAX_SERIES':                2,     # >2 versions on one Episode => suspect grouping
     'MULTI_VERSION_MAX_DURATION_SPREAD_PCT':   2.0,   # spread > 2% across versions => suspect grouping
+
+    # Junk-file Detection Configuration (--junk, --clean)
+    # Identify spurious files (RARBG.com promos, sample clips, etc.) that
+    # share a Plex Movie/Episode slot with a healthy main file.  Three
+    # independent signals; ANY one triggers, but only when a healthy sibling
+    # exists in the same slot (so a lone short film is never flagged).
+    'JUNK_FILENAME_PATTERNS': [
+        r'(?i)RARBG\.com',
+        r'(?i)(^|[._/-])sample([._-]|$)',
+        r'(?i)^readme',
+        r'(?i)\.(nfo|txt)$',
+        r'(?i)screens?\.(jpe?g|png)$',
+    ],
+    'JUNK_MAX_SIZE_MB':                          10,    # file <= this size AND sibling > 10x larger => junk
+    'JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING':  5.0,   # duration < this % of biggest sibling => junk
 
     # Reencode Candidate Detection Configuration
     # Reencode threshold — specify as a dict with ONE of the two keys:
@@ -1478,6 +1495,13 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Default:
 # TRUNCATION_THRESHOLD_PCT = {CONFIG_DEFAULTS['TRUNCATION_THRESHOLD_PCT']}
 
+# Fallback heuristic: files with an average byte-rate below this many KB/s
+# are flagged as broken even when ffprobe metadata is missing.
+# 10 KB/s ≈ 80 kbps, which is below any real video stream.
+#
+# Default:
+# BROKEN_MIN_BYTERATE_KBYTE_PER_S = {CONFIG_DEFAULTS['BROKEN_MIN_BYTERATE_KBYTE_PER_S']}
+
 ###############################################################################
 # Multi-Version Mismatch Detection Configuration (--mismatched)
 ###############################################################################
@@ -1497,6 +1521,32 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # MULTI_VERSION_MAX_MOVIE                 = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_MOVIE']}
 # MULTI_VERSION_MAX_SERIES                = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_SERIES']}
 # MULTI_VERSION_MAX_DURATION_SPREAD_PCT   = {CONFIG_DEFAULTS['MULTI_VERSION_MAX_DURATION_SPREAD_PCT']}
+
+###############################################################################
+# Junk-file Detection Configuration (--junk, --clean)
+###############################################################################
+
+# Identify spurious files (RARBG.com promos, sample clips, .nfo / .txt
+# sidecars, screenshots, tiny placeholders) bundled inside a Plex
+# Movie/Episode slot alongside a healthy main file.
+#
+# Three independent signals; ANY one triggers, but only when a healthy
+# sibling exists in the same Plex slot (so a lone short file is never
+# flagged).  The size + duration signals further require a SMALL cluster
+# (total V ≤ 3) to avoid false positives in legit multi-version groupings
+# (extras packages, large broadcast-recording slots, etc.).
+#
+# 1. JUNK_FILENAME_PATTERNS — list of regex strings; ANY match triggers.
+#    Default patterns cover the common torrent-promo / sample / readme /
+#    sidecar names.  Customise to add release-group-specific clutter.
+# 2. JUNK_MAX_SIZE_MB — file ≤ this size AND a sibling ≥ 10× larger.
+# 3. JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING — file's container duration
+#    < this % of the largest sibling's duration.
+#
+# Defaults:
+# JUNK_FILENAME_PATTERNS = {CONFIG_DEFAULTS['JUNK_FILENAME_PATTERNS']!r}
+# JUNK_MAX_SIZE_MB                          = {CONFIG_DEFAULTS['JUNK_MAX_SIZE_MB']}
+# JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING  = {CONFIG_DEFAULTS['JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING']}
 
 ###############################################################################
 # Reencode Candidate Detection Configuration
@@ -2235,9 +2285,14 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Default: 0.5% - catches meaningful truncation while avoiding false positives from encoding variance
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
+BROKEN_MIN_BYTERATE_KBYTE_PER_S = CONFIG_DEFAULTS.get('BROKEN_MIN_BYTERATE_KBYTE_PER_S', 10)
 MULTI_VERSION_MAX_MOVIE = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_MOVIE', 2)
 MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_SERIES', 2)
 MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', 2.0)
+JUNK_FILENAME_PATTERNS = CONFIG_DEFAULTS.get('JUNK_FILENAME_PATTERNS', [])
+JUNK_FILENAME_PATTERNS_COMPILED = [re.compile(p) for p in JUNK_FILENAME_PATTERNS]
+JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get('JUNK_MAX_SIZE_MB', 10)
+JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING = CONFIG_DEFAULTS.get('JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING', 5.0)
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
@@ -8425,8 +8480,8 @@ def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
 
     DRY_RUN_AWARE = {'--unmatched', '--sort-new', '--original-languages',
                      '--plex2disk', '--disk2plex', '--rename', '--mv-to', '--remux',
-                     '--renumber'}
-    YES_AWARE = {'--sort-new', '--remux', '--mv-to', '--update-cache'}
+                     '--renumber', '--junk'}
+    YES_AWARE = {'--sort-new', '--remux', '--mv-to', '--update-cache', '--junk'}
     FORCE_AWARE = {'--sort-new', '--mv-to', '--reencode'}
 
     _self = sys.argv[0]
@@ -15392,6 +15447,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--unsorted', action='store_true', help="List series with episodes directly in series dir (no season subdirs). With --fix: sort into season dirs. Use --help unsorted for details.")
     argparser.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use --help sort-new for details.")
     argparser.add_argument('--mismatched', action='store_true', dest='mismatched', help="List Plex mismatches: title vs directory + multi-version grouping. Use --help mismatched for details.")
+    argparser.add_argument('--junk', action='store_true', dest='junk', help="List junk files (samples, RARBG.com promos, tiny placeholders) bundled with healthy media. Add --trash to delete. Use --help junk for details.")
+    argparser.add_argument('--trash', action='store_true', dest='trash', help="With --junk: move detected junk files to Finder Trash (undoable).")
     argparser.add_argument('--multi-movie-folder', action='store_true', help="List wrappers that host >=2 distinct Plex Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     argparser.add_argument('--library-language-mismatch', action='store_true', help="List items whose audio language disagrees with their library's configured language. Use --help library-language-mismatch for details.")
     argparser.add_argument('--episode-numbering-issues', action='store_true', help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
@@ -18209,6 +18266,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     argparser.add_argument('--broken', action='store_true',           help="List broken/truncated media files for this item.")
     argparser.add_argument('--unmatched', action='store_true',        help="Check if this item is unmatched (no external IDs).")
     argparser.add_argument('--mismatched', action='store_true', dest='mismatched', help="Check title vs directory + multi-version grouping for this item.")
+    argparser.add_argument('--junk', action='store_true', dest='junk', help="Show junk-file candidates for this item.")
+    argparser.add_argument('--trash', action='store_true', dest='trash', help="With --junk: trash detected junk files.")
     argparser.add_argument('--problems', action='store_true',         help="Run all problem checks for this item.")
     argparser.add_argument('--fix', action='store_true',              help="With --renumber: rename episode files to correct numbering. Respects --try for dry-run.")
     argparser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', default=False, help=argparse.SUPPRESS)  # Used with --rename, --reencode, --renumber
@@ -19269,8 +19328,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if not is_broken and plex_duration > 60000:
                     filesize = file_info.get('filesize', 0)
                     if filesize:
-                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
-                        if avg_kbps < 10:
+                        avg_kbyte_per_s = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbyte_per_s < BROKEN_MIN_BYTERATE_KBYTE_PER_S:
                             is_broken = True
                             severity = 'severe'
                 if is_broken:
@@ -19300,7 +19359,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             ver_str = f"{ver_count:>4}" if ver_count > 1 else "    "
             print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
-        print(f"Detection threshold: {TRUNCATION_THRESHOLD_PCT}%")
+        print(f"Detection thresholds: duration mismatch > {TRUNCATION_THRESHOLD_PCT}%, byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s")
         return len(broken_files)
 
     @staticmethod
@@ -20155,6 +20214,154 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print("=== Multi-version mismatches (suspect Plex grouping) ===")
         multi_n = PLEX_Media._list_multi_version_mismatches(obj_keys, library_name)
         return (title_n or 0) + (multi_n or 0)
+
+    @staticmethod
+    def _detect_junk_file(file_info, sibling_files):
+        """Return a (reason_str, signal) tuple if file_info looks like junk
+        (e.g. RARBG.com promo, sample clip, tiny placeholder) bundled with a
+        real media file in the same Plex slot.  Returns None otherwise.
+
+        sibling_files: iterable of *other* file_info dicts for the same
+        Plex object.  Required because a lone tiny file is NOT junk
+        (it might be a legitimate short film, S00 extra, etc.) — we only
+        flag when a healthy main sibling exists alongside.
+        """
+        if not isinstance(file_info, dict):
+            return None
+        fp = file_info.get('filepath') or ''
+        if not fp:
+            return None
+        fname = fp.rsplit('/', 1)[-1]
+
+        siblings = [s for s in sibling_files if isinstance(s, dict) and s is not file_info]
+        if not siblings:
+            return None
+
+        max_sib_size = 0
+        max_sib_dur = 0
+        for s in siblings:
+            ssz = s.get('filesize') or s.get('size') or 0
+            if ssz and ssz > max_sib_size:
+                max_sib_size = ssz
+            sfm = s.get('file_metadata') or {}
+            scd = sfm.get('container_duration') or 0
+            if scd and scd > max_sib_dur:
+                max_sib_dur = scd
+        if max_sib_size == 0:
+            return None
+
+        for pat in JUNK_FILENAME_PATTERNS_COMPILED:
+            if pat.search(fname):
+                return (f"filename matches /{pat.pattern}/", 'pattern')
+
+        size = file_info.get('filesize') or file_info.get('size') or 0
+        size_mb = size / 1048576 if size else 0
+        # Size signal: only fires in SMALL clusters (≤2 siblings → total V≤3).
+        # In large multi-version groupings (e.g. an Episode bundling many distinct
+        # specials/extras of varying sizes), the "10× larger sibling" pattern
+        # produces false positives — all the smaller items are legitimate content,
+        # just at different sizes than the largest one.
+        if size > 0 and size_mb <= JUNK_MAX_SIZE_MB and max_sib_size >= 10 * size and len(siblings) <= 2:
+            return (f"size {size_mb:.1f} MB ≤ {JUNK_MAX_SIZE_MB} MB and sibling ≥ 10× larger ({max_sib_size/1048576:.1f} MB)", 'size')
+
+        fm = file_info.get('file_metadata') or {}
+        cd = fm.get('container_duration') or 0
+        # Duration signal: only meaningful in SMALL clusters (≤2 siblings → total V≤3).
+        # In big multi-version groups (e.g. 1000+ broadcast recordings of one show),
+        # natural duration variance dominates and "largest sibling" stops being a
+        # reliable reference for "this one is junk".
+        if cd and max_sib_dur > 0 and len(siblings) <= 2:
+            ratio_pct = cd / max_sib_dur * 100.0
+            if ratio_pct < JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING:
+                return (f"duration {cd/60000:.2f} min is {ratio_pct:.1f}% of largest sibling ({max_sib_dur/60000:.2f} min), under {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}%", 'duration')
+
+        return None
+
+    @staticmethod
+    def _list_junk_files(obj_keys, library_name, trash=False, dry_run=False, yes=False):
+        """List (or trash) files inside Plex Movie/Episode slots that look
+        like junk: short promo files, samples, .nfo / readme / screenshots,
+        tiny-vs-sibling, or extreme-duration-mismatch within a multi-version
+        grouping.  See _detect_junk_file for the signals."""
+        flagged = []
+        seen_keys = set()
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            if not obj:
+                continue
+            if obj.get('type') not in ('Movie', 'Episode'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            files = list((obj.get('files') or {}).values())
+            if len(files) < 2:
+                continue
+            for fi in files:
+                if not isinstance(fi, dict):
+                    continue
+                hit = PLEX_Media._detect_junk_file(fi, files)
+                if hit:
+                    reason, signal = hit
+                    flagged.append((key, obj, fi, reason, signal))
+
+        if not flagged:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No junk files found{scope}.")
+            return 0
+
+        flagged.sort(key=lambda r: ((r[1].get('library') or '').lower(),
+                                    (r[1].get('title') or '').lower(),
+                                    r[0]))
+
+        print(f"\n  {'KEY':<14} {'LIBRARY':<15} {'SIGNAL':<10} REASON   →  FILE")
+        print("  " + "-" * 130)
+        for key, obj, fi, reason, signal in flagged:
+            lib = (obj.get('library') or '?')[:15]
+            print(f"  {key:<14} {lib:<15} {signal:<10} {reason}")
+            print(f"  {'':14} {'':15} {'':<10}    {fi.get('filepath','')}")
+
+        print(f"\n  {len(flagged)} junk file(s) found across {len(set(k for k,_,_,_,_ in flagged))} Movies/Episodes.")
+        if not trash:
+            print(f"  To trash these (move to Finder's Trash, undoable): my-plex --junk --trash")
+            print(f"  Configurable thresholds: JUNK_FILENAME_PATTERNS, JUNK_MAX_SIZE_MB={JUNK_MAX_SIZE_MB},")
+            print(f"                           JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING={JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}")
+            return len(flagged)
+
+        if dry_run:
+            print(f"\n  --try: would trash {len(flagged)} file(s).  No changes applied.")
+            return len(flagged)
+
+        if not yes:
+            try:
+                resp = input(f"\n  Trash {len(flagged)} junk file(s)? [y/N]: ").strip().lower()
+            except EOFError:
+                resp = ''
+            if resp != 'y':
+                print(f"  Aborted — no files trashed.")
+                return len(flagged)
+
+        trashed = 0
+        for key, obj, fi, reason, _ in flagged:
+            fp = fi.get('filepath','')
+            ok, _ = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
+            if ok:
+                trashed += 1
+                files_dict = obj.get('files') or {}
+                ver_to_drop = None
+                for ver, fi2 in files_dict.items():
+                    if fi2 is fi:
+                        ver_to_drop = ver
+                        break
+                if ver_to_drop is not None:
+                    files_dict.pop(ver_to_drop, None)
+                print(f"  ✓ trashed: {fp}")
+            else:
+                print(f"  ✗ FAILED:  {fp}")
+        print(f"\n  Trashed {trashed} / {len(flagged)} junk file(s).  Cache updated in-memory; run --update-cache to persist.")
+        return len(flagged)
 
     @staticmethod
     def _list_episode_numbering_issues(obj_keys, library_name=None):
@@ -24437,7 +24644,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -25682,6 +25889,60 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex lib6 --mismatched             # Same")
             print("  my-plex --mismatched Series:4925      # One series")
             print("  my-plex --problems                    # Includes this in full report")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'junk':
+            print()
+            print("=" * 76)
+            print("JUNK FILES HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --junk [SCOPE] [--trash] [--try]")
+            print()
+            print("Detects spurious files bundled inside Plex Movie/Episode slots:")
+            print("  - RARBG.com promo files, sample clips, .nfo / .txt sidecars,")
+            print("    screenshots, tiny placeholders, etc.")
+            print()
+            print("Three independent signals; ANY one triggers, but ONLY when a")
+            print("healthy sibling exists in the same Plex slot (a lone small file")
+            print("is never flagged):")
+            print()
+            print("  1. FILENAME PATTERN")
+            print("     Regex match against JUNK_FILENAME_PATTERNS in config.")
+            print("     Default patterns: RARBG.com, /sample/, ^readme, .nfo|.txt,")
+            print("     screens.jpg|.png.")
+            print()
+            print(f"  2. TINY SIZE")
+            print(f"     file ≤ JUNK_MAX_SIZE_MB (= {JUNK_MAX_SIZE_MB} MB) AND a sibling is")
+            print(f"     ≥ 10× larger.")
+            print()
+            print(f"  3. TINY DURATION RELATIVE TO SIBLING")
+            print(f"     file's container_duration < {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}% of the")
+            print(f"     largest sibling's duration.")
+            print()
+            print("ACTIONS:")
+            print("  --junk                List candidates (read-only).")
+            print("  --junk --trash        Move detected files to Finder Trash")
+            print("                        (undoable via Finder; cache updated).")
+            print("  --junk --trash --try  Dry run — show what would be trashed.")
+            print()
+            print("INTEGRATION:")
+            print("  --clean pipeline runs --junk --trash before --update-cache.")
+            print()
+            print("CONFIG (in ~/.my-plex.conf — see --create-config):")
+            print("  JUNK_FILENAME_PATTERNS  = [<regex>, ...]")
+            print(f"  JUNK_MAX_SIZE_MB                          = {JUNK_MAX_SIZE_MB}")
+            print(f"  JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING  = {JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING}")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --junk                  # All libraries, list only")
+            print("  my-plex --junk movies.en        # One library")
+            print("  my-plex Movie:115523 --junk     # One item")
+            print("  my-plex --junk --trash          # Trash all detected junk (prompts once)")
+            print("  my-plex --junk --trash --yes    # Trash without confirmation")
+            print("  my-plex --junk --trash --try    # Preview what would be trashed")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -33745,8 +34006,8 @@ def _verify_data_integrity():
                 if not is_truncated and plex_duration > 60000:
                     filesize = file_info.get('filesize', 0)
                     if filesize:
-                        avg_kbps = filesize / 1024 / (plex_duration / 1000)
-                        if avg_kbps < 10:
+                        avg_kbyte_per_s = filesize / 1024 / (plex_duration / 1000)
+                        if avg_kbyte_per_s < BROKEN_MIN_BYTERATE_KBYTE_PER_S:
                             is_truncated = True
                 if is_truncated:
                     truncated_files += 1
@@ -34528,9 +34789,9 @@ def _get_broken_reason(file_info, plex_duration=0):
     if plex_duration > 60000:
         filesize = file_info.get('filesize', 0)
         if filesize:
-            avg_kbps = filesize / 1024 / (plex_duration / 1000)
-            if avg_kbps < 10:
-                return f"suspiciously small ({avg_kbps:.1f} kbps)"
+            avg_kbyte_per_s = filesize / 1024 / (plex_duration / 1000)
+            if avg_kbyte_per_s < BROKEN_MIN_BYTERATE_KBYTE_PER_S:
+                return f"suspiciously small ({avg_kbyte_per_s:.1f} KB/s < BROKEN_MIN_BYTERATE_KBYTE_PER_S={BROKEN_MIN_BYTERATE_KBYTE_PER_S})"
     return None
 
 def _normalize_alpha(s):
@@ -35668,6 +35929,18 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_mismatched(obj_keys, library_name)
         return
 
+    # Handle --junk [SCOPE] [--trash]: list (or trash) junk files in Plex slots
+    junk_val = safe_getattr(cmd_args, 'junk', None)
+    if junk_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(junk_val, media_type=media_type)
+        trash   = bool(safe_getattr(cmd_args, 'trash', False) or safe_getattr(args, 'trash', False))
+        dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+        yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
+        print(f"\n--- Junk Files{scope} ---")
+        PLEX_Media._list_junk_files(obj_keys, library_name, trash=trash, dry_run=dry_run, yes=yes)
+        return
+
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
     mmf_val = safe_getattr(cmd_args, 'multi_movie_folder', None)
     if mmf_val is not None:
@@ -35986,7 +36259,7 @@ def main():
     _OPTION_TO_HELP_TOPIC = {
         '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
-        '--unsorted': 'unsorted', '--mismatched': 'mismatched',
+        '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
         '--multi-movie-folder': 'multi-movie-folder',
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
@@ -36128,6 +36401,7 @@ def main():
         # v2.0 (Phase E): listing / problem-detection commands also variadic
         '--broken', '--unmatched', '--unsorted',
         '--mismatched',
+        '--junk',
         '--multi-movie-folder',
         '--library-language-mismatch',
         '--bad-structure', '--nested-media',
@@ -36714,6 +36988,7 @@ def main():
     main_parser.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -36788,6 +37063,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--unmatched', metavar='SCOPE', nargs='*', default=None, help="List items not matched by Plex (local:// guid). Optional: library name or media identifier to filter. Use --help unmatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--unsorted', metavar='SCOPE', nargs='*', default=None, help="List series with episodes in series dir without season subdirs. With --fix: sort into season dirs (= --sort-new). Optional: library name or media identifier to filter. Use --help unsorted for details.")
     GLOBAL_CMD_PARSER.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help="List Plex mismatches: title vs directory + multi-version Plex grouping. Use --help mismatched for details.")
+    GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="List junk files (samples / RARBG promos / .nfo / tiny placeholders) bundled with healthy media. Add --trash to move them to Finder Trash. Use --help junk for details.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
@@ -36935,6 +37211,7 @@ def main():
                 '--unmatched':               'unmatched',
                 '--unsorted':                'unsorted',
                 '--mismatched':              'mismatched',
+                '--junk':                    'junk',
                 '--episode-numbering-issues':'episode-numbering-issues',
                 '--missing':                 'missing',
                 '--sort-new':                'sort-new',
@@ -37150,6 +37427,7 @@ def main():
     _reinject_variadic('unmatched',                 '--unmatched')
     _reinject_variadic('unsorted',                  '--unsorted')
     _reinject_variadic('mismatched',                '--mismatched')
+    _reinject_variadic('junk',                      '--junk')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('bad_structure',             '--bad-structure')
