@@ -1684,6 +1684,34 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']!r}
 
 ###############################################################################
+# --problems Categories Toggle (v2.69)
+###############################################################################
+
+# PROBLEM_CATEGORIES_DISABLED — list of registered problem-category names
+# to SKIP when running --problems.  Each entry must be a registered key in
+# PROBLEM_CATEGORIES_REGISTRY (see `my-plex --help problems` for the full
+# list).  Empty list = run every registered category.
+#
+# Example: PROBLEM_CATEGORIES_DISABLED = ['remux', 'junk']
+#
+# Default:
+# PROBLEM_CATEGORIES_DISABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_DISABLED']!r}
+
+###############################################################################
+# --misplaced Thresholds (v2.69)
+###############################################################################
+
+# A Series in a series.* library is flagged as "misplaced" (probably belongs
+# in a Movie library) when ALL its episodes are at least
+# MISPLACED_FEATURE_LENGTH_MIN minutes long AND the Series has at most
+# MISPLACED_MAX_EPISODES total episodes.  Defaults err on the safe side —
+# tune here if too noisy / too quiet on your library.
+#
+# Default:
+# MISPLACED_FEATURE_LENGTH_MIN = {CONFIG_DEFAULTS['MISPLACED_FEATURE_LENGTH_MIN']!r}
+# MISPLACED_MAX_EPISODES       = {CONFIG_DEFAULTS['MISPLACED_MAX_EPISODES']!r}
+
+###############################################################################
 # On-disk Label Markers
 ###############################################################################
 
