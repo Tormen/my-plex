@@ -8939,6 +8939,13 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         ((c, _score_candidate(_clean_q, c)) for c in online_cands),
                         key=lambda x: x[1], reverse=True,
                     )[:5]
+                    # Single-candidate boost: when the online engines together
+                    # return exactly ONE candidate for this query, that IS the
+                    # answer regardless of title-similarity score.  Mirrors the
+                    # same heuristic in cmd_unmatched_resolve.
+                    if len(online_cands) == 1:
+                        online_scored = [(online_scored[0][0], 100.0)]
+                        print(f"  → single online hit → boosting conf to 100.0")
                     o_top, o_top_score = online_scored[0]
                     o_runner = online_scored[1][1] if len(online_scored) > 1 else 0
                     print(f"  → top online hit: [{o_top['engine']}] {o_top.get('title')!r} ({o_top.get('year') or '----'})  conf={o_top_score:.1f}")
@@ -8974,7 +8981,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             # 5. Interactive picker.
             for idx, (cand, score) in enumerate(scored, 1):
                 _print_candidate_row(idx, cand, score)
-            print(f"  1-{len(scored)}) pick   t<title>) re-query Plex with new title")
+            print(f"  1-{len(scored)}) pick   t<title>) re-query Plex agent   T<title>) re-query online engines")
             print(f"  id:tvdb:NNNNN | id:tmdb:NNNNN | id:imdb:ttNNNNN) force-match an external ID")
             print(f"  s) skip   q) quit & process so far")
             try:
@@ -8993,16 +9000,70 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 skipped_this = True
                 log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'user-skipped'})
                 break
-            # (a) t<title> — re-query the agent.
-            if choice.lower().startswith('t') and len(choice) > 1 and choice[1] in (' ', ':', '='):
+            # (a) t<title> — re-query Plex agent.
+            #     T<title> — re-query online engines (TMDB/TVDB/fernsehserien.de).
+            if choice[:1] in ('t', 'T') and len(choice) > 1 and choice[1] in (' ', ':', '='):
                 new_q = choice[2:].strip()
                 if not new_q:
-                    print("  ? empty title after 't' — try again")
+                    print(f"  ? empty title after {choice[:1]!r} — try again")
                     continue
                 _clean_q = new_q
-                raw_results, err = _query_agent(_clean_q)
-                if err:
-                    print(f"  ⚠ series.matches() failed: {err}")
+                if choice[:1] == 't':
+                    raw_results, err = _query_agent(_clean_q)
+                    if err:
+                        print(f"  ⚠ series.matches() failed: {err}")
+                else:
+                    print(f"          T-query: {_clean_q!r}  (online engines)")
+                    try:
+                        online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
+                    except Exception as e:
+                        print(f"  ⚠ online-engine search failed: {e}")
+                        online_cands = []
+                    if not online_cands:
+                        print(f"  (online engines returned no candidates)")
+                        continue
+                    online_scored = sorted(
+                        ((c, _score_candidate(_clean_q, c)) for c in online_cands),
+                        key=lambda x: x[1], reverse=True,
+                    )[:5]
+                    if len(online_cands) == 1:
+                        online_scored = [(online_scored[0][0], 100.0)]
+                        print(f"  → single online hit → boosting conf to 100.0")
+                    # Convert online candidates into synthesized-guid form so
+                    # the operator can pick them directly from the next prompt.
+                    online_picker = []
+                    for cand, score in online_scored:
+                        guid = None
+                        if cand.get('tvdb_id'):
+                            guid = f"com.plexapp.agents.thetvdb://{cand['tvdb_id']}?lang=en"
+                        elif cand.get('tmdb_id'):
+                            guid = f"com.plexapp.agents.themoviedb://{cand['tmdb_id']}?lang=en"
+                        elif cand.get('imdb_id'):
+                            guid = f"com.plexapp.agents.imdb://{cand['imdb_id']}?lang=en"
+                        if not guid:
+                            continue
+                        class _ManualSearchResult:
+                            pass
+                        msr = _ManualSearchResult()
+                        msr.guid = guid
+                        msr.name = cand.get('title') or _clean_q
+                        cand['_raw'] = msr
+                        online_picker.append((cand, score))
+                    if not online_picker:
+                        print(f"  (online candidates had no usable tvdb/tmdb/imdb id)")
+                        continue
+                    # Auto-pick on single high-confidence hit (e.g. boosted to 100).
+                    o_top, o_top_score = online_picker[0]
+                    o_runner = online_picker[1][1] if len(online_picker) > 1 else 0
+                    if _auto_pick_ok(o_top_score, o_runner):
+                        chosen = o_top
+                        print(f"  ✓ AUTO-PICK [{o_top['engine']}→synth] guid={o_top['_raw'].guid}  conf={o_top_score:.1f}")
+                        break
+                    # Otherwise show the online candidates as the new picker list.
+                    scored = online_picker
+                    raw_results = [c['_raw'] for (c, _) in online_picker]
+                    for idx, (cand, score) in enumerate(scored, 1):
+                        _print_candidate_row(idx, cand, score)
                 continue
             # (b) id:<provider>:<id> — look up the ID on the real engine
             # (TMDB / TVDB / IMDB), fetch real title/year, then construct
