@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.68"
+SCRIPT_VERSION = "v2.69"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -1036,6 +1036,13 @@ CONFIG_DEFAULTS = {
     # after a successful migration.  False keeps the original alongside.
     'REMUX_TRASH_ORIGINAL': True,
     'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
+
+    # Problem categories to SKIP when running --problems.  Each entry is a
+    # category name as registered in PROBLEM_CATEGORIES_REGISTRY (e.g.
+    # 'remux', 'junk', 'no_audio_language', 'missing_episodes').  Empty
+    # list = run every registered category.  Use `my-plex --problems` to
+    # see the full list of categories my-plex currently knows about.
+    'PROBLEM_CATEGORIES_DISABLED': [],
 
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
@@ -2450,6 +2457,7 @@ def _compile_junk_patterns():
     _JUNK_PATTERNS_COMPILED = out
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
+PROBLEM_CATEGORIES_DISABLED = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
@@ -28993,6 +29001,223 @@ def is_special_episode(filename, specials_pattern=None):
 
 
 # ---------------------------------------------------------------------------
+# Problem-categories registry (v2.69) — SINGLE SOURCE OF TRUTH
+#
+# Every problem category my-plex knows how to detect is registered here.
+# This dict drives:
+#   • The --problems runner (which checks to run, in what order).
+#   • The --help problems body (auto-generated from the dict).
+#   • The README problems section (audit-script-generated from this dict).
+#   • The PROBLEM_CATEGORIES_DISABLED CONF list (lets users skip categories).
+#
+# Each entry's `invoke` callable takes (obj_keys, library, tsv_only) and
+# returns a non-negative count.  Returning 0 means "nothing flagged".
+# `tsv_relevant=True` means the check ALSO runs in --problems --tsv mode
+# (only episode-data / numbering categories qualify).
+#
+# Adding a new --problems category is a 1-place edit: append an entry here.
+# No edits to the runner, help, README or auto-resolve loop are needed
+# beyond optionally wiring `resolve_invoke` for the --resolve --auto path.
+# ---------------------------------------------------------------------------
+
+def _pc_excess(obj_keys, library, tsv_only):
+    r = PLEX_Media._list_excess_versions(obj_keys, None, 3)
+    if isinstance(r, tuple) and len(r) >= 2:
+        return int(r[1] or 0)
+    return int(r or 0)
+
+PROBLEM_CATEGORIES_REGISTRY = {
+    'broken': {
+        'cli_flag':      '--broken',
+        'help_topic':    'broken',
+        'header':        'Broken / Truncated Files',
+        'description':   'Broken/truncated media files (probe error, low bitrate, file not found)',
+        'fix_hint':      'my-plex --broken --resolve',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_broken_files(obj_keys, None) or 0,
+    },
+    'excess_versions': {
+        'cli_flag':      '--excess-versions',
+        'help_topic':    'problems',
+        'header':        'Excess Versions (3+)',
+        'description':   'Entries with 3+ file versions (likely accidental duplicate imports)',
+        'fix_hint':      'my-plex --excess-versions 3',
+        'tsv_relevant':  False,
+        'invoke':        _pc_excess,
+    },
+    'tsv': {
+        'cli_flag':      None,
+        'help_topic':    'problems',
+        'header':        'Episode Data (TSV) Issues',
+        'description':   'Episode-scrape failures: no external IDs, misidentified series, truncated titles',
+        'fix_hint':      'Inspect episodes.err files; re-run with corrected source',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: _list_tsv_problems(obj_keys, library) or 0,
+    },
+    'unmatched': {
+        'cli_flag':      '--unmatched',
+        'help_topic':    'unmatched',
+        'header':        'Unmatched Items',
+        'description':   "Items not matched by Plex metadata agent (local:// guid; needs Fix Match)",
+        'fix_hint':      'my-plex --unmatched --resolve [--auto]',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_unmatched(obj_keys, None) or 0,
+    },
+    'no_audio_language': {
+        'cli_flag':      '--no-audio-language',
+        'help_topic':    'no-audio-language',
+        'header':        'No Audio Language',
+        'description':   'Items whose audio tracks have no language tag set in Plex',
+        'fix_hint':      'my-plex --no-audio-language --resolve',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_no_audio_language(obj_keys, None) or 0,
+    },
+    'unsorted': {
+        'cli_flag':      '--unsorted',
+        'help_topic':    'unsorted',
+        'header':        'Unsorted Shows',
+        'description':   'Series with episodes directly in series dir (no season subdirectories)',
+        'fix_hint':      'my-plex --unsorted --fix',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_unsorted(obj_keys, library) or 0,
+    },
+    'mismatched': {
+        'cli_flag':      '--mismatched',
+        'help_topic':    'mismatched',
+        'header':        'Mismatched',
+        'description':   'Title-vs-directory mismatches + multi-version Plex grouping mismatches',
+        'fix_hint':      'my-plex --mismatched --resolve [--auto]',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_mismatched(obj_keys, None) or 0,
+    },
+    'junk': {
+        'cli_flag':      '--junk',
+        'help_topic':    'junk',
+        'header':        'Junk Files',
+        'description':   'Sample / RARBG promo / tiny-placeholder files bundled with healthy media',
+        'fix_hint':      'my-plex --junk --resolve',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_junk_files(None) or 0,
+    },
+    'multi_movie_folder': {
+        'cli_flag':      '--multi-movie-folder',
+        'help_topic':    'multi-movie-folder',
+        'header':        'Multi-Movie Folders',
+        'description':   'Wrappers hosting >=2 distinct Plex Movies (Plex expects 1 Movie per folder)',
+        'fix_hint':      'Split into per-movie wrappers (manual or my-plex --mv)',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_multi_movie_folder(obj_keys, library) or 0,
+    },
+    'library_language_mismatch': {
+        'cli_flag':      '--library-language-mismatch',
+        'help_topic':    'library-language-mismatch',
+        'header':        'Library Language Mismatch',
+        'description':   "Items whose audio language disagrees with their library's configured language",
+        'fix_hint':      'Move to the correct language library (manual or my-plex --mv)',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_library_language_mismatch(obj_keys, library) or 0,
+    },
+    'bad_structure': {
+        'cli_flag':      '--bad-structure',
+        'help_topic':    'bad-structure',
+        'header':        'Bad Structure (nested media)',
+        'description':   'Media files nested too deeply (Movie >1 dir below lib root, Episode >2)',
+        'fix_hint':      'my-plex --bad-structure --resolve',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_bad_structure(obj_keys, library) or 0,
+    },
+    'numbering_issues': {
+        'cli_flag':      '--episode-numbering-issues',
+        'help_topic':    'renumber',
+        'header':        'Episode Numbering Issues',
+        'description':   'Plex vs scraped numbering disagreement (e.g. Plex E101 vs scraped E01)',
+        'fix_hint':      'my-plex --renumber --plex',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_episode_numbering_issues(obj_keys, library) or 0,
+    },
+    'reencode': {
+        'cli_flag':      '--reencode',
+        'help_topic':    'reencode',
+        'header':        'Reencode Candidates',
+        'description':   'Media files whose codecs cannot stream-copy (requires re-encoding)',
+        'fix_hint':      'my-plex --reencode',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_reencode_candidates(obj_keys, library) or 0,
+    },
+    'remux': {
+        'cli_flag':      '--remux',
+        'help_topic':    'remux',
+        'header':        'Remux Candidates',
+        'description':   'Media files whose container is outdated but streams can be copied unchanged',
+        'fix_hint':      'my-plex --remux',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._count_remux_candidates(obj_keys, library) or 0,
+    },
+    'missing_episodes': {
+        'cli_flag':      '--missing',
+        'help_topic':    'missing',
+        'header':        'Missing Episodes',
+        'description':   'Episodes present in scraped data but missing from Plex / disk',
+        'fix_hint':      'my-plex --missing <SERIES>',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_missing_episodes(obj_keys, library, '--all' not in sys.argv) or 0,
+    },
+    'renumber': {
+        'cli_flag':      '--renumber',
+        'help_topic':    'renumber',
+        'header':        'Renumber Candidates',
+        'description':   'Episodes whose S0xE0x in filename disagrees with scraped data (renaming fixes)',
+        'fix_hint':      'my-plex --renumber --fix',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_candidates(obj_keys, library) or 0,
+    },
+    'renumber_nodata': {
+        'cli_flag':      None,
+        'help_topic':    'renumber',
+        'header':        'Renumber: Lack of Data',
+        'description':   "Episodes without scraped data — can't verify numbering",
+        'fix_hint':      'my-plex --renumber -V',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_lack_of_data(obj_keys, library) or 0,
+    },
+    'renumber_season': {
+        'cli_flag':      None,
+        'help_topic':    'renumber',
+        'header':        'Renumber: Season Mismatch',
+        'description':   "S-number in filename doesn't match the parent season directory",
+        'fix_hint':      'my-plex --renumber -V',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_season_mismatch(obj_keys, library) or 0,
+    },
+    'renumber_abs': {
+        'cli_flag':      None,
+        'help_topic':    'renumber',
+        'header':        'Renumber: Absolute Numbering Mismatch',
+        'description':   "Plex's episode ordering disagrees with scraped data",
+        'fix_hint':      'my-plex --renumber -V',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_abs_mismatch(obj_keys, library) or 0,
+    },
+    'unrecognized': {
+        'cli_flag':      '--unrecognized',
+        'help_topic':    'unrecognized',
+        'header':        'Unrecognized Top-Level Entries',
+        'description':   'Top-level entries in Plex DB that the cache cannot resolve',
+        'fix_hint':      'my-plex --unrecognized',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: _count_unrecognized_top_level(library) or 0,
+    },
+}
+
+
+def _enabled_problem_categories():
+    """Return PROBLEM_CATEGORIES_REGISTRY filtered by the user's
+    PROBLEM_CATEGORIES_DISABLED CONF list (preserves insertion order)."""
+    disabled = set(globals().get('PROBLEM_CATEGORIES_DISABLED', []) or [])
+    return {k: v for k, v in PROBLEM_CATEGORIES_REGISTRY.items() if k not in disabled}
+
+
+# ---------------------------------------------------------------------------
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
@@ -35515,50 +35740,31 @@ def verify_cache():
     print("\n" + "="*76)
 
 def _print_problem_warnings(problems, lib_arg=''):
-    """Print problem counts as >> ⚠ warning lines. Used by --update-cache and --problems."""
+    """Print problem counts as >> ⚠ warning lines. Used by --update-cache and --problems.
+
+    v2.69: registry-driven.  Iterates PROBLEM_CATEGORIES_REGISTRY in
+    insertion order, so adding a new category here is a 1-place edit.
+    """
     if not problems:
         return
-    if problems.get('broken', 0):
-        print(f"  >> ⚠ {problems['broken']} broken/truncated files   →  my-plex{lib_arg} --broken")
-    ev = problems.get('excess_versions', {})
-    if ev.get('entries', 0):
-        print(f"  >> ⚠ {ev['entries']} excess version entries ({ev['files']} files)   →  my-plex{lib_arg} --excess-versions 3")
-    if problems.get('tsv', 0):
-        print(f"  >> ⚠ {problems['tsv']} episode data failures   →  my-plex{lib_arg} --problems --tsv")
-    if problems.get('unmatched', 0):
-        print(f"  >> ⚠ {problems['unmatched']} unmatched items   →  my-plex{lib_arg} --unmatched")
-    if problems.get('no_audio_language', 0):
-        print(f"  >> ⚠ {problems['no_audio_language']} items with no audio language   →  my-plex{lib_arg} --no-audio-language")
-    if problems.get('unsorted', 0):
-        print(f"  >> ⚠ {problems['unsorted']} unsorted series   →  my-plex{lib_arg} --unsorted")
-    if problems.get('mismatched', 0):
-        print(f"  >> ⚠ {problems['mismatched']} mismatched   →  my-plex{lib_arg} --mismatched")
-    if problems.get('junk', 0):
-        print(f"  >> ⚠ {problems['junk']} junk file(s) bundled with healthy media   →  my-plex{lib_arg} --junk --resolve")
-    if problems.get('multi_movie_folder', 0):
-        print(f"  >> ⚠ {problems['multi_movie_folder']} wrapper(s) shared by >=2 Movies   →  my-plex{lib_arg} --multi-movie-folder")
-    if problems.get('library_language_mismatch', 0):
-        print(f"  >> ⚠ {problems['library_language_mismatch']} items in the wrong-language library   →  my-plex{lib_arg} --library-language-mismatch")
-    if problems.get('bad_structure', 0):
-        print(f"  >> ⚠ {problems['bad_structure']} item(s) nested too deep on disk   →  my-plex{lib_arg} --bad-structure")
-    if problems.get('numbering_issues', 0):
-        print(f"  >> ⚠ {problems['numbering_issues']} episode numbering issues   →  my-plex{lib_arg} --renumber --plex")
-    if problems.get('reencode', 0):
-        print(f"  >> ⚠ {problems['reencode']} reencode candidates   →  my-plex{lib_arg} --reencode")
-    if problems.get('remux', 0):
-        print(f"  >> ⚠ {problems['remux']} remux candidates   →  my-plex{lib_arg} --remux")
-    if problems.get('missing_episodes', 0):
-        print(f"  >> ⚠ {problems['missing_episodes']} missing episodes   →  my-plex{lib_arg} --missing <SERIES>")
-    if problems.get('renumber', 0):
-        print(f"  >> ⚠ {problems['renumber']} renumber candidates   →  my-plex{lib_arg} --renumber")
-    if problems.get('renumber_nodata', 0):
-        print(f"  >> ⚠ {problems['renumber_nodata']} episodes without scraped data   →  my-plex{lib_arg} --renumber -V")
-    if problems.get('renumber_season', 0):
-        print(f"  >> ⚠ {problems['renumber_season']} season mismatch episodes   →  my-plex{lib_arg} --renumber -V")
-    if problems.get('renumber_abs', 0):
-        print(f"  >> ⚠ {problems['renumber_abs']} absolute numbering mismatch episodes   →  my-plex{lib_arg} --renumber -V")
-    if problems.get('unrecognized', 0):
-        print(f"  >> ⚠ {problems['unrecognized']} unrecognized top-level entries   →  my-plex{lib_arg} --unrecognized   (synonym: --alien)")
+    for cat_name, cat in PROBLEM_CATEGORIES_REGISTRY.items():
+        raw = problems.get(cat_name, 0)
+        # Legacy schema: excess_versions used to be a dict {entries, files}
+        if isinstance(raw, dict):
+            n = raw.get('entries', 0)
+            extra = f" ({raw.get('files', 0)} files)"
+        else:
+            n = int(raw or 0)
+            extra = ''
+        if not n:
+            continue
+        fix = cat.get('fix_hint') or ''
+        # If the fix hint starts with `my-plex ` we splice in the lib_arg
+        # so per-library --problems output suggests the same-scope fix.
+        if fix.startswith('my-plex ') and lib_arg:
+            fix = 'my-plex' + lib_arg + fix[len('my-plex'):]
+        arrow = f"   →  {fix}" if fix else ''
+        print(f"  >> ⚠ {n} {cat['description']}{extra}{arrow}")
 
 
 def _write_cache_update_log(action, completion_status, total_added, total_removed, total_updated,
@@ -36762,20 +36968,6 @@ def execute_global_commands(args, cmd_args):
         cached_str = f": last --update-cache: {_cached_at}" if _cached_at else ""
         print(f" >>> PROBLEM DETECTION (based on cache){cached_str}")
 
-        broken_count = 0
-        excess_file_count = excess_entry_count = 0
-        unmatched_count = 0
-        noaudio_count = 0
-        unsorted_count = 0
-        mismatch_count = 0
-        reencode_count = 0
-        remux_count = 0
-        missing_count = 0
-        renumber_count = 0
-        renumber_nodata_count = 0
-        renumber_season_count = 0
-        renumber_abs_count = 0
-
         def _run_check(func, *args, **kwargs):
             """Run a check function, suppressing detail output unless -V/--verbose."""
             if VRB:
@@ -36784,114 +36976,31 @@ def execute_global_commands(args, cmd_args):
             with contextlib.redirect_stdout(sink):
                 return func(*args, **kwargs)
 
-        if not tsv_only:
-            # 1. Broken files
-            print(f"  >> Broken / Truncated Files{lib_label}")
-            broken_count = _run_check(PLEX_Media._list_broken_files, obj_keys, None) or 0
+        # v2.69: iterate the PROBLEM_CATEGORIES_REGISTRY — single source of
+        # truth.  Adding a new --problems check is a 1-place edit (append to
+        # the registry).  Users can suppress categories via the
+        # PROBLEM_CATEGORIES_DISABLED CONF list.
+        live_problems = {}
+        skipped = []
+        for cat_name, cat in _enabled_problem_categories().items():
+            if tsv_only and not cat.get('tsv_relevant'):
+                continue
+            print(f"  >> {cat['header']}{lib_label}")
+            try:
+                count = _run_check(cat['invoke'], obj_keys, problems_library, tsv_only) or 0
+            except Exception as e:
+                print(f"     ⚠ check {cat_name!r} raised: {e}")
+                count = 0
+            live_problems[cat_name] = int(count) if count else 0
 
-            # 2. Excess versions
-            print(f"  >> Excess Versions (3+){lib_label}")
-            result = _run_check(PLEX_Media._list_excess_versions, obj_keys, None, 3)
-            excess_file_count, excess_entry_count = result if result else (0, 0)
+        disabled_now = set(globals().get('PROBLEM_CATEGORIES_DISABLED', []) or [])
+        skipped = sorted(disabled_now & set(PROBLEM_CATEGORIES_REGISTRY.keys()))
+        if skipped:
+            print(f"  >> ({len(skipped)} categor{'ies' if len(skipped) != 1 else 'y'} disabled via PROBLEM_CATEGORIES_DISABLED: {', '.join(skipped)})")
 
-        # 3. Episode data issues
-        print(f"  >> Episode Data (TSV) Issues{lib_label}")
-        tsv_problem_count = _run_check(_list_tsv_problems, obj_keys, problems_library)
-
-        if not tsv_only:
-            # 4. Unmatched items
-            print(f"  >> Unmatched Items{lib_label}")
-            unmatched_count = _run_check(PLEX_Media._list_unmatched, obj_keys, None)
-
-            # 5. No audio language
-            print(f"  >> No Audio Language{lib_label}")
-            noaudio_count = _run_check(PLEX_Media._list_no_audio_language, obj_keys, None)
-
-            # 6. Unsorted shows
-            print(f"  >> Unsorted Shows{lib_label}")
-            unsorted_count = _run_check(PLEX_Media._list_unsorted, obj_keys, problems_library)
-
-            # 6. Mismatched (title-vs-directory + multi-version grouping)
-            print(f"  >> Mismatched{lib_label}")
-            mismatch_count = _run_check(PLEX_Media._list_mismatched, obj_keys, None)
-
-            # 6a. Junk files (samples, RARBG promos, tiny placeholders)
-            print(f"  >> Junk Files{lib_label}")
-            junk_count = _run_check(PLEX_Media._list_junk_files, obj_keys, None)
-
-        # 7. Episode numbering issues
-        print(f"  >> Episode Numbering Issues{lib_label}")
-        numbering_count = _run_check(PLEX_Media._list_episode_numbering_issues, obj_keys, problems_library)
-
-        if not tsv_only:
-            # 8. Reencode candidates
-            print(f"  >> Reencode Candidates{lib_label}")
-            reencode_count = _run_check(PLEX_Media._list_reencode_candidates, obj_keys, problems_library)
-
-            # 8a. Remux candidates (counted only — full list via --remux)
-            remux_count = _run_check(PLEX_Media._count_remux_candidates, obj_keys, problems_library) or 0
-            if remux_count:
-                print(f"  >> {remux_count} remux candidate(s)  →  my-plex --remux")
-
-            # 9. Missing episodes (cache-only — reads episodes.tsv from disk)
-            print(f"  >> Missing Episodes{lib_label}")
-            # --all bypasses the completion filter.
-            missing_count = _run_check(PLEX_Media._list_missing_episodes,
-                                       obj_keys, problems_library,
-                                       '--all' not in sys.argv)
-
-            # 10. Renumber candidates (actionable — scraped data exists)
-            print(f"  >> Renumber Candidates{lib_label}")
-            renumber_count = _run_check(PLEX_Media._list_renumber_candidates, obj_keys, problems_library)
-
-            # 10. Renumber: lack of scraped data
-            print(f"  >> Renumber: Lack of Data{lib_label}")
-            renumber_nodata_count = _run_check(PLEX_Media._list_renumber_lack_of_data, obj_keys, problems_library)
-
-            # 11. Renumber: season mismatch
-            print(f"  >> Renumber: Season Mismatch{lib_label}")
-            renumber_season_count = _run_check(PLEX_Media._list_renumber_season_mismatch, obj_keys, problems_library)
-
-            # 12. Renumber: absolute numbering mismatch
-            print(f"  >> Renumber: Absolute Numbering Mismatch{lib_label}")
-            renumber_abs_count = _run_check(PLEX_Media._list_renumber_abs_mismatch, obj_keys, problems_library)
-
-        # 13. Unrecognized / alien top-level entries (Plex DB authoritative — independent of cache)
-        unrecognized_count = 0
-        if not tsv_only:
-            print(f"  >> Unrecognized Top-Level Entries{lib_label}")
-            unrecognized_count = _count_unrecognized_top_level(problems_library) or 0
-            if unrecognized_count and VRB:
-                # In verbose mode, print the actual list via the standalone command.
-                cmd_unrecognized(target=problems_library)
-
-        # Closing milestone with total
-        total_problems = (broken_count + excess_entry_count + tsv_problem_count + unmatched_count
-                          + noaudio_count + unsorted_count + mismatch_count + junk_count + numbering_count
-                          + reencode_count + remux_count
-                          + missing_count + renumber_count + renumber_nodata_count + renumber_season_count + renumber_abs_count
-                          + unrecognized_count)
+        total_problems = sum(int(v or 0) for v in live_problems.values())
         vrb_hint = "" if VRB else " (use -V to show details)"
         print(f" >>> PROBLEM DETECTION{scope_str}: {total_problems} problem(s) found{vrb_hint}")
-        live_problems = {
-            'broken':            broken_count,
-            'excess_versions':   {'entries': excess_entry_count, 'files': excess_file_count},
-            'tsv':               tsv_problem_count,
-            'unmatched':         unmatched_count if not tsv_only else 0,
-            'no_audio_language': noaudio_count   if not tsv_only else 0,
-            'unsorted':          unsorted_count  if not tsv_only else 0,
-            'mismatched':        mismatch_count  if not tsv_only else 0,
-            'junk':              junk_count      if not tsv_only else 0,
-            'numbering_issues':  numbering_count,
-            'reencode':          reencode_count  if not tsv_only else 0,
-            'remux':             remux_count     if not tsv_only else 0,
-            'missing_episodes':  missing_count   if not tsv_only else 0,
-            'renumber':          renumber_count  if not tsv_only else 0,
-            'renumber_nodata':   renumber_nodata_count if not tsv_only else 0,
-            'renumber_season':   renumber_season_count if not tsv_only else 0,
-            'renumber_abs':      renumber_abs_count    if not tsv_only else 0,
-            'unrecognized':      unrecognized_count    if not tsv_only else 0,
-        }
         _print_problem_warnings(live_problems, lib_arg)
         if total_problems == 0:
             print(f"  >> No problems found.")
