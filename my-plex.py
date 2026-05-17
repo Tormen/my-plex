@@ -26436,52 +26436,40 @@ def main_print_help(args, remaining_args, main_parser):
             print("PROBLEMS HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --problems [--tsv]")
+            print("Usage: my-plex --problems [SCOPE] [--tsv] [--resolve]")
             print()
-            print("Runs all problem detection checks and prints a summary at the end.")
+            print("Runs every registered problem-category check and prints a summary.")
             print("By default only counts are shown — add -V / --verbose for full details.")
-            print("Use --tsv (or --scrape) to show only episode data / scraping issues.")
-            print("Currently equivalent to running:")
+            print("Use --tsv (or --scrape) to run only TSV-relevant categories.")
+            print("Use --resolve to chain every auto-resolve-capable category in a loop.")
             print()
-            print("  1. --broken           Detect broken/truncated media files")
-            print("                        (file not found, probe error, truncated duration,")
-            print("                        suspiciously low bitrate)")
+            print("CATEGORIES (auto-generated from PROBLEM_CATEGORIES_REGISTRY):")
             print()
-            print("  2. --excess-versions 3  Detect entries with 3+ file versions")
-            print("                          (likely accidental duplicates merged under one entry)")
+            # v2.69: auto-generated from the registry — no more drift.
+            for _i, (_cat_name, _cat) in enumerate(PROBLEM_CATEGORIES_REGISTRY.items(), 1):
+                _flag  = _cat.get('cli_flag') or '(no standalone flag)'
+                _hdr   = _cat.get('header') or _cat_name
+                _desc  = _cat.get('description') or ''
+                _tsv   = ' [tsv]' if _cat.get('tsv_relevant') else ''
+                print(f"  {_i:2d}. {_flag:<32} {_hdr}{_tsv}")
+                print(f"      {_desc}")
+                _fix = _cat.get('fix_hint')
+                if _fix:
+                    print(f"      Fix:  {_fix}")
+                print()
+            print(f"Total registered categories: {len(PROBLEM_CATEGORIES_REGISTRY)}")
+            _disabled = sorted(set(PROBLEM_CATEGORIES_DISABLED) & set(PROBLEM_CATEGORIES_REGISTRY))
+            if _disabled:
+                print(f"Currently disabled via PROBLEM_CATEGORIES_DISABLED: {', '.join(_disabled)}")
+            else:
+                print("Currently disabled via PROBLEM_CATEGORIES_DISABLED: (none)")
             print()
-            print("  3. Episode data issues  Scan for episodes.err files written by --update-cache")
-            print("                          (no external IDs, misidentified series, truncated titles,")
-            print("                          scraper failures)")
+            print("DISABLING CATEGORIES:")
             print()
-            print("  4. --unmatched          Detect items not matched by Plex metadata agent")
-            print("                          (local:// guid — Fix Match needed)")
-            print()
-            print("  5. --unsorted           Detect series with episodes directly in series dir")
-            print("                          (missing season subdirectories). Use --fix to sort.")
-            print()
-            print("  6. --mismatched         Title vs directory + multi-version Plex grouping mismatches")
-            print("                          (wrong metadata match — Fix Match needed)")
-            print()
-            print("  7. --renumber --plex    Detect series where Plex and scraped episode numbering")
-            print("                          disagree (e.g. Plex E101 vs Scraped E01)")
-            print("                          (replaces --episode-numbering-issues)")
-            print()
-            print(f"  8. --reencode           Detect media files with avg bitrate above threshold")
-            print(f"                          (currently {REENCODE_THRESHOLD_MBPS} Mbps / {int(REENCODE_THRESHOLD_MBPS * _MB_PER_HOUR_PER_MBPS)} MB/hr — set via REENCODE_THRESHOLD).")
-            print(f"                          Episodes roll up to season / series level when all flagged.")
-            print()
-            print("  9. --renumber           Detect episodes with incorrect S0xE0x in filename")
-            print("                          (scraped data is ground truth). Use --fix to rename.")
-            print()
-            print(" 10. Renumber: Lack of Data")
-            print("                          Episodes without scraped data — can't verify numbering.")
-            print()
-            print(" 11. Renumber: Season Mismatch")
-            print("                          S-number in filename doesn't match season directory.")
-            print()
-            print(" 12. Renumber: Absolute Numbering Mismatch")
-            print("                          Plex's episode ordering disagrees with scraped data.")
+            print("  Add unwanted category names to PROBLEM_CATEGORIES_DISABLED in")
+            print("  ~/.my-plex.conf, e.g.")
+            print("    PROBLEM_CATEGORIES_DISABLED = ['remux', 'junk']")
+            print("  Empty list = run every registered category.")
             print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
@@ -26498,15 +26486,9 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  my-plex --problems              # Run all checks (summary only)")
             print("  my-plex --problems -V           # Run all checks with full details")
-            print("  my-plex --problems --tsv        # Only episode data + numbering issues")
-            print("  my-plex --excess-versions 2     # Series entries with 2+ versions")
-            print("  my-plex --excess-versions 3     # Series entries with 3+ versions")
-            print("  my-plex --broken                # Series broken/truncated files only")
-            print("  my-plex --unmatched             # Series unmatched items only")
-            print("  my-plex --unsorted              # Series unsorted series only")
-            print("  my-plex --mismatched            # Series mismatched items only")
-            print("  my-plex --renumber --plex       # Series numbering issues only")
-            print("  my-plex --reencode              # Series reencode candidates only")
+            print("  my-plex --problems --tsv        # Only TSV-relevant categories")
+            print("  my-plex --problems --resolve    # Chain every auto-resolve category in a loop")
+            print("  my-plex --problems series.de    # Scoped to one library")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -29215,6 +29197,20 @@ def _enabled_problem_categories():
     PROBLEM_CATEGORIES_DISABLED CONF list (preserves insertion order)."""
     disabled = set(globals().get('PROBLEM_CATEGORIES_DISABLED', []) or [])
     return {k: v for k, v in PROBLEM_CATEGORIES_REGISTRY.items() if k not in disabled}
+
+
+def _emit_problem_categories_markdown():
+    """v2.69: emit a Markdown table of every registered problem category.
+    Used to regenerate the matching README.md section.  Run via
+    `my-plex --print-problem-categories-md`."""
+    print("| # | Category | CLI flag | TSV-only? | Description | Fix |")
+    print("|---|----------|----------|-----------|-------------|-----|")
+    for i, (name, cat) in enumerate(PROBLEM_CATEGORIES_REGISTRY.items(), 1):
+        flag = cat.get('cli_flag') or '—'
+        tsv  = '✓' if cat.get('tsv_relevant') else ''
+        desc = (cat.get('description') or '').replace('|', '\\|')
+        fix  = (cat.get('fix_hint')    or '').replace('|', '\\|')
+        print(f"| {i} | `{name}` | `{flag}` | {tsv} | {desc} | {fix} |")
 
 
 # ---------------------------------------------------------------------------
@@ -37900,7 +37896,11 @@ def main():
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print default config to stdout. With FILE: write default config to FILE (refuses to overwrite).")
     config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden legacy: use with --config-file
+    config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
     config_args, _ = config_parser.parse_known_args()
+    if getattr(config_args, 'print_problem_categories_md', False):
+        _emit_problem_categories_markdown()
+        sys.exit(0)
 
     # Resolve --config: with FILE behaves like --config-file; bare --config triggers print-current after load.
     _print_current_config = False
