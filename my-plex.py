@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.65"
+SCRIPT_VERSION = "v2.66"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -20275,6 +20275,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"\n  {len(mismatches)} potential mismatch(es) found (similarity < {MISMATCH_THRESHOLD:.0%}).")
         print(f"  SIM = similarity between Plex title and directory name (higher = better match).")
         print(f"  These items may need Fix Match in Plex.")
+        # Expose Series keys flagged here so the multi-version pass can
+        # suppress downstream noise inside an already-mismatched series.
+        PLEX_Media._title_mismatched_series_keys = {ck for (ck, *_) in mismatches
+                                                    if ck.startswith('Series:')}
         return len(mismatches)
 
     @staticmethod
@@ -20332,8 +20336,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     def _list_multi_version_mismatches(obj_keys, library_name):
         """List Movies / Episodes where Plex has bundled what's almost certainly
         DIFFERENT content under a single ID. See _detect_multi_version_mismatch
-        for the three signals."""
+        for the three signals.
+
+        Episodes whose parent Series is already title-vs-dir-mismatched
+        (set populated by _list_potential_mismatches above) are SUPPRESSED
+        from the detail output — re-matching the series in Plex will
+        almost always evaporate these.  A per-series tally line is shown
+        instead so the user knows they're shelved, not lost.
+        """
+        skip_series_keys = getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set()
         flagged = []
+        suppressed = {}  # series_key → list of (key, obj, reasons)
         seen_keys = set()
         for key in obj_keys:
             if key in seen_keys:
@@ -20347,12 +20360,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             reasons = PLEX_Media._detect_multi_version_mismatch(obj)
             if not reasons:
                 continue
+            sk = obj.get('series_key') or ''
+            if sk and sk in skip_series_keys:
+                suppressed.setdefault(sk, []).append((key, obj, reasons))
+                continue
             flagged.append((key, obj, reasons))
 
-        if not flagged:
+        if not flagged and not suppressed:
             scope = f" in '{library_name}'" if library_name else ""
             print(f"  No multi-version mismatches found{scope} — every multi-version grouping looks coherent.")
             return 0
+        if not flagged and suppressed:
+            scope = f" in '{library_name}'" if library_name else ""
+            print(f"  No multi-version mismatches found{scope} OUTSIDE already-mismatched series.")
 
         # Sort: Movie first then Episode, then most files first, then library / title.
         flagged.sort(key=lambda r: (
@@ -20387,6 +20407,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"  Fix in Plex: Split apart, then Fix Match each file individually.")
         print(f"  Thresholds: count > {MULTI_VERSION_MAX_MOVIE} (Movie) / > {MULTI_VERSION_MAX_SERIES} (Series),")
         print(f"              duration spread > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%, or files in >1 directory.")
+        # Per-series tally of suppressed findings (whose parent Series is
+        # already title-vs-dir-mismatched).  Re-matching the series in
+        # Plex usually evaporates these — keep them out of the noisy main
+        # list, surface a one-line count per series instead.
+        if suppressed:
+            print()
+            print(f"  SUPPRESSED (inside already-mismatched series — fix series match first):")
+            for sk in sorted(suppressed):
+                so = PLEX_Media.OBJ_BY_ID.get(sk) or {}
+                stitle = (so.get('title') or '?')[:35]
+                print(f"    {sk:<14} '{stitle}'  →  {len(suppressed[sk])} multi-version mismatch(es) inside")
         return len(flagged)
 
     @staticmethod
