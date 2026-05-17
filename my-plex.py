@@ -1703,10 +1703,13 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 ###############################################################################
 
 # MISPLACED_TARGET_LIBRARY — optional default mapping consulted by
-# `--misplaced --resolve` when transitioning a Series-of-Movies from its
-# source series.* library to a target movies.* library.  Key is the source
-# library, value is the target.  The interactive picker uses this as the
-# default suggestion; leave empty to be asked every time.
+# `--misplaced --resolve` for BOTH transition directions:
+#   • Phase A (Series-of-Movies):  looks up source key  → suggests value
+#                                  e.g. series_library_1 → movie_library_1
+#   • Phase B (Movie-with-SxxEyy): reverse-looks-up value → suggests key
+#                                  e.g. movie_library_1  → series_library_1
+# Same mapping, configured once.  The interactive picker uses the
+# suggestion as the default; leave empty to be asked every time.
 #
 # Default: (empty — always asks interactively)
 #
@@ -9628,9 +9631,18 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             print(f"          src: {src_fp}")
             print(f"          parsed: S{s_num:02d}E{e_num:02d}")
 
-            print(f"  Target Series library name: ", end='')
+            # v2.69: reverse-lookup MISPLACED_TARGET_LIBRARY for Phase B.
+            # If the source movies.* library appears as a VALUE in the map,
+            # suggest the corresponding KEY (its series.* counterpart) as
+            # the default target.  Same mapping, both directions.
+            _b_default = ''
+            for _k, _v in (target_map or {}).items():
+                if _v == lib_name:
+                    _b_default = _k
+                    break
+            print(f"  Target Series library name (default: {_b_default or '(none — type below)'}): ", end='')
             try:
-                target_series_lib = input().strip()
+                target_series_lib = (input().strip() or _b_default)
             except (EOFError, KeyboardInterrupt):
                 print("\n  (quit)")
                 quit_early = True
