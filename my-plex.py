@@ -37629,7 +37629,7 @@ def main():
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
         '--episode-numbering-issues': 'episode-numbering-issues',
-        '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
+        '--sort': 'sort-new', '--sort-new': 'sort-new', '--plex2disk': 'plex2disk', '--disk2plex': 'disk2plex',
         '--clean': 'pipelines',  # generic — all pipelines share one help page
         '--remux': 'remux',
         '--mv-to': 'mv', '--move-to': 'mv',
@@ -38374,7 +38374,7 @@ def main():
     main_parser.add_argument('--mark', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--sort', '--sort-new', dest='sort_new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--redo', action='store_true', dest='redo', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
@@ -38469,7 +38469,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--remove-label', nargs='+', metavar='ARG', help="Remove a label from media item(s). Usage: --remove-label LABEL SCOPE. SCOPE: Plex ID, cache key, title, or library name. Use --help remove-label for details.")
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
-    GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
+    GLOBAL_CMD_PARSER.add_argument('--sort', '--sort-new', dest='sort_new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort for details.  --sort-new is the legacy synonym.")
     GLOBAL_CMD_PARSER.add_argument('--redo', action='store_true', dest='redo', default=False, help="(--sort-new) Un-sort first: strip SORT_NEW_SXXEYY_REGEX from filenames + move back to series root, then sort fresh. Requires an explicit SCOPE; refuses to run globally for safety.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux lib1 country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
