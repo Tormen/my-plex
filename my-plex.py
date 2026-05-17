@@ -6627,6 +6627,118 @@ def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5
 # find the correct year for each item, then renames the wrapper directory
 # on disk so Plex auto-matches on the next scan.
 
+def _lookup_by_external_id(provider, ext_id, kind='tv'):
+    """v2.68: Look up a TMDB / TVDB / IMDB id and return a candidate dict in the
+    same shape _search_tmdb_titles / _search_tvdb_titles emit.
+
+    provider: 'tmdb' | 'tvdb' | 'imdb'
+    kind:     'tv' | 'movie'
+    Returns: candidate dict on success, None on failure.
+    """
+    import urllib.request, urllib.error, json as _json
+    endpoint = 'tv' if kind in ('tv', 'series', 'Series') else 'movie'
+
+    if provider == 'tmdb':
+        if not TMDB_API_KEY:
+            return None
+        url = f'https://api.themoviedb.org/3/{endpoint}/{ext_id}'
+        req = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {TMDB_API_KEY}',
+            'Accept': 'application/json',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                d = _json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}TMDB by-id {endpoint}/{ext_id} → {e!r}", file=sys.stderr)
+            return None
+        date_field = 'release_date' if endpoint == 'movie' else 'first_air_date'
+        date = d.get(date_field) or ''
+        year = int(date[:4]) if date[:4].isdigit() else None
+        return {
+            'engine':         'TMDB',
+            'title':          d.get('title') if endpoint == 'movie' else d.get('name'),
+            'original_title': d.get('original_title') if endpoint == 'movie' else d.get('original_name'),
+            'year':           year,
+            'tmdb_id':        str(ext_id),
+            'tvdb_id':        None,
+            'imdb_id':        None,
+            'popularity':     d.get('popularity') or 0.0,
+            'overview':       (d.get('overview') or '')[:140],
+            'lang':           d.get('original_language') or '',
+        }
+
+    if provider == 'tvdb':
+        token = _tvdb_token()
+        if not token:
+            return None
+        path = 'series' if endpoint == 'tv' else 'movies'
+        url = f'https://api4.thetvdb.com/v4/{path}/{ext_id}'
+        req = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                d = _json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}TVDB by-id {path}/{ext_id} → {e!r}", file=sys.stderr)
+            return None
+        rec = (d.get('data') or {})
+        date = rec.get('firstAired') or rec.get('first_air_time') or ''
+        year = int(date[:4]) if date[:4].isdigit() else None
+        return {
+            'engine':         'TVDB',
+            'title':          rec.get('name'),
+            'original_title': rec.get('originalName') or '',
+            'year':           year,
+            'tmdb_id':        None,
+            'tvdb_id':        str(ext_id),
+            'imdb_id':        None,
+            'popularity':     float(rec.get('score') or 0.0),
+            'overview':       (rec.get('overview') or '')[:140],
+            'lang':           rec.get('originalLanguage') or '',
+        }
+
+    if provider == 'imdb':
+        # TMDB's /find endpoint can resolve an IMDB id; reuse it.
+        if not TMDB_API_KEY:
+            return None
+        url = f'https://api.themoviedb.org/3/find/{ext_id}?external_source=imdb_id'
+        req = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {TMDB_API_KEY}',
+            'Accept': 'application/json',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                d = _json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}TMDB find imdb:{ext_id} → {e!r}", file=sys.stderr)
+            return None
+        bucket = 'tv_results' if endpoint == 'tv' else 'movie_results'
+        rows = d.get(bucket) or []
+        if not rows:
+            return None
+        r = rows[0]
+        date_field = 'release_date' if endpoint == 'movie' else 'first_air_date'
+        date = r.get(date_field) or ''
+        year = int(date[:4]) if date[:4].isdigit() else None
+        return {
+            'engine':         'IMDB→TMDB',
+            'title':          r.get('title') if endpoint == 'movie' else r.get('name'),
+            'original_title': r.get('original_title') if endpoint == 'movie' else r.get('original_name'),
+            'year':           year,
+            'tmdb_id':        str(r.get('id')) if r.get('id') is not None else None,
+            'tvdb_id':        None,
+            'imdb_id':        str(ext_id),
+            'popularity':     r.get('popularity') or 0.0,
+            'overview':       (r.get('overview') or '')[:140],
+            'lang':           r.get('original_language') or '',
+        }
+
+    return None
+
+
 def _search_tmdb_titles(title, kind='movie', max_retries=3):
     """Search TMDB for movies or TV shows by title.
 
@@ -8765,69 +8877,124 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         # Clean query from DIR name (strip _[tags], collapse separators).
         _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(dir_name.replace('.', ' ').replace('_', ' ')))
-        print(f"          query: {_clean_q!r}")
-        try:
-            raw_results = series_item.matches(title=_clean_q) or []
-        except Exception as e:
-            print(f"  ⚠ series.matches() failed: {e} — skipping")
+
+        def _query_agent(q):
+            print(f"          query: {q!r}")
+            try:
+                return series_item.matches(title=q) or [], None
+            except Exception as e:
+                return [], str(e)
+
+        raw_results, err = _query_agent(_clean_q)
+        if err:
+            print(f"  ⚠ series.matches() failed: {err} — skipping")
             skipped += 1
-            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'matches-failed: {e}'})
-            continue
-        if not raw_results:
-            print(f"  (Plex agent returned no candidates for {_clean_q!r} — skipping)")
-            skipped += 1
-            log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'no-candidates'})
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'matches-failed: {err}'})
             continue
 
-        candidates = [_adapt_plex_match_to_candidate(r) for r in raw_results]
-        scored = sorted(
-            ((c, _score_candidate(_clean_q, c)) for c in candidates),
-            key=lambda x: x[1], reverse=True,
-        )[:5]
-
-        # 4. Auto-pick branch (same rule as --unmatched).
         chosen = None
-        if auto and scored:
-            top, top_score = scored[0]
-            runner_score = scored[1][1] if len(scored) > 1 else 0
-            _auto_ok = (
-                top_score >= 100
-                or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
-                or (top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score)
-            )
-            if _auto_ok:
-                chosen = top
-                print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({top.get('year') or '----'})  conf={top_score:.1f}")
+        skipped_this = False
 
-        # 5. Interactive picker.
-        if chosen is None:
+        while True:
+            if not raw_results:
+                print(f"  (Plex agent returned no candidates)")
+                scored = []
+            else:
+                candidates = [_adapt_plex_match_to_candidate(r) for r in raw_results]
+                scored = sorted(
+                    ((c, _score_candidate(_clean_q, c)) for c in candidates),
+                    key=lambda x: x[1], reverse=True,
+                )[:5]
+
+            # 4. Auto-pick branch (same rule as --unmatched) — only on first pass.
+            if auto and scored and chosen is None:
+                top, top_score = scored[0]
+                runner_score = scored[1][1] if len(scored) > 1 else 0
+                _auto_ok = (
+                    top_score >= 100
+                    or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
+                    or (top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score)
+                )
+                if _auto_ok:
+                    chosen = top
+                    print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({top.get('year') or '----'})  conf={top_score:.1f}")
+                    break
+
+            # 5. Interactive picker.
             for idx, (cand, score) in enumerate(scored, 1):
                 _print_candidate_row(idx, cand, score)
+            print(f"  1-{len(scored)}) pick   t<title>) re-query Plex with new title")
+            print(f"  id:tvdb:NNNNN | id:tmdb:NNNNN | id:imdb:ttNNNNN) force-match an external ID")
             print(f"  s) skip   q) quit & process so far")
-            while True:
-                try:
-                    choice = input("  pick> ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\n  (quit)")
-                    quit_early = True
-                    break
-                if not choice:
-                    continue
-                if choice.lower() == 'q':
-                    quit_early = True
-                    break
-                if choice.lower() == 's':
-                    skipped += 1
-                    log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'user-skipped'})
-                    break
-                if choice.isdigit() and 1 <= int(choice) <= len(scored):
-                    chosen = scored[int(choice) - 1][0]
-                    break
-                print(f"  ? unrecognised input: {choice!r}")
-            if quit_early:
+            try:
+                choice = input("  pick> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
                 break
-            if chosen is None:
+            if not choice:
                 continue
+            if choice.lower() == 'q':
+                quit_early = True
+                break
+            if choice.lower() == 's':
+                skipped += 1
+                skipped_this = True
+                log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'user-skipped'})
+                break
+            # (a) t<title> — re-query the agent.
+            if choice.lower().startswith('t') and len(choice) > 1 and choice[1] in (' ', ':', '='):
+                new_q = choice[2:].strip()
+                if not new_q:
+                    print("  ? empty title after 't' — try again")
+                    continue
+                _clean_q = new_q
+                raw_results, err = _query_agent(_clean_q)
+                if err:
+                    print(f"  ⚠ series.matches() failed: {err}")
+                continue
+            # (b) id:<provider>:<id> — look up the ID on the real engine
+            # (TMDB / TVDB / IMDB), fetch real title/year, then construct
+            # a synthetic searchResult Plex's fixMatch can consume.
+            m_id = re.match(r'^id:(tvdb|tmdb|imdb):([A-Za-z0-9]+)\s*$', choice, re.IGNORECASE)
+            if m_id:
+                provider = m_id.group(1).lower()
+                ext_id   = m_id.group(2)
+                print(f"  >>> Looking up {provider}:{ext_id} on {provider.upper()}…")
+                rec = _lookup_by_external_id(provider, ext_id, kind='tv')
+                if not rec or not rec.get('title'):
+                    print(f"  ✗ {provider.upper()} returned no record for id={ext_id} — try again")
+                    continue
+                # Compute confidence vs the directory name so the operator
+                # gets a sanity-check score (and so --auto can use it).
+                conf = _score_candidate(_clean_q, rec)
+                print(f"  → {rec['engine']}: {rec.get('title')!r} ({rec.get('year') or '----'})  conf={conf:.1f}")
+                if rec.get('overview'):
+                    print(f"     {rec['overview']}")
+                # Synthetic searchResult — fixMatch only needs .guid + .name.
+                guid_map = {
+                    'tvdb': f"com.plexapp.agents.thetvdb://{ext_id}?lang=en",
+                    'tmdb': f"com.plexapp.agents.themoviedb://{ext_id}?lang=en",
+                    'imdb': f"com.plexapp.agents.imdb://{ext_id}?lang=en",
+                }
+                class _ManualSearchResult:
+                    pass
+                msr = _ManualSearchResult()
+                msr.guid = guid_map[provider]
+                msr.name = rec.get('title') or f"manual {provider}:{ext_id}"
+                rec['_raw'] = msr
+                chosen = rec
+                print(f"  ✓ MANUAL pick → guid {msr.guid}")
+                break
+            if choice.isdigit() and 1 <= int(choice) <= len(scored):
+                chosen = scored[int(choice) - 1][0]
+                break
+            print(f"  ? unrecognised input: {choice!r}")
+
+        if quit_early:
+            break
+        if chosen is None or skipped_this:
+            continue
 
         # 6. fixMatch (skipped in dry-run).
         if dry_run:
@@ -26433,7 +26600,15 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  For each title-vs-directory mismatched Series, queries Plex's own")
             print("  metadata agent (series.matches) for candidates matching the directory")
-            print("  name, then offers a numbered picker (1-N pick, s skip, q quit).")
+            print("  name, then offers a picker:")
+            print("    1-N) pick a candidate")
+            print("    t<title>) re-query Plex with a new title")
+            print("    id:tvdb:NNNNN | id:tmdb:NNNNN | id:imdb:ttNNNNN")
+            print("       Look up the ID on TVDB / TMDB / IMDB, fetch real title+year,")
+            print("       synthesize a searchResult guid, feed to fixMatch.")
+            print("       Use this when Plex's agent doesn't know the show.")
+            print("    s) skip   q) quit & process so far")
+            print()
             print("  With --auto, top hit is picked silently when conf >= "
                   f"{UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT}% and clearly")
             print("  ahead of #2 (same rule as --unmatched --resolve --auto).")
