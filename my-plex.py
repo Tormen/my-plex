@@ -8906,19 +8906,70 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     key=lambda x: x[1], reverse=True,
                 )[:5]
 
-            # 4. Auto-pick branch (same rule as --unmatched) — only on first pass.
-            if auto and scored and chosen is None:
-                top, top_score = scored[0]
-                runner_score = scored[1][1] if len(scored) > 1 else 0
-                _auto_ok = (
+            def _auto_pick_ok(top_score, runner_score):
+                return (
                     top_score >= 100
                     or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
                     or (top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score)
                 )
-                if _auto_ok:
+
+            # 4a. Auto-pick branch — try Plex's own agent first.
+            if auto and scored and chosen is None:
+                top, top_score = scored[0]
+                runner_score = scored[1][1] if len(scored) > 1 else 0
+                if _auto_pick_ok(top_score, runner_score):
                     chosen = top
-                    print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({top.get('year') or '----'})  conf={top_score:.1f}")
+                    print(f"  ✓ AUTO-PICK [plex-agent] {top['title']} ({top.get('year') or '----'})  conf={top_score:.1f}")
                     break
+
+            # 4b. Auto fallback to ONLINE ENGINES (TMDB / TVDB / fernsehserien.de)
+            #     when Plex's agent didn't give us a confident match.
+            #     Reuses --unmatched logic verbatim; on a confident hit, build a
+            #     synthetic searchResult from the candidate's tvdb_id / tmdb_id /
+            #     imdb_id and feed it to fixMatch.
+            if auto and chosen is None:
+                print(f"  >>> Plex agent below threshold — falling back to online engines (TMDB/TVDB/fernsehserien.de)…")
+                try:
+                    online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
+                except Exception as e:
+                    print(f"  ⚠ online-engine search failed: {e}")
+                    online_cands = []
+                if online_cands:
+                    online_scored = sorted(
+                        ((c, _score_candidate(_clean_q, c)) for c in online_cands),
+                        key=lambda x: x[1], reverse=True,
+                    )[:5]
+                    o_top, o_top_score = online_scored[0]
+                    o_runner = online_scored[1][1] if len(online_scored) > 1 else 0
+                    print(f"  → top online hit: [{o_top['engine']}] {o_top.get('title')!r} ({o_top.get('year') or '----'})  conf={o_top_score:.1f}")
+                    if _auto_pick_ok(o_top_score, o_runner):
+                        # Synthesize searchResult from whichever external id is present.
+                        guid = None
+                        if o_top.get('tvdb_id'):
+                            guid = f"com.plexapp.agents.thetvdb://{o_top['tvdb_id']}?lang=en"
+                        elif o_top.get('tmdb_id'):
+                            guid = f"com.plexapp.agents.themoviedb://{o_top['tmdb_id']}?lang=en"
+                        elif o_top.get('imdb_id'):
+                            guid = f"com.plexapp.agents.imdb://{o_top['imdb_id']}?lang=en"
+                        if guid:
+                            class _ManualSearchResult:
+                                pass
+                            msr = _ManualSearchResult()
+                            msr.guid = guid
+                            msr.name = o_top.get('title') or _clean_q
+                            o_top['_raw'] = msr
+                            chosen = o_top
+                            print(f"  ✓ AUTO-PICK [{o_top['engine']}→synth] guid={guid}  conf={o_top_score:.1f}")
+                            break
+                        else:
+                            print(f"  ⚠ top online candidate has no tvdb/tmdb/imdb id — cannot synthesize searchResult")
+                    else:
+                        # Show the rest so an upcoming interactive picker has context.
+                        for idx, (cand, score) in enumerate(online_scored, 1):
+                            _print_candidate_row(idx, cand, score)
+                        print(f"  (online-engine top conf {o_top_score:.1f} below threshold; falling through)")
+                else:
+                    print(f"  (online engines returned no candidates)")
 
             # 5. Interactive picker.
             for idx, (cand, score) in enumerate(scored, 1):
