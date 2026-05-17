@@ -20255,26 +20255,26 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if not mismatches:
             scope = f" in '{library_name}'" if library_name else ""
-            print(f"  No potential mismatches found{scope} — all titles match their directory names.")
+            print(f"No potential mismatches found{scope} — all titles match their directory names.")
             return 0
 
         mismatches.sort(key=lambda x: (x[7], x[5].lower(), x[1].lower()))  # ratio, library, title
 
-        print(f"\n  {'KEY':<14} {'LIBRARY':<15} {'PLEX TITLE':<35} {'SIM':>4}  COMPARISON")
-        print("  " + "-" * 120)
+        print(f"\n{'KEY':<14} {'LIBRARY':<15} {'PLEX TITLE':<35} {'SIM':>4}  COMPARISON")
+        print("-" * 120)
         for cache_key, title, orig_title, dir_name, comparison, library, filepath, ratio in mismatches:
             pct = f"{ratio:.0%}"
             title_disp = title[:35]
-            print(f"  {cache_key:<14} {library:<15} {title_disp:<35} {pct:>4}  {comparison}")
+            print(f"{cache_key:<14} {library:<15} {title_disp:<35} {pct:>4}  {comparison}")
             if orig_title and orig_title != title:
-                print(f"  {'':14} {'':15} originalTitle: {orig_title[:60]}")
+                print(f"{'':14} {'':15} originalTitle: {orig_title[:60]}")
             # Always series directory for context if comparison was against scraped title
             if comparison.startswith('SCRAPED-TITLE:'):
-                print(f"  {'':14} {'':15} DIR: {dir_name}")
+                print(f"{'':14} {'':15} DIR: {dir_name}")
 
-        print(f"\n  {len(mismatches)} potential mismatch(es) found (similarity < {MISMATCH_THRESHOLD:.0%}).")
-        print(f"  SIM = similarity between Plex title and directory name (higher = better match).")
-        print(f"  These items may need Fix Match in Plex.")
+        print(f"\n{len(mismatches)} potential mismatch(es) found (similarity < {MISMATCH_THRESHOLD:.0%}).")
+        print(f"SIM = similarity between Plex title and directory name (higher = better match).")
+        print(f"These items may need Fix Match in Plex.")
         # Expose Series keys flagged here so the multi-version pass can
         # suppress downstream noise inside an already-mismatched series.
         PLEX_Media._title_mismatched_series_keys = {ck for (ck, *_) in mismatches
@@ -20368,11 +20368,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if not flagged and not suppressed:
             scope = f" in '{library_name}'" if library_name else ""
-            print(f"  No multi-version mismatches found{scope} — every multi-version grouping looks coherent.")
+            print(f"No multi-version mismatches found{scope} — every multi-version grouping looks coherent.")
             return 0
         if not flagged and suppressed:
             scope = f" in '{library_name}'" if library_name else ""
-            print(f"  No multi-version mismatches found{scope} OUTSIDE already-mismatched series.")
+            print(f"No multi-version mismatches found{scope} OUTSIDE already-mismatched series.")
 
         # Sort: Movie first then Episode, then most files first, then library / title.
         flagged.sort(key=lambda r: (
@@ -20382,15 +20382,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             (r[1].get('title') or '').lower(),
         ))
 
-        print(f"\n  {'KEY':<14} {'TYPE':<8} {'V':>3}  {'LIBRARY':<15} {'TITLE':<35}  REASONS")
-        print("  " + "-" * 130)
+        print(f"\n{'KEY':<14} {'TYPE':<8} {'V':>3}  {'LIBRARY':<15} {'TITLE':<35}  REASONS")
+        print("-" * 130)
         for key, obj, reasons in flagged:
             obj_type = obj.get('type', '?')
             ver_count = len(obj.get('files') or {})
             library = (obj.get('library') or '?')[:15]
             title = (obj.get('title') or '')[:35]
             reasons_str = '; '.join(reasons)
-            print(f"  {key:<14} {obj_type:<8} {ver_count:>3}  {library:<15} {title:<35}  {reasons_str}")
+            print(f"{key:<14} {obj_type:<8} {ver_count:>3}  {library:<15} {title:<35}  {reasons_str}")
             for fi in (obj.get('files') or {}).values():
                 if not isinstance(fi, dict):
                     continue
@@ -20400,24 +20400,24 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 size = fi.get('filesize') or fi.get('size') or 0
                 size_str = f"{size/1048576:.0f}MB" if size else '?'
                 fp = fi.get('filepath') or ''
-                print(f"  {'':14} {'':8} {'':3}  {'':15} {cd_str:>8}  {size_str:>7}  {fp}")
+                print(f"{'':14} {'':8} {'':3}  {'':15} {cd_str:>8}  {size_str:>7}  {fp}")
 
-        print(f"\n  {len(flagged)} multi-version mismatch(es) found.")
-        print(f"  Cause: Plex matched multiple physically-different files into one Episode/Movie slot.")
-        print(f"  Fix in Plex: Split apart, then Fix Match each file individually.")
-        print(f"  Thresholds: count > {MULTI_VERSION_MAX_MOVIE} (Movie) / > {MULTI_VERSION_MAX_SERIES} (Series),")
-        print(f"              duration spread > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%, or files in >1 directory.")
+        print(f"\n{len(flagged)} multi-version mismatch(es) found.")
+        print(f"Cause: Plex matched multiple physically-different files into one Episode/Movie slot.")
+        print(f"Fix in Plex: Split apart, then Fix Match each file individually.")
+        print(f"Thresholds: count > {MULTI_VERSION_MAX_MOVIE} (Movie) / > {MULTI_VERSION_MAX_SERIES} (Series),")
+        print(f"            duration spread > {MULTI_VERSION_MAX_DURATION_SPREAD_PCT}%, or files in >1 directory.")
         # Per-series tally of suppressed findings (whose parent Series is
         # already title-vs-dir-mismatched).  Re-matching the series in
         # Plex usually evaporates these — keep them out of the noisy main
         # list, surface a one-line count per series instead.
         if suppressed:
             print()
-            print(f"  SUPPRESSED (inside already-mismatched series — fix series match first):")
+            print(f"SUPPRESSED (inside already-mismatched series — fix series match first):")
             for sk in sorted(suppressed):
                 so = PLEX_Media.OBJ_BY_ID.get(sk) or {}
                 stitle = (so.get('title') or '?')[:35]
-                print(f"    {sk:<14} '{stitle}'  →  {len(suppressed[sk])} multi-version mismatch(es) inside")
+                print(f"{sk:<14} '{stitle}'  →  {len(suppressed[sk])} multi-version mismatch(es) inside")
         return len(flagged)
 
     @staticmethod
