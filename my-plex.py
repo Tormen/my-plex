@@ -37731,6 +37731,19 @@ def execute_global_commands(args, cmd_args):
             pfx = "[DRY-RUN] " if dry_run else ""
             print(f"\n--- {pfx}Renumber --fix{scope} ---")
             PLEX_Media._fix_renumber_candidates(obj_keys, library_name, dry_run=dry_run)
+            # v2.69: parity log per resolve memory rule.
+            try:
+                import datetime as _dt
+                _write_resolve_log('renumber_fix', {
+                    'command':  'renumber_fix',
+                    'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                    'dry_run':  bool(dry_run),
+                    'scope':    scope,
+                    'library':  library_name,
+                    'obj_count': len(obj_keys or []),
+                })
+            except Exception as _e:
+                print(f">>> (resolve log skipped: {_e})")
         else:
             print(f"\n--- Renumber Candidates{scope} ---")
             PLEX_Media._list_renumber_candidates(obj_keys, library_name)
