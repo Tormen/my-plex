@@ -19403,48 +19403,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             plex_duration = obj.get('duration') or 0
             files_dict = obj.get('files', {})
-            # v2.65+: PRIMARY identification for multi-version slots.
-            # Plex stores `metadata_items.duration` by COPYING it from
-            # exactly one of the media_items — the "primary" one (highest
-            # quality / first ingested).  So plex_duration always equals
-            # ONE specific sibling's container_duration by construction.
-            # That sibling IS the one whose truncation we can meaningfully
-            # check.  Every other sibling is (a) at the same quality and
-            # matches anyway, OR (b) unrelated content Plex misgrouped
-            # (DVD extras, trailers, alternate cuts) — those don't share
-            # plex_duration as a reference at all, so flagging them is
-            # categorically wrong.  We pick the primary by min |Δ|; ties
-            # resolve to whichever comes first in iteration order.
-            _primary_fi = None
-            if plex_duration > 0 and len(files_dict) > 1:
-                _best_diff = None
-                for _cand_fi in files_dict.values():
-                    if not isinstance(_cand_fi, dict):
-                        continue
-                    _cand_fm = _cand_fi.get('file_metadata') or {}
-                    if _cand_fm.get('broken'):
-                        continue
-                    _cand_cd = _cand_fm.get('container_duration')
-                    if not _cand_cd:
-                        continue
-                    _d = abs(_cand_cd - plex_duration)
-                    if _best_diff is None or _d < _best_diff:
-                        _best_diff = _d
-                        _primary_fi = _cand_fi
-                # Sanity: if the closest sibling is still way off
-                # (>50%), Plex's stored duration is unreliable (probably
-                # scraped, never re-probed).  Don't pick a fake primary;
-                # let single-file logic apply below.
-                if _primary_fi is not None and _best_diff is not None \
-                        and _best_diff > 0.5 * plex_duration:
-                    _primary_fi = None
             for file_info in files_dict.values():
-                # Multi-version primary gate: in multi-version slots,
-                # only the primary file is a meaningful truncation
-                # candidate (its container_duration IS the source of
-                # plex_duration).  Skip every non-primary.
-                if _primary_fi is not None and file_info is not _primary_fi:
-                    continue
                 # v2.55: a file with NO actual disk content is effectively
                 # absent — counted by `--missing`, never by `--broken`.
                 # Two flavours of "no content":
@@ -19466,17 +19425,29 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 _fm_pre = file_info.get('file_metadata') or {}
                 if isinstance(_fm_pre, dict) and _fm_pre.get('disk_bytes') == 0:
                     continue
-                # Skip files that match any JUNK_PATTERNS regex — they're
-                # known clutter (e.g. RARBG.com promo files Plex wrongly
-                # grouped under a real movie) and produce false-positive
-                # "truncated" flags here.  `--junk` is the right tool
-                # for them, not `--broken`.
+                # Skip files that fully match a JUNK_PATTERNS entry —
+                # known clutter that --junk will trash.  Match semantics
+                # are identical to --junk's AND-combine: when a pattern
+                # has BOTH FILENAME_REGEXP and MAX_SIZE_MB active, BOTH
+                # criteria must hold before the file counts as junk
+                # (otherwise a tiny-media pattern whose regex is a
+                # generic video-extension match would silently swallow
+                # every video file in --broken).
                 _fp_here = file_info.get('filepath') or ''
                 if _fp_here:
                     _basename = _fp_here.rsplit('/', 1)[-1]
+                    _file_size_b = file_info.get('filesize') or 0
                     _compiled = _compile_junk_patterns()
-                    if any(rule[1] is not None and rule[1].search(_basename)
-                           for rule in _compiled.values()):
+                    _is_junk = False
+                    for _scope, _regex, _max_bytes, _rec in _compiled.values():
+                        _regex_pass = (_regex is None) or bool(_regex.search(_basename))
+                        _size_pass  = (_max_bytes <= 0) or (_file_size_b and _file_size_b <= _max_bytes)
+                        # Both criteria disabled → invalid (caught at compile);
+                        # at least one must be active for the rule to be usable.
+                        if (_regex is not None or _max_bytes > 0) and _regex_pass and _size_pass:
+                            _is_junk = True
+                            break
+                    if _is_junk:
                         continue
                 file_metadata = file_info.get('file_metadata')
                 is_broken = False
@@ -19573,8 +19544,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection thresholds: duration mismatch > {TRUNCATION_THRESHOLD_PCT}%, "
-              f"byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s.  "
-              f"Multi-version slots: only the primary (closest to plex_duration) is checked.")
+              f"byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s")
         return len(broken_files)
 
     @staticmethod
