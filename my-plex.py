@@ -7795,6 +7795,25 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                             print(f"  ✓ triggered Plex scan of '{_lib_name}'")
                         except Exception as e:
                             print(f"  ⚠ scan of '{_lib_name}' failed: {e}")
+
+    # v2.69: write a JSON resolve log for parity with every other --resolve command.
+    try:
+        import datetime as _dt
+        _write_resolve_log('bad_structure_resolve', {
+            'command':  'bad_structure_resolve',
+            'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+            'dry_run':  bool(dry_run),
+            'auto':     bool(auto),
+            'scope':    scope,
+            'summary':  {
+                'episode_moves':     len(plan_episode),
+                'movie_flattens':    len(plan_movie),
+                'conflicts':         len(plan_conflict),
+            },
+            'libraries_scanned':     sorted(libs_affected) if libs_affected else [],
+        })
+    except Exception as _e:
+        print(f">>> (resolve log skipped: {_e})")
     print()
 
 
@@ -8758,6 +8777,30 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         print(f"  ⚠ re-match failed for {key}: {e}")
         else:
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
+
+    # v2.69: write a JSON resolve log for parity with every other --resolve command.
+    try:
+        import datetime as _dt
+        _write_resolve_log('unmatched_resolve', {
+            'command':  'unmatched_resolve',
+            'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+            'dry_run':  bool(dry_run),
+            'auto':     bool(auto),
+            'scope':    scope,
+            'summary':  {
+                'renamed':      len(rename_queue),
+                'refresh_only': len(refresh_only),
+                'skipped':      len(skipped),
+            },
+            'rename_queue': [
+                {'key': k, 'src': src, 'dest': dst, 'year': yr, 'tmdb_id': tmdb}
+                for (k, _o, src, dst, yr, tmdb) in rename_queue
+            ],
+            'skipped':      [{'key': k, 'reason': r} for (k, r) in skipped],
+            'refresh_only': [k for (k, _o) in refresh_only],
+        })
+    except Exception as _e:
+        print(f">>> (resolve log skipped: {_e})")
 
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
 
