@@ -8754,11 +8754,6 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'no-dir-name'})
             continue
 
-        if dry_run:
-            print(f"  [dry-run] would query Plex agent for {dir_name!r} and present candidates")
-            log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'dry-run'})
-            continue
-
         # 3. Fetch Plex item + query agent.
         try:
             series_item = plex.fetchItem(rk)
@@ -8770,6 +8765,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         # Clean query from DIR name (strip _[tags], collapse separators).
         _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(dir_name.replace('.', ' ').replace('_', ' ')))
+        print(f"          query: {_clean_q!r}")
         try:
             raw_results = series_item.matches(title=_clean_q) or []
         except Exception as e:
@@ -8833,7 +8829,18 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             if chosen is None:
                 continue
 
-        # 6. fixMatch.
+        # 6. fixMatch (skipped in dry-run).
+        if dry_run:
+            print(f"  [dry-run] would fixMatch → {chosen.get('title')!r} ({chosen.get('year') or '----'})")
+            log_payload['actions'].append({
+                'key':       key,
+                'dir':       dir_name,
+                'old_title': title,
+                'new_title': chosen.get('title'),
+                'new_year':  chosen.get('year'),
+                'status':    'dry-run-would-pick',
+            })
+            continue
         try:
             series_item.fixMatch(chosen['_raw'])
         except Exception as e:
