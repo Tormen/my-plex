@@ -1044,6 +1044,15 @@ CONFIG_DEFAULTS = {
     # see the full list of categories my-plex currently knows about.
     'PROBLEM_CATEGORIES_DISABLED': [],
 
+    # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
+    # --resolve` Series→Movies transitions.  Key is the source series.*
+    # library name, value is the target movies.* library name to move
+    # files into.  The picker uses this as the default; leave empty to
+    # always ask interactively.
+    #   Example: MISPLACED_TARGET_LIBRARY = {'series.de': 'movies.de',
+    #                                         'series.en': 'movies.en'}
+    'MISPLACED_TARGET_LIBRARY': {},
+
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
     'ONDISK_LABEL_START_MARKER': '[',   # Any string — opening delimiter of on-disk label (e.g. '[', '{{', '<')
@@ -1688,6 +1697,25 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # PROBLEM_CATEGORIES_DISABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_DISABLED']!r}
+
+###############################################################################
+# --misplaced --resolve target-library mapping (v2.69)
+###############################################################################
+
+# MISPLACED_TARGET_LIBRARY — optional default mapping consulted by
+# `--misplaced --resolve` when transitioning a Series-of-Movies from its
+# source series.* library to a target movies.* library.  Key is the source
+# library, value is the target.  The interactive picker uses this as the
+# default suggestion; leave empty to be asked every time.
+#
+# Default: (empty — always asks interactively)
+#
+# Example (uncomment + customize to use):
+# MISPLACED_TARGET_LIBRARY = {{
+#     'series.de': 'movies.de',
+#     'series.en': 'movies.en',
+#     'series.fr': 'movies.fr',
+# }}
 
 ###############################################################################
 # On-disk Label Markers
@@ -2472,6 +2500,7 @@ def _compile_junk_patterns():
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
+MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
 # 70 min is the industry definition of "feature-length film" (FilmFreeway,
@@ -9257,6 +9286,292 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print()
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(series_keys)} total")
+    if fixed:
+        print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+    if quit_early:
+        print(">>> Stopped early (q).")
+
+
+def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
+    """v2.69: interactive Series→Movies disk transition for --misplaced items.
+
+    For every flagged Series-of-Movies in scope:
+      1. CONFIRM via TMDB — query both 'tv' and 'movie' indexes with the
+         cleaned dir-name.  If TV index returns 0 hits AND movie index
+         returns >=1 hit, this is confidently a Movie misfiled as Series.
+      2. Show the TMDB movie candidate(s) so the user can sanity-check.
+      3. Ask the operator which target Movie library to move into.
+         MISPLACED_TARGET_LIBRARY config provides defaults per source lib.
+      4. List the source files + proposed destination paths.
+      5. --try: stop after the plan.  Otherwise: y/N confirm → SSH-move
+         each file under '<target_lib_root>/<movie-title> (<year>)/<file>',
+         then delete the Plex Series shell, trigger a scan of the target
+         library, wait for completion.
+      6. Write a JSON resolve log.
+
+    Movies→Series (the [B] case from _list_misplaced) is NOT auto-resolvable
+    here — it needs per-file SxxEyy determination which is interactive and
+    fits better into --renumber.  Series-of-Movies covers the user's case.
+    """
+    import os, subprocess, shlex, datetime as _dt
+
+    # 1. Build the flagged set (capture _list_misplaced output silently).
+    obj_keys = []
+    if scope:
+        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
+        obj_keys = [k for (k, _o) in (scope_items or [])]
+    else:
+        obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+
+    flagged = []  # [(key, obj, episode_keys)]
+    thresh_ms = MISPLACED_FEATURE_LENGTH_MIN * 60 * 1000
+    for key in obj_keys:
+        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        if obj.get('type') != 'Series':
+            continue
+        episode_keys = []
+        seasons = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
+        for _s, ep_dict in (seasons or {}).items():
+            for _e, version_dict in (ep_dict or {}).items():
+                for _v, eks in (version_dict or {}).items():
+                    episode_keys.extend(eks or [])
+        if not episode_keys or len(episode_keys) > MISPLACED_MAX_EPISODES:
+            continue
+        _all_feature = True
+        for ek in episode_keys:
+            eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            files = eobj.get('files') or {}
+            _ep_dur_ms = 0
+            for fi in files.values():
+                if not isinstance(fi, dict):
+                    continue
+                cd = (fi.get('file_metadata') or {}).get('container_duration')
+                if cd and cd > _ep_dur_ms:
+                    _ep_dur_ms = cd
+            if not _ep_dur_ms or _ep_dur_ms < thresh_ms:
+                _all_feature = False
+                break
+        if _all_feature:
+            flagged.append((key, obj, episode_keys))
+
+    if not flagged:
+        print("No misplaced Series-of-Movies in scope — nothing to resolve.")
+        return
+
+    print(f">>> --misplaced --resolve: {len(flagged)} Series candidate(s) to process")
+    if dry_run:
+        print(">>> DRY-RUN — no disk moves, no Plex deletions, no scans.")
+    print()
+
+    plex = ensure_plex_api(required=not dry_run)
+
+    # Target Movie library defaults.  Optional CONFIG: MISPLACED_TARGET_LIBRARY
+    # dict mapping source series.* lib name → target movies.* lib name.
+    target_map = globals().get('MISPLACED_TARGET_LIBRARY', {}) or {}
+
+    log_payload = {
+        'command':  'misplaced_resolve',
+        'started':  _dt.datetime.now().isoformat(timespec='seconds'),
+        'dry_run':  bool(dry_run),
+        'scope':    scope,
+        'actions':  [],
+    }
+    fixed = 0
+    skipped = 0
+    quit_early = False
+    libs_to_scan = set()
+
+    for i, (key, obj, ep_keys) in enumerate(flagged, 1):
+        title    = obj.get('title') or '?'
+        lib_name = obj.get('library', '')
+        wrapper  = _derive_wrapper_path(obj) or ''
+        dir_name = os.path.basename(wrapper.rstrip('/'))
+        rk       = int(obj.get('id', 0) or 0)
+
+        print(f"\n──────────────────────────────────────────────────────────────────────────")
+        print(f"[{i}/{len(flagged)}] {key}  {title!r}  ({lib_name})")
+        print(f"          path: {wrapper}")
+        print(f"          {len(ep_keys)} 'episode' file(s) — all feature-length")
+
+        # 2. TMDB confirmation: TV index 0, MOVIE index >=1.
+        _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(
+            dir_name.replace('.', ' ').replace('_', ' ')
+        ))
+        print(f"          query: {_clean_q!r}")
+        try:
+            tv_hits     = _search_unmatched_candidates(_clean_q, 'tv') or []
+            movie_hits  = _search_unmatched_candidates(_clean_q, 'movie') or []
+        except Exception as e:
+            print(f"  ⚠ online search failed: {e} — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'online-search: {e}'})
+            continue
+        print(f"          TMDB tv:    {len(tv_hits)} hit(s)")
+        print(f"          TMDB movie: {len(movie_hits)} hit(s)")
+        if tv_hits:
+            print(f"  ⚠ TMDB also returns TV hits — NOT a confident Series-of-Movies; skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'tmdb-tv-hits-present',
+                                           'tv_count': len(tv_hits), 'movie_count': len(movie_hits)})
+            continue
+        if not movie_hits:
+            print(f"  ⚠ TMDB returned no movie hits either — cannot confirm; skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'tmdb-empty'})
+            continue
+        for j, cand in enumerate(movie_hits[:5], 1):
+            print(f"    [TMDB movie #{j}] {cand.get('title')!r} ({cand.get('year') or '----'})  pop={cand.get('popularity', 0):.1f}  tmdb:{cand.get('tmdb_id')}")
+
+        # 3. Target library selection.
+        default_target = target_map.get(lib_name) or ''
+        print()
+        print(f"  Target Movie library (default: {default_target or '(none — type below)'}): ", end='')
+        try:
+            chosen_target = input().strip() or default_target
+        except (EOFError, KeyboardInterrupt):
+            print("\n  (quit)")
+            quit_early = True
+            break
+        if not chosen_target:
+            print("  ⚠ no target library — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'no-target-library'})
+            continue
+        target_lib_obj = PLEX_Library.OBJ_DICT.get(chosen_target)
+        if not target_lib_obj:
+            print(f"  ⚠ unknown library {chosen_target!r} — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'unknown-target: {chosen_target}'})
+            continue
+        target_roots = [r for r in (getattr(target_lib_obj, 'locations', None) or []) if r]
+        if not target_roots:
+            print(f"  ⚠ target library has no rootpath — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'target-no-rootpath'})
+            continue
+        target_root = target_roots[0].rstrip('/')
+
+        # 4. Build per-file move plan.  When there's one movie hit, use its
+        #    canonical title for every file's dest dir; otherwise use the
+        #    Series title as a fallback (operator can rename later).
+        canonical_title = (movie_hits[0].get('title') or title) if len(movie_hits) == 1 else title
+        canonical_year  = movie_hits[0].get('year') if len(movie_hits) == 1 else None
+        _year_suffix    = f" ({canonical_year})" if canonical_year else ''
+        plan = []   # (ep_key, src_path, dest_dir, dest_path)
+        for ek in ep_keys:
+            eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            files = eobj.get('files') or {}
+            for _v, fi in files.items():
+                if not isinstance(fi, dict):
+                    continue
+                src = fi.get('filepath') or ''
+                if not src:
+                    continue
+                # If multiple files share one Series, default to series title
+                # subdir; user can move/rename later.  Single-file → use canonical.
+                dest_dir = f"{target_root}/{canonical_title}{_year_suffix}"
+                dest = f"{dest_dir}/{os.path.basename(src)}"
+                plan.append((ek, src, dest_dir, dest))
+        if not plan:
+            print(f"  ⚠ no source files derivable — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'no-source-files'})
+            continue
+
+        # 5. Show plan.
+        print()
+        print(f"  MOVE PLAN ({len(plan)} file(s)):")
+        for ek, src, _ddir, dest in plan:
+            print(f"    {src}")
+            print(f"      → {dest}")
+        if dry_run:
+            print(f"  [dry-run] would execute the above moves + delete Plex Series shell + scan {chosen_target!r}")
+            log_payload['actions'].append({
+                'key': key, 'status': 'dry-run',
+                'target_library': chosen_target,
+                'plan': [{'src': src, 'dest': dest} for _ek, src, _dd, dest in plan],
+            })
+            continue
+        if not yes:
+            try:
+                conf = input(f"  Proceed with moves + delete Plex Series:{rk}? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if conf != 'y':
+                print(f"  Skipped at confirmation.")
+                skipped += 1
+                log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'user-declined'})
+                continue
+
+        # 6. Execute moves via SSH (mkdir -p + mv per file).
+        remote_host = PLEX_DB_REMOTE_HOST
+        _moves_done = []
+        _move_failed = False
+        for ek, src, dest_dir, dest in plan:
+            _esc_dir  = shlex.quote(dest_dir)
+            _esc_src  = shlex.quote(src)
+            _esc_dest = shlex.quote(dest)
+            _cmd = f"mkdir -p {_esc_dir} && mv -n {_esc_src} {_esc_dest}"
+            r = subprocess.run([*_ssh_args(remote_host), _cmd],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                print(f"    ✗ move failed: {src}: {r.stderr.strip() or r.stdout.strip()}")
+                _move_failed = True
+                break
+            print(f"    ✓ moved: {os.path.basename(src)}")
+            _moves_done.append((src, dest))
+        if _move_failed:
+            log_payload['actions'].append({
+                'key': key, 'status': 'fail', 'reason': 'mv-failed',
+                'moves_done': [{'src': s, 'dest': d} for s, d in _moves_done],
+            })
+            continue
+
+        # 7. Delete the Plex Series shell (files now gone — Plex would clean
+        #    up on next scan anyway, but explicit delete makes the transition
+        #    deterministic).
+        try:
+            series_item = plex.fetchItem(rk)
+            series_item.delete()
+            print(f"  ✓ deleted Plex Series:{rk}")
+        except Exception as e:
+            print(f"  ⚠ delete Plex Series:{rk} failed (non-fatal — Plex will clean up on scan): {e}")
+
+        libs_to_scan.add(chosen_target)
+        libs_to_scan.add(lib_name)  # source lib also needs scan so Plex notices files gone
+        fixed += 1
+        log_payload['actions'].append({
+            'key': key, 'status': 'fixed',
+            'source_library': lib_name,
+            'target_library': chosen_target,
+            'canonical_title': canonical_title,
+            'canonical_year':  canonical_year,
+            'moves':           [{'src': s, 'dest': d} for s, d in _moves_done],
+        })
+
+    # 8. Scan touched libraries + wait.
+    if libs_to_scan and not dry_run:
+        print()
+        for lib_name in sorted(libs_to_scan):
+            try:
+                lib_section = plex.library.section(lib_name)
+                print(f">>> library.update() on {lib_name!r}…")
+                lib_section.update()
+                print(f">>> Waiting for {lib_name!r} scan to complete…")
+                wait_for_plex_scan_complete(plex, lib_name, lib_section)
+            except Exception as e:
+                print(f"  ⚠ scan of {lib_name!r} failed: {e}")
+
+    # 9. Log + summary.
+    log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
+    log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(flagged)}
+    _write_resolve_log('misplaced_resolve', log_payload)
+
+    print()
+    print("=" * 70)
+    print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(flagged)} total")
     if fixed:
         print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
     if quit_early:
@@ -37322,9 +37637,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_multi_movie_folder(obj_keys, library_name)
         return
 
-    # Handle --misplaced / --wrong-library [SCOPE]: items whose content type doesn't fit their library
+    # Handle --misplaced / --wrong-library [SCOPE] [--resolve [--try] [--yes]]
     misplaced_val = safe_getattr(cmd_args, 'misplaced', None)
     if misplaced_val is not None:
+        resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
+        if resolve:
+            dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+            yes     = bool(safe_getattr(cmd_args, 'yes', False)     or safe_getattr(args, 'yes', False))
+            cmd_misplaced_resolve(scope=misplaced_val, dry_run=dry_run, yes=yes)
+            return
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, library_name, scope = resolve_scope_to_keys(misplaced_val, media_type=media_type)
         print(f"\n--- Misplaced (wrong library type){scope} ---")
