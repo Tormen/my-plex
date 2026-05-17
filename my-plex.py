@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.66"
+SCRIPT_VERSION = "v2.67"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -749,6 +749,15 @@ CONFIG_DEFAULTS = {
     # into subdirs of `s0x` etc.).  Non-existent paths are silently
     # skipped.  Order matters: locations are processed top-to-bottom.
     'SORT_NEW_SCAN_LOCATIONS': ['.', 's0x', ',new'],
+
+    # SORT_NEW_SXXEYY_REGEX — pattern used by `--sort-new --redo` to
+    # detect the season/episode marker in an already-sorted filename.
+    # `--redo` removes EVERY occurrence of this regex from the basename
+    # (re.sub with count=0), cleans up leading separator characters
+    # (` `, `-`, `_`, `.`), then sorts the un-stripped file fresh.
+    # Default matches S followed by 1-4 digits, E followed by 1-4 digits
+    # (case-insensitive at use time).
+    'SORT_NEW_SXXEYY_REGEX': r'S[0-9]{1,4}E[0-9]{1,4}',
 
     # PIPELINES — dict of named pipelines that get registered as top-level
     # my-plex CLI flags.  Each key is the flag name (e.g. '--clean'); each
@@ -1889,6 +1898,15 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # Default:
 # SORT_NEW_SCAN_LOCATIONS = {CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']!r}
 
+# Regex used by `--sort-new --redo` to detect the season/episode marker
+# inside an already-sorted filename.  Every occurrence is stripped
+# (re.sub, count=0) and leading separators (space / dash / underscore /
+# dot) are cleaned up.  Always applied case-insensitively.
+# Full regex syntax reference: https://docs.python.org/3/library/re.html
+#
+# Default:
+# SORT_NEW_SXXEYY_REGEX = {CONFIG_DEFAULTS['SORT_NEW_SXXEYY_REGEX']!r}
+
 ###############################################################################
 # Sort-new movie routing (SORT_NEW_MOVIE_ROUTES)
 ###############################################################################
@@ -2251,6 +2269,7 @@ SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
 # series dir (series-type libraries) or each library root (movie/other).
 # See CONFIG_DEFAULTS doc-block above for full syntax (incl. 'touch' modes).
 SORT_NEW_SCAN_LOCATIONS = CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']
+SORT_NEW_SXXEYY_REGEX = CONFIG_DEFAULTS['SORT_NEW_SXXEYY_REGEX']
 
 _SORT_NEW_LOCATIONS_COMPILED = None  # lazy: [(path_str, touch_mode), …]
 
@@ -32320,9 +32339,19 @@ def cmd_sort_new(args, dry_run=False, target=None):
     Matches file dates to episodes.tsv, renames with S##E## prefix, moves to season dir.
 
     If target is a library name, only process that library.
+
+    --redo flag (read off args): un-sort first (strip SORT_NEW_SXXEYY_REGEX
+    from filenames, move back to series root), then sort fresh.  Requires
+    an explicit target (refuses to run globally — too destructive).
     """
     import os, subprocess, shlex
     from datetime import timedelta
+
+    redo = bool(safe_getattr(args, 'redo', False))
+    if redo and not target:
+        print("ERROR: --redo requires an explicit SCOPE (library, series cache key, or series title).")
+        print("       Refusing to run --redo globally — too destructive.")
+        return
 
     all_series_list = get_all_series_in_series_libraries()
     if target:
@@ -32336,7 +32365,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
     total_sorted = 0
     total_failed = 0
     total_series_processed = 0
-    series_summaries = []  # (library_name, series_title, unsorted_count, sorted_count, failed_count)
+    series_summaries = []  # (series_key, library_name, series_title, unsorted_count, sorted_count, failed_count, skipped_count)
 
     remote_host = PLEX_DB_REMOTE_HOST
 
@@ -32345,6 +32374,63 @@ def cmd_sort_new(args, dry_run=False, target=None):
         series_dir_server = series_dict.get('file', '')
         if not series_dir_server:
             continue
+
+        # --redo: walk the series tree recursively, strip SORT_NEW_SXXEYY_REGEX
+        # matches from every basename (re.sub count=0), clean leading
+        # separators, and move each touched file BACK to the series root.
+        # That undoes prior `--sort-new` results so they can be re-sorted
+        # against a refreshed TSV.  Done BEFORE the unsorted-files scan
+        # so the un-sorted output is what the sort loop picks up.
+        if redo:
+            _sxxeyy_re = re.compile(SORT_NEW_SXXEYY_REGEX, re.IGNORECASE)
+            print(f"\n{series_key}: [{library_name}] [{series_title}] --redo: scanning subtree …")
+            ok, file_list = my_plex_file_operation('LIST_DIR', series_dir_server, remote_host, maxdepth=10)
+            unsort_planned = []
+            if ok and file_list:
+                for fp in file_list:
+                    base = fp.rsplit('/', 1)[-1]
+                    parent = fp.rsplit('/', 1)[0]
+                    if not _sxxeyy_re.search(base):
+                        continue
+                    new_base = _sxxeyy_re.sub('', base, count=0)
+                    new_base = re.sub(r'^[\s\-_.]+', '', new_base).strip()
+                    if not new_base or new_base == base:
+                        continue
+                    target_fp = os.path.join(series_dir_server, new_base)
+                    if target_fp == fp:
+                        continue
+                    unsort_planned.append((fp, target_fp, parent))
+            print(f"  {len(unsort_planned)} file(s) to un-sort.")
+            if dry_run:
+                for src, dst, _parent in unsort_planned[:20]:
+                    print(f"  [dry-run] {src}\n              → {dst}")
+                if len(unsort_planned) > 20:
+                    print(f"  … +{len(unsort_planned) - 20} more")
+            else:
+                for src, dst, parent in unsort_planned:
+                    success, _ = my_plex_file_operation('MOVE', src, remote_host, dest_path=dst)
+                    if not success:
+                        print(f"  ✗ FAILED: {src}")
+                        continue
+                    print(f"  ✓ un-sorted: {os.path.basename(src)} → root")
+                    # Empty source season dir → rmdir it (non-recursive).
+                    if parent != series_dir_server:
+                        escaped_parent = escape_path_for_ssh(parent)
+                        subprocess.run([*_ssh_args(remote_host),
+                                        f'rmdir "{escaped_parent}" 2>/dev/null'],
+                                       capture_output=True, text=True)
+            # Persist the redo action via _write_resolve_log so every
+            # mutating --resolve-style operation leaves an audit trail.
+            if not dry_run and unsort_planned:
+                _write_resolve_log('sort_new_redo', {
+                    'series_key':    series_key,
+                    'series_title':  series_title,
+                    'total_unsorted': len(unsort_planned),
+                    'entries':       [
+                        {'from': src, 'to': dst, 'pattern': SORT_NEW_SXXEYY_REGEX}
+                        for src, dst, _ in unsort_planned
+                    ],
+                })
 
         # READ: try local alternative path first, SSH fallback
         series_dir_local = get_local_path(series_dir_server)
@@ -32513,6 +32599,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         sorted_count = 0
         failed_count = 0
+        skipped_count = 0  # files skipped because no SxxEyy could be assigned with certainty
         dry_run_lines = []  # (sort_key, line) for sorted dry-run output
 
         # v2.53: per-season episode-number counter that increments PER CALL.
@@ -32843,24 +32930,24 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
                 sorted_count += 1
             else:
-                # No TSV match — use fallback (latest season + sequential numbering)
+                # No TSV match — SKIP, do not silently invent SxxEyy.
+                # The destructive fallback that used to assign
+                # `latest_season + next_available_episode` was removed
+                # because it baked arbitrary episode numbers into
+                # filenames whenever the TSV was incomplete or wrong
+                # for the series (see Heimatbilder/Die_Millionenshow
+                # incident).  An SxxEyy assignment must come from a
+                # certain source: TSV date match, filename pattern,
+                # or future explicit --fuzzy override.
+                _hint = f"date {iso_date} not in TSV"
                 if all_episodes:
-                    latest_season = max((ep['season'] for ep in all_episodes if ep['season'] > 0), default=1)
+                    _hint += f" ({len(all_episodes)} eps known)"
                 else:
-                    latest_season = 1
-                target_dir = os.path.join(series_dir, f"s{latest_season:02d}")
-                ep_num = _take_next_ep(target_dir, latest_season)
-                new_name = PLEX_Media._build_sxex_filename(latest_season, ep_num, fn)
-
-                if dry_run:
-                    dry_run_lines.append((latest_season, ep_num, f"    [dry-run] [fallback] {iso_date} -> S{latest_season:02d}E{ep_num:02d}: {fn}"))
-                else:
-                    if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
-                        failed_count += 1
-                        continue
-                    print(f"    [fallback] {iso_date} -> s{latest_season:02d}/{new_name}")
-                sorted_count += 1
+                    _hint += " (no scraped episode list)"
+                print(f"    [skip] {fn}")
+                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV, then re-run with --redo")
+                skipped_count += 1
+                continue
 
         # Print collected dry-run lines sorted by S##E##
         if dry_run and dry_run_lines:
@@ -32870,7 +32957,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         total_sorted += sorted_count
         total_failed += failed_count
-        series_summaries.append((series_key, library_name, series_title, len(unsorted), sorted_count, failed_count))
+        series_summaries.append((series_key, library_name, series_title, len(unsorted), sorted_count, failed_count, skipped_count))
 
     # --- Movie libraries: create directories for bare video files ---
     movie_sorted = 0
@@ -33026,10 +33113,12 @@ def cmd_sort_new(args, dry_run=False, target=None):
             # Per-item summary
             if series_summaries or movie_summaries:
                 print(f"\nSummary:")
-                for s_key, lib_name, series_title, unsorted_count, sorted_count, failed_count in series_summaries:
+                for s_key, lib_name, series_title, unsorted_count, sorted_count, failed_count, skipped_count in series_summaries:
                     status = f"{sorted_count} sorted"
                     if failed_count > 0:
                         status += f", {failed_count} failed"
+                    if skipped_count > 0:
+                        status += f", {skipped_count} skipped (no certain SxxEyy)"
                     print(f"  {s_key}: [{lib_name}] [{series_title}] {unsorted_count} unsorted file(s), {status}")
                 for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
                     status = f"{sorted_count} sorted"
@@ -37365,6 +37454,7 @@ def main():
     main_parser.add_argument('--fix', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--sort-new', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--redo', action='store_true', dest='redo', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new help
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -37458,6 +37548,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help="Show missing episodes for a series. Compares scraped episode data (TVDB/TMDB/fernsehserien.de) against Plex cache. SHOW can be a title, Plex ID, or filepath. Use --help missing for details.")
     GLOBAL_CMD_PARSER.add_argument('--source', choices=['tvdb', 'tmdb', 'fernsehserien.de'], help="Override episode data source for --missing. Default: auto-detect from library agent/language.")
     GLOBAL_CMD_PARSER.add_argument('--sort-new', action='store_true', help="Sort unsorted recordings into season directories (shortcut for --unsorted --fix). Use with --dry-run to preview. Use --help sort-new for details.")
+    GLOBAL_CMD_PARSER.add_argument('--redo', action='store_true', dest='redo', default=False, help="(--sort-new) Un-sort first: strip SORT_NEW_SXXEYY_REGEX from filenames + move back to series root, then sort fresh. Requires an explicit SCOPE; refuses to run globally for safety.")
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux lib1 country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv-to DEST_LIB [SCOPE...]. The `-to` suffix makes it explicit that the FIRST arg is the destination library. SCOPE: library / cache key / Plex ID / title / filepath / filter expression — multiple tokens AND-combine. On duplicate (title+originalTitle+year) matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
