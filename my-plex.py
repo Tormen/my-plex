@@ -1044,14 +1044,6 @@ CONFIG_DEFAULTS = {
     # see the full list of categories my-plex currently knows about.
     'PROBLEM_CATEGORIES_DISABLED': [],
 
-    # --misplaced thresholds: a Series in a series.* library is "misplaced"
-    # (probably belongs in a Movie library) when ALL its episodes are at
-    # least MISPLACED_FEATURE_LENGTH_MIN minutes long AND the Series has
-    # at most MISPLACED_MAX_EPISODES episodes total.  Defaults err on the
-    # safe side — tune in ~/.my-plex.conf if too noisy.
-    'MISPLACED_FEATURE_LENGTH_MIN': 70,     # minutes per "episode"
-    'MISPLACED_MAX_EPISODES':       5,      # max total episodes
-
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
     'ONDISK_LABEL_START_MARKER': '[',   # Any string — opening delimiter of on-disk label (e.g. '[', '{{', '<')
@@ -1696,20 +1688,6 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # PROBLEM_CATEGORIES_DISABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_DISABLED']!r}
-
-###############################################################################
-# --misplaced Thresholds (v2.69)
-###############################################################################
-
-# A Series in a series.* library is flagged as "misplaced" (probably belongs
-# in a Movie library) when ALL its episodes are at least
-# MISPLACED_FEATURE_LENGTH_MIN minutes long AND the Series has at most
-# MISPLACED_MAX_EPISODES total episodes.  Defaults err on the safe side —
-# tune here if too noisy / too quiet on your library.
-#
-# Default:
-# MISPLACED_FEATURE_LENGTH_MIN = {CONFIG_DEFAULTS['MISPLACED_FEATURE_LENGTH_MIN']!r}
-# MISPLACED_MAX_EPISODES       = {CONFIG_DEFAULTS['MISPLACED_MAX_EPISODES']!r}
 
 ###############################################################################
 # On-disk Label Markers
@@ -2494,8 +2472,15 @@ def _compile_junk_patterns():
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
-MISPLACED_FEATURE_LENGTH_MIN = CONFIG_DEFAULTS.get('MISPLACED_FEATURE_LENGTH_MIN', 70)
-MISPLACED_MAX_EPISODES       = CONFIG_DEFAULTS.get('MISPLACED_MAX_EPISODES', 5)
+
+# --misplaced heuristic constants — fixed, not user-tunable.
+# 70 min is the industry definition of "feature-length film" (FilmFreeway,
+# IMDb, festival eligibility) — not a preference.
+# 5 episodes is "trilogy/quadrilogy/quintet" — also not a preference.
+# The DEFINITIVE check (TMDB returns only movie hits, no TV hits) lives in
+# --misplaced --resolve, which queries the API per flagged item.
+MISPLACED_FEATURE_LENGTH_MIN = 70    # minutes per episode (feature-length floor)
+MISPLACED_MAX_EPISODES       = 5     # max total episodes (trilogy/quadrilogy/quintet)
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
@@ -27116,10 +27101,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("Two complementary detectors:")
             print()
             print("  [A] Series-of-Movies — a Plex Series in a series.* library whose")
-            print(f"      content is actually movies.  Heuristic: every episode is at")
-            print(f"      least MISPLACED_FEATURE_LENGTH_MIN minutes long (={MISPLACED_FEATURE_LENGTH_MIN}) AND the")
-            print(f"      Series has at most MISPLACED_MAX_EPISODES total episodes (={MISPLACED_MAX_EPISODES}).")
-            print("      Typical case: a film trilogy ingested as a single Series.")
+            print(f"      content is actually movies.  Fast heuristic: every episode is")
+            print(f"      at least {MISPLACED_FEATURE_LENGTH_MIN} minutes long AND the Series has at most")
+            print(f"      {MISPLACED_MAX_EPISODES} total episodes.  Typical case: a film trilogy")
+            print("      ingested as a single Series.")
+            print()
+            print("      The DEFINITIVE check (TMDB returns only movie hits, no TV hits")
+            print("      for the cleaned dir name) runs during --misplaced --resolve —")
+            print("      cheap and reliable per flagged item, too slow for --problems.")
             print()
             print("  [B] Movie-with-SxxEyy — a Movie whose filename carries TV-shape")
             print("      episode markers (SxxEyy / [NxNN]).  Signals that the file is")
@@ -27132,9 +27121,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("    - [B] move the Movie's file into a target Series library under")
             print("          the right SxxEyy structure, delete the Movie shell, scan.")
             print()
-            print("CONFIG (~/.my-plex.conf):")
-            print(f"  MISPLACED_FEATURE_LENGTH_MIN = {MISPLACED_FEATURE_LENGTH_MIN}     # minutes — every ep must be at least this long")
-            print(f"  MISPLACED_MAX_EPISODES       = {MISPLACED_MAX_EPISODES}      # max total episodes for the [A] signal")
+            print("HEURISTIC CONSTANTS (not user-tunable):")
+            print(f"  MISPLACED_FEATURE_LENGTH_MIN = {MISPLACED_FEATURE_LENGTH_MIN}  (industry feature-length floor)")
+            print(f"  MISPLACED_MAX_EPISODES       = {MISPLACED_MAX_EPISODES}   (trilogy/quadrilogy/quintet bound)")
             print()
             print("EXAMPLES:")
             print()
