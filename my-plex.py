@@ -906,20 +906,6 @@ CONFIG_DEFAULTS = {
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
     'BROKEN_MIN_BYTERATE_KBYTE_PER_S': 10,  # Fallback heuristic: files below this average byte-rate (KB/s) are flagged as broken even when ffprobe metadata is missing. 10 KB/s ≈ 80 kbps, below any real video.
 
-    # BROKEN_MISGROUPED_SIBLING_RATIO_PCT — self-reliance heuristic.
-    # When a file in a multi-version Plex slot is dramatically smaller
-    # AND/OR shorter than the largest sibling in the same slot, skip
-    # the truncation flag entirely — the file is almost certainly
-    # different content Plex wrongly grouped together (a DVD extra,
-    # a making-of, an interview clip), not a truncated re-encode of
-    # the same episode/movie.
-    # The threshold is in PERCENT: if the file's size OR duration is
-    # at or below this fraction of the largest sibling's, it's
-    # considered "clearly different content" and skipped.
-    # Set to 0 to disable the heuristic (every short/small sibling is
-    # then a truncation candidate again).
-    'BROKEN_MISGROUPED_SIBLING_RATIO_PCT': 10.0,
-
     # Multi-Version Mismatch Detection Configuration (--mismatched)
     # Flag Episodes/Movies where Plex has bundled what's almost certainly
     # DIFFERENT content under a single ID (separate episodes wrongly grouped,
@@ -1576,16 +1562,17 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Default:
 # BROKEN_MIN_BYTERATE_KBYTE_PER_S = {CONFIG_DEFAULTS['BROKEN_MIN_BYTERATE_KBYTE_PER_S']}
 
-# Self-reliance heuristic for multi-version Plex slots.  When a file
-# in the slot is ≤ this fraction (PERCENT) of the largest sibling's
-# size OR duration, --broken skips the truncation flag entirely —
-# the file is almost certainly different content Plex wrongly grouped
-# (an extra, a making-of, an interview clip), not a truncated
-# re-encode.  Set to 0 to disable (every short/small sibling becomes a
-# truncation candidate again).
-#
-# Default:
-# BROKEN_MISGROUPED_SIBLING_RATIO_PCT = {CONFIG_DEFAULTS['BROKEN_MISGROUPED_SIBLING_RATIO_PCT']}
+# Multi-version primary selection — no config needed.
+# Plex's `metadata_items.duration` (used by --broken as the truncation
+# reference) is copied from exactly ONE of the bundled media_items —
+# the "primary" one.  --broken auto-identifies that primary as the
+# file whose container_duration is closest to plex_duration and only
+# checks IT for truncation.  Every other sibling in the slot is
+# either (a) the same content at the same quality (matches anyway),
+# or (b) unrelated content Plex misgrouped (DVD extras / trailers /
+# alt cuts) and therefore not a truncation candidate at all.  When no
+# sibling matches plex_duration within 50%, the cache value is treated
+# as unreliable and single-file checks apply to every sibling instead.
 
 ###############################################################################
 # Multi-Version Mismatch Detection Configuration (--mismatched)
@@ -2394,7 +2381,6 @@ AUTO_NO = False  # When True with -N/--no flag, auto-answers 'no' to all prompts
 # Analysis shows 80.72% of files are within ±0.1% (normal variance), so 0.5% is a safe threshold
 TRUNCATION_THRESHOLD_PCT = CONFIG_DEFAULTS.get('TRUNCATION_THRESHOLD_PCT', 0.5)
 BROKEN_MIN_BYTERATE_KBYTE_PER_S = CONFIG_DEFAULTS.get('BROKEN_MIN_BYTERATE_KBYTE_PER_S', 10)
-BROKEN_MISGROUPED_SIBLING_RATIO_PCT = CONFIG_DEFAULTS.get('BROKEN_MISGROUPED_SIBLING_RATIO_PCT', 10.0)
 MULTI_VERSION_MAX_MOVIE = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_MOVIE', 2)
 MULTI_VERSION_MAX_SERIES = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_SERIES', 2)
 MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_DURATION_SPREAD_PCT', 2.0)
@@ -19429,12 +19415,48 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             plex_duration = obj.get('duration') or 0
             files_dict = obj.get('files', {})
-            # Healthy-sibling detection is computed PER FILE inside the loop
-            # below (so the file being evaluated is never counted as its own
-            # sibling).  A single-file object whose own duration drifts
-            # slightly from plex_duration must NOT exempt itself from the
-            # container-vs-video cross-validation.
+            # v2.65+: PRIMARY identification for multi-version slots.
+            # Plex stores `metadata_items.duration` by COPYING it from
+            # exactly one of the media_items — the "primary" one (highest
+            # quality / first ingested).  So plex_duration always equals
+            # ONE specific sibling's container_duration by construction.
+            # That sibling IS the one whose truncation we can meaningfully
+            # check.  Every other sibling is (a) at the same quality and
+            # matches anyway, OR (b) unrelated content Plex misgrouped
+            # (DVD extras, trailers, alternate cuts) — those don't share
+            # plex_duration as a reference at all, so flagging them is
+            # categorically wrong.  We pick the primary by min |Δ|; ties
+            # resolve to whichever comes first in iteration order.
+            _primary_fi = None
+            if plex_duration > 0 and len(files_dict) > 1:
+                _best_diff = None
+                for _cand_fi in files_dict.values():
+                    if not isinstance(_cand_fi, dict):
+                        continue
+                    _cand_fm = _cand_fi.get('file_metadata') or {}
+                    if _cand_fm.get('broken'):
+                        continue
+                    _cand_cd = _cand_fm.get('container_duration')
+                    if not _cand_cd:
+                        continue
+                    _d = abs(_cand_cd - plex_duration)
+                    if _best_diff is None or _d < _best_diff:
+                        _best_diff = _d
+                        _primary_fi = _cand_fi
+                # Sanity: if the closest sibling is still way off
+                # (>50%), Plex's stored duration is unreliable (probably
+                # scraped, never re-probed).  Don't pick a fake primary;
+                # let single-file logic apply below.
+                if _primary_fi is not None and _best_diff is not None \
+                        and _best_diff > 0.5 * plex_duration:
+                    _primary_fi = None
             for file_info in files_dict.values():
+                # Multi-version primary gate: in multi-version slots,
+                # only the primary file is a meaningful truncation
+                # candidate (its container_duration IS the source of
+                # plex_duration).  Skip every non-primary.
+                if _primary_fi is not None and file_info is not _primary_fi:
+                    continue
                 # v2.55: a file with NO actual disk content is effectively
                 # absent — counted by `--missing`, never by `--broken`.
                 # Two flavours of "no content":
@@ -19472,44 +19494,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 is_broken = False
                 diff_pct = None
                 severity = None
-                # Self-reliance heuristic: when this file is dramatically
-                # smaller / shorter than the largest sibling in the same
-                # Plex slot, treat it as MISGROUPED CONTENT (a DVD extra,
-                # interview clip, …) and skip the truncation flag.  Only
-                # fires when there are at least 2 file versions and the
-                # configured ratio threshold is > 0.
-                if BROKEN_MISGROUPED_SIBLING_RATIO_PCT and BROKEN_MISGROUPED_SIBLING_RATIO_PCT > 0 \
-                        and len(files_dict) > 1 and file_metadata and not file_metadata.get('broken'):
-                    _this_size = file_info.get('filesize') or 0
-                    _this_dur  = file_metadata.get('container_duration') or 0
-                    _max_sib_size = 0
-                    _max_sib_dur  = 0
-                    for _sfi in files_dict.values():
-                        if _sfi is file_info:
-                            continue
-                        _sfm = _sfi.get('file_metadata') or {}
-                        if _sfm.get('broken'):
-                            continue
-                        _ssz = _sfi.get('filesize') or 0
-                        if _ssz > _max_sib_size:
-                            _max_sib_size = _ssz
-                        _sdur = _sfm.get('container_duration') or 0
-                        if _sdur > _max_sib_dur:
-                            _max_sib_dur = _sdur
-                    _ratio_threshold = BROKEN_MISGROUPED_SIBLING_RATIO_PCT / 100.0
-                    _size_ratio = (_this_size / _max_sib_size) if _max_sib_size > 0 and _this_size > 0 else None
-                    _dur_ratio  = (_this_dur  / _max_sib_dur)  if _max_sib_dur  > 0 and _this_dur  > 0 else None
-                    _misgrouped = False
-                    if _size_ratio is not None and _size_ratio <= _ratio_threshold:
-                        _misgrouped = True
-                    if _dur_ratio is not None and _dur_ratio <= _ratio_threshold:
-                        _misgrouped = True
-                    if _misgrouped:
-                        if DBG:
-                            print(f"{DBGPFX}--broken: skip {file_info.get('filepath','')} — "
-                                  f"size ratio {_size_ratio} / dur ratio {_dur_ratio} "
-                                  f"≤ {_ratio_threshold:.2f} → misgrouped content, not truncation")
-                        continue
                 if file_metadata:
                     if file_metadata.get('broken'):
                         is_broken = True
@@ -19601,8 +19585,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection thresholds: duration mismatch > {TRUNCATION_THRESHOLD_PCT}%, "
-              f"byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s, "
-              f"misgrouped-sibling skip ≤ {BROKEN_MISGROUPED_SIBLING_RATIO_PCT}%")
+              f"byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s.  "
+              f"Multi-version slots: only the primary (closest to plex_duration) is checked.")
         return len(broken_files)
 
     @staticmethod
