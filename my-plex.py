@@ -1049,8 +1049,8 @@ CONFIG_DEFAULTS = {
     # library name, value is the target movies.* library name to move
     # files into.  The picker uses this as the default; leave empty to
     # always ask interactively.
-    #   Example: MISPLACED_TARGET_LIBRARY = {'series.de': 'movies.de',
-    #                                         'series.en': 'movies.en'}
+    #   Example: MISPLACED_TARGET_LIBRARY = {'series_library_1': 'movie_library_1',
+    #                                         'series_library_2': 'movie_library_2'}
     'MISPLACED_TARGET_LIBRARY': {},
 
     # On-disk label markers embedded in filenames / directory names
@@ -1712,9 +1712,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Example (uncomment + customize to use):
 # MISPLACED_TARGET_LIBRARY = {{
-#     'series.de': 'movies.de',
-#     'series.en': 'movies.en',
-#     'series.fr': 'movies.fr',
+#     'series_library_1': 'movie_library_1',
+#     'series_library_2': 'movie_library_2',
 # }}
 
 ###############################################################################
