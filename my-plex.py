@@ -9385,11 +9385,17 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         if _all_feature:
             flagged.append((key, obj, episode_keys))
 
-    if not flagged:
-        print("No misplaced Series-of-Movies in scope — nothing to resolve.")
+    # Pre-scan Phase B count so we can short-circuit "nothing to do" properly.
+    _sxxeyy_pat_prescan = re.compile(r'(?i)S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b')
+    _b_count_prescan = sum(1 for k in obj_keys
+                           if (PLEX_Media.OBJ_BY_ID.get(k) or {}).get('type') == 'Movie'
+                           and _sxxeyy_pat_prescan.search(os.path.basename((PLEX_Media.OBJ_BY_ID.get(k) or {}).get('file') or '')))
+
+    if not flagged and not _b_count_prescan:
+        print("No misplaced items in scope — nothing to resolve.")
         return
 
-    print(f">>> --misplaced --resolve: {len(flagged)} Series candidate(s) to process")
+    print(f">>> --misplaced --resolve: {len(flagged)} Series-of-Movies + {_b_count_prescan} Movie-with-SxxEyy candidate(s) to process")
     if dry_run:
         print(">>> DRY-RUN — no disk moves, no Plex deletions, no scans.")
     print()
@@ -9583,6 +9589,134 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         })
 
     # 8. Scan touched libraries + wait.
+    # ----- Phase B: Movie-with-SxxEyy → Series transition -----
+    # The detector [B] flagged Movies whose filename carries TV-shape
+    # episode markers (SxxEyy or [NxNN]).  Here the operator supplies
+    # target series library + target series subdir; we parse the
+    # SxxEyy from the filename, build the S<NN>/<basename> dest path,
+    # SSH mv, delete the Movie shell, scan.
+    sxxeyy_pat = re.compile(r'(?i)S(\d{1,2})E(\d{1,3})')
+    bracket_pat = re.compile(r'\[(\d+)x(\d+)\]')
+    bare_pat    = re.compile(r'\b(\d{1,2})x(\d{1,3})\b')
+    movies_b = []
+    seen_b = set()
+    for key in obj_keys:
+        if key in seen_b:
+            continue
+        seen_b.add(key)
+        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        if obj.get('type') != 'Movie':
+            continue
+        fp = obj.get('file', '') or ''
+        if not fp:
+            continue
+        basename = os.path.basename(fp)
+        m = sxxeyy_pat.search(basename) or bracket_pat.search(basename) or bare_pat.search(basename)
+        if not m:
+            continue
+        s_num = int(m.group(1)); e_num = int(m.group(2))
+        movies_b.append((key, obj, fp, s_num, e_num))
+
+    if movies_b and not quit_early:
+        print()
+        print(f">>> Phase B: {len(movies_b)} Movie(s) with TV-episode markers in filename")
+        for i, (key, obj, src_fp, s_num, e_num) in enumerate(movies_b, 1):
+            title = obj.get('title') or '?'
+            lib_name = obj.get('library', '')
+            print(f"\n──────────────────────────────────────────────────────────────────────────")
+            print(f"[B {i}/{len(movies_b)}] {key}  {title!r}  ({lib_name})")
+            print(f"          src: {src_fp}")
+            print(f"          parsed: S{s_num:02d}E{e_num:02d}")
+
+            print(f"  Target Series library name: ", end='')
+            try:
+                target_series_lib = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if not target_series_lib:
+                print("  ⚠ no target library — skipping")
+                skipped += 1
+                continue
+            target_series_obj = PLEX_Library.OBJ_DICT.get(target_series_lib)
+            if not target_series_obj:
+                print(f"  ⚠ unknown library {target_series_lib!r} — skipping")
+                skipped += 1
+                continue
+            t_roots = [r for r in (getattr(target_series_obj, 'locations', None) or []) if r]
+            if not t_roots:
+                print(f"  ⚠ target library has no rootpath — skipping")
+                skipped += 1
+                continue
+            t_root = t_roots[0].rstrip('/')
+
+            print(f"  Target series directory name (under {t_root}): ", end='')
+            try:
+                series_dir = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if not series_dir:
+                print("  ⚠ no series dir — skipping")
+                skipped += 1
+                continue
+
+            dest_dir = f"{t_root}/{series_dir}/S{s_num:02d}"
+            dest = f"{dest_dir}/{os.path.basename(src_fp)}"
+            print(f"  PLAN: {src_fp}")
+            print(f"     → {dest}")
+            if dry_run:
+                print(f"  [dry-run] would mkdir + mv + delete Movie:{int(obj.get('id',0) or 0)} + scan {target_series_lib!r}")
+                log_payload['actions'].append({
+                    'key': key, 'phase': 'B', 'status': 'dry-run',
+                    'src': src_fp, 'dest': dest,
+                    'target_series_library': target_series_lib,
+                    'target_series_dir': series_dir,
+                    'season': s_num, 'episode': e_num,
+                })
+                continue
+            if not yes:
+                try:
+                    c = input(f"  Proceed? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  (quit)")
+                    quit_early = True
+                    break
+                if c != 'y':
+                    skipped += 1
+                    log_payload['actions'].append({'key': key, 'phase': 'B', 'status': 'skip', 'reason': 'user-declined'})
+                    continue
+            _esc_dir  = shlex.quote(dest_dir)
+            _esc_src  = shlex.quote(src_fp)
+            _esc_dest = shlex.quote(dest)
+            r = subprocess.run([*_ssh_args(PLEX_DB_REMOTE_HOST),
+                                f"mkdir -p {_esc_dir} && mv -n {_esc_src} {_esc_dest}"],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                print(f"    ✗ move failed: {r.stderr.strip() or r.stdout.strip()}")
+                log_payload['actions'].append({'key': key, 'phase': 'B', 'status': 'fail', 'reason': 'mv-failed'})
+                continue
+            print(f"    ✓ moved")
+            rk = int(obj.get('id', 0) or 0)
+            if rk:
+                try:
+                    plex.fetchItem(rk).delete()
+                    print(f"    ✓ deleted Plex Movie:{rk}")
+                except Exception as e:
+                    print(f"    ⚠ delete Movie:{rk} failed: {e}")
+            libs_to_scan.add(target_series_lib)
+            libs_to_scan.add(lib_name)
+            fixed += 1
+            log_payload['actions'].append({
+                'key': key, 'phase': 'B', 'status': 'fixed',
+                'src': src_fp, 'dest': dest,
+                'target_series_library': target_series_lib,
+                'target_series_dir': series_dir,
+                'season': s_num, 'episode': e_num,
+            })
+
     if libs_to_scan and not dry_run:
         print()
         for lib_name in sorted(libs_to_scan):
@@ -9597,12 +9731,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
 
     # 9. Log + summary.
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
-    log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(flagged)}
+    log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total_A': len(flagged), 'total_B': len(movies_b) if 'movies_b' in dir() else 0}
     _write_resolve_log('misplaced_resolve', log_payload)
 
     print()
     print("=" * 70)
-    print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(flagged)} total")
+    _total_all = len(flagged) + (len(movies_b) if 'movies_b' in dir() else 0)
+    print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {_total_all} total ({len(flagged)} Series-of-Movies + {len(movies_b) if 'movies_b' in dir() else 0} Movie-with-SxxEyy)")
     if fixed:
         print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
     if quit_early:
@@ -21048,7 +21183,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         """
         flagged_series = []   # (key, obj, max_min_duration, episode_count)
         flagged_movies = []   # (key, obj, sxxeyy_token)
-        _series_pat   = re.compile(r'(?i)(S\d{1,2}E\d{1,3}|\[\d+x\d+\])')
+        # SxxEyy (with or without separators), [NxNN], or bare N x NN with
+        # word-boundaries to avoid matching e.g. "1080p" or "x264" tags.
+        _series_pat   = re.compile(r'(?i)(S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b)')
         seen_keys = set()
         # Plex stores container_duration in MILLISECONDS.
         thresh_ms = (MISPLACED_FEATURE_LENGTH_MIN or 0) * 60 * 1000
