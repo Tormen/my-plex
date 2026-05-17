@@ -23,21 +23,42 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Smart rollup** — episodes with identical display values collapse into Season/Series rows, with matched/total counts when filters are active
 - **Supported libraries** — Personal Media libraries (agent=none) are automatically excluded from all operations
 - **Duplicate detection** with intelligent classification (exact duplicates vs re-encodes vs true multi-version)
-- **Problem scanner** (`--problems`) — runs all 12 checks in one pass, counts stored in cache after every `--update-cache`:
-  - **Broken files** (`--broken`) — truncated/corrupt media detected by comparing container duration vs Plex duration and ffmpeg probe
-  - **Excess versions** (`--excess-versions`) — entries with 3+ file versions (accidental duplicates, failed moves)
-  - **Episode data failures** (`--problems --tsv`) — shows that could not be matched to an episode source (no external IDs, scrape failed, source not found, etc.)
-  - **Unmatched items** (`--unmatched`) — media with `local://` GUID: never matched by any Plex metadata agent, or matched but missing external IDs (TMDB/TVDB) needed for episode scraping
-  - **Unsorted series** (`--unsorted`) — series with episodes directly in the series directory instead of season subdirectories; fix with `--unsorted --fix`
-  - **Mismatched** (`--mismatched`) — TWO detectors reported together:
-    - **Title vs directory** — Plex title doesn't match filesystem directory name (likely wrong match in Plex)
-    - **Multi-version mismatch** — Plex bundled physically-different files under one Episode/Movie slot (different episodes wrongly grouped, alternate language cuts, unrelated DVD extras). Configurable thresholds: `MULTI_VERSION_MAX_MOVIE`, `MULTI_VERSION_MAX_SERIES`, `MULTI_VERSION_MAX_DURATION_SPREAD_PCT`
-  - **Plex numbering issues** (`--renumber --plex`) — shows where Plex and the scraped source (TMDB/TVDB/fernsehserien.de) disagree on season/episode numbers
-  - **Re-encode candidates** (`--reencode`) — high-bitrate media above configurable threshold; rolls up episodes → season → series; labels files on disk with `[reencode]` markers
-  - **Renumber candidates** (`--renumber`) — episodes whose filename S0xE0x disagrees with scraped data; fix with `--renumber --fix`
-  - **Renumber: lack of data** — episodes without scraped data (can't determine correct numbering)
-  - **Renumber: season mismatch** — S-number in filename doesn't match season directory
-  - **Renumber: absolute numbering mismatch** — Plex's episode ordering disagrees with scraped data
+- **Problem scanner** (`--problems`) — driven by the `PROBLEM_CATEGORIES_REGISTRY` single source of truth (v2.69+). Runs every registered category in one pass; counts cached after every `--update-cache`. Use `my-plex --help problems` for the auto-generated category list, or `my-plex --print-problem-categories-md` to regenerate the table below.
+  - **Current categories** (auto-generated — regenerate by running `my-plex --print-problem-categories-md`):
+
+    | # | Category | CLI flag | TSV-only? | Description | Fix |
+    |---|----------|----------|-----------|-------------|-----|
+    | 1 | `broken` | `--broken` |  | Broken/truncated media files (probe error, low bitrate, file not found) | `my-plex --broken --resolve` |
+    | 2 | `excess_versions` | `--excess-versions` |  | Entries with 3+ file versions (likely accidental duplicate imports) | `my-plex --excess-versions 3` |
+    | 3 | `tsv` | — | ✓ | Episode-scrape failures: no external IDs, misidentified series, truncated titles | Inspect `episodes.err`; re-run with corrected source |
+    | 4 | `unmatched` | `--unmatched` |  | Items not matched by Plex metadata agent (`local://` guid; needs Fix Match) | `my-plex --unmatched --resolve [--auto]` |
+    | 5 | `no_audio_language` | `--no-audio-language` |  | Items whose audio tracks have no language tag set in Plex | `my-plex --no-audio-language --resolve` |
+    | 6 | `unsorted` | `--unsorted` |  | Series with episodes directly in series dir (no season subdirectories) | `my-plex --unsorted --fix` |
+    | 7 | `mismatched` | `--mismatched` |  | Title-vs-directory mismatches + multi-version Plex grouping mismatches | `my-plex --mismatched --resolve [--auto]` |
+    | 8 | `junk` | `--junk` |  | Sample / RARBG promo / tiny-placeholder files bundled with healthy media | `my-plex --junk --resolve` |
+    | 9 | `multi_movie_folder` | `--multi-movie-folder` |  | Wrappers hosting ≥2 distinct Plex Movies (Plex expects 1 Movie per folder) | Split into per-movie wrappers (manual or `my-plex --mv`) |
+    | 10 | `library_language_mismatch` | `--library-language-mismatch` |  | Items whose audio language disagrees with their library's configured language | Move to the correct language library (manual or `my-plex --mv`) |
+    | 11 | `bad_structure` | `--bad-structure` |  | Media files nested too deeply (Movie >1 dir below lib root, Episode >2) | `my-plex --bad-structure --resolve` |
+    | 12 | `misplaced` | `--misplaced` (alias: `--wrong-library`) |  | Items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy) | `my-plex --misplaced --resolve` |
+    | 13 | `numbering_issues` | `--episode-numbering-issues` | ✓ | Plex vs scraped numbering disagreement (e.g. Plex E101 vs scraped E01) | `my-plex --renumber --plex` |
+    | 14 | `reencode` | `--reencode` |  | Media files whose codecs cannot stream-copy (requires re-encoding) | `my-plex --reencode` |
+    | 15 | `remux` | `--remux` |  | Media files whose container is outdated but streams can be copied unchanged | `my-plex --remux` |
+    | 16 | `missing_episodes` | `--missing` |  | Episodes present in scraped data but missing from Plex / disk | `my-plex --missing <SERIES>` |
+    | 17 | `renumber` | `--renumber` | ✓ | Episodes whose S0xE0x in filename disagrees with scraped data (renaming fixes) | `my-plex --renumber --fix` |
+    | 18 | `renumber_nodata` | — | ✓ | Episodes without scraped data — can't verify numbering | `my-plex --renumber -V` |
+    | 19 | `renumber_season` | — | ✓ | S-number in filename doesn't match the parent season directory | `my-plex --renumber -V` |
+    | 20 | `renumber_abs` | — | ✓ | Plex's episode ordering disagrees with scraped data | `my-plex --renumber -V` |
+    | 21 | `unrecognized` | `--unrecognized` |  | Top-level entries in Plex DB that the cache cannot resolve | `my-plex --unrecognized` |
+
+  - **Disabling categories** — add unwanted names to `PROBLEM_CATEGORIES_DISABLED` in `~/.my-plex.conf`, e.g.
+    ```python
+    PROBLEM_CATEGORIES_DISABLED = ['remux', 'junk']
+    ```
+  - **Interactive resolve flows** — every `--resolve` writes a JSON log to `~/.my-plex/logs/<cmd>_<TS>.json`. Notable:
+    - **`--mismatched --resolve [--auto] [--try]`** (v2.68) — for each title-vs-directory mismatched Series, queries Plex's own metadata agent. Picker exposes: `1-N` pick, `t<title>` re-query Plex agent, `T<title>` re-query online engines, `id:tvdb:NNNNN | id:tmdb:NNNNN | id:imdb:ttNNNNN` to force-match an external ID. In `--auto`, falls through Plex agent → TMDB/TVDB/fernsehserien.de online lookup → synthesizes a `searchResult` from the candidate's external ID → `series.fixMatch()` — without operator intervention when conf ≥ `UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT` (default 90%).
+    - **`--unmatched --resolve [--auto] [--try]`** — renames wrappers to canonical title + year, then re-triggers Plex's matcher.
+    - **`--bad-structure --resolve [--auto]`** — flattens nested wrappers.
+    - **`--misplaced --resolve`** *(v2.69, in progress)* — disk-level transition between media types (Series-of-Movies → Movie library; Movie-with-SxxEyy → Series library).
 - **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 
@@ -49,7 +70,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - **fernsehserien.de** (web scraping, German TV, no key needed)
   - Automatic fallback: if primary source returns 0 episodes, tries next source
 - **Auto-detection** of episode source from library agent + language
-- **Sort new recordings** (`--unsorted --fix` or `--sort-new`) — organizes unsorted recordings across **all libraries** (series-type AND movie-type)
+- **Sort new recordings** (`--sort`; legacy synonym `--sort-new`; or `--unsorted --fix`) — organizes unsorted recordings across **all libraries** (series-type AND movie-type)
+  - **`--sort --redo` / `--sort-new --redo` (v2.67+)** — strip existing `SxxEyy` markers (regex configurable via `SORT_NEW_SXXEYY_REGEX`) from filenames in scope and re-sort from scratch. Use after a `--mismatched --resolve` re-binds a series to a new metadata source.
   - Series libraries: matches file dates to episode data, renames with S##E## prefix
   - Movie libraries: creates directories for bare video files, moves sibling files (.srt, .nfo)
   - **`SORT_NEW_SCAN_LOCATIONS`** (default `['.', 's0x', ',new']`) — list of paths to scan inside each series dir (series libs) or each library root (movie libs). Each entry is either a string path or `(path, 'touch')` / `(path, 'touch-all')` — `touch` leaves a zero-byte placeholder with the moved file's name so external auto-downloaders see "already taken"; `touch-all` extends that to sidecars too.
