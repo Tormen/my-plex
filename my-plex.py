@@ -1562,18 +1562,6 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Default:
 # BROKEN_MIN_BYTERATE_KBYTE_PER_S = {CONFIG_DEFAULTS['BROKEN_MIN_BYTERATE_KBYTE_PER_S']}
 
-# Multi-version primary selection — no config needed.
-# Plex's `metadata_items.duration` (used by --broken as the truncation
-# reference) is copied from exactly ONE of the bundled media_items —
-# the "primary" one.  --broken auto-identifies that primary as the
-# file whose container_duration is closest to plex_duration and only
-# checks IT for truncation.  Every other sibling in the slot is
-# either (a) the same content at the same quality (matches anyway),
-# or (b) unrelated content Plex misgrouped (DVD extras / trailers /
-# alt cuts) and therefore not a truncation candidate at all.  When no
-# sibling matches plex_duration within 50%, the cache value is treated
-# as unreliable and single-file checks apply to every sibling instead.
-
 ###############################################################################
 # Multi-Version Mismatch Detection Configuration (--mismatched)
 ###############################################################################
