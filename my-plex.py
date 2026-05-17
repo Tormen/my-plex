@@ -65,7 +65,7 @@
 # SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.67"
+SCRIPT_VERSION = "v2.68"
 SCRIPT_COMMIT  = ""
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
@@ -8640,6 +8640,268 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+
+
+def _adapt_plex_match_to_candidate(r):
+    """Adapt a plexapi SearchResult (from item.matches()) into the dict
+    shape _score_candidate / _print_candidate_row expect."""
+    name = getattr(r, 'name', None) or getattr(r, 'title', None) or ''
+    year = getattr(r, 'year', None)
+    guid = getattr(r, 'guid', '') or ''
+    tmdb = tvdb = imdb = None
+    g_low = guid.lower()
+    if 'themoviedb' in g_low or 'tmdb' in g_low:
+        m = re.search(r'(\d+)', guid)
+        if m: tmdb = m.group(1)
+    elif 'thetvdb' in g_low or 'tvdb' in g_low:
+        m = re.search(r'(\d+)', guid)
+        if m: tvdb = m.group(1)
+    elif 'imdb' in g_low:
+        m = re.search(r'tt\d+', guid)
+        if m: imdb = m.group(0)
+    return {
+        'engine':         'plex-agent',
+        'title':          name,
+        'original_title': '',
+        'year':           year,
+        'popularity':     float(getattr(r, 'score', 0) or 0) / 10.0,
+        'tmdb_id':        tmdb,
+        'tvdb_id':        tvdb,
+        'imdb_id':        imdb,
+        'overview':       getattr(r, 'summary', None) or '',
+        'lang':           getattr(r, 'lang', None) or '?',
+        '_raw':           r,
+    }
+
+
+def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
+    """v2.68: Interactive resolver for title-vs-directory MISMATCHED Series.
+
+    For each Series flagged by --mismatched as having its directory name
+    diverging from Plex's title, query Plex's own agent (series.matches)
+    for candidates that fit the directory name, let the user pick one
+    (or auto-pick the top hit when confident), then call
+    series.fixMatch(searchResult) to re-bind Plex's metadata.
+
+    Afterwards: re-scrape episodes (which auto-rotates the stale
+    episodes.tsv to episodes.tsv.<old-date>), trigger library scan via
+    library.update(path=series_dir) + wait_for_plex_scan_complete(),
+    write resolve log.
+    """
+    import os, time, datetime as _dt
+
+    # 1. Determine scoped Series keys.
+    obj_keys = []
+    if scope:
+        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
+        obj_keys = [k for (k, _o) in (scope_items or [])]
+    else:
+        obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+
+    # 2. Populate _title_mismatched_series_keys by running the lister
+    #    quietly first.  Capture stdout to avoid double-printing.
+    import io, contextlib
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        PLEX_Media._list_potential_mismatches(obj_keys, None)
+    series_keys = sorted(getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set())
+    if not series_keys:
+        print("No mismatched Series in scope — nothing to resolve.")
+        return
+
+    print(f">>> --mismatched --resolve: {len(series_keys)} Series to process")
+    if auto:
+        print(f">>> AUTO mode: auto-pick threshold = {UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT}%")
+    if dry_run:
+        print(">>> DRY-RUN — no fixMatch / scrape / scan will be performed.")
+    print()
+
+    plex = ensure_plex_api(required=not dry_run)
+
+    log_payload = {
+        'command':   'mismatched_resolve',
+        'started':   _dt.datetime.now().isoformat(timespec='seconds'),
+        'dry_run':   dry_run,
+        'auto':      auto,
+        'actions':   [],   # per-series: {key, dir, old_title, new_title, new_guid, status, reason}
+    }
+    fixed = 0
+    skipped = 0
+    quit_early = False
+    libs_to_scan = {}   # lib_name -> set(series_dir)
+
+    for i, key in enumerate(series_keys, 1):
+        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        title    = obj.get('title') or ''
+        lib_name = obj.get('library', '')
+        wrapper  = _derive_wrapper_path(obj) or ''
+        dir_name = os.path.basename(wrapper.rstrip('/')) if wrapper else ''
+        rk       = int(obj.get('id', 0) or 0)
+
+        print(f"\n──────────────────────────────────────────────────────────────────────────")
+        print(f"[{i}/{len(series_keys)}] {key}  Plex title: {title!r}  ({lib_name})")
+        print(f"          path: {wrapper}")
+        print(f"          DIR:  {dir_name!r}")
+
+        if not rk:
+            print(f"  ⚠ cache entry has no Plex ratingKey — cannot re-match; skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'no-ratingKey'})
+            continue
+        if not dir_name:
+            print(f"  ⚠ cannot derive directory name — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'no-dir-name'})
+            continue
+
+        if dry_run:
+            print(f"  [dry-run] would query Plex agent for {dir_name!r} and present candidates")
+            log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'dry-run'})
+            continue
+
+        # 3. Fetch Plex item + query agent.
+        try:
+            series_item = plex.fetchItem(rk)
+        except Exception as e:
+            print(f"  ⚠ fetchItem({rk}) failed: {e} — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'fetch-failed: {e}'})
+            continue
+
+        # Clean query from DIR name (strip _[tags], collapse separators).
+        _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(dir_name.replace('.', ' ').replace('_', ' ')))
+        try:
+            raw_results = series_item.matches(title=_clean_q) or []
+        except Exception as e:
+            print(f"  ⚠ series.matches() failed: {e} — skipping")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'matches-failed: {e}'})
+            continue
+        if not raw_results:
+            print(f"  (Plex agent returned no candidates for {_clean_q!r} — skipping)")
+            skipped += 1
+            log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'no-candidates'})
+            continue
+
+        candidates = [_adapt_plex_match_to_candidate(r) for r in raw_results]
+        scored = sorted(
+            ((c, _score_candidate(_clean_q, c)) for c in candidates),
+            key=lambda x: x[1], reverse=True,
+        )[:5]
+
+        # 4. Auto-pick branch (same rule as --unmatched).
+        chosen = None
+        if auto and scored:
+            top, top_score = scored[0]
+            runner_score = scored[1][1] if len(scored) > 1 else 0
+            _auto_ok = (
+                top_score >= 100
+                or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
+                or (top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT and top_score >= 1.5 * runner_score)
+            )
+            if _auto_ok:
+                chosen = top
+                print(f"  ✓ AUTO-PICK #1 [{top['engine']}] {top['title']} ({top.get('year') or '----'})  conf={top_score:.1f}")
+
+        # 5. Interactive picker.
+        if chosen is None:
+            for idx, (cand, score) in enumerate(scored, 1):
+                _print_candidate_row(idx, cand, score)
+            print(f"  s) skip   q) quit & process so far")
+            while True:
+                try:
+                    choice = input("  pick> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  (quit)")
+                    quit_early = True
+                    break
+                if not choice:
+                    continue
+                if choice.lower() == 'q':
+                    quit_early = True
+                    break
+                if choice.lower() == 's':
+                    skipped += 1
+                    log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'skip', 'reason': 'user-skipped'})
+                    break
+                if choice.isdigit() and 1 <= int(choice) <= len(scored):
+                    chosen = scored[int(choice) - 1][0]
+                    break
+                print(f"  ? unrecognised input: {choice!r}")
+            if quit_early:
+                break
+            if chosen is None:
+                continue
+
+        # 6. fixMatch.
+        try:
+            series_item.fixMatch(chosen['_raw'])
+        except Exception as e:
+            print(f"  ✗ fixMatch failed: {e}")
+            log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'fail',
+                                           'reason': f'fixMatch: {e}',
+                                           'new_title': chosen.get('title'), 'new_year': chosen.get('year')})
+            continue
+        print(f"  ✓ fixMatch applied: {title!r} → {chosen.get('title')!r}")
+        fixed += 1
+        if lib_name and wrapper:
+            libs_to_scan.setdefault(lib_name, set()).add(wrapper)
+        log_payload['actions'].append({
+            'key':       key,
+            'dir':       dir_name,
+            'old_title': title,
+            'new_title': chosen.get('title'),
+            'new_year':  chosen.get('year'),
+            'new_guid':  getattr(chosen.get('_raw'), 'guid', ''),
+            'status':    'fixed',
+        })
+
+        # 7. Re-scrape episodes — writer auto-rotates stale TSV.
+        try:
+            new_ext_ids = {}
+            if chosen.get('tmdb_id'): new_ext_ids['tmdb'] = chosen['tmdb_id']
+            if chosen.get('tvdb_id'): new_ext_ids['tvdb'] = chosen['tvdb_id']
+            if chosen.get('imdb_id'): new_ext_ids['imdb'] = chosen['imdb_id']
+            print(f"  >>> Re-scraping episodes for new match…")
+            scrape_episodes(chosen.get('title') or title, wrapper, force=True,
+                            external_ids=new_ext_ids, library_name=lib_name,
+                            year=chosen.get('year'))
+        except Exception as e:
+            print(f"  ⚠ re-scrape failed (non-fatal): {e}")
+
+    # 8. Library scan(s) — wait for completion.
+    if libs_to_scan and not dry_run:
+        print()
+        for lib_name, paths in libs_to_scan.items():
+            try:
+                lib = PLEX_Library.OBJ_DICT.get(lib_name)
+                if not lib:
+                    print(f"  ⚠ library {lib_name!r} not in cache — skipping scan")
+                    continue
+                for p in sorted(paths):
+                    print(f">>> library.update(path={p}) on {lib_name!r}…")
+                    try:
+                        lib.update(path=p)
+                    except TypeError:
+                        # Older plexapi: no path kwarg → fall back to full scan
+                        lib.update()
+                print(f">>> Waiting for {lib_name!r} scan to complete…")
+                wait_for_plex_scan_complete(plex, lib_name, lib)
+            except Exception as e:
+                print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
+
+    # 9. Summary + log.
+    log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
+    log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(series_keys)}
+    _write_resolve_log('mismatched_resolve', log_payload)
+
+    print()
+    print("=" * 70)
+    print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(series_keys)} total")
+    if fixed:
+        print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+    if quit_early:
+        print(">>> Stopped early (q).")
 
 
 def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
@@ -26150,18 +26412,40 @@ def main_print_help(args, remaining_args, main_parser):
             print("                     version count 13 > 2; spread 1.84%")
             print()
             print("TO FIX:")
-            print("  Title/dir:        Plex > Fix Match (re-identify the item)")
+            print("  Title/dir:        my-plex --mismatched --resolve   (interactive)")
+            print("                    my-plex --mismatched --resolve --auto")
+            print("                    OR: Plex > Fix Match (re-identify the item) in the Web UI")
             print("  Multi-version:    Rename files to canonical SxxEyy (Plex's [NxNN] parser")
             print("                    is unreliable and collapses different episodes into one)")
             print("                    OR: in Plex UI, 'Split Apart' the combined item")
             print()
+            print("RESOLVE MODE (--resolve):")
+            print("  my-plex --mismatched --resolve            # Per-Series picker")
+            print("  my-plex --mismatched --resolve --auto     # Auto-pick when confident")
+            print("  my-plex --mismatched --resolve --try      # Dry-run (no fixMatch)")
+            print()
+            print("  For each title-vs-directory mismatched Series, queries Plex's own")
+            print("  metadata agent (series.matches) for candidates matching the directory")
+            print("  name, then offers a numbered picker (1-N pick, s skip, q quit).")
+            print("  With --auto, top hit is picked silently when conf >= "
+                  f"{UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT}% and clearly")
+            print("  ahead of #2 (same rule as --unmatched --resolve --auto).")
+            print()
+            print("  On pick: series.fixMatch(searchResult) re-binds Plex metadata; then")
+            print("  episodes.tsv is re-scraped (auto-rotates stale TSV to .<old-date>);")
+            print("  then library.update(path=series_dir) + wait for scan to complete.")
+            print()
+            print("  A JSON log is written to ~/.my-plex/logs/mismatched_resolve_<TS>.json.")
+            print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --mismatched                  # All libraries, both detectors")
-            print("  my-plex --mismatched lib6             # One library")
-            print("  my-plex lib6 --mismatched             # Same")
-            print("  my-plex --mismatched Series:4925      # One series")
-            print("  my-plex --problems                    # Includes this in full report")
+            print("  my-plex --mismatched                       # All libraries, both detectors")
+            print("  my-plex --mismatched lib6                  # One library")
+            print("  my-plex lib6 --mismatched                  # Same")
+            print("  my-plex --mismatched Series:4925           # One series")
+            print("  my-plex --mismatched --resolve             # Re-match interactively")
+            print("  my-plex --mismatched --resolve --auto      # Re-match (top hit auto-picked)")
+            print("  my-plex --problems                         # Includes this in full report")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -36360,6 +36644,13 @@ def execute_global_commands(args, cmd_args):
     # Handle --mismatched [SCOPE]: title-vs-directory + multi-version grouping mismatches
     mismatch_val = safe_getattr(cmd_args, 'mismatched', None)
     if mismatch_val is not None:
+        resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
+        if resolve:
+            auto    = bool(safe_getattr(cmd_args, 'auto', False) or safe_getattr(args, 'auto', False))
+            dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+            yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
+            cmd_mismatched_resolve(scope=mismatch_val, auto=auto, dry_run=dry_run, yes=yes)
+            return
         media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, library_name, scope = resolve_scope_to_keys(mismatch_val, media_type=media_type)
         print(f"\n--- Mismatched{scope} (title-vs-directory + multi-version grouping) ---")
