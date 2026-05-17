@@ -1044,6 +1044,14 @@ CONFIG_DEFAULTS = {
     # see the full list of categories my-plex currently knows about.
     'PROBLEM_CATEGORIES_DISABLED': [],
 
+    # --misplaced thresholds: a Series in a series.* library is "misplaced"
+    # (probably belongs in a Movie library) when ALL its episodes are at
+    # least MISPLACED_FEATURE_LENGTH_MIN minutes long AND the Series has
+    # at most MISPLACED_MAX_EPISODES episodes total.  Defaults err on the
+    # safe side — tune in ~/.my-plex.conf if too noisy.
+    'MISPLACED_FEATURE_LENGTH_MIN': 70,     # minutes per "episode"
+    'MISPLACED_MAX_EPISODES':       5,      # max total episodes
+
     # On-disk label markers embedded in filenames / directory names
     # Labels are stored as  <START><label><END>  within the name, e.g.  "Movie (2020) [reencode]"
     'ONDISK_LABEL_START_MARKER': '[',   # Any string — opening delimiter of on-disk label (e.g. '[', '{{', '<')
@@ -2457,7 +2465,9 @@ def _compile_junk_patterns():
     _JUNK_PATTERNS_COMPILED = out
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
-PROBLEM_CATEGORIES_DISABLED = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
+PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
+MISPLACED_FEATURE_LENGTH_MIN = CONFIG_DEFAULTS.get('MISPLACED_FEATURE_LENGTH_MIN', 70)
+MISPLACED_MAX_EPISODES       = CONFIG_DEFAULTS.get('MISPLACED_MAX_EPISODES', 5)
 
 # Reencode candidate detection threshold — resolved from REENCODE_THRESHOLD dict.
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
@@ -20659,6 +20669,116 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
+    def _list_misplaced(obj_keys, library_name):
+        """v2.69: List items whose media TYPE doesn't fit their library.
+
+        Two sub-detectors:
+
+          A. Series in a series.* library whose content is actually movies.
+             Signal: every "episode" is feature-length
+             (>= MISPLACED_FEATURE_LENGTH_MIN minutes) AND the Series has
+             at most MISPLACED_MAX_EPISODES total episodes.  Typical case:
+             a film trilogy ingested as a Series.
+
+          B. Movies in a movies.* library whose filename carries series-shape
+             episode markers (SxxEyy or [NxNN]).  Signal that the content
+             is actually a TV episode misfiled as a Movie.
+
+        Both signals are heuristic — auto only flags; the user decides via
+        --misplaced --resolve whether to act.
+        """
+        flagged_series = []   # (key, obj, max_min_duration, episode_count)
+        flagged_movies = []   # (key, obj, sxxeyy_token)
+        _series_pat   = re.compile(r'(?i)(S\d{1,2}E\d{1,3}|\[\d+x\d+\])')
+        seen_keys = set()
+        # Plex stores container_duration in MILLISECONDS.
+        thresh_ms = (MISPLACED_FEATURE_LENGTH_MIN or 0) * 60 * 1000
+        for key in obj_keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+            lib = obj.get('library', '')
+            if library_name and lib != library_name:
+                continue
+            t = obj.get('type')
+
+            # ----- (A) Series → Movies -----
+            if t == 'Series':
+                episode_keys = []
+                seasons = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
+                for _s, ep_dict in (seasons or {}).items():
+                    for _e, version_dict in (ep_dict or {}).items():
+                        for _v, ep_keys in (version_dict or {}).items():
+                            episode_keys.extend(ep_keys or [])
+                if not episode_keys:
+                    continue
+                if len(episode_keys) > MISPLACED_MAX_EPISODES:
+                    continue
+                _min_dur_ms = None
+                _max_dur_ms = 0
+                _all_feature = True
+                for ek in episode_keys:
+                    eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+                    files = eobj.get('files') or {}
+                    _ep_dur_ms = 0
+                    for fi in files.values():
+                        if not isinstance(fi, dict):
+                            continue
+                        fm = fi.get('file_metadata') or {}
+                        cd = fm.get('container_duration')
+                        if cd and cd > _ep_dur_ms:
+                            _ep_dur_ms = cd
+                    if not _ep_dur_ms:
+                        _all_feature = False
+                        break
+                    if _ep_dur_ms < thresh_ms:
+                        _all_feature = False
+                        break
+                    if _min_dur_ms is None or _ep_dur_ms < _min_dur_ms:
+                        _min_dur_ms = _ep_dur_ms
+                    if _ep_dur_ms > _max_dur_ms:
+                        _max_dur_ms = _ep_dur_ms
+                if _all_feature and _min_dur_ms:
+                    flagged_series.append((key, obj, int(_min_dur_ms // 60000), int(_max_dur_ms // 60000), len(episode_keys)))
+                continue
+
+            # ----- (B) Movie with series-shape filename -----
+            if t == 'Movie':
+                fp = obj.get('file', '') or ''
+                basename = os.path.basename(fp)
+                m = _series_pat.search(basename)
+                if m:
+                    flagged_movies.append((key, obj, m.group(1)))
+                continue
+
+        if not flagged_series and not flagged_movies:
+            return 0
+
+        if flagged_series:
+            print(f"\n[A] {len(flagged_series)} Series in a TV library whose episodes are all feature-length:")
+            print(f"    (threshold: every episode >= {MISPLACED_FEATURE_LENGTH_MIN} min AND total episodes <= {MISPLACED_MAX_EPISODES})")
+            print()
+            print(f"{'KEY':<14} {'LIBRARY':<14} {'EPISODES':<9} {'DUR-MIN':>7} {'DUR-MAX':>7}  TITLE")
+            print("-" * 110)
+            for key, obj, dmin, dmax, cnt in sorted(flagged_series, key=lambda r: (r[1].get('library',''), r[1].get('title') or '')):
+                print(f"{key:<14} {obj.get('library',''):<14} {cnt:<9} {dmin:>7} {dmax:>7}  {obj.get('title','?')}")
+
+        if flagged_movies:
+            print(f"\n[B] {len(flagged_movies)} Movies in a Movie library whose filename carries TV-episode markers:")
+            print()
+            print(f"{'KEY':<14} {'LIBRARY':<14} {'MARKER':<14}  TITLE  /  FILE")
+            print("-" * 110)
+            for key, obj, marker in sorted(flagged_movies, key=lambda r: (r[1].get('library',''), r[1].get('title') or '')):
+                print(f"{key:<14} {obj.get('library',''):<14} {marker:<14}  {obj.get('title','?')}  /  {obj.get('file','') or ''}")
+
+        total = len(flagged_series) + len(flagged_movies)
+        print()
+        print(f"{total} misplaced item(s) — Series→Movies: {len(flagged_series)}, Movies→Series: {len(flagged_movies)}")
+        print(f"Resolve via: my-plex --misplaced --resolve  (interactive disk-level move)")
+        return total
+
+    @staticmethod
     def _list_multi_movie_folder(obj_keys, library_name):
         """List wrappers that host MULTIPLE distinct Plex Movies.
 
@@ -25515,7 +25635,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -26950,6 +27070,50 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  If the nested file is a byte-identical copy of the parent-level")
             print("  one, --duplicates --resolve (with AUTO_TRASH_DUPLICATES) will catch it.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'misplaced' | 'wrong-library' | 'wrong_library':
+            print()
+            print("=" * 76)
+            print("MISPLACED HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --misplaced [SCOPE]            (synonym: --wrong-library)")
+            print("       my-plex [SCOPE] --misplaced")
+            print("       my-plex --misplaced --resolve [--auto] [--try]")
+            print()
+            print("Flags items whose CONTENT TYPE does not match their library type.")
+            print("Two complementary detectors:")
+            print()
+            print("  [A] Series-of-Movies — a Plex Series in a series.* library whose")
+            print(f"      content is actually movies.  Heuristic: every episode is at")
+            print(f"      least MISPLACED_FEATURE_LENGTH_MIN minutes long (={MISPLACED_FEATURE_LENGTH_MIN}) AND the")
+            print(f"      Series has at most MISPLACED_MAX_EPISODES total episodes (={MISPLACED_MAX_EPISODES}).")
+            print("      Typical case: a film trilogy ingested as a single Series.")
+            print()
+            print("  [B] Movie-with-SxxEyy — a Movie whose filename carries TV-shape")
+            print("      episode markers (SxxEyy / [NxNN]).  Signals that the file is")
+            print("      actually a TV episode misfiled as a Movie.")
+            print()
+            print("HOW TO FIX:")
+            print("  --misplaced --resolve performs the disk-level transition:")
+            print("    - [A] move the Series' files into a target Movie library,")
+            print("          delete the empty Series shell in Plex, trigger scans.")
+            print("    - [B] move the Movie's file into a target Series library under")
+            print("          the right SxxEyy structure, delete the Movie shell, scan.")
+            print()
+            print("CONFIG (~/.my-plex.conf):")
+            print(f"  MISPLACED_FEATURE_LENGTH_MIN = {MISPLACED_FEATURE_LENGTH_MIN}     # minutes — every ep must be at least this long")
+            print(f"  MISPLACED_MAX_EPISODES       = {MISPLACED_MAX_EPISODES}      # max total episodes for the [A] signal")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --misplaced                  # All libraries")
+            print("  my-plex series.de --misplaced        # One library")
+            print("  my-plex --misplaced --resolve --try  # Dry-run the disk moves")
+            print("  my-plex --problems                   # Includes this count")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -29150,6 +29314,15 @@ PROBLEM_CATEGORIES_REGISTRY = {
         'fix_hint':      'my-plex --bad-structure --resolve',
         'tsv_relevant':  False,
         'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_bad_structure(obj_keys, library) or 0,
+    },
+    'misplaced': {
+        'cli_flag':      '--misplaced',
+        'help_topic':    'misplaced',
+        'header':        'Misplaced (wrong library type)',
+        'description':   'Items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy)',
+        'fix_hint':      'my-plex --misplaced --resolve',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_misplaced(obj_keys, library) or 0,
     },
     'numbering_issues': {
         'cli_flag':      '--episode-numbering-issues',
@@ -37132,6 +37305,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_multi_movie_folder(obj_keys, library_name)
         return
 
+    # Handle --misplaced / --wrong-library [SCOPE]: items whose content type doesn't fit their library
+    misplaced_val = safe_getattr(cmd_args, 'misplaced', None)
+    if misplaced_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(misplaced_val, media_type=media_type)
+        print(f"\n--- Misplaced (wrong library type){scope} ---")
+        PLEX_Media._list_misplaced(obj_keys, library_name)
+        return
+
     # Handle --library-language-mismatch [SCOPE]: items in the wrong language library
     llm_val = safe_getattr(cmd_args, 'library_language_mismatch', None)
     if llm_val is not None:
@@ -37443,6 +37625,7 @@ def main():
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
         '--multi-movie-folder': 'multi-movie-folder',
+        '--misplaced': 'misplaced', '--wrong-library': 'misplaced',
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
         '--episode-numbering-issues': 'episode-numbering-issues',
@@ -37585,6 +37768,7 @@ def main():
         '--mismatched',
         '--junk',
         '--multi-movie-folder',
+        '--misplaced', '--wrong-library',
         '--library-language-mismatch',
         '--bad-structure', '--nested-media',
         '--missing', '--reencode', '--problems',
@@ -38177,6 +38361,7 @@ def main():
     main_parser.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -38254,6 +38439,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="Pure disk-walk clutter detection in scope (recursive by default; --no-recursive for depth-1). Add --resolve to trash matches. Use --help junk for details.")
     GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
+    GLOBAL_CMD_PARSER.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help="List items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy). Use --help misplaced for details.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
@@ -38619,6 +38805,7 @@ def main():
     _reinject_variadic('mismatched',                '--mismatched')
     _reinject_variadic('junk',                      '--junk')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
+    _reinject_variadic('misplaced',                 '--misplaced')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('bad_structure',             '--bad-structure')
     _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
