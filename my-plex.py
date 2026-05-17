@@ -9094,24 +9094,23 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         except Exception as e:
             print(f"  ⚠ re-scrape failed (non-fatal): {e}")
 
-    # 8. Library scan(s) — wait for completion.
+    # 8. Library scan(s) — wait for completion.  PLEX_Library.OBJ_DICT
+    #    stores our cache wrappers, which do not expose .update(); we
+    #    need the real plexapi LibrarySection via plex.library.section().
     if libs_to_scan and not dry_run:
         print()
         for lib_name, paths in libs_to_scan.items():
             try:
-                lib = PLEX_Library.OBJ_DICT.get(lib_name)
-                if not lib:
-                    print(f"  ⚠ library {lib_name!r} not in cache — skipping scan")
-                    continue
+                lib_section = plex.library.section(lib_name)
                 for p in sorted(paths):
                     print(f">>> library.update(path={p}) on {lib_name!r}…")
                     try:
-                        lib.update(path=p)
+                        lib_section.update(path=p)
                     except TypeError:
                         # Older plexapi: no path kwarg → fall back to full scan
-                        lib.update()
+                        lib_section.update()
                 print(f">>> Waiting for {lib_name!r} scan to complete…")
-                wait_for_plex_scan_complete(plex, lib_name, lib)
+                wait_for_plex_scan_complete(plex, lib_name, lib_section)
             except Exception as e:
                 print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
 
