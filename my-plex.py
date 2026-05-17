@@ -7058,6 +7058,11 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
     seen_imdb = set()
     seen_tvdb = set()
     merged = []
+    # v2.69: track candidates that were dropped only by year_hint so we can
+    # fall back to them when the year-filtered result set is empty (catches
+    # the common case where the year in the wrapper basename is WRONG —
+    # e.g. `hotel.rawanda.(2008)` for the real Hotel Rwanda (2004)).
+    _year_dropped = []
     for q in queries:
         if not q:
             continue
@@ -7066,8 +7071,12 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
             if not fn:
                 if VRB: print(f"  ⚠ unknown lookup engine: {eng!r} (supported: {sorted(_ENGINE_DISPATCH)})")
                 continue
-            for r in fn(q, kind=kind):
+            _raw_results = fn(q, kind=kind)
+            if DBG:
+                print(f"  [debug] _search_unmatched: engine={eng} kind={kind} q={q!r} → {len(_raw_results) if _raw_results else 0} raw hit(s); year_hint={year_hint}")
+            for r in _raw_results:
                 if year_hint and r.get('year') and r['year'] != year_hint:
+                    _year_dropped.append(r)
                     continue
                 # Multi-axis dedupe: a film returned by both TMDB and TVDB
                 # may carry different localised titles (e.g. TMDB "The
@@ -7086,6 +7095,29 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
                 if _imdb: seen_imdb.add(_imdb)
                 if _tvdb: seen_tvdb.add(_tvdb)
                 merged.append(r)
+    # Year-hint fallback: nothing survived the year filter but the engines
+    # DID return hits with a different year — surface them so the operator
+    # can spot a wrong-year wrapper.  Dedupe identically to the main path.
+    if not merged and _year_dropped:
+        if VRB or DBG:
+            print(f"  [debug] year_hint={year_hint} eliminated every hit; falling back to {len(_year_dropped)} year-mismatched candidate(s)")
+        seen.clear(); seen_tmdb.clear(); seen_imdb.clear(); seen_tvdb.clear()
+        for r in _year_dropped:
+            _tmdb = r.get('tmdb_id'); _imdb = r.get('imdb_id'); _tvdb = r.get('tvdb_id')
+            if _tmdb and _tmdb in seen_tmdb: continue
+            if _imdb and _imdb in seen_imdb: continue
+            if _tvdb and _tvdb in seen_tvdb: continue
+            dedup_key = ((r.get('title') or '').lower(), r.get('year'))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            if _tmdb: seen_tmdb.add(_tmdb)
+            if _imdb: seen_imdb.add(_imdb)
+            if _tvdb: seen_tvdb.add(_tvdb)
+            # Tag the engine to make the year-mismatch visible in the picker.
+            r = dict(r)
+            r['engine'] = f"{r.get('engine','?')}†"
+            merged.append(r)
     return merged
 
 
