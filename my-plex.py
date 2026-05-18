@@ -34668,6 +34668,21 @@ def cmd_sort_new(args, dry_run=False, target=None):
     _force = bool(safe_getattr(args, 'force', False))
     _sort_new_movies(dry_run=dry_run, target=target, yes=_yes, force=_force)
 
+    # v2.69: parity log per resolve memory rule.  --redo already writes its
+    # own `sort_new_redo` log inside the redo branch; this covers the
+    # regular (non-redo) sort-new path.
+    if not redo:
+        try:
+            import datetime as _dt
+            _write_resolve_log('sort_new', {
+                'command':  'sort_new',
+                'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                'dry_run':  bool(dry_run),
+                'target':   target,
+            })
+        except Exception as _e:
+            print(f">>> (resolve log skipped: {_e})")
+
 
 def _next_episode_in_dir(directory, season_num, remote_host=None):
     """Find the next available episode number in a season directory.
@@ -37400,6 +37415,16 @@ def execute_global_commands(args, cmd_args):
         force = bool(safe_getattr(args, 'force', False) or safe_getattr(cmd_args, 'force', False))
         yes = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
         cmd_move(mv_args, dry_run=dry_run, force=force, yes=yes)
+        # v2.69: parity log per resolve memory rule.
+        try:
+            import datetime as _dt
+            _write_resolve_log('mv', {
+                'command': 'mv', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                'dry_run': bool(dry_run), 'force': bool(force), 'yes': bool(yes),
+                'args': list(mv_args),
+            })
+        except Exception as _e:
+            print(f">>> (resolve log skipped: {_e})")
         sys.exit(0)
 
     # Handle --map-from-filename alias (standalone, without --plex2disk)
