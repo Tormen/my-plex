@@ -9357,6 +9357,16 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     else:
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
+    # When the operator explicitly targets one or more Series cache keys,
+    # SKIP the heuristic gate (episode count + feature-length) — they've
+    # already decided.  The TMDB confirmation step still runs and is what
+    # actually authorises the disk action.
+    explicit_series = False
+    if isinstance(scope, str) and scope.startswith('Series:'):
+        explicit_series = True
+    elif isinstance(scope, list) and scope and all(isinstance(s, str) and s.startswith('Series:') for s in scope):
+        explicit_series = True
+
     flagged = []  # [(key, obj, episode_keys)]
     thresh_ms = MISPLACED_FEATURE_LENGTH_MIN * 60 * 1000
     for key in obj_keys:
@@ -9369,7 +9379,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             for _e, version_dict in (ep_dict or {}).items():
                 for _v, eks in (version_dict or {}).items():
                     episode_keys.extend(eks or [])
-        if not episode_keys or len(episode_keys) > MISPLACED_MAX_EPISODES:
+        if not episode_keys:
+            continue
+        if explicit_series:
+            # Operator vouched for it — bypass heuristic, let TMDB confirm.
+            flagged.append((key, obj, episode_keys))
+            continue
+        if len(episode_keys) > MISPLACED_MAX_EPISODES:
             continue
         _all_feature = True
         for ek in episode_keys:
@@ -9437,30 +9453,75 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(
             dir_name.replace('.', ' ').replace('_', ' ')
         ))
-        print(f"          query: {_clean_q!r}")
-        try:
-            tv_hits     = _search_unmatched_candidates(_clean_q, 'tv') or []
-            movie_hits  = _search_unmatched_candidates(_clean_q, 'movie') or []
-        except Exception as e:
-            print(f"  ⚠ online search failed: {e} — skipping")
+        # Loop so operator can refine the query interactively when the
+        # auto-cleaned dir-name doesn't match (German titles with English
+        # tail tokens, mangled spellings, etc.).
+        tv_hits = movie_hits = None
+        _confirmation_skip = False
+        while True:
+            print(f"          query: {_clean_q!r}")
+            try:
+                tv_hits     = _search_unmatched_candidates(_clean_q, 'tv') or []
+                movie_hits  = _search_unmatched_candidates(_clean_q, 'movie') or []
+            except Exception as e:
+                print(f"  ⚠ online search failed: {e} — skipping")
+                _confirmation_skip = True
+                log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'online-search: {e}'})
+                break
+            print(f"          TMDB tv:    {len(tv_hits)} hit(s)")
+            print(f"          TMDB movie: {len(movie_hits)} hit(s)")
+            if tv_hits:
+                print(f"  ⚠ TMDB also returns TV hits — NOT a confident Series-of-Movies")
+                # Show top of each so operator can sanity-check.
+                for j, cand in enumerate(tv_hits[:3], 1):
+                    print(f"    [TMDB tv    #{j}] {cand.get('title')!r} ({cand.get('year') or '----'})")
+                for j, cand in enumerate(movie_hits[:3], 1):
+                    print(f"    [TMDB movie #{j}] {cand.get('title')!r} ({cand.get('year') or '----'})")
+            elif movie_hits:
+                for j, cand in enumerate(movie_hits[:5], 1):
+                    print(f"    [TMDB movie #{j}] {cand.get('title')!r} ({cand.get('year') or '----'})  pop={cand.get('popularity', 0):.1f}  tmdb:{cand.get('tmdb_id')}")
+            else:
+                print(f"  (no hits at all — try a different query)")
+
+            # Decision: if we have a confident Movie-only result, fall through;
+            # otherwise prompt for retry / proceed-anyway / skip.
+            if movie_hits and not tv_hits:
+                break
+            print(f"  T<title>) retry with new query")
+            if movie_hits:
+                print(f"  p) proceed with the {len(movie_hits)} movie hit(s) above (ignore TV noise)")
+            print(f"  s) skip this Series   q) quit")
+            try:
+                _c = input("  pick> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if not _c:
+                continue
+            if _c.lower() == 'q':
+                quit_early = True
+                break
+            if _c.lower() == 's':
+                _confirmation_skip = True
+                log_payload['actions'].append({'key': key, 'status': 'skip',
+                                               'reason': 'tmdb-tv-hits-present' if tv_hits else 'tmdb-empty',
+                                               'tv_count': len(tv_hits), 'movie_count': len(movie_hits)})
+                break
+            if _c.lower() == 'p' and movie_hits:
+                # Operator overrides the TV-noise gate.  Clear TV hits so the
+                # downstream logic treats this as confident Series-of-Movies.
+                tv_hits = []
+                break
+            if _c[:1] in ('t', 'T') and len(_c) > 1 and _c[1] in (' ', ':', '='):
+                _clean_q = _c[2:].strip() or _clean_q
+                continue
+            print(f"  ? unrecognised input: {_c!r}")
+        if quit_early:
+            break
+        if _confirmation_skip:
             skipped += 1
-            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'online-search: {e}'})
             continue
-        print(f"          TMDB tv:    {len(tv_hits)} hit(s)")
-        print(f"          TMDB movie: {len(movie_hits)} hit(s)")
-        if tv_hits:
-            print(f"  ⚠ TMDB also returns TV hits — NOT a confident Series-of-Movies; skipping")
-            skipped += 1
-            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'tmdb-tv-hits-present',
-                                           'tv_count': len(tv_hits), 'movie_count': len(movie_hits)})
-            continue
-        if not movie_hits:
-            print(f"  ⚠ TMDB returned no movie hits either — cannot confirm; skipping")
-            skipped += 1
-            log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': 'tmdb-empty'})
-            continue
-        for j, cand in enumerate(movie_hits[:5], 1):
-            print(f"    [TMDB movie #{j}] {cand.get('title')!r} ({cand.get('year') or '----'})  pop={cand.get('popularity', 0):.1f}  tmdb:{cand.get('tmdb_id')}")
 
         # 3. Target library selection.
         default_target = target_map.get(lib_name) or ''
