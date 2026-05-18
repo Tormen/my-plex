@@ -18300,6 +18300,16 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
                         if series_obj:
                             PLEX_Media.rename_episodes(series_obj, dry_run=dry_run)
+                    # v2.69: parity log per resolve memory rule.
+                    try:
+                        import datetime as _dt
+                        _write_resolve_log('rename', {
+                            'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                            'dry_run': bool(dry_run), 'scope_kind': 'library',
+                            'scope':   lib_name, 'series_count': len(series_keys),
+                        })
+                    except Exception as _e:
+                        print(f">>> (resolve log skipped: {_e})")
 
         # Handle --unmatched: list unmatched items in this library
         if safe_getattr(obj_args, 'unmatched', False):
@@ -19643,6 +19653,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if safe_getattr(obj_args, 'rename', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
+            # v2.69: parity log per resolve memory rule.
+            try:
+                import datetime as _dt
+                _scope_label = obj.get('title') if isinstance(obj, dict) else str(obj)
+                _write_resolve_log('rename', {
+                    'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                    'dry_run': bool(dry_run), 'scope_kind': 'object',
+                    'scope':   _scope_label,
+                })
+            except Exception as _e:
+                print(f">>> (resolve log skipped: {_e})")
         if safe_getattr(obj_args, 'reencode', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             force_mark = safe_getattr(obj_args, 'mark', False)
