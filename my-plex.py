@@ -6801,6 +6801,103 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
     return None
 
 
+def _search_tmdb_collections(title, max_retries=3):
+    """v2.69: Search TMDB collections.  A "collection" on TMDB groups
+    related movies (trilogy, saga, sequel chain).  When a query returns
+    a collection but no individual movie / TV hits, that's a very strong
+    "Series-of-Movies" signal for --misplaced --resolve — the on-disk
+    dir contains the films of a known TMDB-tracked collection.
+
+    Returns: list[dict] with keys
+        engine='TMDB-collection', title, year=None, tmdb_collection_id,
+        overview, original_title.
+    """
+    if not TMDB_API_KEY or not title:
+        return []
+    import urllib.request, urllib.parse, urllib.error, json as _json, time as _t
+    q = urllib.parse.quote(title)
+    url = f'https://api.themoviedb.org/3/search/collection?query={q}'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json',
+    })
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+            results = []
+            for r in (data.get('results') or [])[:10]:
+                results.append({
+                    'engine':              'TMDB-collection',
+                    'title':               r.get('name'),
+                    'original_title':      r.get('original_name') or '',
+                    'year':                None,
+                    'tmdb_collection_id':  str(r.get('id')) if r.get('id') is not None else None,
+                    'tmdb_id':             None,
+                    'tvdb_id':             None,
+                    'imdb_id':             None,
+                    'popularity':          0.0,
+                    'overview':            (r.get('overview') or '')[:140],
+                    'lang':                r.get('original_language') or '',
+                })
+            return results
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TMDB collection search {title!r} → HTTP {e.code}", file=sys.stderr)
+            return []
+        except Exception as e:
+            if attempt < max_retries:
+                _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
+            if DBG: print(f"{DBGPFX}TMDB collection search {title!r} → {e!r}", file=sys.stderr)
+            return []
+    return []
+
+
+def _fetch_tmdb_collection_parts(collection_id):
+    """v2.69: Fetch the individual movies belonging to a TMDB collection.
+    Used by --misplaced --resolve to show the operator the actual films
+    that the dir is supposed to contain.
+
+    Returns: list[dict] in the same shape _search_tmdb_titles emits
+    (one entry per part of the collection).
+    """
+    if not TMDB_API_KEY or not collection_id:
+        return []
+    import urllib.request, urllib.error, json as _json
+    url = f'https://api.themoviedb.org/3/collection/{collection_id}'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}TMDB collection/{collection_id} → {e!r}", file=sys.stderr)
+        return []
+    parts = []
+    for p in (data.get('parts') or []):
+        date = p.get('release_date') or ''
+        year = int(date[:4]) if date[:4].isdigit() else None
+        parts.append({
+            'engine':         'TMDB',
+            'title':          p.get('title'),
+            'original_title': p.get('original_title'),
+            'year':           year,
+            'tmdb_id':        str(p.get('id')) if p.get('id') is not None else None,
+            'tvdb_id':        None,
+            'imdb_id':        None,
+            'popularity':     p.get('popularity') or 0.0,
+            'overview':       (p.get('overview') or '')[:140],
+            'lang':           p.get('original_language') or '',
+        })
+    # Sort by release year ascending so the trilogy appears in order.
+    parts.sort(key=lambda x: (x.get('year') or 9999))
+    return parts
+
+
 def _search_tmdb_titles(title, kind='movie', max_retries=3):
     """Search TMDB for movies or TV shows by title.
 
@@ -9461,15 +9558,31 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         while True:
             print(f"          query: {_clean_q!r}")
             try:
-                tv_hits     = _search_unmatched_candidates(_clean_q, 'tv') or []
-                movie_hits  = _search_unmatched_candidates(_clean_q, 'movie') or []
+                tv_hits         = _search_unmatched_candidates(_clean_q, 'tv') or []
+                movie_hits      = _search_unmatched_candidates(_clean_q, 'movie') or []
+                collection_hits = _search_tmdb_collections(_clean_q) or []
             except Exception as e:
                 print(f"  ⚠ online search failed: {e} — skipping")
                 _confirmation_skip = True
                 log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'online-search: {e}'})
                 break
-            print(f"          TMDB tv:    {len(tv_hits)} hit(s)")
-            print(f"          TMDB movie: {len(movie_hits)} hit(s)")
+            print(f"          TMDB tv:         {len(tv_hits)} hit(s)")
+            print(f"          TMDB movie:      {len(movie_hits)} hit(s)")
+            print(f"          TMDB collection: {len(collection_hits)} hit(s)")
+            # If TMDB has a COLLECTION match (and no TV match), expand
+            # the collection into its parts and treat them as movie hits.
+            # A collection is by definition a movie series — strong signal.
+            if collection_hits and not tv_hits and not movie_hits:
+                col = collection_hits[0]
+                print(f"  ✓ TMDB collection match: {col.get('title')!r} (id={col.get('tmdb_collection_id')})")
+                if col.get('overview'):
+                    print(f"     {col['overview']}")
+                parts = _fetch_tmdb_collection_parts(col.get('tmdb_collection_id'))
+                if parts:
+                    movie_hits = parts
+                    print(f"  → expanded collection into {len(parts)} part(s):")
+                    for _p in parts:
+                        print(f"      {_p.get('title')!r} ({_p.get('year') or '----'})  tmdb:{_p.get('tmdb_id')}")
             if tv_hits:
                 print(f"  ⚠ TMDB also returns TV hits — NOT a confident Series-of-Movies")
                 # Show top of each so operator can sanity-check.
