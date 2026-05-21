@@ -38826,7 +38826,12 @@ def execute_global_commands(args, cmd_args):
     uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
     if uncoll_val is not None:
         _override_min = None
-        if isinstance(uncoll_val, list) and uncoll_val and isinstance(uncoll_val[0], str) and uncoll_val[0].isdigit():
+        # Match only ASCII digits 0-9 — str.isdigit() also matches Unicode
+        # digit characters like '²' or Arabic numerals which we DON'T want
+        # interpreted as a threshold here.
+        if (isinstance(uncoll_val, list) and uncoll_val
+                and isinstance(uncoll_val[0], str)
+                and re.fullmatch(r'[0-9]+', uncoll_val[0])):
             _override_min = int(uncoll_val[0])
             uncoll_val = uncoll_val[1:]   # strip the threshold; rest is SCOPE
         if _override_min is not None:
