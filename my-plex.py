@@ -9682,6 +9682,22 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         canonical_title = (movie_hits[0].get('title') or title) if len(movie_hits) == 1 else title
         canonical_year  = movie_hits[0].get('year') if len(movie_hits) == 1 else None
         _year_suffix    = f" ({canonical_year})" if canonical_year else ''
+        # Filename SxxEyy stripper.  When moving INTO a Movie library, the
+        # destination basename MUST NOT carry TV-episode markers — Plex's
+        # Movie agent rejects files whose name parses as `SxxEyy` and
+        # leaves the dir as --unrecognized.  Strip leading
+        # `S06E01 - ` / `[1x03] ` / `1x03.` / etc. prefixes and any
+        # trailing whitespace/separator garbage.
+        _sxx_strip = re.compile(
+            r'(?i)(?:^|(?<=[\s\-_.]))'
+            r'(?:S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b)'
+            r'[\s\-_.]*'
+        )
+        def _strip_sxx_from_basename(name):
+            cleaned = _sxx_strip.sub('', name, count=1)
+            # Collapse residual leading separators left by the strip.
+            return re.sub(r'^[\s\-_.]+', '', cleaned).strip()
+
         plan = []   # (ep_key, src_path, dest_dir, dest_path)
         for ek in ep_keys:
             eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
@@ -9695,7 +9711,10 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 # If multiple files share one Series, default to series title
                 # subdir; user can move/rename later.  Single-file → use canonical.
                 dest_dir = f"{target_root}/{canonical_title}{_year_suffix}"
-                dest = f"{dest_dir}/{os.path.basename(src)}"
+                dest_basename = _strip_sxx_from_basename(os.path.basename(src))
+                if not dest_basename:
+                    dest_basename = os.path.basename(src)
+                dest = f"{dest_dir}/{dest_basename}"
                 plan.append((ek, src, dest_dir, dest))
         if not plan:
             print(f"  ⚠ no source files derivable — skipping")
