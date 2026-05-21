@@ -10284,11 +10284,24 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     except Exception:
         _PlexCollection = None
 
-    # 1. Build the candidate list by re-running the detector quietly.
+    # 1. Build the candidate list.
+    # _get_universal_scope AND-combines tokens (intersection) — fine for
+    # filter expressions like `lang:fr year>2020`, but wrong for multiple
+    # discrete cache keys (Movie:A Movie:B).  Union each token's resolution
+    # so per-key scoping works.
     obj_keys = []
     if scope:
-        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
-        obj_keys = [k for (k, _o) in (scope_items or [])]
+        _tokens = scope if isinstance(scope, list) else [scope]
+        _seen = set()
+        for _t in _tokens:
+            if not _t:
+                continue
+            _items = _get_universal_scope([_t]) if isinstance(_t, str) else None
+            for _k, _o in (_items or []):
+                if _k not in _seen:
+                    _seen.add(_k)
+                    obj_keys.append(_k)
+        if DBG: print(f"{DBGPFX}cmd_uncollected_resolve: scope={scope!r} → {len(obj_keys)} obj_keys")
     else:
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
@@ -38853,6 +38866,18 @@ def execute_global_commands(args, cmd_args):
     # pattern).  Remaining tokens become the SCOPE.
     uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
     if uncoll_val is not None:
+        # If scope came AFTER --resolve / --auto / --try in the user's
+        # argv (e.g. `--uncollected --resolve --auto Movie:123204 Movie:123205`),
+        # those positionals end up under CMD_OR_PLEXOBJECT instead of
+        # --uncollected.  Merge them in so the operator's intent — scoping
+        # --uncollected — is honoured regardless of arg ordering.
+        if not uncoll_val:   # empty list / True / None
+            _cop = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
+            if _cop:
+                if isinstance(_cop, list):
+                    uncoll_val = list(_cop)
+                else:
+                    uncoll_val = [_cop]
         _override_min = None
         # Match only ASCII digits 0-9 — str.isdigit() also matches Unicode
         # digit characters like '²' or Arabic numerals which we DON'T want
