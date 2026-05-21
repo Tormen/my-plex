@@ -23142,7 +23142,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # also try matching against PATH COMPONENTS (post-library-root) —
             # all needle-words must appear in a SINGLE path component.
             _needle_words = {w for w in re.split(r'[\s._\-]+', needle) if w}
-            _path_fallback = (len(_needle_words) >= 2)
+            # v2.69: also engage path-fallback for a single needle word as long
+            # as it's specific enough (>=4 chars) — catches `my-plex edelstein`
+            # finding `movies.de/Edelstein Trilogy/…` even though no individual
+            # movie title contains "edelstein".  Short words ("the", "a", "der")
+            # stay title-only to avoid noise.
+            _path_fallback = (len(_needle_words) >= 2) or (
+                len(_needle_words) == 1 and len(next(iter(_needle_words), '')) >= 4
+            )
             # Pre-build set of series keys whose title matches (for fast episode lookup).
             # The needle is also matched in its normalized form (via
             # CLI_TEXT_NORMALIZE_REGEX); titles are normalized the same
