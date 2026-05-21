@@ -22502,6 +22502,85 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return s_pad, e_pad
 
     @staticmethod
+    @staticmethod
+    def _list_renumber_title_mismatch(obj_keys, library_name=None):
+        """v2.69: Episodes whose Plex title at S/E slot disagrees with the
+        scraped TSV's title at the SAME slot.
+
+        Detection gap that motivated this category: Plex's E14 of
+        'Die fliegenden Ärzte' was titled 'Arsen und Edelsteine' but
+        scraped S03E02 = 'Diagnose: Stress'.  --renumber --plex checks
+        positional/numbering disagreements, not title-vs-title at matching
+        slots; --renumber --fix checks filename-vs-scraped numbering.
+        Neither caught this class.
+
+        Compares Plex title (and originalTitle) against scraped {title,
+        original_title} via case-insensitive substring + Ratcliff-Obershelp
+        similarity (>=0.75 = considered matching).  Different durations
+        and translation variants ('Diagnose: Stress' vs 'Diagnose Stress')
+        are tolerated; a wholly different title is flagged.
+        """
+        import difflib
+
+        def _norm(s):
+            return re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).strip()
+
+        flagged = []  # [(ep_key, ep_obj, plex_title, scraped_title, scraped_orig)]
+        for key in set(obj_keys):
+            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+            if obj.get('type') not in ('Episode', 'Episode*'):
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            sk = obj.get('series_key', '')
+            if not sk:
+                continue
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(sk, {})
+            eps_by_season = scraped.get('episodes', {})
+            if not eps_by_season:
+                continue
+            s_str = obj.get('S_str') or ''
+            e_str = obj.get('E_str') or ''
+            scraped_ep = (eps_by_season.get(s_str) or {}).get(e_str)
+            if not scraped_ep:
+                continue
+            plex_t  = _norm(obj.get('title'))
+            scrap_t = _norm(scraped_ep.get('title'))
+            scrap_o = _norm(scraped_ep.get('original_title'))
+            if not plex_t or not scrap_t:
+                continue
+            # Match if plex_t is a substring of scraped (or vice versa) OR
+            # similarity >= 0.75 against either scraped title.
+            def _ok(a, b):
+                if not a or not b:
+                    return False
+                if a in b or b in a:
+                    return True
+                return difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
+            if _ok(plex_t, scrap_t) or _ok(plex_t, scrap_o):
+                continue
+            flagged.append((key, obj, obj.get('title') or '', scraped_ep.get('title') or '', scraped_ep.get('original_title') or ''))
+
+        if not flagged:
+            return 0
+
+        flagged.sort(key=lambda r: (r[1].get('library',''), r[1].get('series_key',''), r[1].get('S_str',''), r[1].get('E_str','')))
+        if VRB:
+            print(f"\n  {'KEY':<14}  {'S/E':<8}  {'LIBRARY':<14}  PLEX TITLE  ↔  SCRAPED TITLE  (orig)")
+            print("  " + "-" * 110)
+            for k, o, pt, st, so in flagged:
+                lib  = o.get('library', '')
+                se   = o.get('S0XE0X') or f"{o.get('S_str','')}{o.get('E_str','')}"
+                orig = f"  (orig: {so})" if so and so.lower() != st.lower() else ''
+                print(f"  {k:<14}  {se:<8}  {lib:<14}  {pt[:35]!r}  ↔  {st[:35]!r}{orig}")
+                fp = o.get('file', '')
+                if fp:
+                    print(f"  {'':14}  {'':8}  {'':14}  file: {fp}")
+        print(f"\n  {len(flagged)} episode(s) where Plex title doesn't match scraped TSV title for the SAME S/E slot.")
+        print(f"  Likely cause: wrong Plex match for that episode, or file misnamed at ingestion.")
+        return len(flagged)
+
+    @staticmethod
     def _list_renumber_candidates(obj_keys, library_name=None):
         """List episodes whose filename numbering disagrees with scraped data.
         Only episodes WITH scraped data are considered (no-scraped-data is a
@@ -26459,7 +26538,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -30223,6 +30302,15 @@ PROBLEM_CATEGORIES_REGISTRY = {
         'fix_hint':      'my-plex --renumber -V',
         'tsv_relevant':  True,
         'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_abs_mismatch(obj_keys, library) or 0,
+    },
+    'renumber_title_mismatch': {
+        'cli_flag':      '--renumber-title-mismatch',
+        'help_topic':    'renumber',
+        'header':        'Renumber: Title Mismatch',
+        'description':   "Plex episode title at S/E slot doesn't match scraped TSV title for the same slot",
+        'fix_hint':      'Inspect via my-plex --renumber-title-mismatch -V; fix in Plex (Fix Match) or re-ingest the file',
+        'tsv_relevant':  True,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_renumber_title_mismatch(obj_keys, library) or 0,
     },
     'unrecognized': {
         'cli_flag':      '--unrecognized',
@@ -38158,6 +38246,15 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_multi_movie_folder(obj_keys, library_name)
         return
 
+    # Handle --renumber-title-mismatch [SCOPE]: episodes where Plex title disagrees with scraped TSV title at the same S/E
+    rtm_val = safe_getattr(cmd_args, 'renumber_title_mismatch', None)
+    if rtm_val is not None:
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(rtm_val, media_type=media_type)
+        print(f"\n--- Renumber: Title Mismatch{scope} (Plex title vs scraped TSV title at same S/E) ---")
+        PLEX_Media._list_renumber_title_mismatch(obj_keys, library_name)
+        return
+
     # Handle --misplaced / --wrong-library [SCOPE] [--resolve [--try] [--yes]]
     misplaced_val = safe_getattr(cmd_args, 'misplaced', None)
     if misplaced_val is not None:
@@ -38498,6 +38595,7 @@ def main():
         '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
         '--multi-movie-folder': 'multi-movie-folder',
         '--misplaced': 'misplaced', '--wrong-library': 'misplaced',
+        '--renumber-title-mismatch': 'renumber',
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
         '--episode-numbering-issues': 'episode-numbering-issues',
@@ -39234,6 +39332,7 @@ def main():
     main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--renumber-title-mismatch', metavar='SCOPE', nargs='*', default=None, dest='renumber_title_mismatch', help=argparse.SUPPRESS)  # Hidden - documented via --problems / --help renumber
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -39312,6 +39411,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help="List items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy). Use --help misplaced for details.")
+    GLOBAL_CMD_PARSER.add_argument('--renumber-title-mismatch', metavar='SCOPE', nargs='*', default=None, dest='renumber_title_mismatch', help="List episodes whose Plex title doesn't match the scraped TSV title for the same S/E slot. Use -V for the per-episode breakdown.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
     GLOBAL_CMD_PARSER.add_argument('--episode-numbering-issues', metavar='SCOPE', nargs='?', const=True, default=None, help=argparse.SUPPRESS)  # Deprecated — use --renumber --plex instead
@@ -39678,6 +39778,7 @@ def main():
     _reinject_variadic('junk',                      '--junk')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('misplaced',                 '--misplaced')
+    _reinject_variadic('renumber_title_mismatch',   '--renumber-title-mismatch')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('bad_structure',             '--bad-structure')
     _reinject_variadic('episode_numbering_issues',  '--episode-numbering-issues')
