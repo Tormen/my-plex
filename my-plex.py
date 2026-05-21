@@ -23397,6 +23397,24 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _sotn = _normalize_text(_sot)
                     if _needle_norm in _stn or _needle_norm in _sotn:
                         _matching_series.add(_sk2)
+            # v2.69: also expand any Plex Collection whose title contains the
+            # needle into its member ratingKeys, so e.g. 'edelstein' finds
+            # the 3 movies grouped under the 'Edelstein Filmreihe' Plex
+            # Collection even when none of those movies has the token in
+            # its own title / file path.
+            _matching_collection_member_ratingkeys = set()
+            if not _ep_only:
+                for _ck, _cobj in PLEX_Media.OBJ_BY_ID.items():
+                    if _cobj.get('type') != 'Collection':
+                        continue
+                    _ct = (_cobj.get('title') or '').lower()
+                    _cot = (_cobj.get('originalTitle') or '').lower()
+                    _hit = (needle in _ct) or (_cot and needle in _cot)
+                    if not _hit and not _needle_norm_eq_orig:
+                        _hit = (_needle_norm in _normalize_text(_ct)) or (_cot and _needle_norm in _normalize_text(_cot))
+                    if _hit:
+                        for _mid in (_cobj.get('member_ids') or []):
+                            _matching_collection_member_ratingkeys.add(str(_mid))
             # v2.15: hot-path uses precomputed obj['file_segment_words']
             # (list[list[str]]) populated at --update-cache finalize time.
             # No re.split on the per-query path — ~30× faster than v2.13.
@@ -23427,6 +23445,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return False
             def _title_fn(obj, fi, _n=needle, _nn=_needle_norm, _eq=_needle_norm_eq_orig,
                           _ep_only=_ep_only, _ms=_matching_series,
+                          _cm=_matching_collection_member_ratingkeys,
                           _pf=_path_fallback, _swm=_segwords_match, _lpm=_filepath_match_live):
                 t = (obj.get('title') or '').lower()
                 ot = (obj.get('originalTitle') or '').lower()
@@ -23436,6 +23455,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if _nn in _normalize_text(t) or _nn in _normalize_text(ot):
                         return True
                 if not _ep_only and _ms and obj.get('series_key', '') in _ms:
+                    return True
+                # v2.69: include Movies whose ratingKey is a member of a
+                # Plex Collection whose title matched the needle.
+                if _cm and obj.get('type') == 'Movie' and str(obj.get('id') or '') in _cm:
                     return True
                 if not _pf:
                     return False
