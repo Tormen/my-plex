@@ -9566,6 +9566,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         # tail tokens, mangled spellings, etc.).
         tv_hits = movie_hits = None
         _confirmation_skip = False
+        _collection_expanded = False   # set when movie_hits came from TMDB collection parts
         while True:
             print(f"          query: {_clean_q!r}")
             try:
@@ -9591,6 +9592,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 parts = _fetch_tmdb_collection_parts(col.get('tmdb_collection_id'))
                 if parts:
                     movie_hits = parts
+                    _collection_expanded = True
                     print(f"  → expanded collection into {len(parts)} part(s):")
                     for _p in parts:
                         print(f"      {_p.get('title')!r} ({_p.get('year') or '----'})  tmdb:{_p.get('tmdb_id')}")
@@ -9676,18 +9678,24 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             continue
         target_root = target_roots[0].rstrip('/')
 
-        # 4. Build per-file move plan.  When there's one movie hit, use its
-        #    canonical title for every file's dest dir; otherwise use the
-        #    Series title as a fallback (operator can rename later).
-        canonical_title = (movie_hits[0].get('title') or title) if len(movie_hits) == 1 else title
-        canonical_year  = movie_hits[0].get('year') if len(movie_hits) == 1 else None
-        _year_suffix    = f" ({canonical_year})" if canonical_year else ''
-        # Filename SxxEyy stripper.  When moving INTO a Movie library, the
-        # destination basename MUST NOT carry TV-episode markers — Plex's
-        # Movie agent rejects files whose name parses as `SxxEyy` and
-        # leaves the dir as --unrecognized.  Strip leading
-        # `S06E01 - ` / `[1x03] ` / `1x03.` / etc. prefixes and any
-        # trailing whitespace/separator garbage.
+        # 4. Build per-file move plan.
+        #    Three cases for destination canonical naming:
+        #     (a) collection_expanded AND len(movie_hits) == len(source files):
+        #         per-film wrappers — map each source file (sorted by S/E in
+        #         filename) to a specific TMDB collection part (sorted by year).
+        #         e.g. S06E01 → Rubinrot.(2013), S06E02 → Saphirblau.(2014), …
+        #     (b) exactly ONE movie hit:
+        #         use that single canonical title + year for every source file
+        #         (typical "single misfiled movie" case).
+        #     (c) anything else (multiple movie hits but no collection / count
+        #         mismatch):
+        #         fall back to the Series title as a single shared wrapper —
+        #         operator can rename later.
+        #
+        # SxxEyy stripper: when moving INTO a Movie library, destination
+        # basenames MUST NOT carry TV-episode markers — Plex's Movie agent
+        # rejects files whose name parses as `SxxEyy` and leaves the dir as
+        # --unrecognized.
         _sxx_strip = re.compile(
             r'(?i)(?:^|(?<=[\s\-_.]))'
             r'(?:S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b)'
@@ -9695,12 +9703,61 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         )
         def _strip_sxx_from_basename(name):
             cleaned = _sxx_strip.sub('', name, count=1)
-            # Collapse residual leading separators left by the strip.
             return re.sub(r'^[\s\-_.]+', '', cleaned).strip()
 
+        # Slug helper for filesystem-friendly wrapper dir names
+        # ("Smaragdgrün" → "smaragdgruen.(2016).[de]" style).
+        def _slug_wrapper(t, y=None, lang=None):
+            base = _slugify_title_for_wrapper(t) if t else 'movie'
+            parts_ = [base]
+            if y:
+                parts_.append(f"({y})")
+            if lang:
+                parts_.append(f"[{lang}]")
+            return '.'.join(parts_)
+
+        # Sort episode keys by (season, episode) for stable mapping to
+        # collection parts ordered by release year.
+        def _se_sort_key(ek):
+            eo = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            return (int(eo.get('S_idx') or 0), int(eo.get('E_idx') or 0))
+        ordered_ep_keys = sorted(ep_keys, key=_se_sort_key)
+
         plan = []   # (ep_key, src_path, dest_dir, dest_path)
-        for ek in ep_keys:
+
+        # Pre-compute total source-file count (each ep may have multiple
+        # versions — we sum all to decide whether to use per-film mapping).
+        _total_source_files = 0
+        for ek in ordered_ep_keys:
+            files = (PLEX_Media.OBJ_BY_ID.get(ek) or {}).get('files') or {}
+            for _v, fi in files.items():
+                if isinstance(fi, dict) and fi.get('filepath'):
+                    _total_source_files += 1
+
+        per_film_map = None  # ek → (canonical_title, canonical_year)
+        if _collection_expanded and len(movie_hits) == _total_source_files:
+            # Build ordinal map: i-th source file (by S/E order) → i-th
+            # collection part (already sorted by release year in
+            # _fetch_tmdb_collection_parts).
+            print(f"  → collection has {len(movie_hits)} parts matching {_total_source_files} source files; using PER-FILM wrappers")
+            _flat_files = []
+            for ek in ordered_ep_keys:
+                files = (PLEX_Media.OBJ_BY_ID.get(ek) or {}).get('files') or {}
+                for _v, fi in files.items():
+                    if isinstance(fi, dict) and fi.get('filepath'):
+                        _flat_files.append((ek, fi))
+            per_film_map = {
+                id(_fi): (_p.get('title') or '', _p.get('year'))
+                for (_ek, _fi), _p in zip(_flat_files, movie_hits)
+            }
+
+        # Single-hit fallback or shared-wrapper fallback for non-mapped paths
+        _shared_title = (movie_hits[0].get('title') or title) if len(movie_hits) == 1 else title
+        _shared_year  = movie_hits[0].get('year') if len(movie_hits) == 1 else None
+
+        for ek in ordered_ep_keys:
             eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            _audio = (eobj.get('audio_languages') or [None])[0]
             files = eobj.get('files') or {}
             for _v, fi in files.items():
                 if not isinstance(fi, dict):
@@ -9708,9 +9765,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 src = fi.get('filepath') or ''
                 if not src:
                     continue
-                # If multiple files share one Series, default to series title
-                # subdir; user can move/rename later.  Single-file → use canonical.
-                dest_dir = f"{target_root}/{canonical_title}{_year_suffix}"
+                if per_film_map is not None and id(fi) in per_film_map:
+                    _ct, _cy = per_film_map[id(fi)]
+                    wrapper_name = _slug_wrapper(_ct, _cy, _audio)
+                else:
+                    _ct, _cy = _shared_title, _shared_year
+                    wrapper_name = _slug_wrapper(_ct, _cy, _audio) if (_collection_expanded or len(movie_hits) == 1) else f"{_ct}{(' (' + str(_cy) + ')') if _cy else ''}"
+                dest_dir = f"{target_root}/{wrapper_name}"
                 dest_basename = _strip_sxx_from_basename(os.path.basename(src))
                 if not dest_basename:
                     dest_basename = os.path.basename(src)
