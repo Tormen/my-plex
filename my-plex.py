@@ -1050,6 +1050,14 @@ CONFIG_DEFAULTS = {
     # higher values only flag substantial sub-libraries.
     'UNCOLLECTED_MIN_MEMBERS': 2,
 
+    # UNCOLLECTED_IGNORED_COLLECTION_IDS — TMDB collection IDs to suppress
+    # from `--uncollected` flagging.  Operators with mixed-genre libraries
+    # may not want every TMDB-tagged grouping to become a Plex Collection
+    # (e.g. low-quality cash-grab "Collections" attached to single sequels
+    # like 'The Jake Gittes Collection').  IDs are strings (TMDB collection
+    # ids are integers but always stringified in my-plex cache).
+    'UNCOLLECTED_IGNORED_COLLECTION_IDS': [],
+
     # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
     # --resolve` Series→Movies transitions.  Key is the source series.*
     # library name, value is the target movies.* library name to move
@@ -1715,6 +1723,23 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # UNCOLLECTED_MIN_MEMBERS = {CONFIG_DEFAULTS['UNCOLLECTED_MIN_MEMBERS']!r}
+
+###############################################################################
+# --uncollected: TMDB collection IDs to ignore (v2.69)
+###############################################################################
+
+# UNCOLLECTED_IGNORED_COLLECTION_IDS — TMDB collection IDs that
+# `--uncollected` should NEVER flag (and `--uncollected --resolve` should
+# NEVER create as Plex Collections).  Useful for nuking low-quality
+# TMDB-tagged "Collections" you don't want auto-grouped.  IDs are
+# strings (TMDB stores ints; my-plex normalises to str).
+#
+# Default: (empty — flag every TMDB collection)
+#
+# Example (uncomment + customize to use):
+# UNCOLLECTED_IGNORED_COLLECTION_IDS = [
+#     '359005',   # The Jake Gittes Collection
+# ]
 
 ###############################################################################
 # --misplaced --resolve target-library mapping (v2.69)
@@ -2521,6 +2546,7 @@ def _compile_junk_patterns():
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
 UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
+UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
@@ -10318,6 +10344,8 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         cid = obj.get('tmdb_collection_id')
         if not cid:
             continue
+        if str(cid) in (UNCOLLECTED_IGNORED_COLLECTION_IDS or []):
+            continue   # operator-suppressed
         coll_groups.setdefault(str(cid), []).append((key, obj))
 
     # Filter by min-members + already-covered.
@@ -21956,6 +21984,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             cid = obj.get('tmdb_collection_id')
             if not cid:
                 continue
+            if str(cid) in (UNCOLLECTED_IGNORED_COLLECTION_IDS or []):
+                continue   # operator-suppressed
             coll_groups.setdefault(str(cid), []).append((key, obj))
 
         if not coll_groups:
@@ -28562,7 +28592,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --resolve --yes      skip confirmation prompts")
             print()
             print("CONFIG (~/.my-plex.conf):")
-            print(f"  UNCOLLECTED_MIN_MEMBERS = {UNCOLLECTED_MIN_MEMBERS}   # min in-library members per group")
+            print(f"  UNCOLLECTED_MIN_MEMBERS              = {UNCOLLECTED_MIN_MEMBERS}     # min in-library members per group")
+            print(f"  UNCOLLECTED_IGNORED_COLLECTION_IDS   = {UNCOLLECTED_IGNORED_COLLECTION_IDS!r}    # TMDB collection IDs to suppress")
             print()
             print("EXAMPLES:")
             print()
