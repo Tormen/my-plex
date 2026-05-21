@@ -9406,8 +9406,19 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         lib_section.update()
                 print(f">>> Waiting for {lib_name!r} scan to complete…")
                 wait_for_plex_scan_complete(plex, lib_name, lib_section)
+                # Per CACHE INTEGRITY rule: refresh my-plex cache in-process.
+                print(f">>> Refreshing my-plex cache for {lib_name!r}…")
+                try:
+                    update_cache_for_library(lib_name)
+                except Exception as e:
+                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
+                    print(f"    Fall back to: my-plex --update-cache")
             except Exception as e:
                 print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
+        try:
+            update_and_save_cache({})
+        except Exception as e:
+            print(f"  ⚠ cache persist failed: {e}")
 
     # 9. Summary + log.
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
@@ -9418,7 +9429,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(series_keys)} total")
     if fixed:
-        print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")
 
@@ -9723,6 +9734,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         remote_host = PLEX_DB_REMOTE_HOST
         _moves_done = []
         _move_failed = False
+        _source_dirs = set()
         for ek, src, dest_dir, dest in plan:
             _esc_dir  = shlex.quote(dest_dir)
             _esc_src  = shlex.quote(src)
@@ -9736,12 +9748,48 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 break
             print(f"    ✓ moved: {os.path.basename(src)}")
             _moves_done.append((src, dest))
+            # Track source dir + its parent (season + series) so we can
+            # clean up the now-empty wrappers (with their stale episodes.tsv).
+            _sdir = os.path.dirname(src)
+            _source_dirs.add(_sdir)
+            _source_dirs.add(os.path.dirname(_sdir))
         if _move_failed:
             log_payload['actions'].append({
                 'key': key, 'status': 'fail', 'reason': 'mv-failed',
                 'moves_done': [{'src': s, 'dest': d} for s, d in _moves_done],
             })
             continue
+
+        # Cleanup orphan source dirs.  TRASH (never `rm`) every leftover
+        # file; then `rmdir` (non-recursive, empty-only — explicitly
+        # allowed by the trash-not-rm memory rule) the now-empty wrappers
+        # innermost first.  Series leaves behind episodes.tsv / .err
+        # sidecars from scrape; without this the next Plex scan
+        # re-detects an empty Series shell.
+        for _sd in sorted(_source_dirs, key=lambda p: -p.count('/')):
+            # List leftover sidecar files in this directory only (depth 1).
+            _esc_sd = shlex.quote(_sd)
+            _ls = subprocess.run([*_ssh_args(remote_host),
+                                  f"find {_esc_sd} -maxdepth 1 -type f 2>/dev/null"],
+                                 capture_output=True, text=True, timeout=30)
+            for _f in (_ls.stdout or '').splitlines():
+                _f = _f.strip()
+                if not _f:
+                    continue
+                ok, trash_path = move_to_trash(_f, remote_host=remote_host)
+                if ok:
+                    log_payload.setdefault('trashed_files', []).append({'src': _f, 'trash': trash_path})
+                else:
+                    log_payload.setdefault('trash_failed', []).append(_f)
+            # Now the dir should be empty — rmdir it (no -r, so safe).
+            _rd = subprocess.run([*_ssh_args(remote_host),
+                                  f"rmdir {_esc_sd} 2>&1"],
+                                 capture_output=True, text=True, timeout=15)
+            if _rd.returncode == 0:
+                log_payload.setdefault('emptied_dirs', []).append(_sd)
+            else:
+                # Non-empty (something else in there we shouldn't touch) — flag it.
+                log_payload.setdefault('dirs_not_empty', []).append({'dir': _sd, 'reason': (_rd.stderr or _rd.stdout).strip()})
 
         # 7. Delete the Plex Series shell (files now gone — Plex would clean
         #    up on next scan anyway, but explicit delete makes the transition
@@ -9912,8 +9960,21 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 lib_section.update()
                 print(f">>> Waiting for {lib_name!r} scan to complete…")
                 wait_for_plex_scan_complete(plex, lib_name, lib_section)
+                # Per CACHE INTEGRITY rule: refresh my-plex cache in-process
+                # so the user never has to run --update-cache after this command.
+                print(f">>> Refreshing my-plex cache for {lib_name!r}…")
+                try:
+                    update_cache_for_library(lib_name)
+                except Exception as e:
+                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
+                    print(f"    Fall back to: my-plex --update-cache")
             except Exception as e:
                 print(f"  ⚠ scan of {lib_name!r} failed: {e}")
+        # Persist the refreshed cache.
+        try:
+            update_and_save_cache({})
+        except Exception as e:
+            print(f"  ⚠ cache persist failed: {e}")
 
     # 9. Log + summary.
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
@@ -9924,8 +9985,30 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     print("=" * 70)
     _total_all = len(flagged) + (len(movies_b) if 'movies_b' in dir() else 0)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {_total_all} total ({len(flagged)} Series-of-Movies + {len(movies_b) if 'movies_b' in dir() else 0} Movie-with-SxxEyy)")
+    # EXPLICIT report of every disk side-effect — operator MUST notice.
+    _trashed = log_payload.get('trashed_files', [])
+    _trash_fail = log_payload.get('trash_failed', [])
+    _emptied = log_payload.get('emptied_dirs', [])
+    _not_empty = log_payload.get('dirs_not_empty', [])
+    if _trashed:
+        print(f"\nTRASHED {len(_trashed)} orphan file(s) (in trash, recoverable):")
+        for t in _trashed:
+            print(f"  ↳ {t['src']}")
+            print(f"      → {t['trash']}")
+    if _trash_fail:
+        print(f"\n⚠ FAILED to trash {len(_trash_fail)} file(s):")
+        for f in _trash_fail:
+            print(f"  ✗ {f}")
+    if _emptied:
+        print(f"\nREMOVED {len(_emptied)} now-empty source dir(s) (rmdir — safe, was empty):")
+        for d in _emptied:
+            print(f"  ↳ {d}")
+    if _not_empty:
+        print(f"\n⚠ {len(_not_empty)} source dir(s) were NOT empty — left in place for review:")
+        for entry in _not_empty:
+            print(f"  ⚠ {entry['dir']}    ({entry['reason']})")
     if fixed:
-        print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
+        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")
 
