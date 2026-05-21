@@ -1044,6 +1044,12 @@ CONFIG_DEFAULTS = {
     # see the full list of categories my-plex currently knows about.
     'PROBLEM_CATEGORIES_DISABLED': [],
 
+    # UNCOLLECTED_MIN_MEMBERS — minimum number of in-library Movies that
+    # must share a TMDB collection before `--uncollected` flags the group.
+    # Lower values flag every 2-movie pair (Bond Dr. No + Goldfinger);
+    # higher values only flag substantial sub-libraries.
+    'UNCOLLECTED_MIN_MEMBERS': 2,
+
     # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
     # --resolve` Series→Movies transitions.  Key is the source series.*
     # library name, value is the target movies.* library name to move
@@ -1697,6 +1703,18 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # PROBLEM_CATEGORIES_DISABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_DISABLED']!r}
+
+###############################################################################
+# --uncollected: minimum in-library members per TMDB collection (v2.69)
+###############################################################################
+
+# UNCOLLECTED_MIN_MEMBERS — `--uncollected` only flags a TMDB collection
+# when at least N of its parts are present in your library (avoids
+# noise from one-off matches against very large collections like Marvel
+# Cinematic Universe when you only own a single film).
+#
+# Default:
+# UNCOLLECTED_MIN_MEMBERS = {CONFIG_DEFAULTS['UNCOLLECTED_MIN_MEMBERS']!r}
 
 ###############################################################################
 # --misplaced --resolve target-library mapping (v2.69)
@@ -2502,6 +2520,7 @@ def _compile_junk_patterns():
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
 PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
+UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
@@ -6605,6 +6624,61 @@ def _country_matches(country_token, obj_countries):
     return False
 
 
+def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
+    """v2.69: Fetch `belongs_to_collection.{id,name}` for one Movie from TMDB.
+    Returns (collection_id_str, collection_name) or (None, None).
+    Uses the same retry/backoff plumbing as fetch_original_language_from_tmdb
+    so we play nicely with TMDB's rate limits (429 honours Retry-After,
+    5xx exponential backoff, transport errors retried)."""
+    global TMDB_API_KEY
+    if not TMDB_API_KEY or not tmdb_id:
+        return (None, None)
+    import urllib.request, urllib.error, json as _json, time as _t
+    url = f'https://api.themoviedb.org/3/movie/{tmdb_id}'
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {TMDB_API_KEY}',
+        'Accept': 'application/json',
+    })
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+            col = data.get('belongs_to_collection') or {}
+            if not col:
+                return (None, None)
+            cid = col.get('id')
+            return (str(cid) if cid is not None else None, col.get('name'))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = e.headers.get('Retry-After', '') if hasattr(e, 'headers') else ''
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = backoff
+                delay = max(0.5, min(delay, 30.0))
+                if VRB: print(f"  TMDB 429 (rate-limited); sleeping {delay:.1f}s then retrying movie/{tmdb_id}…")
+                _t.sleep(delay)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            if 500 <= e.code < 600:
+                if VRB: print(f"  TMDB {e.code} (server error); sleeping {backoff:.1f}s then retrying movie/{tmdb_id}…")
+                _t.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            if DBG: print(f"{DBGPFX}fetch_belongs_to_collection_from_tmdb({tmdb_id}): HTTP {e.code}")
+            return (None, None)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if VRB: print(f"  TMDB transport error ({e.__class__.__name__}); sleeping {backoff:.1f}s then retrying movie/{tmdb_id}…")
+            _t.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}fetch_belongs_to_collection_from_tmdb({tmdb_id}): {e!r}")
+            return (None, None)
+    return (None, None)
+
+
 def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5):
     """Fetch `original_language` for one item from TMDB API v3.
 
@@ -10193,6 +10267,212 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             print(f"  ⚠ {entry['dir']}    ({entry['reason']})")
     if fixed:
         print(">>> Done.  Plex now reflects the moves; run any --scan (or --update-cache) so my-plex's pickle catches up.")
+    if quit_early:
+        print(">>> Stopped early (q).")
+
+
+def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
+    """v2.69: Create-or-extend Plex Collections for TMDB-collection groups
+    in scope that --uncollected has flagged.
+
+    Per group:
+      • Look up or create the Plex Collection.  Default name = TMDB
+        collection name; interactive operator can override (unless --auto
+        or --yes is in effect).
+      • Add every in-library Movie of the group to the Plex Collection.
+      • Records the action in ~/.my-plex/logs/uncollected_resolve_<TS>.json.
+
+    --auto + --try mirror the conventions of the other --resolve cmds.
+    """
+    import os, datetime as _dt
+    try:
+        from plexapi.collection import Collection as _PlexCollection
+    except Exception:
+        _PlexCollection = None
+
+    # 1. Build the candidate list by re-running the detector quietly.
+    obj_keys = []
+    if scope:
+        scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
+        obj_keys = [k for (k, _o) in (scope_items or [])]
+    else:
+        obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
+
+    # Group by tmdb_collection_id (same logic as the detector).
+    coll_groups = {}
+    seen = set()
+    for key in obj_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        if obj.get('type') != 'Movie':
+            continue
+        cid = obj.get('tmdb_collection_id')
+        if not cid:
+            continue
+        coll_groups.setdefault(str(cid), []).append((key, obj))
+
+    # Filter by min-members + already-covered.
+    plex_coll_by_lib = {}   # library_name → list[(cache_key, title, set_of_ratingKeys)]
+    for k, o in PLEX_Media.OBJ_BY_ID.items():
+        if o.get('type') != 'Collection':
+            continue
+        lib = o.get('library', '')
+        mids = set(int(m) for m in (o.get('member_ids') or []) if str(m).isdigit())
+        plex_coll_by_lib.setdefault(lib, []).append((k, o.get('title') or '', mids))
+
+    candidates = []   # (cid, tmdb_name, members, target_library)
+    for cid, members in coll_groups.items():
+        if len(members) < UNCOLLECTED_MIN_MEMBERS:
+            continue
+        # All Movies of a group are in the same library? (almost always; if not, skip)
+        libs = {(_o.get('library') or '') for _, _o in members}
+        if len(libs) != 1:
+            continue
+        target_lib = libs.pop()
+        if not target_lib:
+            continue
+        our_rks = {int(_o.get('id') or 0) for _, _o in members if (_o.get('id') or 0)}
+        # Already fully covered?
+        covered = False
+        for _ck, _t, _mids in (plex_coll_by_lib.get(target_lib) or []):
+            if our_rks.issubset(_mids):
+                covered = True; break
+        if covered:
+            continue
+        tmdb_name = next((_o.get('tmdb_collection_name') for _, _o in members if _o.get('tmdb_collection_name')), '') or ''
+        candidates.append((cid, tmdb_name, members, target_lib))
+
+    if not candidates:
+        print("No uncollected TMDB collection groups in scope — nothing to resolve.")
+        return
+
+    print(f">>> --uncollected --resolve: {len(candidates)} group(s) to process")
+    if auto: print(f">>> AUTO mode: no per-group confirmation")
+    if dry_run: print(">>> DRY-RUN — no Plex changes will be made.")
+    print()
+
+    plex = ensure_plex_api(required=not dry_run)
+
+    log_payload = {
+        'command':  'uncollected_resolve',
+        'started':  _dt.datetime.now().isoformat(timespec='seconds'),
+        'dry_run':  bool(dry_run),
+        'auto':     bool(auto),
+        'scope':    scope,
+        'actions':  [],
+    }
+    fixed = skipped = 0
+    quit_early = False
+
+    for i, (cid, tmdb_name, members, lib_name) in enumerate(candidates, 1):
+        print(f"──────────────────────────────────────────────────────────────────────────")
+        print(f"[{i}/{len(candidates)}] TMDB collection {tmdb_name!r}  (id={cid})  → library {lib_name!r}")
+        for k, o in sorted(members, key=lambda x: (x[1].get('year') or 0)):
+            print(f"    {k:<14}  {o.get('title','?')!r:<45}  ({o.get('year') or '----'})")
+
+        # Decide Plex Collection name.
+        coll_name = tmdb_name
+        if not (auto or yes or dry_run):
+            try:
+                _in = input(f"  Plex Collection name (default: {tmdb_name!r}, 's' to skip): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (quit)")
+                quit_early = True
+                break
+            if _in.lower() == 's':
+                print("  → skipped")
+                skipped += 1
+                log_payload['actions'].append({'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name, 'status': 'skip', 'reason': 'user-skipped'})
+                continue
+            coll_name = _in or tmdb_name
+        if not coll_name:
+            print("  ⚠ no collection name available — skipping")
+            skipped += 1
+            continue
+
+        if dry_run:
+            print(f"  [dry-run] would create/extend Plex Collection {coll_name!r} in {lib_name!r} with {len(members)} member(s)")
+            log_payload['actions'].append({
+                'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name,
+                'plex_collection': coll_name, 'members': [k for k, _ in members], 'status': 'dry-run',
+            })
+            continue
+
+        # Look up the live Plex items.
+        try:
+            section = plex.library.section(lib_name)
+        except Exception as e:
+            print(f"  ⚠ plex.library.section({lib_name!r}) failed: {e}")
+            skipped += 1
+            log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': f'section: {e}'})
+            continue
+        try:
+            items = []
+            for k, o in members:
+                rk = int(o.get('id') or 0)
+                if not rk:
+                    continue
+                try:
+                    items.append(plex.fetchItem(rk))
+                except Exception as _e:
+                    print(f"  ⚠ fetchItem({rk}) failed for {k}: {_e}")
+        except Exception as e:
+            print(f"  ⚠ Plex item lookup failed: {e}")
+            skipped += 1
+            log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': f'fetchItem: {e}'})
+            continue
+        if not items:
+            print(f"  ⚠ no live Plex items found for the {len(members)} group member(s)")
+            skipped += 1
+            log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': 'no-live-items'})
+            continue
+
+        # Create-or-fetch the Plex Collection, then add items.
+        existing = None
+        try:
+            for c in section.collections():
+                if (c.title or '').strip().lower() == coll_name.strip().lower():
+                    existing = c; break
+            if existing is None and _PlexCollection is not None:
+                try:
+                    existing = _PlexCollection.create(plex, title=coll_name, section=section, items=items)
+                    print(f"  ✓ created Plex Collection {coll_name!r} with {len(items)} item(s)")
+                except Exception as _e:
+                    print(f"  ⚠ Plex Collection.create({coll_name!r}) failed: {_e}")
+                    existing = None
+            if existing is not None:
+                try:
+                    existing.addItems(items)
+                    print(f"  ✓ added {len(items)} item(s) to Plex Collection {coll_name!r}")
+                except Exception as _e:
+                    # Per-item fallback for older plexapi
+                    for it in items:
+                        try:
+                            it.addCollection(coll_name)
+                        except Exception:
+                            pass
+                    print(f"  ✓ tagged {len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
+            fixed += 1
+            log_payload['actions'].append({
+                'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name,
+                'plex_collection': coll_name, 'members': [k for k, _ in members], 'status': 'fixed',
+            })
+        except Exception as e:
+            print(f"  ⚠ Plex Collection mirror for {coll_name!r} failed: {e}")
+            skipped += 1
+            log_payload['actions'].append({'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name, 'status': 'fail', 'reason': str(e)})
+
+    log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
+    log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(candidates)}
+    _write_resolve_log('uncollected_resolve', log_payload)
+
+    print()
+    print("=" * 70)
+    print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(candidates)} total")
+    if fixed and not dry_run:
+        print(">>> Done.  Run --update-cache so my-plex's cache reflects the new Plex Collections.")
     if quit_early:
         print(">>> Stopped early (q).")
 
@@ -19419,6 +19699,41 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # marker-promotion logic in --plex2disk without per-call recompute.
         finalize_disk_plex_map_uniform_fields(globals().get('DISK_PLEX_MAP', {}))
 
+        # v2.69: backfill TMDB belongs_to_collection on every Movie that
+        # has a TMDB external id but no tmdb_collection_id cached yet.
+        # One TMDB call per Movie max once per cache; subsequent
+        # --update-cache runs only hit movies added since last time.
+        # Drives the --uncollected detector.
+        if TMDB_API_KEY:
+            _backfill_targets = []
+            for _k, _o in PLEX_Media.OBJ_BY_ID.items():
+                if _o.get('type') != 'Movie':
+                    continue
+                if 'tmdb_collection_id' in _o:
+                    continue  # already cached (None or value — both count as 'known')
+                _ext = (_o.get('external_ids') or {})
+                _tmdb_id = _ext.get('tmdb') or _ext.get('TMDB')
+                if not _tmdb_id:
+                    continue
+                _backfill_targets.append((_k, _o, str(_tmdb_id)))
+            if _backfill_targets:
+                _bf_total = len(_backfill_targets)
+                if PLEX_Media.cache_rebuild_lock:
+                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: 0/{_bf_total}")
+                print(f"  >> TMDB belongs_to_collection backfill: {_bf_total} Movie(s) to probe (one-time per Movie; rate-limited).")
+                _bf_with_coll = 0
+                for _i, (_k, _o, _tmdb_id) in enumerate(_backfill_targets, 1):
+                    _cid, _cname = fetch_belongs_to_collection_from_tmdb(_tmdb_id)
+                    # ALWAYS write the field (even None) so future runs skip this Movie.
+                    _o['tmdb_collection_id']   = _cid
+                    _o['tmdb_collection_name'] = _cname
+                    if _cid:
+                        _bf_with_coll += 1
+                    if _i % 100 == 0 or _i == _bf_total:
+                        if PLEX_Media.cache_rebuild_lock:
+                            PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: {_i}/{_bf_total}")
+                print(f"  >> TMDB belongs_to_collection backfill: done ({_bf_with_coll}/{_bf_total} have collections).")
+
         # Run all problem checks (pure cache walks, ~1s) and store counts in cache
         # so --problems can show cached counts and --update-cache summary can report all issues
         if PLEX_Media.cache_rebuild_lock:
@@ -19439,6 +19754,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_mmf      = _silent(PLEX_Media._list_multi_movie_folder, all_obj_keys, None) or 0
         _pc_llm      = _silent(PLEX_Media._list_library_language_mismatch, all_obj_keys, None) or 0
         _pc_badstruct= _silent(PLEX_Media._list_bad_structure, all_obj_keys, None) or 0
+        _pc_uncoll   = _silent(PLEX_Media._list_uncollected, all_obj_keys, None) or 0
         # v2.18: backfill renumber* + unrecognized — these were printed by
         # the summary but never populated, so they always displayed as 0
         # (i.e. never).  Audit by user.
@@ -19474,6 +19790,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             'multi_movie_folder':_pc_mmf,
             'library_language_mismatch':_pc_llm,
             'bad_structure':     _pc_badstruct,
+            'uncollected':       _pc_uncoll,
             'renumber':          _pc_renumber,
             'renumber_nodata':   _pc_renumber_nodata,
             'renumber_season':   _pc_renumber_season,
@@ -19724,6 +20041,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     _problems_cache.get('multi_movie_folder', 0) +
                     _problems_cache.get('library_language_mismatch', 0) +
                     _problems_cache.get('bad_structure', 0) +
+                    _problems_cache.get('uncollected', 0) +
                     _problems_cache.get('numbering_issues', 0) +
                     _problems_cache.get('reencode', 0) +
                     _problems_cache.get('remux', 0) +
@@ -21560,6 +21878,95 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if VRB:
             print(f"  Fix: move them to the library matching their audio language")
             print(f"  (e.g. my-plex <KEY> --mv-to movies.{flagged[0][2]} for one of them).")
+        return len(flagged)
+
+    @staticmethod
+    @staticmethod
+    def _list_uncollected(obj_keys, library_name):
+        """v2.69: List Movies belonging to a TMDB collection that aren't yet
+        grouped under a matching Plex Collection.
+
+        Detection:
+          1. Per Movie in scope, look up its cached `tmdb_collection_id`
+             (populated lazily by --update-cache via
+             fetch_belongs_to_collection_from_tmdb()).
+          2. Group movies by tmdb_collection_id.
+          3. Skip groups with fewer than UNCOLLECTED_MIN_MEMBERS movies in
+             the library (CONF-tunable).
+          4. For each remaining group, check whether ALL its movies are
+             already covered by a single Plex Collection (any of the
+             Collection-type cache entries whose member_ids superset the
+             group).  Flag the group as 'uncollected' if not.
+
+        Returns count of flagged groups.
+        """
+        # Build TMDB-collection-id → [(cache_key, movie_obj)]
+        coll_groups = {}
+        seen = set()
+        for key in obj_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+            if obj.get('type') != 'Movie':
+                continue
+            if library_name and obj.get('library') != library_name:
+                continue
+            cid = obj.get('tmdb_collection_id')
+            if not cid:
+                continue
+            coll_groups.setdefault(str(cid), []).append((key, obj))
+
+        if not coll_groups:
+            return 0
+
+        # Build inverse: Plex-Collection → set of member ratingKeys.
+        plex_coll_members = {}   # collection_cache_key → (title, set(ratingKeys as int))
+        for k, o in PLEX_Media.OBJ_BY_ID.items():
+            if o.get('type') != 'Collection':
+                continue
+            mids = set(int(m) for m in (o.get('member_ids') or []) if str(m).isdigit())
+            plex_coll_members[k] = (o.get('title') or '', mids, o.get('library', ''))
+
+        flagged = []   # (tmdb_cid, tmdb_name, [(key, obj)], existing_plex_coll_or_None)
+        for cid, members in coll_groups.items():
+            if len(members) < UNCOLLECTED_MIN_MEMBERS:
+                continue
+            # Use the TMDB name carried on any of the movies (they should all agree)
+            tmdb_name = ''
+            for _, _o in members:
+                tmdb_name = _o.get('tmdb_collection_name') or ''
+                if tmdb_name:
+                    break
+            our_rks = {int(_o.get('id') or 0) for _, _o in members if (_o.get('id') or 0)}
+            # Find an existing Plex Collection that contains ALL our movies
+            covering = None
+            for _pk, (_pt, _pmids, _plib) in plex_coll_members.items():
+                if our_rks.issubset(_pmids):
+                    covering = (_pk, _pt, _pmids, _plib)
+                    break
+            if covering:
+                # Already fully grouped.  But maybe TMDB has more parts than
+                # the Plex Collection currently holds — still don't flag,
+                # because those extras aren't in our library to add anyway.
+                continue
+            flagged.append((cid, tmdb_name, members, covering))
+
+        if not flagged:
+            return 0
+
+        flagged.sort(key=lambda r: (r[1] or '').lower())
+        print(f"\n  {len(flagged)} TMDB collection(s) with {UNCOLLECTED_MIN_MEMBERS}+ Movies in your library not yet grouped under a matching Plex Collection")
+        print(f"  (threshold UNCOLLECTED_MIN_MEMBERS = {UNCOLLECTED_MIN_MEMBERS} — tune in ~/.my-plex.conf)")
+        print()
+        for cid, tmdb_name, members, _existing in flagged:
+            print(f"  TMDB collection {tmdb_name!r}  (id={cid})  — {len(members)} Movie(s) in your library:")
+            for k, o in sorted(members, key=lambda x: (x[1].get('year') or 0)):
+                lib  = o.get('library', '')
+                year = o.get('year') or '----'
+                print(f"    {k:<14}  {o.get('title','?')!r:<45}  ({year})  [{lib}]")
+            print()
+        print(f"  Resolve via: my-plex --uncollected --resolve [--auto] [--try]")
         return len(flagged)
 
     @staticmethod
@@ -26644,7 +27051,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'uncollected', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -28079,6 +28486,45 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  If the nested file is a byte-identical copy of the parent-level")
             print("  one, --duplicates --resolve (with AUTO_TRASH_DUPLICATES) will catch it.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'uncollected':
+            print()
+            print("=" * 76)
+            print("UNCOLLECTED MOVIES HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --uncollected [SCOPE]")
+            print("       my-plex --uncollected --resolve [--auto] [--try] [--yes]")
+            print()
+            print("Flags Movies that belong to a TMDB collection (e.g. James Bond,")
+            print("Mission Impossible, Marvel Cinematic Universe, X-Men, Harry Potter,")
+            print("Edelstein Filmreihe) but are NOT yet grouped under a matching Plex")
+            print("Collection.")
+            print()
+            print("DETECTION:")
+            print("  • --update-cache backfills `tmdb_collection_id` per Movie via")
+            print("    one TMDB /movie/<id> call (only for Movies missing the field).")
+            print("  • Detector groups Movies by tmdb_collection_id; flags any group")
+            print(f"    with >= UNCOLLECTED_MIN_MEMBERS ({UNCOLLECTED_MIN_MEMBERS}) in your library that aren't")
+            print("    already fully covered by a single Plex Collection.")
+            print()
+            print("RESOLVE MODE:")
+            print("  --resolve            interactive (prompts for Plex Collection name; default = TMDB name)")
+            print("  --resolve --auto     non-interactive (TMDB name used)")
+            print("  --resolve --try      dry-run (no Plex changes)")
+            print("  --resolve --yes      skip confirmation prompts")
+            print()
+            print("CONFIG (~/.my-plex.conf):")
+            print(f"  UNCOLLECTED_MIN_MEMBERS = {UNCOLLECTED_MIN_MEMBERS}   # min in-library members per group")
+            print()
+            print("EXAMPLES:")
+            print()
+            print("  my-plex --uncollected                  # all movie libraries")
+            print("  my-plex --uncollected movies.en        # one library")
+            print("  my-plex --uncollected --resolve --auto # create/extend Plex Collections, no prompts")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -30336,6 +30782,15 @@ PROBLEM_CATEGORIES_REGISTRY = {
         'fix_hint':      'my-plex --misplaced --resolve',
         'tsv_relevant':  False,
         'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_misplaced(obj_keys, library) or 0,
+    },
+    'uncollected': {
+        'cli_flag':      '--uncollected',
+        'help_topic':    'uncollected',
+        'header':        'Uncollected Movies',
+        'description':   'Movies belonging to a TMDB collection that are not yet grouped under a matching Plex Collection',
+        'fix_hint':      'my-plex --uncollected --resolve [--auto]',
+        'tsv_relevant':  False,
+        'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_uncollected(obj_keys, library) or 0,
     },
     'numbering_issues': {
         'cli_flag':      '--episode-numbering-issues',
@@ -38361,6 +38816,22 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_renumber_title_mismatch(obj_keys, library_name)
         return
 
+    # Handle --uncollected [SCOPE] [--resolve [--auto] [--try] [--yes]]
+    uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
+    if uncoll_val is not None:
+        resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
+        if resolve:
+            auto    = bool(safe_getattr(cmd_args, 'auto', False) or safe_getattr(args, 'auto', False))
+            dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+            yes     = bool(safe_getattr(cmd_args, 'yes', False)     or safe_getattr(args, 'yes', False))
+            cmd_uncollected_resolve(scope=uncoll_val, auto=auto, dry_run=dry_run, yes=yes)
+            return
+        media_type = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
+        obj_keys, library_name, scope = resolve_scope_to_keys(uncoll_val, media_type=media_type)
+        print(f"\n--- Uncollected Movies{scope} ---")
+        PLEX_Media._list_uncollected(obj_keys, library_name)
+        return
+
     # Handle --misplaced / --wrong-library [SCOPE] [--resolve [--try] [--yes]]
     misplaced_val = safe_getattr(cmd_args, 'misplaced', None)
     if misplaced_val is not None:
@@ -38701,6 +39172,7 @@ def main():
         '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
         '--multi-movie-folder': 'multi-movie-folder',
         '--misplaced': 'misplaced', '--wrong-library': 'misplaced',
+        '--uncollected': 'uncollected', 'uncollected': 'uncollected',
         '--renumber-title-mismatch': 'renumber',
         '--library-language-mismatch': 'library-language-mismatch',
         '--bad-structure': 'bad-structure', '--nested-media': 'bad-structure',
@@ -39438,6 +39910,7 @@ def main():
     main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--uncollected', metavar='SCOPE', nargs='*', default=None, dest='uncollected', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--renumber-title-mismatch', metavar='SCOPE', nargs='*', default=None, dest='renumber_title_mismatch', help=argparse.SUPPRESS)  # Hidden - documented via --problems / --help renumber
     main_parser.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -39517,6 +39990,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help="List items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy). Use --help misplaced for details.")
+    GLOBAL_CMD_PARSER.add_argument('--uncollected', metavar='SCOPE', nargs='*', default=None, dest='uncollected', help="List Movies belonging to a TMDB collection that aren't grouped under a matching Plex Collection. Add --resolve [--auto] [--try] to create/extend the Plex Collection. Use --help uncollected for details.")
     GLOBAL_CMD_PARSER.add_argument('--renumber-title-mismatch', metavar='SCOPE', nargs='*', default=None, dest='renumber_title_mismatch', help="List episodes whose Plex title doesn't match the scraped TSV title for the same S/E slot. Use -V for the per-episode breakdown.")
     GLOBAL_CMD_PARSER.add_argument('--library-language-mismatch', metavar='SCOPE', nargs='*', default=None, help="List items whose audio language disagrees with their library's configured language (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY). Use --help library-language-mismatch for details.")
     GLOBAL_CMD_PARSER.add_argument('--bad-structure', '--nested-media', metavar='SCOPE', nargs='*', default=None, dest='bad_structure', help="List items whose on-disk path is nested too deeply for Plex's expected flat layout. Movies should sit at library_root/wrapper/file (≤1 dir below root); Episodes at library_root/series[/season]/file (≤2 dirs). Anything deeper is flagged — typically a downloader that extracted an archive into a subdirectory. SCOPE: library / cache key / Plex ID / title / filepath. Use --help bad-structure for details.")
@@ -39884,6 +40358,7 @@ def main():
     _reinject_variadic('junk',                      '--junk')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('misplaced',                 '--misplaced')
+    _reinject_variadic('uncollected',               '--uncollected')
     _reinject_variadic('renumber_title_mismatch',   '--renumber-title-mismatch')
     _reinject_variadic('library_language_mismatch', '--library-language-mismatch')
     _reinject_variadic('bad_structure',             '--bad-structure')
