@@ -136,7 +136,7 @@ my-plex --update-cache --force
 
 ### From Scratch (Clean Slate)
 ```bash
-my-plex --update-cache --from-scratch --force
+my-plex --update-cache --force-plex --force
 ```
 - Deletes existing cache completely
 - Rebuilds everything from zero
@@ -156,7 +156,7 @@ For a library with ~14,500 video files:
 | `--update-cache --force-plexdata` | 5-10 minutes | After file operations |
 | `--update-cache --force-metadata` | 15-30 minutes | Initial metadata setup |
 | `--update-cache --force` | 20-40 minutes | Complete verification |
-| `--update-cache --from-scratch --force` | 25-45 minutes | Clean rebuild |
+| `--update-cache --force-plex --force` | 25-45 minutes | Clean rebuild |
 
 *Note: Times vary based on library size, network speed (SSH), and server load.*
 
@@ -179,7 +179,7 @@ For a library with ~14,500 video files:
    → `my-plex --update-cache --force`
 
 5. **Cache corrupted or want to start fresh?**
-   → `my-plex --update-cache --from-scratch --force`
+   → `my-plex --update-cache --force-plex --force`
 
 ---
 
@@ -250,8 +250,8 @@ my-plex --update-cache --force
 - ✓ `--update-cache --force-plexdata`
 - ✓ `--update-cache --force-metadata`
 - ✓ `--update-cache --force` (triggers both above)
-- ✓ `--update-cache --from-scratch` (clears cache first)
-- ✓ `--update-cache --from-scratch --force` (complete clean rebuild)
+- ✓ `--update-cache --force-plex` (clears cache first)
+- ✓ `--update-cache --force-plex --force` (complete clean rebuild)
 
 ### Invalid/Redundant Combinations
 - ✗ `--force-plexdata` without `--update-cache` (no effect)

@@ -851,7 +851,7 @@ class TestCacheSkipLogic(unittest.TestCase):
             "type_map must map 'Series' to 'series' (already plural)")
 
     def test_from_scratch_counts_all_items_as_added(self):
-        """--from-scratch summary must count all Movie/Episode objects as added."""
+        """--force-plex summary must count all Movie/Episode objects as added."""
         content = self._read_script()
         # FROM_SCRATCH branch must count items directly from OBJ_BY_ID
         self.assertIn("if FROM_SCRATCH:", content,
@@ -977,7 +977,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         # The init() function must have a sweep that iterates OBJ_BY_ID and queues
         # any Movie/Episode files with file_metadata=None to _metadata_batch_queue.
-        # This covers --from-scratch full processing paths that don't call
+        # This covers --force-plex full processing paths that don't call
         # _collect_missing_file_metadata individually.
         self.assertIn("additional files missing metadata", content,
             "Must have a sweep that reports queuing additional files missing metadata")
@@ -1360,10 +1360,10 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
             "--broken must not skip objects with None duration — PROBE ERR files would be hidden")
 
     def test_from_scratch_preserves_file_metadata(self):
-        """--from-scratch must preserve file_metadata and re-attach after rebuild."""
+        """--force-plex must preserve file_metadata and re-attach after rebuild."""
         content = self._read_script()
         self.assertIn("_preserved_file_metadata", content,
-            "--from-scratch must extract file_metadata before clearing OBJ_BY_ID")
+            "--force-plex must extract file_metadata before clearing OBJ_BY_ID")
         import re
         # Preservation must happen BEFORE clearing OBJ_BY_ID
         preserve_pos = content.find("_preserved_file_metadata = {}")
@@ -1404,7 +1404,7 @@ class TestCacheFormatValidation(unittest.TestCase):
     def test_outdated_cache_detected(self):
         content = self._read_script()
         self.assertIn("Cache format is outdated", content)
-        self.assertIn("--update-cache --from-scratch", content)
+        self.assertIn("--update-cache --force-plex", content)
 
     def test_filter_skips_show_season_types(self):
         content = self._read_script()
@@ -5405,7 +5405,7 @@ class TestUnmatched(unittest.TestCase):
         """Cache must detect missing guid field and warn at point of use."""
         content = self._read_script()
         self.assertIn("_cache_missing_guid", content, "Must flag missing guid in cache")
-        self.assertIn("update-cache --from-scratch", content, "Must tell user how to fix")
+        self.assertIn("update-cache --force-plex", content, "Must tell user how to fix")
 
     def test_unmatched_e2e_help(self):
         """--help unmatched must run without error."""
@@ -5731,7 +5731,7 @@ class TestForceTsv(unittest.TestCase):
         self.assertIn('force-tsv', result.stdout)
 
     def test_default_preserves_tsv(self):
-        """--from-scratch without --force-tsv must NOT force re-scrape (default = preserve)."""
+        """--force-plex without --force-tsv must NOT force re-scrape (default = preserve)."""
         src = self._read_script()
         # The condition must require FORCE_TSV to be True for re-scraping
         self.assertNotIn('FROM_SCRATCH and not FORCE_TSV', src, "Logic should be opt-IN (FORCE_TSV), not opt-OUT")
@@ -6210,7 +6210,7 @@ class TestObjByShowScraped(unittest.TestCase):
         self.assertIn("source.get('obj_by_series_scraped'", content)
 
     def test_from_scratch_reset(self):
-        """OBJ_BY_SERIES_SCRAPED must be reset during --from-scratch."""
+        """OBJ_BY_SERIES_SCRAPED must be reset during --force-plex."""
         content = self._read_script()
         self.assertIn('OBJ_BY_SERIES_SCRAPED = {}', content)
 
@@ -10228,20 +10228,20 @@ def run_regression_tests(main_globals, scope=None):
         test_parser.add_argument('--type', type=str)
         test_parser.add_argument('--update-cache', action='store_true')
         test_parser.add_argument('--force', action='store_true')
-        test_parser.add_argument('--from-scratch', action='store_true')
+        test_parser.add_argument('--force-plex', action='store_true')
 
         validation_tests = [
             # (args, should_fail, description)
             (['--resolve'], True, "--resolve without --duplicates should fail"),
             (['--type', 'movie'], True, "--type without --list or --duplicates should fail"),
             (['--force'], True, "--force without --update-cache should fail"),
-            (['--from-scratch'], True, "--from-scratch without --update-cache should fail"),
+            (['--force-plex'], True, "--force-plex without --update-cache should fail"),
             (['--duplicates', '--resolve'], False, "--resolve with --duplicates should work"),
             (['--list', '--duplicates', '--resolve'], False, "--resolve with --list --duplicates should work"),
             (['--list', '--type', 'movie'], False, "--type with --list should work"),
             (['--duplicates', '--type', 'movie'], False, "--type with --duplicates should work"),
             (['--update-cache', '--force'], False, "--force with --update-cache should work"),
-            (['--update-cache', '--from-scratch'], False, "--from-scratch with --update-cache should work"),
+            (['--update-cache', '--force-plex'], False, "--force-plex with --update-cache should work"),
         ]
 
         validation_ok = True

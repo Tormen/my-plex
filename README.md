@@ -159,7 +159,7 @@ That's it. On first run, the `my-plex` shell wrapper automatically:
 
 ```bash
 # First time: build the cache (reads entire Plex DB, takes ~1 minute)
-my-plex --update-cache --from-scratch
+my-plex --update-cache --force-plex
 
 # List all libraries (with supported status)
 my-plex --list

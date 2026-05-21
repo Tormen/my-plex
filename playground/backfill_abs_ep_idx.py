@@ -1,6 +1,6 @@
 """One-time cache patch: add abs_ep_idx to episodes with scraped data.
 
-Avoids `my-plex --update-cache --from-scratch` by patching the existing
+Avoids `my-plex --update-cache --force-plex` by patching the existing
 cache.pkl in place with the new abs_ep_idx field.
 
 Applies, per show in obj_by_id (only if scraped data exists):
