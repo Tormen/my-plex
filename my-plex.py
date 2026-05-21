@@ -11914,142 +11914,60 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
         return None
 
 def update_cache_for_library(library_name):
-    """Update cache by fetching all items from a specific Plex library
+    """v2.69: Refresh my-plex's cache by delegating to the canonical
+    `--update-cache` code path via a subprocess invocation of the my-plex
+    script itself, then reloading the freshly-written pickle into the
+    current process's in-memory PLEX_Media.OBJ_BY_* dictionaries.
 
-    This completely refreshes the cache entries for the specified library by:
-    1. Removing all existing cache entries for this library
-    2. Fetching fresh data from Plex server
-    3. Rebuilding cache structures for this library
+    Why subprocess + reload, not in-process?  The previous in-process
+    implementation was incomplete for Series-type libraries: it removed
+    Series + Seasons + Episodes from OBJ_BY_ID but only repopulated
+    Series HEADERS (no Seasons, no Episodes, no OBJ_BY_SERIES /
+    OBJ_BY_SERIES_EPISODES), corrupting the cache and crashing
+    PLEX_Media.init() on next start (KeyError on missing series).  A
+    truthful in-process rebuild would have to replicate the entire
+    --update-cache pipeline — file_segment_words, audio_languages,
+    ffmpeg metadata probing, multi-version handling, etc. — i.e. nearly
+    all of my-plex.  Subprocess delegation reuses that proven code
+    intact.
 
-    Args:
-        library_name: Name of the library to update
+    NB: `library_name` is accepted for API compatibility with the older
+    in-process helper; the subprocess performs an *incremental* full
+    --update-cache (not scoped), since Plex's DB diff is what drives
+    the work and only changed items get processed.  Targeting one
+    library wouldn't materially speed this up because the diff scan
+    walks all libraries either way.
 
-    Returns:
-        Number of items fetched, or None if error
+    Returns: int (count of items in cache after reload), or None on error.
     """
+    import subprocess as _sp, sys as _sys, os as _os
+    script = _os.path.abspath(__file__)
     try:
-        if library_name not in PLEX_Library.OBJ_DICT:
-            if VRB: print(f"{VRBPFX}Library '{library_name}' not found")
+        # Inherit stdio so the operator sees update-cache progress live.
+        # check=False — we'll inspect returncode ourselves.
+        r = _sp.run([_sys.executable, script, '--update-cache'],
+                    capture_output=False, check=False)
+        if r.returncode != 0:
+            print(f"  ⚠ subprocess --update-cache exit code {r.returncode}; cache may be stale")
             return None
-
-        # v2.69: PLEX_Library.OBJ_DICT stores our internal wrappers which
-        # don't expose .reload() / .all() from plexapi — fetch the real
-        # LibrarySection so subsequent lib.reload() + lib.all() work.
-        try:
-            plex = ensure_plex_api(required=True)
-            lib = plex.library.section(library_name)
-        except Exception as _e:
-            if VRB: print(f"{VRBPFX}plex.library.section({library_name!r}) failed: {_e}")
-            return None
-        lib_type = PLEX_Library.OBJ_DICT_TYPE.get(library_name, 'Unknown')
-
-        # Step 1: Remove all existing entries for this library from cache
-        keys_to_remove = []
-        for key, obj in PLEX_Media.OBJ_BY_ID.items():
-            if obj.get('library') == library_name:
-                keys_to_remove.append(key)
-
-        for key in keys_to_remove:
-            obj = PLEX_Media.OBJ_BY_ID[key]
-            file_path = obj.get('file')
-
-            # Remove from all cache structures
-            del PLEX_Media.OBJ_BY_ID[key]
-
-            if file_path and file_path in PLEX_Media.OBJ_BY_FILEPATH:
-                del PLEX_Media.OBJ_BY_FILEPATH[file_path]
-
-            obj_type = obj.get('type')
-            if obj_type == 'Movie' and key in PLEX_Media.OBJ_BY_MOVIE:
-                del PLEX_Media.OBJ_BY_MOVIE[key]
-            elif obj_type == 'Series' and key in PLEX_Media.OBJ_BY_SERIES:
-                del PLEX_Media.OBJ_BY_SERIES[key]
-            elif obj_type == 'Episode':
-                # Remove from series episodes structure
-                for series_key, episodes in PLEX_Media.OBJ_BY_SERIES_EPISODES.items():
-                    if key in episodes:
-                        episodes.remove(key)
-
-        # Remove library from OBJ_BY_LIBRARY
-        if library_name in PLEX_Media.OBJ_BY_LIBRARY:
-            del PLEX_Media.OBJ_BY_LIBRARY[library_name]
-
-        # Step 2: Fetch all items from Plex and rebuild cache
-        lib.reload()
-        items_added = 0
-
-        for item in lib.all():
-            try:
-                obj_type = _plex_type(item.type)
-
-                # Handle Movies
-                if obj_type == 'Movie' and hasattr(item, 'media'):
-                    for media in item.media:
-                        for part in media.parts:
-                            cache_key = f"{obj_type}:{part.id}"
-
-                            cache_entry = {
-                                'id': item.ratingKey,
-                                'type': obj_type,
-                                'library': library_name,
-                                'file': part.file,
-                                'title': item.title,
-                                'year': getattr(item, 'year', None),
-                                'part_id': part.id,
-                                'filesize': getattr(part, 'size', 0),
-                                'duration': getattr(item, 'duration', 0),
-                                'version': f"{getattr(item, 'duration', 0) / 60000:.2f}min" if hasattr(item, 'duration') else 'N/A'
-                            }
-
-                            # Add to cache structures
-                            PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
-                            PLEX_Media.OBJ_BY_FILEPATH[part.file] = cache_key
-
-                            if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
-                                PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
-                            if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
-                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                            if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
-                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
-
-                            # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
-                            if cache_key not in PLEX_Media.OBJ_BY_MOVIE:
-                                PLEX_Media.OBJ_BY_MOVIE[cache_key] = {}
-                            PLEX_Media.OBJ_BY_MOVIE[cache_key][cache_entry['version']] = part.file
-
-                            items_added += 1
-
-                # Handle Shows (for TV libraries)
-                elif obj_type == 'Series':
-                    cache_key = f"{obj_type}:{item.ratingKey}"
-
-                    cache_entry = {
-                        'id': item.ratingKey,
-                        'type': obj_type,
-                        'library': library_name,
-                        'title': item.title
-                    }
-
-                    PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
-
-                    if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
-                        PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
-                    if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
-                        PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                    if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
-                        PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
-
-                    items_added += 1
-
-            except Exception as e:
-                if DBG: print(f"{DBGPFX}Error processing item in {library_name}: {e}")
-                continue
-
-        if VRB: print(f"{VRBPFX}Updated cache for library '{library_name}': {items_added} items")
-        return items_added
-
     except Exception as e:
-        print(f"  ⚠ Warning: Could not update cache for library '{library_name}': {e}")
+        print(f"  ⚠ subprocess --update-cache failed: {e}")
+        return None
+
+    # Reload the freshly-written pickle into the current process's
+    # in-memory state.  Uses the same helper that load_cache uses on
+    # startup, so every PLEX_Media.OBJ_BY_* dict gets the new data.
+    try:
+        import pickle as _pickle
+        global CACHE
+        _cache_path = _os.path.expanduser(CACHE_FILE)
+        with open(_cache_path, 'rb') as _f:
+            CACHE = _pickle.load(_f)
+        load_media_cache(CACHE)
+        return len(PLEX_Media.OBJ_BY_ID)
+    except Exception as e:
+        print(f"  ⚠ cache reload after subprocess --update-cache failed: {e}")
+        print(f"    In-memory state may be stale; restart my-plex to pick up the new cache.")
         return None
 
 def get_movie_dir_from_path(filepath, library_name):
