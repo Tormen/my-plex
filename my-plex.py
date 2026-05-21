@@ -10081,9 +10081,28 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             _cm = _act.get('collection_meta') or None
             if not _cm:
                 continue
-            _coll_name = (_cm.get('original_name') or _cm.get('name') or '').strip()
-            if not _coll_name:
+            # Suggested name from TMDB (original_name preferred so German
+            # libraries get the German title like 'Edelstein Filmreihe' rather
+            # than the English 'Gwendolyn Shepherd Collection').
+            _coll_suggest = (_cm.get('original_name') or _cm.get('name') or '').strip()
+            if not _coll_suggest:
                 continue
+            # Let operator override (default = TMDB suggestion).  Empty input
+            # accepts the default; 's' skips collection creation entirely.
+            # In dry_run OR --yes mode, take the TMDB suggestion without prompting.
+            if dry_run or yes:
+                _coll_name = _coll_suggest
+                if yes:
+                    print(f"  → Plex Collection name (--yes): {_coll_name!r}")
+            else:
+                try:
+                    _input = input(f"  Plex Collection name (default: {_coll_suggest!r}, 's' to skip): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    _input = ''  # default
+                if _input.lower() == 's':
+                    print(f"  → skipping Plex Collection creation for this action")
+                    continue
+                _coll_name = _input or _coll_suggest
             _tgt_lib = _act.get('target_library') or ''
             _dests   = [_m.get('dest') for _m in (_act.get('moves') or []) if _m.get('dest')]
             if not _tgt_lib or not _dests:
