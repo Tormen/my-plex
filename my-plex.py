@@ -24197,13 +24197,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 _sigs = {_row_sig(r) for r in _grp}
                 _total = _total_eps_in_season(_sk, _s)
                 _matched = len(_grp)
-                # v2.56: roll up when EITHER display sig is uniform OR every
-                # episode of this season is in the matched set.  The user's
-                # ask was "club the series if ALL episodes are matched" —
-                # display heterogeneity (different episode titles) shouldn't
-                # block that.  Under -V we KEEP all per-episode rows AND
-                # prepend the rollup row, so the user gets header + details.
-                _can_roll = (not VRB) and (len(_sigs) <= 1 or _matched == _total)
+                # v2.69: roll up ONLY when every episode of this season is in
+                # the matched set ("club the series if ALL episodes are matched").
+                # The earlier v2.56 also rolled up on uniform display-sig, but
+                # that hid PARTIAL matches: e.g. `my-plex edelstein` matched
+                # 2 episodes both titled 'Arsen und Edelsteine' (uniform sig)
+                # → got rolled up to Series:3312, losing the specific Episode
+                # keys.  The operator wants to see exactly which episodes
+                # matched, so partial matches now keep their individual rows.
+                # Under -V we KEEP all per-episode rows AND prepend the
+                # rollup row, so the user gets header + details.
+                _can_roll = (not VRB) and (_matched == _total)
                 # -V still emits a Season header when fully matched (and a
                 # Series header at Phase 2) for navigability.
                 _emit_header_under_vrb = VRB and _matched == _total and _total > 0
