@@ -473,7 +473,7 @@ _my-plex() {
         '--clean[Bundled pipeline: --unmatched --resolve --auto + --original-languages + --sort-new. Optional SCOPE. Honours --try, --yes, --force.]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
         '(--map-to-filename --map-from-filename)'{--map-to-filename,--map-from-filename}'[Legacy alias for --plex2disk]'
-        '--from-scratch[With --update-cache: drop existing cache and rebuild]'
+        '--force-plex[With --update-cache: re-read EVERY item from Plex DB (cache pickle dropped + rebuilt; TSVs and ffmpeg metadata preserved on disk).]'
         '--force-metadata[With --update-cache: collect file metadata via ffmpeg/ffprobe]'
         '--force-plexdata[With --update-cache: re-fetch Plex metadata even when timestamps are unchanged]'
         '--episode-numbering-issues[List episodes with problematic S0xE0x in filename or Plex metadata]'
@@ -775,7 +775,7 @@ CONFIG_DEFAULTS = {
     # Add your own pipelines in ~/.my-plex.conf, e.g.:
     #   PIPELINES = {
     #       '--clean': [...],
-    #       '--full-refresh': [['--update-cache', '--from-scratch'],
+    #       '--full-refresh': [['--update-cache', '--force-plex'],
     #                          ['--original-languages']],
     #       '--nightly': [['--update-cache'], ['--problems']],
     #   }
@@ -1998,7 +1998,7 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 #
 # All values shown are the built-in defaults.  Each can also be toggled
 # from the command line (--update-cache / --force-cache-update /
-# --from-scratch / --read-only).  Setting them here pins the behavior.
+# --force-plex / --read-only).  Setting them here pins the behavior.
 
 # Default:
 # FORCE_CACHE_UPDATE = {CONFIG_DEFAULTS['FORCE_CACHE_UPDATE']}
@@ -3231,7 +3231,7 @@ def load_cache():
                     print(f"Please run: my-plex --update-cache")
                     CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
         else:
-            # Don't show error if we're doing a from-scratch rebuild (cache was intentionally moved aside)
+            # Don't show error if we're doing a force-plex rebuild (cache was intentionally moved aside)
             if not FROM_SCRATCH:
                 print(f"CACHE file '{CACHE_FILE}' is MISSING - needs to be built.")
                 print(f"Please run: my-plex --update-cache")
@@ -3285,7 +3285,7 @@ def load_media_cache(source):
             continue
         if any(isinstance(v, dict) for v in lib_dict.values()):
             err(1080, f"Cache format is outdated (OBJ_BY_LIBRARY has old structure).\n"
-                      f"Please rebuild: my-plex --update-cache --from-scratch")
+                      f"Please rebuild: my-plex --update-cache --force-plex")
 
     # Detect missing guid field (added for --unmatched support)
     # Only warn — don't fatal, since most commands don't need guid.
@@ -16216,7 +16216,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
 
         # Ensure TSV exists — during --update-cache we only scrape MISSING TSVs.
         # Freshness of existing TSVs is handled by --missing (which checks staleness).
-        # Use --update-cache --force/--from-scratch to re-scrape all TSVs.
+        # Use --update-cache --force/--force-plex to re-scrape all TSVs.
         tsv_episodes = None
         tsv_meta = {}
         needs_scrape = False
@@ -16409,7 +16409,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
     if not _get_worker_prefix():
         print()  # newline after progress \r (main thread only)
     # "cached" = used existing TSV without re-scraping; "scraped" = fetched from API
-    # A show that had a TSV but was re-scraped (--from-scratch) counts only as "scraped"
+    # A show that had a TSV but was re-scraped (--force-plex) counts only as "scraped"
     actual_cached = existing_count - scraped_count  # series where existing TSV was reused
     if actual_cached < 0: actual_cached = 0
     parts = []
@@ -17139,8 +17139,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Validate cache format
         if old_counts and not isinstance(old_counts, dict):
-            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
-            err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --from-scratch to fix.")
+            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex")
+            err(1059, f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
 
         # For series libraries: compare series count AND episode count to detect new episodes
         # in existing series (series count alone won't change when episodes are added)
@@ -17960,8 +17960,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             for lib, counts in old_itemsCount_from_cache.items():
                 # Validate cache format - must be dict with type counts
                 if not isinstance(counts, dict):
-                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --from-scratch")
-                    err(1058, f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --from-scratch to fix.")
+                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex")
+                    err(1058, f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
                 print(f"{DBGPFX}  Library '{lib}': {count_str}")
 
@@ -18845,7 +18845,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     except Exception as e:
                         print(f"Warning: Could not move old cache aside: {e}")
 
-                # Delete partial cache if it exists - we want a completely fresh rebuild with --from-scratch
+                # Delete partial cache if it exists - we want a completely fresh rebuild with --force-plex
                 if os.path.exists(partial_cache_file):
                     try:
                         os.remove(partial_cache_file)
@@ -18853,10 +18853,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     except Exception as e:
                         print(f"Warning: Could not delete partial cache: {e}")
 
-                if VRB: print(f"{VRBPFX}From-scratch rebuild mode (--from-scratch): starting with empty cache...")
+                if VRB: print(f"{VRBPFX}Force-plex rebuild mode (--force-plex): starting with empty cache...")
 
                 # Preserve file_metadata from old cache backup (keyed by filepath)
-                # This avoids re-probing 17000+ files with ffmpeg after a from-scratch rebuild
+                # This avoids re-probing 17000+ files with ffmpeg after a force-plex rebuild
                 # Skip if --force-metadata: user wants to re-collect all metadata from scratch
                 # Note: OBJ_BY_ID is already empty at this point, so we read from the backup file
                 PLEX_Media._preserved_file_metadata = {}
@@ -18895,7 +18895,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 PLEX_Media.completed_libraries = set()
 
             # Check if there's a partial cache from an interrupted rebuild
-            # Resume from it unless --from-scratch was specified
+            # Resume from it unless --force-plex was specified
             elif os.path.exists(partial_cache_file):
                 print(f"Found partial cache from interrupted rebuild: {partial_cache_file}")
                 try:
@@ -18930,7 +18930,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Acquire and hold the lock for the entire rebuild process
             PLEX_Media.cache_rebuild_lock = CacheLock(LOCK_FILE)
             PLEX_Media.cache_rebuild_lock.__enter__()
-            mode_str = ("From-scratch rebuild" if FROM_SCRATCH else "Incremental update") + (" + re-scraping episode TSVs" if FORCE_TSV else "")
+            mode_str = ("Force-plex rebuild" if FROM_SCRATCH else "Incremental update") + (" + re-scraping episode TSVs" if FORCE_TSV else "")
             PLEX_Media.cache_rebuild_lock.write_progress(f"Cache {mode_str.lower()} started - initializing...")
         else:
             # Load the previous cache
@@ -19136,7 +19136,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if broken_queued > 0:
                 print(f"  Queued {broken_queued} broken files for rescan")
 
-        # Re-attach preserved file_metadata from --from-scratch rebuild
+        # Re-attach preserved file_metadata from --force-plex rebuild
         if hasattr(PLEX_Media, '_preserved_file_metadata') and PLEX_Media._preserved_file_metadata:
             reattached = 0
             for obj in PLEX_Media.OBJ_BY_ID.values():
@@ -19153,7 +19153,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         reattached += 1
             if reattached > 0:
                 print(f"  Re-attached preserved file metadata to {reattached} files")
-                print(f"  To force rebuilding metadata, use: my-plex --update-cache --from-scratch --force-metadata")
+                print(f"  To force rebuilding metadata, use: my-plex --update-cache --force-plex --force-metadata")
             # Remove from batch queue any files that now have metadata
             if _metadata_batch_queue:
                 old_len = len(_metadata_batch_queue)
@@ -19166,7 +19166,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"  Batch queue reduced from {old_len} to {len(_metadata_batch_queue)} files")
             del PLEX_Media._preserved_file_metadata
 
-        # Queue any files still missing metadata (covers --from-scratch full processing paths
+        # Queue any files still missing metadata (covers --force-plex full processing paths
         # which don't call _collect_missing_file_metadata, and any other edge cases).
         # When FORCE_METADATA is set (e.g. --scan), queue ALL files for re-probing.
         if FORCE_CACHE_UPDATE:
@@ -19450,7 +19450,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             total_updated = 0
 
             if FROM_SCRATCH:
-                # --from-scratch: everything in OBJ_BY_ID is newly added (delta counters aren't
+                # --force-plex: everything in OBJ_BY_ID is newly added (delta counters aren't
                 # used by the DB processing path, so we count directly)
                 for obj in PLEX_Media.OBJ_BY_ID.values():
                     if obj.get('type') in ('Movie', 'Episode'):
@@ -21050,7 +21050,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         matched but missing external IDs (no TMDB/TVDB → can't scrape episodes).
         Returns count of unmatched items."""
         if getattr(PLEX_Media, '_cache_missing_guid', False):
-            print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --from-scratch")
+            print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --force-plex")
             return 0
         unmatched = []       # (obj_type, plex_id, title, library, filepath, reason)
         missing_guid_count = 0
@@ -21085,7 +21085,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if missing_guid_count > 0:
             scope = f" in '{library_name}'" if library_name else ""
             print(f"  WARNING: {missing_guid_count} item(s){scope} have no guid in cache — results incomplete.")
-            print(f"  Run: my-plex --update-cache --from-scratch")
+            print(f"  Run: my-plex --update-cache --force-plex")
 
         if not unmatched:
             scope = f" in '{library_name}'" if library_name else ""
@@ -26572,7 +26572,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --fix [--try]            With --renumber or --unsorted: apply changes")
             print("  --force                  With --reencode --mark: also remove old labels")
             print("  --force-tsv              With --update-cache: re-scrape episode data")
-            print("  --from-scratch           With --update-cache: rebuild cache from zero")
+            print("  --force-plex           With --update-cache: rebuild cache from zero")
             print("  --force-metadata         With --update-cache: re-probe all file metadata")
             print()
             print("For detailed help on any option:")
@@ -26604,10 +26604,10 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("MODIFIERS:")
             print()
-            print("  --from-scratch")
+            print("  --force-plex")
             print("      Deletes existing cache file before rebuilding.")
             print("      Use this for a completely fresh start.")
-            print("      Example: my-plex --update-cache --from-scratch")
+            print("      Example: my-plex --update-cache --force-plex")
             print()
             print("  --force")
             print("      Complete rebuild: recollects BOTH Plex data AND file metadata.")
@@ -26646,7 +26646,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("      Re-scrape ALL episode TSV files (existing TSVs backed up as episodes.tsv.<date>).")
             print("        • Re-fetches episode data from TMDB/TVDB/fernsehserien.de")
             print("        • Without this flag, existing TSVs are preserved (only missing/corrupt re-scraped)")
-            print("        • Works with --update-cache or --update-cache --from-scratch")
+            print("        • Works with --update-cache or --update-cache --force-plex")
             print("      Example: my-plex --update-cache --force-tsv")
             print()
             print("COMBINATIONS:")
@@ -26655,7 +26655,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --update-cache")
             print()
             print("  # Fresh start (delete cache and rebuild everything)")
-            print("  my-plex --update-cache --from-scratch")
+            print("  my-plex --update-cache --force-plex")
             print()
             print("  # Recollect only Plex server data")
             print("  my-plex --update-cache --force-plexdata")
@@ -26673,7 +26673,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --update-cache --force-tsv")
             print()
             print("  # Fresh start + re-scrape all episode TSV files")
-            print("  my-plex --update-cache --from-scratch --force-tsv")
+            print("  my-plex --update-cache --force-plex --force-tsv")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -27560,7 +27560,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("             or Series with no external IDs")
             print("  Matched:   guid starts with 'plex://' (successfully identified)")
             print()
-            print("  Requires --update-cache --from-scratch once to populate guid.")
+            print("  Requires --update-cache --force-plex once to populate guid.")
             print()
             print("EXAMPLES:")
             print()
@@ -28322,7 +28322,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("            ['--problems'],")
             print("        ],")
             print("        '--full-refresh': [")
-            print("            ['--update-cache', '--from-scratch'],")
+            print("            ['--update-cache', '--force-plex'],")
             print("            ['--original-languages'],")
             print("        ],")
             print("    }")
@@ -37260,7 +37260,7 @@ def show_item_info(identifier, table_only=False):
             print(f"Match:\t⚠ UNMATCHED by Plex (guid='{guid}') — use Fix Match in Plex to identify this item")
         elif not guid:
             # Empty/missing guid: pre-v1.x cache OR Plex DB has no guid row.
-            print(f"Match:\t⚠ no guid in cache — run --update-cache --from-scratch to refresh")
+            print(f"Match:\t⚠ no guid in cache — run --update-cache --force-plex to refresh")
         elif not ext_ids:
             print(f"Match:\t⚠ Matched ({guid}) but no external IDs — rematch in Plex recommended")
         elif 'Match' in visible:
@@ -39255,14 +39255,14 @@ def main():
     main_parser.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename
     main_parser.add_argument('--scan', action='store_true', help="Trigger Plex filesystem scan and update cache. Use with a library name to scan specific library, or alone to scan all. Use --help scan for details.")
 
-    main_parser.add_argument('-U', '--update-cache', '--cache-update', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --from-scratch (delete cache first), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --force-tsv (with --from-scratch: re-scrape all episode TSVs), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
+    main_parser.add_argument('-U', '--update-cache', '--cache-update', action='store_true', help=f"Update cache by comparing with server and adding missing items. Modifiers: --force-plex (re-read every item from Plex DB; cache pickle dropped + rebuilt; TSV + ffmpeg metadata preserved on disk), --force (complete rebuild: Plex data + file metadata), --force-plexdata (recollect Plex data: audio_languages, collections, etc.), --force-metadata (recollect video file metadata for broken file detection), --force-tsv (re-scrape all episode TSVs), --broken (rescan broken files) - defaults to '{FORCE_CACHE_UPDATE}'", default=FORCE_CACHE_UPDATE)
     main_parser.add_argument('--verify-cache', action='store_true', help="Verify cache consistency with Plex server: compares item counts and timestamps (CACHE should be ≤60s ahead of PLEX; flags errors if PLEX is newer than CACHE)", default=False)
-    main_parser.add_argument('--from-scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
+    main_parser.add_argument('--force-plex', dest='from_scratch', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-tsv', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - force re-scrape ALL episode TSVs
     main_parser.add_argument('--force', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-plexdata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
     main_parser.add_argument('--force-metadata', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --update-cache
-    main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --from-scratch, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
+    main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --force-plex, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
     main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
     main_parser.add_argument('-DD', '--deep-debug', action='store_true', help=f"Turn on deep debugging - defaults to '{DEEPDBG}'", default=DEEPDBG)
@@ -39389,11 +39389,11 @@ def main():
     if args.force and not args.update_cache:
         err(1066, "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
-    # Check if --from-scratch is used without --update-cache
+    # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err(1067, "--from-scratch can only be used together with --update-cache.\nExample: my-plex --update-cache --from-scratch")
+        err(1067, "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
-    # Confirm --from-scratch operation (deletes cache and rebuilds)
+    # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
         print("\n" + "="*76)
         print("⚠  WARNING: FROM-SCRATCH CACHE REBUILD")
