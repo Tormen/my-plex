@@ -10458,6 +10458,22 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
             skipped += 1
             log_payload['actions'].append({'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name, 'status': 'fail', 'reason': str(e)})
 
+    # Per CACHE INTEGRITY rule: refresh my-plex cache in-process so the
+    # newly-created Plex Collections (and their member_ids) are reflected
+    # in the cache pickle without requiring a separate --update-cache.
+    # Plex Collection creation is API-only (no filesystem change), so we
+    # don't need library.update() / wait_for_plex_scan_complete here —
+    # the Plex DB already reflects the changes by the time addItems
+    # returns.
+    if fixed and not dry_run:
+        print()
+        print(f">>> Refreshing my-plex cache (via subprocess --update-cache) so the {fixed} new Plex Collection(s) are reflected…")
+        try:
+            update_cache_for_library(None)
+        except Exception as e:
+            print(f"  ⚠ in-process cache refresh failed: {e}")
+            print(f"    Fall back to: my-plex --update-cache")
+
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
     log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(candidates)}
     _write_resolve_log('uncollected_resolve', log_payload)
@@ -10466,7 +10482,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(candidates)} total")
     if fixed and not dry_run:
-        print(">>> Done.  Run --update-cache so my-plex's cache reflects the new Plex Collections.")
+        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")
 
