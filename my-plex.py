@@ -19720,18 +19720,36 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 _bf_total = len(_backfill_targets)
                 if PLEX_Media.cache_rebuild_lock:
                     PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: 0/{_bf_total}")
-                print(f"  >> TMDB belongs_to_collection backfill: {_bf_total} Movie(s) to probe (one-time per Movie; rate-limited).")
+                print(f"  >> TMDB belongs_to_collection backfill: {_bf_total} Movie(s) to probe (parallel, {MAX_PARALLEL_WORKERS} workers; rate-limited).")
+                # ThreadPoolExecutor + per-future write-back.  Each call is
+                # network-bound (TMDB HTTPS round-trip); workers stay well
+                # under TMDB's 40 req/10s limit at MAX_PARALLEL_WORKERS=4.
+                # The shared helper handles 429 / 5xx / transport retries.
+                import threading as _threading
+                _bf_lock = _threading.Lock()
                 _bf_with_coll = 0
-                for _i, (_k, _o, _tmdb_id) in enumerate(_backfill_targets, 1):
-                    _cid, _cname = fetch_belongs_to_collection_from_tmdb(_tmdb_id)
-                    # ALWAYS write the field (even None) so future runs skip this Movie.
-                    _o['tmdb_collection_id']   = _cid
-                    _o['tmdb_collection_name'] = _cname
-                    if _cid:
-                        _bf_with_coll += 1
-                    if _i % 100 == 0 or _i == _bf_total:
-                        if PLEX_Media.cache_rebuild_lock:
-                            PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: {_i}/{_bf_total}")
+                _bf_done = 0
+                def _bf_one(_k, _o, _tmdb_id):
+                    return _k, _o, _tmdb_id, fetch_belongs_to_collection_from_tmdb(_tmdb_id)
+                with ThreadPoolExecutor(max_workers=max(1, int(MAX_PARALLEL_WORKERS))) as _pool:
+                    _futs = [_pool.submit(_bf_one, _k, _o, _tmdb_id) for (_k, _o, _tmdb_id) in _backfill_targets]
+                    for _fut in as_completed(_futs):
+                        try:
+                            _k, _o, _tmdb_id, (_cid, _cname) = _fut.result()
+                        except Exception as _e:
+                            if DBG: print(f"{DBGPFX}belongs_to_collection backfill worker raised: {_e!r}")
+                            continue
+                        # ALWAYS write the field (even None) so future runs skip this Movie.
+                        with _bf_lock:
+                            _o['tmdb_collection_id']   = _cid
+                            _o['tmdb_collection_name'] = _cname
+                            if _cid:
+                                _bf_with_coll += 1
+                            _bf_done += 1
+                            if _bf_done % 100 == 0 or _bf_done == _bf_total:
+                                if PLEX_Media.cache_rebuild_lock:
+                                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: {_bf_done}/{_bf_total}")
+                                print(f"  >> TMDB belongs_to_collection backfill: {_bf_done}/{_bf_total} ({_bf_with_coll} with collection so far)")
                 print(f"  >> TMDB belongs_to_collection backfill: done ({_bf_with_coll}/{_bf_total} have collections).")
 
         # Run all problem checks (pure cache walks, ~1s) and store counts in cache
