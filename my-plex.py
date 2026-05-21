@@ -11767,7 +11767,15 @@ def update_cache_for_library(library_name):
             if VRB: print(f"{VRBPFX}Library '{library_name}' not found")
             return None
 
-        lib = PLEX_Library.OBJ_DICT[library_name]
+        # v2.69: PLEX_Library.OBJ_DICT stores our internal wrappers which
+        # don't expose .reload() / .all() from plexapi — fetch the real
+        # LibrarySection so subsequent lib.reload() + lib.all() work.
+        try:
+            plex = ensure_plex_api(required=True)
+            lib = plex.library.section(library_name)
+        except Exception as _e:
+            if VRB: print(f"{VRBPFX}plex.library.section({library_name!r}) failed: {_e}")
+            return None
         lib_type = PLEX_Library.OBJ_DICT_TYPE.get(library_name, 'Unknown')
 
         # Step 1: Remove all existing entries for this library from cache
