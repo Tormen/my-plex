@@ -28496,8 +28496,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("UNCOLLECTED MOVIES HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --uncollected [SCOPE]")
-            print("       my-plex --uncollected --resolve [--auto] [--try] [--yes]")
+            print("Usage: my-plex --uncollected [N] [SCOPE]")
+            print("       my-plex --uncollected [N] --resolve [--auto] [--try] [--yes]")
+            print()
+            print(f"  N — optional integer overriding UNCOLLECTED_MIN_MEMBERS (default {UNCOLLECTED_MIN_MEMBERS}).")
+            print( "      e.g. `my-plex --uncollected 3` flags only collections with 3+ in-library movies.")
             print()
             print("Flags Movies that belong to a TMDB collection (e.g. James Bond,")
             print("Mission Impossible, Marvel Cinematic Universe, X-Men, Harry Potter,")
@@ -38816,9 +38819,21 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_renumber_title_mismatch(obj_keys, library_name)
         return
 
-    # Handle --uncollected [SCOPE] [--resolve [--auto] [--try] [--yes]]
+    # Handle --uncollected [N] [SCOPE] [--resolve [--auto] [--try] [--yes]]
+    # If the FIRST positional token is a bare integer, treat it as a one-shot
+    # override of UNCOLLECTED_MIN_MEMBERS (mirrors the --excess-versions N
+    # pattern).  Remaining tokens become the SCOPE.
     uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
     if uncoll_val is not None:
+        _override_min = None
+        if isinstance(uncoll_val, list) and uncoll_val and isinstance(uncoll_val[0], str) and uncoll_val[0].isdigit():
+            _override_min = int(uncoll_val[0])
+            uncoll_val = uncoll_val[1:]   # strip the threshold; rest is SCOPE
+        if _override_min is not None:
+            global UNCOLLECTED_MIN_MEMBERS
+            _prev_min = UNCOLLECTED_MIN_MEMBERS
+            UNCOLLECTED_MIN_MEMBERS = _override_min
+            print(f">>> --uncollected: overriding UNCOLLECTED_MIN_MEMBERS = {_override_min}  (CONF default = {_prev_min})")
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         if resolve:
             auto    = bool(safe_getattr(cmd_args, 'auto', False) or safe_getattr(args, 'auto', False))
