@@ -9480,21 +9480,18 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         lib_section.update()
                 print(f">>> Waiting for {lib_name!r} scan to complete…")
                 wait_for_plex_scan_complete(plex, lib_name, lib_section)
-                # NB: update_cache_for_library() is currently incomplete for
-                # Series libraries (deletes Seasons/Episodes from OBJ_BY_ID but
-                # doesn't repopulate OBJ_BY_SERIES / OBJ_BY_SERIES_EPISODES,
-                # which corrupts the cache).  Bug deferred for a proper
-                # rewrite; for now we rely on Plex's library.update + the
-                # NEXT incremental --update-cache to reconcile.  CACHE
-                # INTEGRITY rule is mildly compromised (operator may need a
-                # follow-up --update-cache or --scan) but data is preserved.
-                print(f">>> Plex scan of {lib_name!r} complete — run --update-cache (or any --scan) to reconcile my-plex cache.")
+                # v2.69: refresh my-plex cache in-process per CACHE
+                # INTEGRITY rule.  update_cache_for_library() now delegates
+                # to the canonical --update-cache code path via subprocess +
+                # pickle reload (3a446fb), so this is safe.
+                print(f">>> Refreshing my-plex cache (via subprocess --update-cache)…")
+                try:
+                    update_cache_for_library(lib_name)
+                except Exception as e:
+                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
+                    print(f"    Fall back to: my-plex --update-cache")
             except Exception as e:
                 print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
-        try:
-            update_and_save_cache({})
-        except Exception as e:
-            print(f"  ⚠ cache persist failed: {e}")
 
     # 9. Summary + log.
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
@@ -9505,7 +9502,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(series_keys)} total")
     if fixed:
-        print(">>> Done.  Plex now reflects the moves; run any --scan (or --update-cache) so my-plex's pickle catches up.")
+        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")
 
@@ -10135,9 +10132,6 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                     print(f"    Fall back to: my-plex --update-cache")
             except Exception as e:
                 print(f"  ⚠ scan of {lib_name!r} failed: {e}")
-        # NB: cache NOT persisted from in-process refresh (see comment above
-        # re: update_cache_for_library limitations).  The next --update-cache
-        # or --scan will reconcile the cache with the new Plex state.
 
         # 8b. Mirror TMDB collections as Plex Collections.  When a Phase-A
         # action moved per-film files via collection expansion, group its
@@ -10266,7 +10260,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         for entry in _not_empty:
             print(f"  ⚠ {entry['dir']}    ({entry['reason']})")
     if fixed:
-        print(">>> Done.  Plex now reflects the moves; run any --scan (or --update-cache) so my-plex's pickle catches up.")
+        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")
 
