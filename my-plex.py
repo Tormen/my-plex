@@ -9406,13 +9406,15 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         lib_section.update()
                 print(f">>> Waiting for {lib_name!r} scan to complete…")
                 wait_for_plex_scan_complete(plex, lib_name, lib_section)
-                # Per CACHE INTEGRITY rule: refresh my-plex cache in-process.
-                print(f">>> Refreshing my-plex cache for {lib_name!r}…")
-                try:
-                    update_cache_for_library(lib_name)
-                except Exception as e:
-                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
-                    print(f"    Fall back to: my-plex --update-cache")
+                # NB: update_cache_for_library() is currently incomplete for
+                # Series libraries (deletes Seasons/Episodes from OBJ_BY_ID but
+                # doesn't repopulate OBJ_BY_SERIES / OBJ_BY_SERIES_EPISODES,
+                # which corrupts the cache).  Bug deferred for a proper
+                # rewrite; for now we rely on Plex's library.update + the
+                # NEXT incremental --update-cache to reconcile.  CACHE
+                # INTEGRITY rule is mildly compromised (operator may need a
+                # follow-up --update-cache or --scan) but data is preserved.
+                print(f">>> Plex scan of {lib_name!r} complete — run --update-cache (or any --scan) to reconcile my-plex cache.")
             except Exception as e:
                 print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
         try:
@@ -9429,7 +9431,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(series_keys)} total")
     if fixed:
-        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
+        print(">>> Done.  Plex now reflects the moves; run any --scan (or --update-cache) so my-plex's pickle catches up.")
     if quit_early:
         print(">>> Stopped early (q).")
 
@@ -9567,6 +9569,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         tv_hits = movie_hits = None
         _confirmation_skip = False
         _collection_expanded = False   # set when movie_hits came from TMDB collection parts
+        _collection_meta = None        # {tmdb_id, name, original_name} — used to mirror as Plex Collection
         while True:
             print(f"          query: {_clean_q!r}")
             try:
@@ -9593,6 +9596,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 if parts:
                     movie_hits = parts
                     _collection_expanded = True
+                    # Stash the TMDB collection metadata so the post-move
+                    # step can mirror it as a Plex Collection.
+                    _collection_meta = {
+                        'tmdb_id':       col.get('tmdb_collection_id'),
+                        'name':          col.get('title') or '',
+                        'original_name': col.get('original_title') or '',
+                    }
                     print(f"  → expanded collection into {len(parts)} part(s):")
                     for _p in parts:
                         print(f"      {_p.get('title')!r} ({_p.get('year') or '----'})  tmdb:{_p.get('tmdb_id')}")
@@ -9888,8 +9898,9 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             'key': key, 'status': 'fixed',
             'source_library': lib_name,
             'target_library': chosen_target,
-            'canonical_title': canonical_title,
-            'canonical_year':  canonical_year,
+            'shared_title':   _shared_title,
+            'shared_year':    _shared_year,
+            'collection_meta': _collection_meta,  # for post-scan Plex Collection mirror
             'moves':           [{'src': s, 'dest': d} for s, d in _moves_done],
         })
 
@@ -10050,11 +10061,85 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                     print(f"    Fall back to: my-plex --update-cache")
             except Exception as e:
                 print(f"  ⚠ scan of {lib_name!r} failed: {e}")
-        # Persist the refreshed cache.
+        # NB: cache NOT persisted from in-process refresh (see comment above
+        # re: update_cache_for_library limitations).  The next --update-cache
+        # or --scan will reconcile the cache with the new Plex state.
+
+        # 8b. Mirror TMDB collections as Plex Collections.  When a Phase-A
+        # action moved per-film files via collection expansion, group its
+        # new Movie items into a same-named Plex Collection so Plex's
+        # search-bar / library browser surfaces them under that title
+        # (e.g. 'Edelstein Filmreihe' — the German TMDB original_name —
+        # makes 'edelstein' searchable in Plex Web UI).
         try:
-            update_and_save_cache({})
-        except Exception as e:
-            print(f"  ⚠ cache persist failed: {e}")
+            from plexapi.collection import Collection as _PlexCollection
+        except Exception:
+            _PlexCollection = None
+        for _act in log_payload.get('actions', []):
+            if _act.get('status') != 'fixed':
+                continue
+            _cm = _act.get('collection_meta') or None
+            if not _cm:
+                continue
+            _coll_name = (_cm.get('original_name') or _cm.get('name') or '').strip()
+            if not _coll_name:
+                continue
+            _tgt_lib = _act.get('target_library') or ''
+            _dests   = [_m.get('dest') for _m in (_act.get('moves') or []) if _m.get('dest')]
+            if not _tgt_lib or not _dests:
+                continue
+            try:
+                _section = plex.library.section(_tgt_lib)
+            except Exception as _e:
+                print(f"  ⚠ Plex section {_tgt_lib!r} not accessible for collection mirror: {_e}")
+                continue
+            # Look up the new Movie items by file path.  Plex's REST search
+            # by path is not always available; iterate section.all() once
+            # and build a path → item map (small library scan).
+            _path_map = {}
+            try:
+                for _it in _section.all():
+                    for _media in (getattr(_it, 'media', None) or []):
+                        for _part in (getattr(_media, 'parts', None) or []):
+                            _fp = getattr(_part, 'file', None)
+                            if _fp:
+                                _path_map[_fp] = _it
+            except Exception as _e:
+                print(f"  ⚠ enumerating {_tgt_lib!r} for collection mirror failed: {_e}")
+                continue
+            _items = [_path_map.get(d) for d in _dests]
+            _items = [i for i in _items if i is not None]
+            if not _items:
+                print(f"  ⚠ no Plex items found for {len(_dests)} destination path(s) — collection mirror skipped")
+                continue
+            # Create-or-fetch the Plex Collection, then add items.
+            try:
+                _existing = None
+                for _c in _section.collections():
+                    if (_c.title or '').strip().lower() == _coll_name.lower():
+                        _existing = _c; break
+                if _existing is None and _PlexCollection is not None:
+                    try:
+                        _existing = _PlexCollection.create(plex, title=_coll_name, section=_section, items=_items)
+                        print(f"  ✓ created Plex Collection {_coll_name!r} with {len(_items)} item(s) in {_tgt_lib!r}")
+                    except Exception as _e:
+                        print(f"  ⚠ Plex Collection.create({_coll_name!r}) failed: {_e}")
+                        _existing = None
+                if _existing is not None:
+                    try:
+                        _existing.addItems(_items)
+                        print(f"  ✓ added {len(_items)} item(s) to existing Plex Collection {_coll_name!r}")
+                    except Exception as _e:
+                        # If addItems is not supported (older plexapi), fall back to per-item addCollection
+                        try:
+                            for _it in _items:
+                                _it.addCollection(_coll_name)
+                            print(f"  ✓ tagged {len(_items)} item(s) with collection {_coll_name!r} (per-item)")
+                        except Exception as _e2:
+                            print(f"  ⚠ failed to add items to {_coll_name!r}: {_e} / {_e2}")
+                _act['plex_collection'] = _coll_name
+            except Exception as _e:
+                print(f"  ⚠ Plex Collection mirror for {_coll_name!r} failed: {_e}")
 
     # 9. Log + summary.
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
@@ -10088,7 +10173,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         for entry in _not_empty:
             print(f"  ⚠ {entry['dir']}    ({entry['reason']})")
     if fixed:
-        print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
+        print(">>> Done.  Plex now reflects the moves; run any --scan (or --update-cache) so my-plex's pickle catches up.")
     if quit_early:
         print(">>> Stopped early (q).")
 
