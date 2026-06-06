@@ -34435,9 +34435,16 @@ def _replay_pending_move_state(plex, quiet=False):
         if not new_fp:
             continue
         new_rk = None
-        obj = (PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None) or {}
-        if isinstance(obj, dict):
-            new_rk = int(obj.get('id') or 0)
+        try:
+            _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
+            _keys = _fp_entry if isinstance(_fp_entry, list) else ([_fp_entry] if _fp_entry else [])
+            for _ck in _keys:
+                _obj = PLEX_Media.OBJ_BY_ID.get(_ck) if hasattr(PLEX_Media, 'OBJ_BY_ID') else None
+                if isinstance(_obj, dict) and _obj.get('id'):
+                    new_rk = int(_obj['id'])
+                    break
+        except Exception as _e:
+            if DBG: print(f"{DBGPFX}_replay_pending_move_state lookup: {_e}")
         if not new_rk:
             if not quiet:
                 print(f"  ⏸ pending {fn}: new ratingKey not yet in cache (try after --update-cache)")
@@ -34454,6 +34461,33 @@ def _replay_pending_move_state(plex, quiet=False):
             if not quiet:
                 for e in errs: print(f"      ! {e}")
         else:
+            # Patch the in-memory cache so obj_by_id reflects the freshly-
+            # applied labels / collections.  Without this, the cache's
+            # collections/labels stay empty until the next --update-cache,
+            # silently failing the CACHE INTEGRITY rule.
+            try:
+                _snap = st.get('snapshot') or {}
+                _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
+                _keys = _fp_entry if isinstance(_fp_entry, list) else ([_fp_entry] if _fp_entry else [])
+                for _ck in _keys:
+                    _o = PLEX_Media.OBJ_BY_ID.get(_ck) if hasattr(PLEX_Media, 'OBJ_BY_ID') else None
+                    if isinstance(_o, dict):
+                        if _snap.get('collections'):
+                            _o['collections'] = sorted(set((_o.get('collections') or []) + list(_snap['collections'])))
+                        if _snap.get('labels'):
+                            _o['labels'] = sorted(set((_o.get('labels') or []) + list(_snap['labels'])))
+                        if _snap.get('userRating'):
+                            _o['userRating'] = _snap['userRating']
+                        if (_snap.get('viewCount') or 0) > 0:
+                            _o['viewCount'] = _snap['viewCount']
+                # Persist immediately so a crash before next --update-cache
+                # doesn't drop the in-memory patch.
+                try:
+                    update_and_save_cache(CACHE)
+                except Exception as _se:
+                    if DBG: print(f"{DBGPFX}post-restore cache save: {_se}")
+            except Exception as _e:
+                if DBG: print(f"{DBGPFX}post-restore cache patch: {_e}")
             try: os.remove(path)
             except Exception: pass
             n_restored += 1
@@ -34513,6 +34547,22 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         err(1103, f"--mv: destination library '{dest_lib}' has no known rootpath in cache.\n  Run --update-cache first.")
     dest_root = dest_locations[0].rstrip('/')
 
+    # v2.69: drain any leftover state from a prior crashed --mv run FIRST,
+    # before scope resolution / item filtering / early-returns.  This makes
+    # every cmd_move invocation — including no-op ones — act as a
+    # transparent replay trigger.
+    if not dry_run and not READ_ONLY_MODE:
+        try:
+            _plex_for_replay = ensure_plex_api(required=False)
+        except Exception:
+            _plex_for_replay = None
+        try:
+            nr, nf = _replay_pending_move_state(_plex_for_replay, quiet=False)
+            if nr or nf:
+                print(f">>> drained pending state-preservation: {nr} restored, {nf} failed")
+        except Exception as _e:
+            print(f"  ⚠ state-preservation replay failed: {_e}")
+
     # Resolve scope via the universal multi-token resolver — same engine
     # used by --list, --remux, --plex2disk, etc.  Multiple tokens AND-combine
     # (e.g. `lib1 original_lang:fr` = library AND filter).
@@ -34568,21 +34618,6 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     if not movables:
         print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode/Folder content found in libraries other than '{dest_lib}').")
         return (0, 0, 0)
-
-    # v2.69: drain any leftover state from a prior crashed --mv run.
-    # Plex API isn't strictly required for stale-snapshot cleanup, but
-    # restoring 'moved' entries does need it.
-    if not dry_run and not READ_ONLY_MODE:
-        try:
-            _plex_for_replay = ensure_plex_api(required=False)
-        except Exception:
-            _plex_for_replay = None
-        try:
-            nr, nf = _replay_pending_move_state(_plex_for_replay, quiet=False)
-            if nr or nf:
-                print(f">>> drained pending state-preservation: {nr} restored, {nf} failed")
-        except Exception as _e:
-            print(f"  ⚠ state-preservation replay failed: {_e}")
 
     # ---- Phase 1: preview ----
     print()
