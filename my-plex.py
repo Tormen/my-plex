@@ -34436,6 +34436,7 @@ def _replay_pending_move_state(plex, quiet=False):
             continue
         new_rk = None
         try:
+            # Strategy 1: exact filepath lookup.
             _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
             _keys = _fp_entry if isinstance(_fp_entry, list) else ([_fp_entry] if _fp_entry else [])
             for _ck in _keys:
@@ -34443,6 +34444,41 @@ def _replay_pending_move_state(plex, quiet=False):
                 if isinstance(_obj, dict) and _obj.get('id'):
                     new_rk = int(_obj['id'])
                     break
+            # Strategy 2: filepath prefix scan (covers wrong new_filepath
+            # computation in older sort-new code paths).
+            if not new_rk and new_fp:
+                _wrapper = new_fp if new_fp.endswith('/') else (new_fp.rsplit('/', 1)[0] + '/')
+                for _fp, _ks in (PLEX_Media.OBJ_BY_FILEPATH.items() if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else []):
+                    if _fp.startswith(_wrapper):
+                        _ks2 = _ks if isinstance(_ks, list) else [_ks]
+                        for _ck in _ks2:
+                            _o = PLEX_Media.OBJ_BY_ID.get(_ck)
+                            if isinstance(_o, dict) and _o.get('id') and _o.get('library') == (st.get('dest_library') or ''):
+                                new_rk = int(_o['id'])
+                                break
+                        if new_rk: break
+            # Strategy 3: GUID + dest_library (Plex may have merged the
+            # moved file as a new VERSION of a same-GUID existing item).
+            if not new_rk:
+                _g = (st.get('snapshot') or {}).get('guid') or st.get('guid') or ''
+                _dest = st.get('dest_library') or ''
+                if _g and _dest:
+                    for _ck, _o in (PLEX_Media.OBJ_BY_ID.items() if hasattr(PLEX_Media, 'OBJ_BY_ID') else []):
+                        if isinstance(_o, dict) and _o.get('guid') == _g and _o.get('library') == _dest and _o.get('id'):
+                            new_rk = int(_o['id'])
+                            break
+            # Strategy 4: title + year + dest_library.
+            if not new_rk:
+                _t = st.get('title') or ''
+                _y = str(st.get('year') or '')
+                _dest = st.get('dest_library') or ''
+                if _t and _dest:
+                    for _ck, _o in (PLEX_Media.OBJ_BY_ID.items() if hasattr(PLEX_Media, 'OBJ_BY_ID') else []):
+                        if (isinstance(_o, dict) and _o.get('title') == _t
+                            and str(_o.get('year') or '') == _y
+                            and _o.get('library') == _dest and _o.get('id')):
+                            new_rk = int(_o['id'])
+                            break
         except Exception as _e:
             if DBG: print(f"{DBGPFX}_replay_pending_move_state lookup: {_e}")
         if not new_rk:
@@ -35428,18 +35464,16 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 _st = _move_state_read(_path) or {}
                 _st['status'] = 'moved'
                 _st['moved_at'] = _dtm.now().isoformat(timespec='seconds')
-                # The plan's `_dw` is the dst wrapper.  Compute the actual
-                # video filepath inside that wrapper (= old_wrapper-suffix
-                # remapped to dst_wrapper).
-                _of = _st.get('old_filepath') or ''
-                if _of and _of.startswith(_entry[2] + '/'):
-                    _suffix = _of[len(_entry[2]):]
-                    _st['new_filepath'] = _new_fp_planned + _suffix
+                # `_dw` (= _new_fp_planned) is the destination WRAPPER (a
+                # directory).  The actual video filepath inside the new
+                # wrapper is computed from the original video filepath
+                # (obj['file']) by replacing the src-wrapper prefix.
+                _src_wrap = _entry[2]
+                _real_old_fp = _obj.get('file') or ''
+                if _real_old_fp and _src_wrap and _real_old_fp.startswith(_src_wrap + '/'):
+                    _st['new_filepath'] = _new_fp_planned + _real_old_fp[len(_src_wrap):]
                 else:
-                    # Plan's `sw` (entry[2]) is the wrapper, not the file.
-                    # Try alternative: the actual file basename under dw.
-                    import os as _os2
-                    _st['new_filepath'] = _os2.path.join(_new_fp_planned, _os2.path.basename(_of)) if _of else _new_fp_planned
+                    _st['new_filepath'] = _new_fp_planned   # prefix-scan fallback
                 _move_state_write(_st)
             except Exception as _e:
                 print(f"  ⚠ state-file update {key}: {_e}")
