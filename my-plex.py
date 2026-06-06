@@ -6652,13 +6652,31 @@ def _country_matches(country_token, obj_countries):
 
 def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
     """v2.69: Fetch `belongs_to_collection.{id,name}` for one Movie from TMDB.
-    Returns (collection_id_str, collection_name) or (None, None).
-    Uses the same retry/backoff plumbing as fetch_original_language_from_tmdb
-    so we play nicely with TMDB's rate limits (429 honours Retry-After,
-    5xx exponential backoff, transport errors retried)."""
+    Returns (collection_id_str, collection_name) or (None, None).  Thin
+    backward-compat wrapper around fetch_tmdb_movie_basics()."""
+    data = fetch_tmdb_movie_basics(tmdb_id, max_retries=max_retries) or {}
+    return (data.get('tmdb_collection_id'), data.get('tmdb_collection_name'))
+
+
+def fetch_tmdb_movie_basics(tmdb_id, max_retries=5):
+    """v2.69: Fetch the `/movie/{id}` basics for one Movie in ONE API call:
+      - belongs_to_collection.id / .name → tmdb_collection_id / _name
+      - original_language               → original_language
+
+    Used by --update-cache backfill so a single round-trip populates BOTH
+    fields (avoids doubling TMDB hits when --uncollected and the extended
+    --library-language-mismatch both want movie metadata).
+
+    Returns dict { 'tmdb_collection_id', 'tmdb_collection_name',
+                   'original_language' } with values possibly None,
+    OR None on transport / permanent failure.
+
+    Same retry/backoff plumbing as fetch_original_language_from_tmdb:
+    429 honours Retry-After, 5xx exponential backoff, transport errors
+    retried up to `max_retries` times."""
     global TMDB_API_KEY
     if not TMDB_API_KEY or not tmdb_id:
-        return (None, None)
+        return None
     import urllib.request, urllib.error, json as _json, time as _t
     url = f'https://api.themoviedb.org/3/movie/{tmdb_id}'
     req = urllib.request.Request(url, headers={
@@ -6671,10 +6689,13 @@ def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
             col = data.get('belongs_to_collection') or {}
-            if not col:
-                return (None, None)
-            cid = col.get('id')
-            return (str(cid) if cid is not None else None, col.get('name'))
+            _cid = col.get('id') if col else None
+            return {
+                'tmdb_collection_id':   str(_cid) if _cid is not None else None,
+                'tmdb_collection_name': col.get('name') if col else None,
+                'original_language':    (str(data.get('original_language')).lower().strip()
+                                          if data.get('original_language') else None),
+            }
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = e.headers.get('Retry-After', '') if hasattr(e, 'headers') else ''
@@ -6692,17 +6713,17 @@ def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
                 _t.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
                 continue
-            if DBG: print(f"{DBGPFX}fetch_belongs_to_collection_from_tmdb({tmdb_id}): HTTP {e.code}")
-            return (None, None)
+            if DBG: print(f"{DBGPFX}fetch_tmdb_movie_basics({tmdb_id}): HTTP {e.code}")
+            return None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             if VRB: print(f"  TMDB transport error ({e.__class__.__name__}); sleeping {backoff:.1f}s then retrying movie/{tmdb_id}…")
             _t.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
             continue
         except Exception as e:
-            if DBG: print(f"{DBGPFX}fetch_belongs_to_collection_from_tmdb({tmdb_id}): {e!r}")
-            return (None, None)
-    return (None, None)
+            if DBG: print(f"{DBGPFX}fetch_tmdb_movie_basics({tmdb_id}): {e!r}")
+            return None
+    return None
 
 
 def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5):
@@ -19750,18 +19771,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # marker-promotion logic in --plex2disk without per-call recompute.
         finalize_disk_plex_map_uniform_fields(globals().get('DISK_PLEX_MAP', {}))
 
-        # v2.69: backfill TMDB belongs_to_collection on every Movie that
-        # has a TMDB external id but no tmdb_collection_id cached yet.
-        # One TMDB call per Movie max once per cache; subsequent
-        # --update-cache runs only hit movies added since last time.
-        # Drives the --uncollected detector.
+        # v2.69: TMDB basics backfill — ONE /movie/{id} call per Movie
+        # populates BOTH tmdb_collection_id (→ --uncollected) AND
+        # original_language (→ extended --library-language-mismatch).
+        # Run for any Movie missing EITHER field; field-writes always
+        # land (even on None) so future runs skip processed Movies.
         if TMDB_API_KEY:
             _backfill_targets = []
             for _k, _o in PLEX_Media.OBJ_BY_ID.items():
                 if _o.get('type') != 'Movie':
                     continue
-                if 'tmdb_collection_id' in _o:
-                    continue  # already cached (None or value — both count as 'known')
+                _has_coll = ('tmdb_collection_id' in _o)
+                _has_lang = bool(_o.get('original_language'))
+                if _has_coll and _has_lang:
+                    continue   # both fields already cached
                 _ext = (_o.get('external_ids') or {})
                 _tmdb_id = _ext.get('tmdb') or _ext.get('TMDB')
                 if not _tmdb_id:
@@ -19770,8 +19793,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if _backfill_targets:
                 _bf_total = len(_backfill_targets)
                 if PLEX_Media.cache_rebuild_lock:
-                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: 0/{_bf_total}")
-                print(f"  >> TMDB belongs_to_collection backfill: {_bf_total} Movie(s) to probe (parallel, {MAX_PARALLEL_WORKERS} workers; rate-limited).")
+                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB movie-basics backfill: 0/{_bf_total}")
+                print(f"  >> TMDB movie-basics backfill (collection_id + original_language): {_bf_total} Movie(s) (parallel, {MAX_PARALLEL_WORKERS} workers; rate-limited).")
                 # ThreadPoolExecutor + per-future write-back.  Each call is
                 # network-bound (TMDB HTTPS round-trip); workers stay well
                 # under TMDB's 40 req/10s limit at MAX_PARALLEL_WORKERS=4.
@@ -19779,29 +19802,40 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 import threading as _threading
                 _bf_lock = _threading.Lock()
                 _bf_with_coll = 0
+                _bf_with_lang = 0
                 _bf_done = 0
                 def _bf_one(_k, _o, _tmdb_id):
-                    return _k, _o, _tmdb_id, fetch_belongs_to_collection_from_tmdb(_tmdb_id)
+                    return _k, _o, _tmdb_id, fetch_tmdb_movie_basics(_tmdb_id)
                 with ThreadPoolExecutor(max_workers=max(1, int(MAX_PARALLEL_WORKERS))) as _pool:
                     _futs = [_pool.submit(_bf_one, _k, _o, _tmdb_id) for (_k, _o, _tmdb_id) in _backfill_targets]
                     for _fut in as_completed(_futs):
                         try:
-                            _k, _o, _tmdb_id, (_cid, _cname) = _fut.result()
+                            _k, _o, _tmdb_id, _basics = _fut.result()
                         except Exception as _e:
-                            if DBG: print(f"{DBGPFX}belongs_to_collection backfill worker raised: {_e!r}")
+                            if DBG: print(f"{DBGPFX}movie-basics backfill worker raised: {_e!r}")
                             continue
+                        _basics = _basics or {}
+                        _cid   = _basics.get('tmdb_collection_id')
+                        _cname = _basics.get('tmdb_collection_name')
+                        _olang = _basics.get('original_language')
                         # ALWAYS write the field (even None) so future runs skip this Movie.
                         with _bf_lock:
                             _o['tmdb_collection_id']   = _cid
                             _o['tmdb_collection_name'] = _cname
+                            # Don't OVERWRITE an existing original_language with None
+                            # (other code paths may populate it from Plex DB / other sources).
+                            if _olang or ('original_language' not in _o):
+                                _o['original_language'] = _olang
                             if _cid:
                                 _bf_with_coll += 1
+                            if _olang:
+                                _bf_with_lang += 1
                             _bf_done += 1
                             if _bf_done % 100 == 0 or _bf_done == _bf_total:
                                 if PLEX_Media.cache_rebuild_lock:
-                                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB belongs_to_collection backfill: {_bf_done}/{_bf_total}")
-                                print(f"  >> TMDB belongs_to_collection backfill: {_bf_done}/{_bf_total} ({_bf_with_coll} with collection so far)")
-                print(f"  >> TMDB belongs_to_collection backfill: done ({_bf_with_coll}/{_bf_total} have collections).")
+                                    PLEX_Media.cache_rebuild_lock.write_progress(f"TMDB movie-basics backfill: {_bf_done}/{_bf_total}")
+                                print(f"  >> TMDB movie-basics backfill: {_bf_done}/{_bf_total} ({_bf_with_coll} with collection, {_bf_with_lang} with original_language)")
+                print(f"  >> TMDB movie-basics backfill: done ({_bf_with_coll}/{_bf_total} have collections, {_bf_with_lang}/{_bf_total} have original_language).")
 
         # Run all problem checks (pure cache walks, ~1s) and store counts in cache
         # so --problems can show cached counts and --update-cache summary can report all issues
@@ -21873,27 +21907,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def _list_library_language_mismatch(obj_keys, library_name):
-        """List Movies/Episodes whose audio_language doesn't match the
+        """List Movies/Episodes whose effective language doesn't match the
         configured language of the library they live in.
 
-        Sources of truth:
-          - audio_languages (the COMPLETED view: Plex + filename + library
-            fallbacks).  In the special `library` step of completion we
-            inject the library's configured language when nothing else
-            had a hint — so for this check we use audio_languages_plex
-            (the PURE Plex view, untouched by completion) when present.
-            That way an item that ONLY has the language because the
-            library completion filled it in doesn't pollute the check.
-          - AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY: the per-library
-            convention.  Single-code entries are the targets; 'MULTI'
-            libraries are excluded (mixed-language by design).
+        Two-signal flagging (v2.69 extension):
 
-        Flag an item when:
-          - its library has a single-code language X configured, AND
-          - it carries a real audio language Y (not 'unknown'), AND
-          - Y != X.
+          A. AUDIO MISMATCH — Plex's audio_languages_plex carries a real
+             language Y ≠ expected X.  Typical: a TVOON_DE recording
+             sitting in `movies.en`.
 
-        Typical case: a TVOON_DE recording sitting in `movies.en`."""
+          B. ORIGINAL-LANGUAGE MISMATCH (audio unknown) — Plex couldn't
+             read the audio language (TAG:title vs TAG:language gotcha
+             in Russian rips, etc.), so audio_languages_plex is empty or
+             all 'unknown'.  Falls back to TMDB original_language (lazily
+             backfilled by --update-cache via fetch_tmdb_movie_basics);
+             flags when that language ≠ expected X.  Typical: a French
+             film file with `TAG:title=Russian/French` audio tracks
+             landing in `movies.de`.
+
+        For each flagged item the 'GOT' column carries a trailing 'p' to
+        indicate the language came from Plex audio (path A) or 'o' for
+        TMDB original_language (path B).
+        """
         # Build library → expected-language map (only single-code entries).
         _lib_expected = {}
         for _lname, _lval in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY or []):
@@ -21923,29 +21958,51 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             al = obj.get('audio_languages_plex')
             if al is None:
                 al = obj.get('audio_languages') or []
-            if not al:
+            primary = None
+            via = None
+            if al and not all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al):
+                # Path A — Plex knows the audio language.
+                primary = str(al[0]).lower()
+                via = 'p'  # primary audio (Plex)
+            else:
+                # Path B — Plex audio unknown.  Fall back to TMDB
+                # original_language (Movies only; Episodes inherit from
+                # their Series and the original_language field is
+                # populated only for matched Movies via TMDB backfill).
+                if obj.get('type') == 'Movie':
+                    _ol = obj.get('original_language')
+                    if _ol and str(_ol).lower() != _AUDIO_LANG_UNKNOWN:
+                        primary = str(_ol).lower()
+                        via = 'o'  # original_language (TMDB)
+            if primary is None:
                 continue
-            if all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al):
-                continue
-            # Match by primary track; AUDIO_LANG is the first track.
-            primary = str(al[0]).lower()
             if primary == expected:
                 continue
-            flagged.append((key, obj, primary, expected))
+            flagged.append((key, obj, primary, expected, via))
         if not flagged:
             return 0
         flagged.sort(key=lambda t: (t[1].get('library', ''), t[1].get('title') or ''))
         if VRB:
-            print(f"  {'KEY':<16}  {'LIBRARY':<14}  {'EXP':<4}  {'GOT':<4}  TITLE  /  FILE")
-            print(f"  {'-'*16}  {'-'*14}  ----  ----  ---------------------")
-        for key, obj, got, expected in flagged:
+            print(f"  {'KEY':<16}  {'LIBRARY':<14}  {'EXP':<4}  {'GOT':<5}  TITLE  /  FILE")
+            print(f"  {'-'*16}  {'-'*14}  ----  -----  ---------------------")
+        # via='p' → got=primary Plex audio; via='o' → got=TMDB original_language
+        # (italics-equivalent: append a small marker so the operator sees the source).
+        _via_markers = {'p': '', 'o': '*'}
+        for key, obj, got, expected, via in flagged:
             lib   = obj.get('library', '')
             title = obj.get('title') or '?'
             fp    = obj.get('file', '') or ''
-            print(f"  {key:<16}  {lib:<14}  {expected:<4}  {got:<4}  {title}  /  {fp}")
-        print(f"\n  {len(flagged)} item(s) with audio language mismatching their library convention.")
+            got_disp = f"{got}{_via_markers.get(via, '')}"
+            print(f"  {key:<16}  {lib:<14}  {expected:<4}  {got_disp:<5}  {title}  /  {fp}")
+        _n_p = sum(1 for r in flagged if r[4] == 'p')
+        _n_o = len(flagged) - _n_p
+        print(f"\n  {len(flagged)} item(s) with effective language mismatching their library convention "
+              f"({_n_p} via Plex audio, {_n_o} via TMDB original_language).")
+        if _n_o:
+            print(f"  (GOT col: a trailing '*' marks items whose audio was unknown to Plex; "
+                  f"the language came from TMDB original_language.)")
         if VRB:
-            print(f"  Fix: move them to the library matching their audio language")
+            print(f"  Fix: move them to the library matching their effective language")
             print(f"  (e.g. my-plex <KEY> --mv-to movies.{flagged[0][2]} for one of them).")
         return len(flagged)
 
@@ -30835,7 +30892,7 @@ PROBLEM_CATEGORIES_REGISTRY = {
         'cli_flag':      '--library-language-mismatch',
         'help_topic':    'library-language-mismatch',
         'header':        'Library Language Mismatch',
-        'description':   "Items whose audio language disagrees with their library's configured language",
+        'description':   "Items whose effective language (Plex audio OR TMDB original_language fallback) disagrees with their library's configured language",
         'fix_hint':      'Move to the correct language library (manual or my-plex --mv)',
         'tsv_relevant':  False,
         'invoke':        lambda obj_keys, library, tsv_only: PLEX_Media._list_library_language_mismatch(obj_keys, library) or 0,
