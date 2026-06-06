@@ -1058,6 +1058,19 @@ CONFIG_DEFAULTS = {
     # ids are integers but always stringified in my-plex cache).
     'UNCOLLECTED_IGNORED_COLLECTION_IDS': [],
 
+    # UNCOLLECTED_ALLOW_CROSS_LIBRARY — when a TMDB collection has movies
+    # spread across multiple libraries (e.g. 'Zoomania' in movies.de and
+    # 'Zootropolis' in movies.en), should `--uncollected --resolve` create
+    # a matching-named Plex Collection PER library (one per library that
+    # has members)?  A single Plex Collection cannot span libraries, so
+    # the "cross-library" form is really per-library siblings sharing
+    # the same name.
+    #   True  (default): create per-library siblings.  Every in-library
+    #                    movie ends up grouped in its own library.
+    #   False:           skip multi-library groups (operator handles
+    #                    manually or unifies libraries first).
+    'UNCOLLECTED_ALLOW_CROSS_LIBRARY': True,
+
     # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
     # --resolve` Series→Movies transitions.  Key is the source series.*
     # library name, value is the target movies.* library name to move
@@ -1740,6 +1753,24 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # UNCOLLECTED_IGNORED_COLLECTION_IDS = [
 #     '359005',   # The Jake Gittes Collection
 # ]
+
+###############################################################################
+# --uncollected: allow cross-library Plex Collection siblings (v2.69)
+###############################################################################
+
+# UNCOLLECTED_ALLOW_CROSS_LIBRARY — when a TMDB collection's movies span
+# multiple libraries (e.g. 'Zoomania' in movies.de + 'Zootropolis' in
+# movies.en), Plex itself cannot host one Collection across libraries.
+# my-plex's solution is to create a matching-named Plex Collection PER
+# library that has members (per-library siblings sharing the same name).
+#
+#   True  → create per-library siblings.  Every in-library movie of the
+#           TMDB collection ends up grouped in its own library.
+#   False → skip multi-library groups; operator handles them manually
+#           or unifies libraries first.
+#
+# Default (the value below is the actual default — uncomment changes nothing):
+# UNCOLLECTED_ALLOW_CROSS_LIBRARY = {CONFIG_DEFAULTS['UNCOLLECTED_ALLOW_CROSS_LIBRARY']!r}
 
 ###############################################################################
 # --misplaced --resolve target-library mapping (v2.69)
@@ -2547,6 +2578,7 @@ REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEP
 PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
 UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
+UNCOLLECTED_ALLOW_CROSS_LIBRARY = CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', True)
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
@@ -10382,23 +10414,31 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     for cid, members in coll_groups.items():
         if len(members) < UNCOLLECTED_MIN_MEMBERS:
             continue
-        # All Movies of a group are in the same library? (almost always; if not, skip)
-        libs = {(_o.get('library') or '') for _, _o in members}
-        if len(libs) != 1:
+        # Split members by library — Plex Collections are library-bound,
+        # so a multi-library group becomes per-library siblings sharing
+        # one name (UNCOLLECTED_ALLOW_CROSS_LIBRARY = True), or is
+        # skipped entirely (False).
+        per_lib = {}   # library_name → [(key, obj)]
+        for _k, _o in members:
+            _lib = (_o.get('library') or '')
+            if not _lib:
+                continue
+            per_lib.setdefault(_lib, []).append((_k, _o))
+        if not per_lib:
             continue
-        target_lib = libs.pop()
-        if not target_lib:
-            continue
-        our_rks = {int(_o.get('id') or 0) for _, _o in members if (_o.get('id') or 0)}
-        # Already fully covered?
-        covered = False
-        for _ck, _t, _mids in (plex_coll_by_lib.get(target_lib) or []):
-            if our_rks.issubset(_mids):
-                covered = True; break
-        if covered:
+        if len(per_lib) > 1 and not UNCOLLECTED_ALLOW_CROSS_LIBRARY:
             continue
         tmdb_name = next((_o.get('tmdb_collection_name') for _, _o in members if _o.get('tmdb_collection_name')), '') or ''
-        candidates.append((cid, tmdb_name, members, target_lib))
+        for target_lib, lib_members in per_lib.items():
+            lib_rks = {int(_o.get('id') or 0) for _, _o in lib_members if (_o.get('id') or 0)}
+            # Already fully covered in this library?
+            covered = False
+            for _ck, _t, _mids in (plex_coll_by_lib.get(target_lib) or []):
+                if lib_rks.issubset(_mids):
+                    covered = True; break
+            if covered:
+                continue
+            candidates.append((cid, tmdb_name, lib_members, target_lib))
 
     if not candidates:
         print("No uncollected TMDB collection groups in scope — nothing to resolve.")
@@ -22066,19 +22106,32 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 tmdb_name = _o.get('tmdb_collection_name') or ''
                 if tmdb_name:
                     break
-            our_rks = {int(_o.get('id') or 0) for _, _o in members if (_o.get('id') or 0)}
-            # Find an existing Plex Collection that contains ALL our movies
-            covering = None
-            for _pk, (_pt, _pmids, _plib) in plex_coll_members.items():
-                if our_rks.issubset(_pmids):
-                    covering = (_pk, _pt, _pmids, _plib)
+            # Plex Collections are library-bound.  Check coverage
+            # per-library: each library subset must be covered by a Plex
+            # Collection IN THAT LIBRARY.  A group is "uncollected" if
+            # ANY library subset is uncovered.
+            per_lib_rks = {}   # library_name → set(ratingKeys)
+            for _, _o in members:
+                _lib = _o.get('library') or ''
+                _rk = int(_o.get('id') or 0)
+                if not _lib or not _rk:
+                    continue
+                per_lib_rks.setdefault(_lib, set()).add(_rk)
+            uncovered = False
+            for _lib, _lib_rks in per_lib_rks.items():
+                _lib_covered = False
+                for _pk, (_pt, _pmids, _plib) in plex_coll_members.items():
+                    if _plib != _lib:
+                        continue
+                    if _lib_rks.issubset(_pmids):
+                        _lib_covered = True
+                        break
+                if not _lib_covered:
+                    uncovered = True
                     break
-            if covering:
-                # Already fully grouped.  But maybe TMDB has more parts than
-                # the Plex Collection currently holds — still don't flag,
-                # because those extras aren't in our library to add anyway.
+            if not uncovered:
                 continue
-            flagged.append((cid, tmdb_name, members, covering))
+            flagged.append((cid, tmdb_name, members, None))
 
         if not flagged:
             return 0
@@ -28651,6 +28704,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG (~/.my-plex.conf):")
             print(f"  UNCOLLECTED_MIN_MEMBERS              = {UNCOLLECTED_MIN_MEMBERS}     # min in-library members per group")
             print(f"  UNCOLLECTED_IGNORED_COLLECTION_IDS   = {UNCOLLECTED_IGNORED_COLLECTION_IDS!r}    # TMDB collection IDs to suppress")
+            print(f"  UNCOLLECTED_ALLOW_CROSS_LIBRARY      = {UNCOLLECTED_ALLOW_CROSS_LIBRARY!r}    # True: create per-library siblings for multi-library groups")
             print()
             print("EXAMPLES:")
             print()
@@ -34160,6 +34214,252 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
 VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv', '.mov'}
 
 
+# ---------------------------------------------------------------------------
+# v2.69: durable state preservation for cross-library moves
+# ---------------------------------------------------------------------------
+# Plex assigns a NEW ratingKey when a media file crosses libraries.  Any
+# Plex Playlist / Collection / Label / view-state / user-rating attached to
+# the OLD ratingKey is silently dropped.  To preserve it across the move:
+#
+#   1. Before each move we snapshot the item's state to a durable JSON file
+#      under ~/.my-plex/state-preservation/<old_rk>.json (atomic write).
+#   2. After the move + cache refresh, we look up the NEW ratingKey by
+#      filepath, re-apply the snapshot via the Plex API, and delete the
+#      state file on success.
+#   3. Any state file left over from a prior crashed run is REPLAYED
+#      transparently at the start of every cmd_move invocation (and at
+#      script startup when Plex is reachable) — no operator action needed.
+#
+# State file lifecycle: snapshotted → moved → restored (file removed).
+# A 'failed' status with restore_errors keeps the file for diagnosis.
+# ---------------------------------------------------------------------------
+
+_MOVE_STATE_DIR = os.path.expanduser('~/.my-plex/state-preservation')
+
+
+def _move_state_dir():
+    try:
+        os.makedirs(_MOVE_STATE_DIR, exist_ok=True)
+    except Exception:
+        pass
+    return _MOVE_STATE_DIR
+
+
+def _move_state_path(old_rk):
+    return os.path.join(_move_state_dir(), f'{int(old_rk)}.json')
+
+
+def _move_state_write(state):
+    """Atomic write — tmp then rename so a kill mid-flight never corrupts."""
+    import json as _json
+    p = _move_state_path(state['old_rk'])
+    tmp = p + '.tmp'
+    with open(tmp, 'w') as f:
+        _json.dump(state, f, indent=2, default=str)
+    os.replace(tmp, p)
+    return p
+
+
+def _move_state_read(path):
+    import json as _json
+    try:
+        with open(path) as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def _move_state_remove(old_rk):
+    try:
+        os.remove(_move_state_path(old_rk))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _build_playlist_membership_map(plex):
+    """Return {ratingKey: [playlist_title, ...]} for every audio/video Playlist.
+
+    Single sweep of plex.playlists() — cheap unless the user has dozens
+    of huge playlists.  Errors degrade gracefully to an empty map (any
+    unsnapshotted playlist memberships will simply be lost).
+    """
+    out = {}
+    if plex is None:
+        return out
+    try:
+        for pl in plex.playlists():
+            try:
+                title = pl.title
+                for it in pl.items():
+                    try:
+                        rk = int(getattr(it, 'ratingKey', 0) or 0)
+                        if rk:
+                            out.setdefault(rk, []).append(title)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception as e:
+        if DBG: print(f"{DBGPFX}_build_playlist_membership_map: {e}")
+    return out
+
+
+def _snapshot_plex_item_state(plex, obj, playlist_map):
+    """Capture all preservable state for the cache obj of one item."""
+    rk = int(obj.get('id') or 0)
+    snap = {
+        'labels':         list(obj.get('labels') or []),
+        'collections':    list(obj.get('collections') or []),
+        'viewCount':      obj.get('viewCount') or 0,
+        'lastViewedAt':   obj.get('lastViewedAt') or None,
+        'userRating':     obj.get('userRating') or None,
+        'guid':           obj.get('guid') or '',
+        'playlists':      list(playlist_map.get(rk, [])),
+    }
+    # Live Plex API supplements (in case cache is missing fields).
+    if plex is not None and rk:
+        try:
+            item = plex.fetchItem(rk)
+            for attr, key in (('viewCount', 'viewCount'),
+                              ('userRating', 'userRating'),
+                              ('viewOffset', 'viewOffset'),
+                              ('lastViewedAt', 'lastViewedAt')):
+                v = getattr(item, attr, None)
+                if v not in (None, 0, ''):
+                    snap[key] = v
+            try:
+                snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})
+            except Exception:
+                pass
+            try:
+                snap['collections'] = sorted({c.tag for c in (item.collections or [])})
+            except Exception:
+                pass
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}_snapshot_plex_item_state rk={rk}: {e}")
+    return snap
+
+
+def _restore_plex_item_state(plex, new_rk, snap, dest_library):
+    """Re-apply snapshot to the new ratingKey.  Returns list of error strings."""
+    errors = []
+    if plex is None or not new_rk:
+        return ['plex API unavailable or new_rk missing']
+    try:
+        item = plex.fetchItem(int(new_rk))
+    except Exception as e:
+        return [f'fetchItem({new_rk}): {e}']
+
+    for lab in (snap.get('labels') or []):
+        try: item.addLabel(lab)
+        except Exception as e: errors.append(f'addLabel({lab!r}): {e}')
+
+    if snap.get('userRating'):
+        try: item.rate(float(snap['userRating']))
+        except Exception as e: errors.append(f'rate({snap["userRating"]}): {e}')
+
+    if (snap.get('viewCount') or 0) > 0:
+        try: item.markPlayed()
+        except Exception as e: errors.append(f'markPlayed: {e}')
+
+    for pl_title in (snap.get('playlists') or []):
+        try:
+            pl = plex.playlist(pl_title)
+            pl.addItems([item])
+        except Exception as e:
+            errors.append(f'playlist({pl_title!r}).addItems: {e}')
+
+    for coll_title in (snap.get('collections') or []):
+        try:
+            try:
+                section = plex.library.section(dest_library)
+            except Exception:
+                section = None
+            existing = None
+            if section is not None:
+                try:
+                    for c in section.collections():
+                        if c.title == coll_title:
+                            existing = c; break
+                except Exception:
+                    pass
+            if existing is not None:
+                existing.addItems([item])
+            else:
+                from plexapi.collection import Collection as _PC
+                _PC.create(server=plex, title=coll_title, section=dest_library, items=[item])
+        except Exception as e:
+            errors.append(f'collection({coll_title!r}): {e}')
+
+    return errors
+
+
+def _replay_pending_move_state(plex, quiet=False):
+    """Drain any pending move-state files left from prior runs.
+
+    For files at status 'moved' we attempt restore (looks up the new
+    ratingKey via the cache's obj_by_filepath index).  For 'snapshotted'
+    only (item never actually moved) we discard the snapshot — there's
+    nothing to restore against.
+    """
+    d = _move_state_dir()
+    try:
+        entries = sorted(os.listdir(d))
+    except Exception:
+        return 0, 0
+    pending = [e for e in entries if e.endswith('.json')]
+    if not pending:
+        return 0, 0
+    n_restored = n_failed = 0
+    for fn in pending:
+        path = os.path.join(d, fn)
+        st = _move_state_read(path)
+        if not st:
+            continue
+        status = st.get('status')
+        if status == 'snapshotted':
+            if not quiet:
+                print(f"  ⊘ stale snapshot {fn}: file never moved, discarding")
+            try: os.remove(path)
+            except Exception: pass
+            continue
+        if status == 'restored':
+            try: os.remove(path)
+            except Exception: pass
+            continue
+        if status != 'moved':
+            continue
+        new_fp = st.get('new_filepath')
+        if not new_fp:
+            continue
+        new_rk = None
+        obj = (PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None) or {}
+        if isinstance(obj, dict):
+            new_rk = int(obj.get('id') or 0)
+        if not new_rk:
+            if not quiet:
+                print(f"  ⏸ pending {fn}: new ratingKey not yet in cache (try after --update-cache)")
+            continue
+        if not quiet:
+            print(f"  ↺ replaying {fn}: restoring state on new rk={new_rk}")
+        errs = _restore_plex_item_state(plex, new_rk, st.get('snapshot') or {}, st.get('dest_library') or '')
+        if errs:
+            st['status'] = 'failed'
+            st['restore_errors'] = errs
+            st['restored_at'] = _dtm.now().isoformat(timespec='seconds')
+            _move_state_write(st)
+            n_failed += 1
+            if not quiet:
+                for e in errs: print(f"      ! {e}")
+        else:
+            try: os.remove(path)
+            except Exception: pass
+            n_restored += 1
+    return n_restored, n_failed
+
+
 def cmd_move(args_list, dry_run=False, force=False, yes=False):
     """v1.6: --mv / --move — move media files (and siblings) to another Plex library.
 
@@ -34269,6 +34569,21 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode/Folder content found in libraries other than '{dest_lib}').")
         return (0, 0, 0)
 
+    # v2.69: drain any leftover state from a prior crashed --mv run.
+    # Plex API isn't strictly required for stale-snapshot cleanup, but
+    # restoring 'moved' entries does need it.
+    if not dry_run and not READ_ONLY_MODE:
+        try:
+            _plex_for_replay = ensure_plex_api(required=False)
+        except Exception:
+            _plex_for_replay = None
+        try:
+            nr, nf = _replay_pending_move_state(_plex_for_replay, quiet=False)
+            if nr or nf:
+                print(f">>> drained pending state-preservation: {nr} restored, {nf} failed")
+        except Exception as _e:
+            print(f"  ⚠ state-preservation replay failed: {_e}")
+
     # ---- Phase 1: preview ----
     print()
     print("=" * 76)
@@ -34309,6 +34624,23 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     interactive_choice = None   # 'skip-all' or 'overwrite-all'
     n_moved = n_skipped = n_errors = 0
     affected_libs = {dest_lib}
+
+    # v2.69: build {ratingKey: [playlist_title]} ONCE so per-item snapshot is O(1).
+    # Cross-library moves issue NEW ratingKeys; without this map the Plex
+    # Playlist membership is silently dropped.
+    _plex_for_snapshot = None
+    _playlist_membership = {}
+    if not dry_run and not READ_ONLY_MODE:
+        try:
+            _plex_for_snapshot = ensure_plex_api(required=False)
+            if _plex_for_snapshot is not None:
+                _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
+                if _playlist_membership:
+                    print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
+        except Exception as _e:
+            print(f"  ⚠ could not build playlist-membership map ({_e}); playlist memberships will NOT be preserved")
+    # Track state files written this run so the final restore pass can find them.
+    _state_files_written = []
     # v2.18: session log — every per-item outcome recorded for audit history.
     # Written to /tmp/my-plex.move-log.<UTC-ISO>.json at the end of cmd_move.
     from datetime import datetime as _dtm
@@ -34475,6 +34807,49 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         item_failed = False
         moved_filepaths = []
         moved_as_wrapper = False
+
+        # v2.69: snapshot durable state BEFORE the file move.  Plex will
+        # assign a NEW ratingKey post-scan, so the snapshot is the only
+        # link between the old item's Playlists/Collections/Labels/
+        # view-state/rating and the post-move item.
+        _state_file_path = None
+        if not dry_run and not READ_ONLY_MODE:
+            _old_rk = int(obj.get('id') or 0)
+            if _old_rk:
+                try:
+                    _snap = _snapshot_plex_item_state(_plex_for_snapshot, obj, _playlist_membership)
+                    _state = {
+                        'version':       1,
+                        'created_at':    _dtm.now().isoformat(timespec='seconds'),
+                        'status':        'snapshotted',
+                        'old_rk':        _old_rk,
+                        'old_library':   src_lib,
+                        'old_filepath':  filepaths[0] if filepaths else '',
+                        'dest_library':  dest_lib,
+                        'title':         obj.get('title', ''),
+                        'year':          obj.get('year', ''),
+                        'guid':          obj.get('guid', ''),
+                        'type':          type_str,
+                        'snapshot':      _snap,
+                        'new_filepath':  None,
+                        'restored_at':   None,
+                        'restore_errors': [],
+                    }
+                    _state_file_path = _move_state_write(_state)
+                    _has_state = bool(_snap.get('labels') or _snap.get('collections')
+                                      or _snap.get('playlists') or _snap.get('userRating')
+                                      or (_snap.get('viewCount') or 0) > 0)
+                    if _has_state:
+                        _bits = []
+                        if _snap.get('labels'):      _bits.append(f"labels={len(_snap['labels'])}")
+                        if _snap.get('collections'): _bits.append(f"collections={len(_snap['collections'])}")
+                        if _snap.get('playlists'):   _bits.append(f"playlists={len(_snap['playlists'])}")
+                        if _snap.get('userRating'):  _bits.append(f"rating={_snap['userRating']}")
+                        if (_snap.get('viewCount') or 0) > 0: _bits.append(f"watched={_snap['viewCount']}x")
+                        print(f"  state-snapshot {cache_key} rk={_old_rk}: {', '.join(_bits)}")
+                except Exception as _e:
+                    print(f"  ⚠ state-snapshot {cache_key}: {_e}")
+
         if type_str == 'Movie' and filepaths:
             # Compute wrapper = first path component under src_root.
             first_fp = filepaths[0]
@@ -34627,6 +35002,19 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         for _sf, _df in moved_filepaths:
             _log_op('moved', cache_key, obj, _sf, _df)
 
+        # v2.69: state file durably records the move so post-cache-refresh
+        # restore can find the new ratingKey via new_filepath.
+        if _state_file_path and moved_filepaths:
+            try:
+                _st = _move_state_read(_state_file_path) or {}
+                _st['status'] = 'moved'
+                _st['moved_at'] = _dtm.now().isoformat(timespec='seconds')
+                _st['new_filepath'] = moved_filepaths[0][1]
+                _move_state_write(_st)
+                _state_files_written.append(_state_file_path)
+            except Exception as _e:
+                print(f"  ⚠ state-file update failed: {_e}")
+
     # ----- Trigger Plex library scans -----
     if n_moved > 0:
         print()
@@ -34668,6 +35056,19 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         except Exception as e:
             print(f"  ⚠ in-process cache refresh failed: {e}")
             print(f"    Fall back to: my-plex --update-cache")
+
+        # v2.69: restore state on every just-moved item.  Pending state files
+        # written this run (status='moved') now resolve to a new ratingKey
+        # via the refreshed cache's obj_by_filepath index.
+        if _state_files_written:
+            print()
+            print(f"  state-preservation: restoring state on {len(_state_files_written)} moved item(s)…")
+            try:
+                nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+                print(f"  state-preservation: {nr} restored, {nf} failed")
+            except Exception as _e:
+                print(f"  ⚠ state-preservation restore failed: {_e}")
+                print(f"    State files remain at {_MOVE_STATE_DIR}/ for a later replay.")
     # v2.18: write session log to /tmp/my-plex.move-log.<UTC-ISO>.json so
     # the user can audit history of cross-library moves later.
     if _move_log['ops']:
