@@ -35296,6 +35296,67 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 continue
             print(f"  (didn't understand {confirm!r} — please answer y / n / e)")
 
+    # v2.69: snapshot durable state for every plan entry BEFORE the bulk
+    # SSH mv.  Mirrors cmd_move's state-preservation: Plex assigns NEW
+    # ratingKeys post-rescan and Playlists/Collections/Labels would
+    # otherwise be silently dropped.
+    _plex_for_snapshot = None
+    _playlist_membership = {}
+    _state_files_written = []
+    from datetime import datetime as _dtm
+    if not dry_run and not READ_ONLY_MODE:
+        try:
+            _plex_for_snapshot = ensure_plex_api(required=False)
+            if _plex_for_snapshot is not None:
+                _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
+                if _playlist_membership:
+                    print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
+        except Exception as _e:
+            print(f"  ⚠ playlist-membership map build failed ({_e}); playlist memberships will NOT be preserved")
+        # Also drain any leftover state from a prior crashed run.
+        try:
+            _nr, _nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+            if _nr or _nf:
+                print(f">>> drained pending state-preservation: {_nr} restored, {_nf} failed")
+        except Exception as _e:
+            print(f"  ⚠ state-preservation replay failed: {_e}")
+        # Per-item snapshot.
+        for _key, _obj, _src, _dst, _sw, _dw, _ri in plan:
+            try:
+                _old_rk = int(_obj.get('id') or 0)
+                if not _old_rk:
+                    continue
+                _snap = _snapshot_plex_item_state(_plex_for_snapshot, _obj, _playlist_membership)
+                _state = {
+                    'version':       1,
+                    'created_at':    _dtm.now().isoformat(timespec='seconds'),
+                    'status':        'snapshotted',
+                    'old_rk':        _old_rk,
+                    'old_library':   _src,
+                    'old_filepath':  _sw,
+                    'dest_library':  _dst,
+                    'title':         _obj.get('title', ''),
+                    'year':          _obj.get('year', ''),
+                    'guid':          _obj.get('guid', ''),
+                    'type':          _obj.get('type', 'Movie'),
+                    'snapshot':      _snap,
+                    'new_filepath':  None,
+                    'restored_at':   None,
+                    'restore_errors': [],
+                }
+                _path = _move_state_write(_state)
+                _state_files_written.append((_path, _key, _sw, _dw))
+                _bits = []
+                if _snap.get('labels'):      _bits.append(f"labels={len(_snap['labels'])}")
+                if _snap.get('collections'): _bits.append(f"collections={len(_snap['collections'])}")
+                if _snap.get('playlists'):   _bits.append(f"playlists={len(_snap['playlists'])}")
+                if _snap.get('userRating'):  _bits.append(f"rating={_snap['userRating']}")
+                if (_snap.get('viewCount') or 0) > 0: _bits.append(f"watched={_snap['viewCount']}x")
+                if _bits:
+                    print(f"  state-snapshot {_key} rk={_old_rk}: {', '.join(_bits)}")
+            except Exception as _e:
+                print(f"  ⚠ state-snapshot {_key}: {_e}")
+
     # Phase 4: bulk SSH mv.  ONE session.  Per-op outcome on its own
     # stdout line so we can attribute MOVED/FAILED back to plan entries.
     import subprocess
@@ -35352,6 +35413,37 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     if moved_keys and not READ_ONLY_MODE:
         update_and_save_cache(CACHE)
 
+    # v2.69: mark each successfully-moved item's state file as 'moved'
+    # so the post-cache-refresh restore can resolve to the new ratingKey.
+    if _state_files_written and not READ_ONLY_MODE:
+        _state_by_key = {entry[1]: entry for entry in _state_files_written}
+        for (key, _obj, _src, _dst, _sw, _dw, _ri), outcome in zip(plan, outcomes):
+            if outcome.strip() != 'MOVED':
+                continue
+            _entry = _state_by_key.get(key)
+            if not _entry:
+                continue
+            _path, _, _, _new_fp_planned = _entry
+            try:
+                _st = _move_state_read(_path) or {}
+                _st['status'] = 'moved'
+                _st['moved_at'] = _dtm.now().isoformat(timespec='seconds')
+                # The plan's `_dw` is the dst wrapper.  Compute the actual
+                # video filepath inside that wrapper (= old_wrapper-suffix
+                # remapped to dst_wrapper).
+                _of = _st.get('old_filepath') or ''
+                if _of and _of.startswith(_entry[2] + '/'):
+                    _suffix = _of[len(_entry[2]):]
+                    _st['new_filepath'] = _new_fp_planned + _suffix
+                else:
+                    # Plan's `sw` (entry[2]) is the wrapper, not the file.
+                    # Try alternative: the actual file basename under dw.
+                    import os as _os2
+                    _st['new_filepath'] = _os2.path.join(_new_fp_planned, _os2.path.basename(_of)) if _of else _new_fp_planned
+                _move_state_write(_st)
+            except Exception as _e:
+                print(f"  ⚠ state-file update {key}: {_e}")
+
     # Phase 6: ONE library scan trigger per affected lib (unless Plex's
     # filesystem watcher will pick it up automatically).
     if moved_keys:
@@ -35369,6 +35461,27 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                             print(f"  ⚠ scan of '{lib_name}' failed: {e}")
             except Exception as e:
                 print(f"  ⚠ scan trigger failed: {e}")
+
+    # v2.69: refresh cache in-process (CACHE INTEGRITY rule) so new
+    # ratingKeys land in the cache, then drain pending state files so
+    # Playlists/Collections/Labels are restored on the new keys.
+    if moved_keys and not dry_run and not READ_ONLY_MODE:
+        print()
+        print(f"  refreshing cache (delegates to --update-cache; new Plex IDs adopted)…")
+        try:
+            update_cache_for_library(None)
+        except Exception as e:
+            print(f"  ⚠ in-process cache refresh failed: {e}")
+            print(f"    Fall back to: my-plex --update-cache")
+        if _state_files_written:
+            print()
+            print(f"  state-preservation: restoring state on {len(_state_files_written)} moved item(s)…")
+            try:
+                nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+                print(f"  state-preservation: {nr} restored, {nf} failed")
+            except Exception as _e:
+                print(f"  ⚠ state-preservation restore failed: {_e}")
+                print(f"    State files remain at {_MOVE_STATE_DIR}/ for a later replay.")
 
     # Phase 7: JSON session log.
     try:
