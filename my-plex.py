@@ -34654,11 +34654,20 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     print(f"  moved   : {n_moved} item(s)")
     print(f"  skipped : {n_skipped}")
     print(f"  errors  : {n_errors}")
-    if n_moved > 0:
+    # v2.69: per CACHE INTEGRITY rule — refresh my-plex cache in-process
+    # so the operator never has to run --update-cache after this command.
+    # Plex assigns NEW ratingKeys for cross-library moves (the media_part_id
+    # changes), so an incremental --update-cache picks up the new entries
+    # AND adopts the new keys.  update_cache_for_library delegates to
+    # subprocess `my-plex --update-cache` + pickle reload (per 3a446fb).
+    if n_moved > 0 and not dry_run and not READ_ONLY_MODE:
         print()
-        print(f"  NOTE: Plex assigns NEW IDs for cross-library moves. The OLD cache entries")
-        print(f"        have been removed from the cache.  Run `my-plex --update-cache` to")
-        print(f"        index the new entries in destination library '{dest_lib}'.")
+        print(f"  refreshing cache (delegates to --update-cache; new Plex IDs adopted)…")
+        try:
+            update_cache_for_library(None)
+        except Exception as e:
+            print(f"  ⚠ in-process cache refresh failed: {e}")
+            print(f"    Fall back to: my-plex --update-cache")
     # v2.18: write session log to /tmp/my-plex.move-log.<UTC-ISO>.json so
     # the user can audit history of cross-library moves later.
     if _move_log['ops']:
