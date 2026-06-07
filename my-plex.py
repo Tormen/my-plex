@@ -34396,14 +34396,54 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     return errors
 
 
+def _cleanup_emptied_source_collections(plex, drained_pairs, quiet=False):
+    """Delete Plex Collections that we just drained to empty by moving
+    their last member(s) out.  Only deletes collections WE emptied —
+    queries live Plex to confirm zero items remain before deletion.
+    """
+    if plex is None or not drained_pairs:
+        return 0
+    n_deleted = 0
+    for (library, title) in sorted(drained_pairs):
+        if not library or not title:
+            continue
+        try:
+            section = plex.library.section(library)
+        except Exception as e:
+            if not quiet: print(f"  ⚠ cleanup: section {library!r} not reachable: {e}")
+            continue
+        try:
+            matches = [c for c in section.collections() if c.title == title]
+        except Exception as e:
+            if not quiet: print(f"  ⚠ cleanup: list collections in {library!r}: {e}")
+            continue
+        for coll in matches:
+            try:
+                members = coll.items()
+            except Exception as e:
+                if not quiet: print(f"  ⚠ cleanup: read members of {title!r} in {library!r}: {e}")
+                continue
+            if members:
+                continue   # still has members — not WE who emptied it, or partial drain
+            try:
+                coll.delete()
+                if not quiet: print(f"  🗑 cleanup: deleted now-empty Plex Collection {title!r} in {library!r}")
+                n_deleted += 1
+            except Exception as e:
+                if not quiet: print(f"  ⚠ cleanup: delete {title!r} in {library!r}: {e}")
+    return n_deleted
+
+
 def _replay_pending_move_state(plex, quiet=False):
     """Drain any pending move-state files left from prior runs.
 
     For files at status 'moved' we attempt restore (looks up the new
     ratingKey via the cache's obj_by_filepath index).  For 'snapshotted'
     only (item never actually moved) we discard the snapshot — there's
-    nothing to restore against.
+    nothing to restore against.  At the end, any Plex Collection in the
+    source library that we just drained to zero members is auto-deleted.
     """
+    _drained_source_pairs = set()   # (old_library, collection_title)
     d = _move_state_dir()
     try:
         entries = sorted(os.listdir(d))
@@ -34524,9 +34564,27 @@ def _replay_pending_move_state(plex, quiet=False):
                     if DBG: print(f"{DBGPFX}post-restore cache save: {_se}")
             except Exception as _e:
                 if DBG: print(f"{DBGPFX}post-restore cache patch: {_e}")
+            # Remember the source library + collection titles so we can
+            # delete the now-emptied Plex Collections at the end.
+            try:
+                _src_lib = st.get('old_library') or ''
+                for _ct in ((st.get('snapshot') or {}).get('collections') or []):
+                    if _src_lib and _ct:
+                        _drained_source_pairs.add((_src_lib, _ct))
+            except Exception:
+                pass
             try: os.remove(path)
             except Exception: pass
             n_restored += 1
+    # Auto-cleanup: any source-library Plex Collection that's now empty
+    # (because we just moved its last member out) is deleted.  We only
+    # delete collections that live-Plex confirms are empty.
+    try:
+        n_del = _cleanup_emptied_source_collections(plex, _drained_source_pairs, quiet=quiet)
+        if n_del and not quiet:
+            print(f"  state-preservation: cleaned up {n_del} now-empty source Plex Collection(s)")
+    except Exception as _e:
+        if not quiet: print(f"  ⚠ state-preservation: collection cleanup failed: {_e}")
     return n_restored, n_failed
 
 
