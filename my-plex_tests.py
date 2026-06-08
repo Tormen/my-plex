@@ -9896,6 +9896,122 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         src = self._read_script()
         self.assertIn('date-update FAILED', src)
 
+    # ------------------------------------------------------------------
+    # Backfilled coverage of earlier session commits (4444fc7, 93cae07,
+    # 621981d, 3d280f7, cabde38, 2aae2d6, 3f9056f, 3a446fb).
+    # ------------------------------------------------------------------
+
+    # ---- 4444fc7: UNCOLLECTED_IGNORED_COLLECTION_IDS actual filter ----
+
+    def test_uncollected_ignored_ids_filter_at_detector(self):
+        """Detector (_list_uncollected) must consult UNCOLLECTED_IGNORED_COLLECTION_IDS
+        BEFORE counting members.  Otherwise the ignored coll still appears
+        in --uncollected listings."""
+        src = self._read_script()
+        # Both the detector AND resolver must short-circuit on ignored ids.
+        # The check looks like `if str(cid) in (UNCOLLECTED_IGNORED_COLLECTION_IDS or []):`
+        self.assertGreaterEqual(
+            len(__import__('re').findall(
+                r"if str\(cid\) in \(UNCOLLECTED_IGNORED_COLLECTION_IDS or \[\]\):",
+                src)),
+            2,
+            "ignored-ids check must appear in BOTH detector and resolver")
+
+    # ---- 93cae07: --uncollected --resolve per-token union ----
+
+    def test_uncollected_resolve_scope_unions_tokens(self):
+        """cmd_uncollected_resolve must UNION per-token resolutions, not AND
+        them.  _get_universal_scope AND-combines variadic scope tokens,
+        which gives 0 results for multiple discrete cache keys
+        (Movie:A Movie:B = items in BOTH).  The per-token union loop is
+        the fix."""
+        src = self._read_script()
+        m_start = src.index('def cmd_uncollected_resolve(')
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        # Comment documents the rationale ("Union each token's resolution").
+        self.assertIn("Union each token", region)
+        # Per-token loop + de-dup set.
+        self.assertRegex(region, r"for _t in _tokens:")
+        self.assertRegex(region, r"_seen\.add\(_k\)")
+
+    # ---- 621981d + 3d280f7 + 3f9056f: in-process cache refresh ----
+
+    def test_resolve_commands_refresh_cache_in_process(self):
+        """Every mutating resolve / move command MUST call
+        update_cache_for_library at the end so the operator never has to
+        run --update-cache afterwards (CACHE INTEGRITY rule).
+
+        Accepts either `update_cache_for_library(None)` (full refresh)
+        or `update_cache_for_library(<lib_name>)` (per-library) — both
+        delegate to the canonical subprocess pipeline."""
+        src = self._read_script()
+        for fname in ('cmd_move', 'cmd_uncollected_resolve',
+                      'cmd_mismatched_resolve', 'cmd_misplaced_resolve'):
+            m_start = src.index(f'def {fname}(')
+            try:
+                m_end = src.index('\ndef ', m_start + 1)
+            except ValueError:
+                m_end = len(src)
+            region = src[m_start:m_end]
+            self.assertIn('update_cache_for_library(', region,
+                          f"{fname} must refresh cache in-process")
+
+    # ---- 3a446fb: update_cache_for_library subprocess + pickle reload ----
+
+    def test_update_cache_for_library_delegates_to_subprocess(self):
+        """update_cache_for_library must run `--update-cache` as a
+        subprocess (canonical pipeline) and then reload the pickle.
+        In-process partial rebuild was the historical bug."""
+        src = self._read_script()
+        m_start = src.index('def update_cache_for_library(')
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        self.assertIn("'--update-cache'", region)
+        self.assertIn('load_media_cache', region)
+        self.assertIn('pickle', region.lower())
+
+    # ---- cabde38: parallel TMDB backfill ----
+
+    def test_tmdb_backfill_uses_thread_pool(self):
+        """TMDB backfill must use ThreadPoolExecutor sized by
+        MAX_PARALLEL_WORKERS, matching the existing scraper-pool pattern."""
+        src = self._read_script()
+        # Worker count comes from MAX_PARALLEL_WORKERS (possibly wrapped in
+        # max(1, int(...)) for safety).
+        self.assertRegex(src,
+            r"ThreadPoolExecutor\(\s*max_workers\s*=\s*[^)]*MAX_PARALLEL_WORKERS")
+        self.assertIn('fetch_tmdb_movie_basics', src)
+
+    # ---- 2aae2d6: --library-language-mismatch path-B (TMDB fallback) ----
+
+    def test_library_language_mismatch_has_tmdb_fallback_path(self):
+        """When audio_languages is empty/unknown, the detector must fall
+        back to obj['original_language'] (TMDB-backfilled).  Encoded via
+        the 'via' tuple field — 'p' = Plex audio source, 'o' = TMDB
+        original_language fallback."""
+        src = self._read_script()
+        # The 'o' branch (TMDB fallback) must exist, and the display
+        # legend must distinguish it from 'p'.
+        self.assertRegex(src, r"_via_markers\s*=\s*\{['\"]p['\"]:\s*['\"]['\"]")
+        self.assertRegex(src, r"['\"]o['\"]:\s*['\"]\*['\"]")
+        # The fallback assignment to original_language:
+        self.assertRegex(src, r"original_language|_o_lang")
+
+    def test_fetch_tmdb_movie_basics_combined_helper(self):
+        """The combined helper must return BOTH collection AND
+        original_language in ONE TMDB call.  Prevents the previous
+        two-pass overhead (one call for each field)."""
+        src = self._read_script()
+        m_start = src.index('def fetch_tmdb_movie_basics(')
+        # Helper must reach for /movie/{id} endpoint and return the
+        # three-key dict.
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        self.assertIn('tmdb_collection_id', region)
+        self.assertIn('tmdb_collection_name', region)
+        self.assertIn('original_language', region)
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
