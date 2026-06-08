@@ -4901,6 +4901,47 @@ def query_plex_database(query, mode='rows'):
         print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
         return None
 
+def query_plex_database_write(query):
+    """Execute a write-mode SQL statement against the Plex database.
+
+    Mirrors query_plex_database() (auto-detects local vs SSH+sqlite3) but
+    is for INSERT / UPDATE / DELETE.  Returns True on success, False on
+    failure.
+
+    ⚠ Use only for narrow, deterministic updates (e.g. setting
+    `metadata_item_settings.last_viewed_at` for the disk2plex date
+    round-trip fix).  Plex's running daemon caches rows in memory; large
+    or schema-touching writes risk corruption.  Single-row UPDATEs to
+    well-known columns are safe because Plex re-reads on its next
+    DB refresh tick.
+    """
+    if not query or not query.strip():
+        print(f"ERROR: Empty query provided to query_plex_database_write()")
+        return False
+    local_db_path = os.path.expanduser(PLEX_DB_PATH)
+    use_local = os.path.exists(local_db_path)
+    if use_local:
+        cmd = ['sqlite3', local_db_path, query]
+    else:
+        query_escaped = query.replace("'", "'\\''")
+        sqlite_cmd = f"sqlite3 '{PLEX_DB_PATH}' '{query_escaped}'"
+        cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), sqlite_cmd]
+    if DEEPDBG:
+        print(f"{DBGPFX}Executing Plex DB WRITE: {query[:120]}{'…' if len(query) > 120 else ''}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, encoding='utf-8', errors='replace')
+        if result.returncode != 0:
+            print(f"ERROR: Plex DB write failed (rc={result.returncode}): {result.stderr.strip()}")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: Plex DB write timed out")
+        return False
+    except Exception as e:
+        print(f"ERROR: Plex DB write exception: {e}")
+        return False
+
+
 def validate_plex_database_schema():
     """Validate that Plex database schema matches our expectations
 
@@ -33584,14 +33625,33 @@ def _push_watched_dpm(obj, change, dry_run):
         plex = ensure_plex_api()
         media = plex.fetchItem(int(item_id))
         media.markWatched()
-        if wd and hasattr(media, 'lastViewedAt'):
+        # v2.69: Plex's public API has no endpoint for arbitrary
+        # last_viewed_at — `media.markWatched()` always timestamps with
+        # NOW.  When the disk regex captured a WATCHED_DATE
+        # (`[vu@YYYY-MM-DD]`) we round-trip it via a narrow direct UPDATE
+        # to metadata_item_settings.last_viewed_at, joined by GUID since
+        # mis is keyed by GUID not metadata_item id.  Without this, the
+        # historical watch-date is lost on every disk→plex sync.
+        date_pushed = False
+        if wd:
             try:
                 dt = datetime.strptime(str(wd), '%Y-%m-%d')
-                media.lastViewedAt = dt
-                media.save()
-            except (ValueError, Exception):
-                pass  # markWatched succeeded; date is best-effort
-        print(f"  Pushed watched ({wd or 'no date'}): {title}")
+                unix_ts = int(dt.timestamp())
+                # GUID-join is required: metadata_item_settings stores per-
+                # GUID rows (so a re-import keeps watch state).
+                sql = (
+                    "UPDATE metadata_item_settings "
+                    f"SET last_viewed_at = {unix_ts} "
+                    f"WHERE guid = (SELECT guid FROM metadata_items WHERE id = {int(item_id)})"
+                )
+                if query_plex_database_write(sql):
+                    date_pushed = True
+            except ValueError:
+                pass
+        if wd and not date_pushed:
+            print(f"  Pushed watched ({wd}, date-update FAILED — Plex API timestamped NOW): {title}")
+        else:
+            print(f"  Pushed watched ({wd or 'no date'}): {title}")
         return True
     except Exception as ex:
         print(f"  ERROR pushing watched for {title}: {ex}")

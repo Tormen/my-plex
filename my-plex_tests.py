@@ -9671,6 +9671,232 @@ class TestSyncDispatchAndDoubleMarkerFix(unittest.TestCase):
         self.assertEqual(out, 'Movie [de].mkv')
 
 
+# v2.69 retroactive coverage — tests for code shipped earlier this
+# session.  Each test documents the bug or behaviour it pins so a
+# future regression has a paper trail.
+class TestV269RetroactiveCoverage(unittest.TestCase):
+    """Backfilled tests for state preservation, cross-library uncollected,
+    auto-refresh fast-path, and the disk2plex date-roundtrip fix.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util, sys as _sys, os as _os
+        here = _os.path.dirname(_os.path.realpath(__file__))
+        spec = importlib.util.spec_from_file_location('_myplex_v269', _os.path.join(here, 'my-plex.py'))
+        cls.m = importlib.util.module_from_spec(spec)
+        saved_argv = _sys.argv[:]
+        _sys.argv = [_sys.argv[0]]
+        try:
+            spec.loader.exec_module(cls.m)
+        except SystemExit:
+            pass
+        finally:
+            _sys.argv = saved_argv
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    # ---- State preservation (cmd_move + _sort_new_movies) ----
+
+    def test_state_preservation_directory_is_under_my_plex(self):
+        """State files MUST live under ~/.my-plex/state-preservation/.
+        Any other location risks losing them across sessions."""
+        self.assertEqual(
+            self.m._MOVE_STATE_DIR,
+            os.path.expanduser('~/.my-plex/state-preservation'))
+
+    def test_state_file_atomic_write_then_rename(self):
+        """Snapshot writes must be atomic (tmp → rename) so a SIGKILL mid-write
+        never produces a half-written JSON that breaks replay."""
+        src = self._read_script()
+        import re
+        m = re.search(r"def _move_state_write\(state\):.*?tmp = p \+ '\.tmp'.*?os\.replace\(tmp, p\)",
+                      src, re.DOTALL)
+        self.assertIsNotNone(m, "atomic write pattern (tmp → rename) missing")
+
+    def test_state_file_round_trip(self):
+        """Write → read → assert equality.  Real I/O under tmp dir."""
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Patch _MOVE_STATE_DIR to the tmpdir.
+            saved = self.m._MOVE_STATE_DIR
+            self.m._MOVE_STATE_DIR = tmpdir
+            try:
+                state = {
+                    'version': 1, 'status': 'snapshotted', 'old_rk': 99001,
+                    'old_library': ',unsorted', 'old_filepath': '/tmp/old.mkv',
+                    'dest_library': 'movies.fr',
+                    'title': 'TestMovie', 'year': 2024, 'guid': 'plex://movie/abc',
+                    'type': 'Movie',
+                    'snapshot': {'labels': ['favourite'], 'collections': ['SomeColl'],
+                                 'viewCount': 1, 'lastViewedAt': None,
+                                 'userRating': 8.5, 'guid': 'plex://movie/abc',
+                                 'playlists': ['My Watchlist']},
+                    'new_filepath': None, 'restored_at': None, 'restore_errors': [],
+                }
+                path = self.m._move_state_write(state)
+                self.assertTrue(os.path.exists(path))
+                read_back = self.m._move_state_read(path)
+                self.assertEqual(read_back, state)
+            finally:
+                self.m._MOVE_STATE_DIR = saved
+
+    def test_replay_handles_missing_filepath_gracefully(self):
+        """A state file with status='moved' but no new_filepath must NOT crash."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = self.m._MOVE_STATE_DIR
+            self.m._MOVE_STATE_DIR = tmpdir
+            try:
+                self.m._move_state_write({
+                    'version': 1, 'status': 'moved', 'old_rk': 12345,
+                    'new_filepath': None, 'snapshot': {}, 'dest_library': 'movies.fr',
+                })
+                # Should not raise even when Plex is unavailable.
+                n_r, n_f = self.m._replay_pending_move_state(plex=None, quiet=True)
+                # No real restore happens (new_filepath missing); just no crash.
+                self.assertEqual((n_r, n_f), (0, 0))
+            finally:
+                self.m._MOVE_STATE_DIR = saved
+
+    def test_restore_lookup_has_four_strategies(self):
+        """The lookup in _replay_pending_move_state must include:
+           (1) exact filepath, (2) prefix scan, (3) GUID+library, (4) title+year+library.
+        All four are needed because Plex sometimes merges a moved file as a new
+        VERSION of an existing same-title item (no fresh ratingKey)."""
+        src = self._read_script()
+        self.assertIn('# Strategy 1: exact filepath lookup', src)
+        self.assertIn('# Strategy 2: filepath prefix scan', src)
+        self.assertIn('# Strategy 3: GUID + dest_library', src)
+        self.assertIn('# Strategy 4: title + year + dest_library', src)
+
+    def test_cleanup_emptied_source_collections_skips_nonempty(self):
+        """The cleanup must NOT delete a Plex Collection that still has members,
+        even if its name matches a snapshotted source collection."""
+        class FakeItem:
+            def __init__(self, name, members):
+                self._name = name; self._members = list(members)
+                self.title = name; self.deleted = False
+            def items(self): return list(self._members)
+            def delete(self): self.deleted = True
+        class FakeSection:
+            def __init__(self, colls): self._colls = colls
+            def collections(self): return list(self._colls)
+        class FakePlex:
+            def __init__(self, by_lib): self._by_lib = by_lib
+            class _Library:
+                def __init__(self, parent): self._p = parent
+                def section(self, name): return FakeSection(self._p._by_lib.get(name, []))
+            @property
+            def library(self): return self._Library(self)
+        coll = FakeItem('Test Collection', members=['some_member'])  # still has members
+        plex = FakePlex({'movies.en': [coll]})
+        n = self.m._cleanup_emptied_source_collections(
+            plex, {('movies.en', 'Test Collection')}, quiet=True)
+        self.assertEqual(n, 0)
+        self.assertFalse(coll.deleted)
+
+    def test_cleanup_emptied_source_collections_deletes_empty(self):
+        """Empty same-name collection in source library MUST be deleted."""
+        class FakeItem:
+            def __init__(self, name): self.title = name; self.deleted = False
+            def items(self): return []
+            def delete(self): self.deleted = True
+        class FakeSection:
+            def __init__(self, c): self._c = c
+            def collections(self): return list(self._c)
+        class FakePlex:
+            def __init__(self, by_lib): self._b = by_lib
+            class _Library:
+                def __init__(self, p): self._p = p
+                def section(self, name): return FakeSection(self._p._b.get(name, []))
+            @property
+            def library(self): return self._Library(self)
+        coll = FakeItem('Test Collection')
+        plex = FakePlex({',unsorted': [coll]})
+        n = self.m._cleanup_emptied_source_collections(
+            plex, {(',unsorted', 'Test Collection')}, quiet=True)
+        self.assertEqual(n, 1)
+        self.assertTrue(coll.deleted)
+
+    # ---- Cross-library uncollected resolver ----
+
+    def test_uncollected_allow_cross_library_default_true(self):
+        """The default must allow per-library siblings (user opted in)."""
+        self.assertTrue(self.m.CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', False))
+
+    def test_uncollected_ignored_collection_ids_default_empty(self):
+        """No collection-id suppressed by default; users opt in per id."""
+        self.assertEqual(self.m.CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS'), [])
+
+    def test_uncollected_resolver_per_library_split(self):
+        """cmd_uncollected_resolve must split a multi-library group into
+        per-library candidates rather than skipping it.  Code-pattern check."""
+        src = self._read_script()
+        self.assertRegex(src, r"per_lib\s*=\s*\{\}\s*#\s*library_name\s*→\s*\[\(key,\s*obj\)\]")
+        self.assertRegex(src, r"if len\(per_lib\) > 1 and not UNCOLLECTED_ALLOW_CROSS_LIBRARY")
+
+    # ---- Auto-refresh fast-path ----
+
+    def test_auto_refresh_gate_order(self):
+        """_maybe_refresh_cache_for_state_changing_command must short-circuit
+        in this order: OFFLINE/READ_ONLY → cache mtime → scanned_at diff."""
+        src = self._read_script()
+        self.assertRegex(src, r"if OFFLINE or READ_ONLY_MODE:\s*\n\s*return False")
+        self.assertRegex(src, r"if _age < _AUTO_UPDATE_CACHE_MAX_AGE_S:\s*\n.*\n.*return False")
+        self.assertRegex(src, r"changed\s*=\s*\[\]")
+
+    def test_auto_refresh_max_age_30s(self):
+        """Stale-window default must remain 30 seconds (settled with user)."""
+        self.assertEqual(self.m._AUTO_UPDATE_CACHE_MAX_AGE_S, 30)
+
+    def test_auto_refresh_wired_into_sort_new(self):
+        """_sort_new_movies must invoke the auto-refresh before plan-build
+        (after the empty-routes guard, before the routing banner prints)."""
+        src = self._read_script()
+        m_start = src.index('def _sort_new_movies(')
+        # Anchor on the routing banner which prints AFTER the auto-refresh.
+        m_end = src.index('--sort-new: MOVIE ROUTING', m_start)
+        region = src[m_start:m_end]
+        self.assertIn("_maybe_refresh_cache_for_state_changing_command('--sort-new')", region)
+
+    def test_auto_refresh_wired_into_cmd_move(self):
+        """cmd_move must invoke the auto-refresh before scope resolution."""
+        src = self._read_script()
+        m_start = src.index('def cmd_move(')
+        m_end = src.index('items = _get_universal_scope', m_start)
+        region = src[m_start:m_end]
+        self.assertIn("_maybe_refresh_cache_for_state_changing_command('--mv')", region)
+
+    # ---- disk2plex date round-trip (bug #4 fixed this turn) ----
+
+    def test_disk2plex_pushes_watched_date_via_db_write(self):
+        """The historical [vu@YYYY-MM-DD] date must round-trip into Plex's
+        metadata_item_settings.last_viewed_at — not get clobbered to NOW
+        by `markPlayed()`."""
+        src = self._read_script()
+        # The new code path uses query_plex_database_write + UPDATE …
+        # metadata_item_settings.last_viewed_at joined by GUID.
+        self.assertIn('UPDATE metadata_item_settings', src)
+        self.assertIn('last_viewed_at = {unix_ts}', src)
+        self.assertIn('WHERE guid = (SELECT guid FROM metadata_items WHERE id =', src)
+
+    def test_query_plex_database_write_helper_exists(self):
+        """The narrow DB-write helper must exist and document its safety
+        boundary (Plex daemon caches rows; arbitrary writes are unsafe)."""
+        self.assertTrue(hasattr(self.m, 'query_plex_database_write'))
+        src = self._read_script()
+        self.assertIn('Use only for narrow, deterministic updates', src)
+
+    def test_disk2plex_logs_failure_when_db_write_fails(self):
+        """If the DB write fails, the operator must be told the date wasn't
+        pushed (the watched-status still landed via markWatched())."""
+        src = self._read_script()
+        self.assertIn('date-update FAILED', src)
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -9718,6 +9944,7 @@ _UNITTEST_SCOPES = {
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
     'sync':               [TestSyncDispatchAndDoubleMarkerFix],
+    'v269':               [TestV269RetroactiveCoverage],
 }
 
 # List of all unittest classes for run_regression_tests()
