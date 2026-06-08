@@ -9617,6 +9617,59 @@ class TestSyncDispatchAndDoubleMarkerFix(unittest.TestCase):
         self.assertRegex(src, r"if\s+replace\s+and\s+_replace_patterns:")
         self.assertRegex(src, r"if\s+not\s+_new_val:")
 
+    # ------------------------------------------------------------------
+    # apply_markers: scalar-marker rejection (corruption guard).
+    #
+    # Background: while testing S26 sync we saw 163 files end up with
+    # `[vu@D] [True]`.  The `[True]` came from `apply_markers` accepting
+    # a raw 'True' string from the merge step (when DPM template
+    # `[vu@{WATCHED_DATE}]` couldn't be filled and upstream fallback
+    # used the value-key as a scalar).  apply_markers must reject any
+    # value that isn't a real marker string — never write `[True]`.
+    # ------------------------------------------------------------------
+
+    def _load_main_mod(self):
+        import importlib.util, sys as _sys, os as _os
+        here = _os.path.dirname(_os.path.realpath(__file__))
+        spec = importlib.util.spec_from_file_location('_myplex_marker', _os.path.join(here, 'my-plex.py'))
+        m = importlib.util.module_from_spec(spec)
+        saved_argv = _sys.argv[:]
+        _sys.argv = [_sys.argv[0]]
+        try:
+            spec.loader.exec_module(m)
+        except SystemExit:
+            pass
+        finally:
+            _sys.argv = saved_argv
+        return m
+
+    def test_apply_markers_rejects_raw_True_string(self):
+        """WATCHED='True' (str) must NOT produce a [True] marker."""
+        m = self._load_main_mod()
+        out = m.apply_markers('Movie.mkv', {'WATCHED': 'True'})
+        self.assertEqual(out, 'Movie.mkv', f"expected no marker, got: {out!r}")
+
+    def test_apply_markers_rejects_raw_boolean(self):
+        """A raw Python bool must NOT crash and must NOT produce [True]."""
+        m = self._load_main_mod()
+        out = m.apply_markers('Movie.mkv', {'WATCHED': True})
+        self.assertEqual(out, 'Movie.mkv', f"expected no marker, got: {out!r}")
+
+    def test_apply_markers_rejects_None_and_empty(self):
+        m = self._load_main_mod()
+        self.assertEqual(m.apply_markers('Movie.mkv', {'X': None}), 'Movie.mkv')
+        self.assertEqual(m.apply_markers('Movie.mkv', {'X': ''}), 'Movie.mkv')
+        self.assertEqual(m.apply_markers('Movie.mkv', {'X': 'None'}), 'Movie.mkv')
+        self.assertEqual(m.apply_markers('Movie.mkv', {'X': 'False'}), 'Movie.mkv')
+
+    def test_apply_markers_accepts_valid_bracket_marker(self):
+        """Sanity: valid markers must still be written."""
+        m = self._load_main_mod()
+        out = m.apply_markers('Movie.mkv', {'WATCHED': '[vu@2026-05-16]'})
+        self.assertEqual(out, 'Movie [vu@2026-05-16].mkv')
+        out = m.apply_markers('Movie.mkv', {'LANG': '[de]'})
+        self.assertEqual(out, 'Movie [de].mkv')
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,

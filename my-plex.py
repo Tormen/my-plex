@@ -6354,6 +6354,15 @@ def apply_markers(clean_filename, markers):
         val = markers[aspect]
         if not val:  # skip empty markers
             continue
+        # v2.69: reject raw scalars (bool / number / non-bracketed leaf).
+        # When the DPM plex2disk template can't be filled (e.g. the
+        # value-key was True but WATCHED_DATE was empty), upstream
+        # fallback produces a raw 'True' / 'False' string.  Writing
+        # that as a `[True]` marker is wrong — drop it.
+        if not isinstance(val, str):
+            continue
+        if val.strip().lower() in ('true', 'false', 'none', ''):
+            continue
         # v1.1 DPM list-valued plex_vars produce multi-bracket strings like
         # '[de][en]'.  Pass those through as-is.  Legacy single-value markers
         # are bare or single-bracketed; normalise via strip+rewrap.
