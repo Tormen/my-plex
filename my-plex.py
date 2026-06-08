@@ -12305,6 +12305,76 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
         print(f"  ⚠ Warning: Could not update cache for file: {e}")
         return None
 
+# v2.69: 30-second cache-staleness window for the auto-refresh fast-path.
+_AUTO_UPDATE_CACHE_MAX_AGE_S = 30
+
+
+def _maybe_refresh_cache_for_state_changing_command(label=''):
+    """Fast-path auto-refresh used by state-changing commands.
+
+    Three-stage gate, cheap → expensive:
+      1. OFFLINE / READ_ONLY_MODE / no PLEX_DB → skip entirely.
+      2. Cache pickle mtime < 30 s → skip (assumed fresh).
+      3. SQLite query of Plex DB section scanned_at; compare to
+         CACHE['library_stats']['updatedAt'].  If every library matches
+         → skip.  Otherwise → run update_cache_for_library(None).
+
+    Returns True if a refresh ran, False if skipped.  All errors degrade
+    to "skip with a warning" so a misconfigured Plex DB never blocks a
+    user-issued command.
+    """
+    import os as _os, time as _time
+    global OFFLINE, READ_ONLY_MODE
+    if OFFLINE or READ_ONLY_MODE:
+        return False
+    # Stage 1: cache mtime
+    try:
+        _path = _os.path.expanduser(CACHE_FILE)
+        if _os.path.exists(_path):
+            _age = _time.time() - _os.path.getmtime(_path)
+            if _age < _AUTO_UPDATE_CACHE_MAX_AGE_S:
+                if DBG: print(f"{DBGPFX}auto-refresh skipped: cache pickle is {_age:.1f}s old (< {_AUTO_UPDATE_CACHE_MAX_AGE_S}s)")
+                return False
+    except Exception:
+        pass
+    # Stage 2: Plex DB scanned_at delta check
+    try:
+        rows = query_plex_database(
+            "SELECT name, scanned_at FROM library_sections",
+            mode='rows'
+        ) or []
+    except Exception as _e:
+        if DBG: print(f"{DBGPFX}auto-refresh: scanned_at query failed: {_e}")
+        return False
+    cached_ua = (CACHE.get('library_stats') or {}).get('updatedAt') or {}
+    changed = []
+    for row in rows:
+        try:
+            _name = row[0] if isinstance(row, (list, tuple)) else row.get('name')
+            _scan = row[1] if isinstance(row, (list, tuple)) else row.get('scanned_at')
+        except Exception:
+            continue
+        if _scan is None:
+            continue
+        _cached = cached_ua.get(_name)
+        # Plex's scanned_at is a string ISO timestamp; CACHE's updatedAt
+        # is a unix int or datetime — compare as strings for robustness.
+        if str(_cached) != str(_scan):
+            changed.append(_name)
+    if not changed:
+        if DBG: print(f"{DBGPFX}auto-refresh skipped: all {len(rows)} libraries' scanned_at match cache")
+        return False
+    # Stage 3: real work
+    prefix = f"  [auto-refresh{(' for ' + label) if label else ''}]"
+    print(f"{prefix} Plex DB shows changes in: {', '.join(sorted(changed))} — refreshing cache…")
+    try:
+        update_cache_for_library(None)
+        return True
+    except Exception as _e:
+        print(f"{prefix} cache refresh failed: {_e}  (continuing with stale cache)")
+        return False
+
+
 def update_cache_for_library(library_name):
     """v2.69: Refresh my-plex's cache by delegating to the canonical
     `--update-cache` code path via a subprocess invocation of the my-plex
@@ -34625,6 +34695,12 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     Returns: tuple (n_moved, n_skipped, n_errors).
     """
     global VRB
+    # v2.69: state-changing command — make sure the cache is fresh enough
+    # that all backfilled fields (original_language, tmdb_collection_*, etc.)
+    # used by scope filters / dup-detection are current.  Fast-path: skips
+    # if pickle is < 30s old or if Plex DB shows no library changes.
+    if not dry_run:
+        _maybe_refresh_cache_for_state_changing_command('--mv')
     if not args_list:
         err(1100, "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE...]\n  Use --help mv for details.")
     dest_lib = args_list[0]
@@ -35232,6 +35308,12 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     routes = SORT_NEW_MOVIE_ROUTES or []
     if not routes:
         return (0, 0, 0)
+
+    # v2.69: fast-path auto-refresh so the plan is built against current
+    # backfilled fields (original_language, tmdb_collection_*).  Skipped
+    # when --offline / read-only / cache <30s old / no Plex DB delta.
+    if not dry_run:
+        _maybe_refresh_cache_for_state_changing_command('--sort-new')
 
     print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
 
