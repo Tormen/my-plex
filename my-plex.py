@@ -33064,6 +33064,40 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
         # Compute new markers from Plex via the DPM engine.
         plex_vars = resolve_disk_map_variables(obj, cache_key)
         new_markers = compute_markers_dpm(DISK_PLEX_MAP, plex_vars, scope)
+
+        # v2.69 bugfix: also strip any EXISTING same-aspect marker from the
+        # filename when we're about to write that aspect.  Without this,
+        # a user-edited [vu@D1] on disk + Plex lastViewedAt D2 produces
+        # [vu@D1] [vu@D2] (double-marker corruption).  Narrower than
+        # --replace: only touches aspects we're actively writing.
+        for _aspect, _new_val in new_markers.items():
+            if not _new_val:
+                continue
+            _var_spec = DISK_PLEX_MAP.get(_aspect) or {}
+            _scope_set = _normalise_disk_plex_scope(_var_spec.get('scope', 'file')) or ()
+            if scope not in _scope_set:
+                continue
+            _aspect_patterns = []
+            for _, _entry_or_list in (_var_spec.get('values') or {}).items():
+                _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
+                for _entry in _entries:
+                    if not isinstance(_entry, dict):
+                        continue
+                    for _rg in _dpm_resolve_disk2plex(_entry, scope):
+                        try:
+                            _aspect_patterns.append(re.compile(_rg, re.IGNORECASE))
+                        except re.error:
+                            pass
+            for _pat in _aspect_patterns:
+                _new_clean = _pat.sub('', clean)
+                if _new_clean != clean:
+                    # collapse any stray whitespace, tidy " ." before extension
+                    _new_clean = re.sub(r'\s{2,}', ' ', _new_clean)
+                    _new_clean = re.sub(r'\s+(\.[^.]+)$', r'\1', _new_clean)   # " .mp4" → ".mp4"
+                    _new_clean = _new_clean.strip()
+                    if VRB or dry_run:
+                        print(f"{prefix}Replacing pre-existing [{_aspect}] marker (Plex now: {_new_val})")
+                    clean = _new_clean
         # Markers come back as {plex_var: marker_string}.  We feed plex_var
         # as the "aspect" name so the sidecar can track per-plex_var.
 
@@ -39180,7 +39214,14 @@ def execute_global_commands(args, cmd_args):
         return val   # already a string (legacy nargs='?')
 
     # Handle --plex-disk-sync / --sync (bidirectional: disk2plex first, then plex2disk)
-    sync_target = safe_getattr(cmd_args, 'plex_disk_sync', None) or safe_getattr(cmd_args, 'sync', None)
+    # Both parsers register --sync / --plex-disk-sync (main + GLOBAL).
+    # When main_parser consumes the flag first, cmd_args.* stays None;
+    # fall through to args.* so the dispatch still fires.  Fix for the
+    # silent-no-op bug discovered while testing S26 sync.
+    sync_target = (safe_getattr(cmd_args, 'plex_disk_sync', None) or
+                   safe_getattr(cmd_args, 'sync', None) or
+                   safe_getattr(args, 'plex_disk_sync', None) or
+                   safe_getattr(args, 'sync', None))
     if sync_target is not None:
         if args.force:
             err(1092, "--force cannot be used with --sync / --plex-disk-sync\n"

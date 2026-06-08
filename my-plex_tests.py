@@ -9538,6 +9538,86 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
             r"obj\['audio_languages'\]\s*==\s*\[_AUDIO_LANG_UNKNOWN\]\s*\)")
 
 
+# v2.69 bugfix coverage — both bugs were caught while syncing series.de
+# wer.wird.millionaer S26 (152 disk [vu@] markers vs 2 Plex viewCount>0):
+#   1. `--sync` silent-no-op (main_parser ate the flag → cmd_args.sync=None)
+#   2. `--plex2disk` produced double [vu@D1] [vu@D2] when the existing on-disk
+#      marker came from manual edit (no sidecar entry).
+class TestSyncDispatchAndDoubleMarkerFix(unittest.TestCase):
+    """Regression coverage for the v2.69 sync-S26 bug investigation."""
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_sync_dispatch_falls_back_to_args_namespace(self):
+        """execute_global_commands must check args.sync as fallback.
+
+        main_parser.add_argument('--sync', …) consumes the flag before the
+        MAIN DOIT LOOP runs GLOBAL_CMD_PARSER.parse_known_args, so
+        cmd_args.sync stays None.  Without an args.* fallback the dispatch
+        silently no-ops.  The fix: 4-way fallback (cmd_args.plex_disk_sync,
+        cmd_args.sync, args.plex_disk_sync, args.sync).
+        """
+        src = self._read_script()
+        # The fallback chain must include args.* OR-clauses.
+        self.assertRegex(src,
+            r"sync_target\s*=\s*\(?safe_getattr\(cmd_args,\s*'plex_disk_sync',\s*None\)\s+or\s+"
+            r"safe_getattr\(cmd_args,\s*'sync',\s*None\)\s+or\s+"
+            r"safe_getattr\(args,\s*'plex_disk_sync',\s*None\)\s+or\s+"
+            r"safe_getattr\(args,\s*'sync',\s*None\)\)?")
+
+    def test_sync_registered_in_both_parsers(self):
+        """Both main_parser and GLOBAL_CMD_PARSER must register --sync.
+
+        main_parser is the canonical parser; GLOBAL_CMD_PARSER is the loop
+        parser.  Both need it for argparse not to error.  Documents the
+        dual-registration as intentional (root cause of bug #1).
+        """
+        src = self._read_script()
+        self.assertRegex(src, r"main_parser\.add_argument\('--sync'")
+        self.assertRegex(src, r"GLOBAL_CMD_PARSER\.add_argument\('--sync'")
+
+    def test_plex2disk_strips_pre_existing_same_aspect_marker(self):
+        """`--plex2disk` must replace, not append, when an aspect marker
+        already exists in the filename but is NOT tracked by the sidecar.
+
+        Reproducer: filename has `[vu@2026-05-17]` (user-edited, no sidecar
+        entry); Plex's lastViewedAt is 2026-05-16.  Pre-v2.69, output was
+        `... [vu@2026-05-17] [vu@2026-05-16].mp4` (two markers).
+        Post-fix: `... [vu@2026-05-16].mp4` (single marker).
+        """
+        src = self._read_script()
+        # The bugfix block must:
+        #  a) iterate new_markers per aspect
+        #  b) compile disk2plex regex patterns for that aspect
+        #  c) pat.sub('', clean) and assign back to clean
+        #  d) log "Replacing pre-existing [{aspect}] marker"
+        self.assertIn('v2.69 bugfix', src)
+        self.assertRegex(src, r"for\s+_aspect,\s*_new_val\s+in\s+new_markers\.items\(\)")
+        self.assertRegex(src, r"_aspect_patterns\.append\(\s*re\.compile\(_rg,\s*re\.IGNORECASE\)")
+        self.assertRegex(src, r"Replacing pre-existing \[\{_aspect\}\] marker")
+
+    def test_plex2disk_marker_replacement_tidies_whitespace(self):
+        """After regex-stripping the old marker, leftover whitespace (' .mp4'
+        or '  ') must be collapsed so the new filename is well-formed.
+        """
+        src = self._read_script()
+        # the cleanup must collapse multi-space AND remove the lone space
+        # before extension (' .mp4' → '.mp4').
+        self.assertRegex(src, r"re\.sub\(r'\\s\{2,\}',\s*' ',\s*_new_clean\)")
+        self.assertRegex(src, r"re\.sub\(r'\\s\+\(\\\.\[\^\.\]\+\)\$',\s*r'\\1',\s*_new_clean\)")
+
+    def test_plex2disk_replace_flag_unaffected(self):
+        """--replace (cross-aspect strip) must remain a SEPARATE codepath
+        from the per-aspect fix, otherwise it would silently change
+        semantics."""
+        src = self._read_script()
+        # Both branches exist independently:
+        self.assertRegex(src, r"if\s+replace\s+and\s+_replace_patterns:")
+        self.assertRegex(src, r"if\s+not\s+_new_val:")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -9584,6 +9664,7 @@ _UNITTEST_SCOPES = {
     'unrecognized':       [TestUnrecognized],
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
+    'sync':               [TestSyncDispatchAndDoubleMarkerFix],
 }
 
 # List of all unittest classes for run_regression_tests()
