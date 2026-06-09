@@ -10012,6 +10012,138 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertIn('tmdb_collection_name', region)
         self.assertIn('original_language', region)
 
+    # ------------------------------------------------------------------
+    # Bug #1 (this turn): DPM_LIBRARY_SUPPRESS — library-context
+    # suppression of redundant markers (e.g. don't write [de] inside
+    # series.de / movies.de).  Demonstrated visually in S26 [de] rename.
+    # ------------------------------------------------------------------
+
+    def test_dpm_library_suppress_default_empty(self):
+        """Default = no suppression; user opts in per library."""
+        self.assertEqual(self.m.CONFIG_DEFAULTS.get('DPM_LIBRARY_SUPPRESS'), {})
+
+    def test_dpm_library_suppress_matching_library_value(self):
+        """When obj.library matches a key in DPM_LIBRARY_SUPPRESS and
+        the resolved var matches the value-to-suppress, the var is
+        rewritten to 'unknown' (the no-marker bucket)."""
+        m = self.m
+        saved_dpm_lib = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
+        saved_disk_plex_map = getattr(m, 'DISK_PLEX_MAP', {})
+        try:
+            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            # Need at least one promoted plex_var so the bottom_up path runs.
+            m.DISK_PLEX_MAP = {
+                'AUDIO_LANG': {
+                    'scope': ['file'],
+                    'series_strategy': 'bottom_up',
+                    'values': {'de': {'plex2disk': '[de]'}},
+                }
+            }
+            obj = {
+                'type': 'Episode', 'type_str': 'Episode',
+                'library': 'series.de',
+                'audio_languages': ['de'], 'audio_languages_plex': ['de'],
+            }
+            var = m.resolve_disk_map_variables(obj, cache_key='Episode:1')
+            self.assertEqual(var.get('AUDIO_LANG'), 'unknown',
+                             f"expected 'unknown' (suppressed), got {var.get('AUDIO_LANG')!r}")
+        finally:
+            m.DPM_LIBRARY_SUPPRESS = saved_dpm_lib
+            m.DISK_PLEX_MAP = saved_disk_plex_map
+
+    def test_dpm_library_suppress_non_matching_passes_through(self):
+        """When obj.library is NOT in DPM_LIBRARY_SUPPRESS, the var is
+        unchanged."""
+        m = self.m
+        saved = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
+        saved_dpm = getattr(m, 'DISK_PLEX_MAP', {})
+        try:
+            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            m.DISK_PLEX_MAP = {
+                'AUDIO_LANG': {
+                    'scope': ['file'],
+                    'series_strategy': 'bottom_up',
+                    'values': {'de': {'plex2disk': '[de]'}},
+                }
+            }
+            obj = {
+                'type': 'Episode', 'type_str': 'Episode',
+                'library': 'series.fr',   # different library
+                'audio_languages': ['de'], 'audio_languages_plex': ['de'],
+            }
+            var = m.resolve_disk_map_variables(obj, cache_key='Episode:2')
+            self.assertEqual(var.get('AUDIO_LANG'), 'de',
+                             "unrelated library must NOT suppress")
+        finally:
+            m.DPM_LIBRARY_SUPPRESS = saved
+            m.DISK_PLEX_MAP = saved_dpm
+
+    def test_dpm_library_suppress_different_value_passes_through(self):
+        """When the var resolved to a value DIFFERENT from the
+        suppress-value, leave it alone (e.g. a French dub of a movie
+        sitting in series.de still gets [fr])."""
+        m = self.m
+        saved = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
+        saved_dpm = getattr(m, 'DISK_PLEX_MAP', {})
+        try:
+            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            m.DISK_PLEX_MAP = {
+                'AUDIO_LANG': {
+                    'scope': ['file'],
+                    'series_strategy': 'bottom_up',
+                    'values': {'de': {'plex2disk': '[de]'},
+                               'fr': {'plex2disk': '[fr]'}},
+                }
+            }
+            obj = {
+                'type': 'Episode', 'type_str': 'Episode',
+                'library': 'series.de',
+                'audio_languages': ['fr'], 'audio_languages_plex': ['fr'],
+            }
+            var = m.resolve_disk_map_variables(obj, cache_key='Episode:3')
+            self.assertEqual(var.get('AUDIO_LANG'), 'fr',
+                             "non-matching value must NOT be suppressed")
+        finally:
+            m.DPM_LIBRARY_SUPPRESS = saved
+            m.DISK_PLEX_MAP = saved_dpm
+
+    # ------------------------------------------------------------------
+    # Bug #2 (this turn): sync_view_state_into_cache — per-item view
+    # state sweep.  Plex view-state writes don't bump library.updatedAt,
+    # so incremental --update-cache misses them and --plex2disk wrote
+    # no [vu] for items watched only via Plex (S26E124-127 visible).
+    # ------------------------------------------------------------------
+
+    def test_sync_view_state_helper_exists(self):
+        """The sweep helper must be a module-level function."""
+        self.assertTrue(callable(getattr(self.m, 'sync_view_state_into_cache', None)),
+                        "sync_view_state_into_cache helper missing")
+
+    def test_sync_view_state_query_form(self):
+        """The SQL must:
+          (a) JOIN metadata_item_settings on GUID (mis is GUID-keyed),
+          (b) filter to Movie+Episode (metadata_type IN (1,4)),
+          (c) skip rows without a mis entry,
+          (d) skip rows with no view-state worth syncing."""
+        src = self._read_script()
+        m_start = src.index('def sync_view_state_into_cache(')
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        self.assertIn('JOIN metadata_item_settings mis ON mis.guid = mi.guid', region)
+        self.assertIn('mi.metadata_type IN (1, 4)', region)
+        self.assertIn('mis.guid IS NOT NULL', region)
+        self.assertIn('mis.view_count > 0 OR mis.last_viewed_at IS NOT NULL', region)
+
+    def test_sync_view_state_wired_into_cmd_plex2disk(self):
+        """cmd_plex2disk must invoke the sweep BEFORE building items —
+        otherwise the bug (Plex-watched but no [vu]) silently recurs."""
+        src = self._read_script()
+        m_start = src.index('def cmd_plex2disk(')
+        m_end = src.index('items = _get_disk_map_scope(target)', m_start)
+        region = src[m_start:m_end]
+        self.assertIn('sync_view_state_into_cache()', region,
+                      "view-state sweep must run before plan-build in cmd_plex2disk")
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,

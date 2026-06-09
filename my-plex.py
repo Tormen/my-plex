@@ -1071,6 +1071,20 @@ CONFIG_DEFAULTS = {
     #                    manually or unifies libraries first).
     'UNCOLLECTED_ALLOW_CROSS_LIBRARY': True,
 
+    # DPM_LIBRARY_SUPPRESS — when a plex2disk marker value would be
+    # redundant given the LIBRARY the item lives in, suppress it.  E.g.
+    # writing `[de]` to every file in 'series.de' is noise — the
+    # library name already encodes the language.
+    #
+    # Map: {library_name: {plex_var: value_to_suppress}}
+    # Example: {'series.de': {'AUDIO_LANG': 'de'},
+    #          'movies.de':  {'AUDIO_LANG': 'de'},
+    #          'series.fr':  {'AUDIO_LANG': 'fr'},
+    #          'movies.fr':  {'AUDIO_LANG': 'fr'}}
+    #
+    # Default empty = library does not affect markers.
+    'DPM_LIBRARY_SUPPRESS': {},
+
     # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
     # --resolve` Series→Movies transitions.  Key is the source series.*
     # library name, value is the target movies.* library name to move
@@ -2579,6 +2593,7 @@ PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED'
 UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
 UNCOLLECTED_ALLOW_CROSS_LIBRARY = CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', True)
+DPM_LIBRARY_SUPPRESS         = CONFIG_DEFAULTS.get('DPM_LIBRARY_SUPPRESS', {})
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
@@ -4901,6 +4916,59 @@ def query_plex_database(query, mode='rows'):
         print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
         return None
 
+def sync_view_state_into_cache():
+    """v2.69: refresh viewCount/lastViewedAt for every item in cache by
+    polling Plex's metadata_item_settings table directly.
+
+    Plex's per-item view-state changes do NOT bump library.updatedAt, so
+    incremental --update-cache (which keys on library updatedAt) misses
+    them.  Symptom: a Plex-watched episode keeps `viewCount=0` /
+    `lastViewedAt=None` in our cache, and --plex2disk writes no [vu]
+    marker for it.  This sweep closes that gap.
+
+    Cheap: one SQL query for ALL items, joined by GUID (mis is GUID-
+    keyed not id-keyed).  In-process patch, then save cache.  Returns
+    (n_view_state_changes, n_items_total).
+    """
+    rows = query_plex_database(
+        "SELECT mi.id, mi.guid, mis.view_count, mis.last_viewed_at "
+        "FROM metadata_items mi "
+        "LEFT JOIN metadata_item_settings mis ON mis.guid = mi.guid "
+        "WHERE mi.metadata_type IN (1, 4) "
+        "AND mis.guid IS NOT NULL "
+        "AND (mis.view_count > 0 OR mis.last_viewed_at IS NOT NULL)",
+        mode='rows') or []
+    if not rows:
+        return (0, 0)
+    n_changed = 0
+    for row in rows:
+        try:
+            mid = int(row[0])
+            db_vc = int(row[2]) if row[2] not in (None, '') else 0
+            db_lva = int(row[3]) if row[3] not in (None, '') else None
+        except (ValueError, IndexError):
+            continue
+        # Find the cache entry by Plex id.  Try both Movie:<id> and Episode:<id>.
+        for prefix in ('Movie', 'Episode'):
+            ck = f"{prefix}:{mid}"
+            obj = PLEX_Media.OBJ_BY_ID.get(ck) if hasattr(PLEX_Media, 'OBJ_BY_ID') else None
+            if not isinstance(obj, dict):
+                continue
+            old_vc = int(obj.get('viewCount') or 0)
+            old_lva = obj.get('lastViewedAt')
+            if old_vc != db_vc or old_lva != db_lva:
+                obj['viewCount'] = db_vc
+                obj['lastViewedAt'] = db_lva
+                n_changed += 1
+            break
+    if n_changed and not READ_ONLY_MODE:
+        try:
+            update_and_save_cache(CACHE)
+        except Exception as e:
+            if DBG: print(f"{DBGPFX}sync_view_state_into_cache: save failed: {e}")
+    return (n_changed, len(rows))
+
+
 def query_plex_database_write(query):
     """Execute a write-mode SQL statement against the Plex database.
 
@@ -6143,6 +6211,15 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     # finalize pass that computes the uniform fields themselves.
     if not _bottom_up_pass:
         _apply_bottom_up_promotion(obj, type_str, var)
+        # v2.69: library-context suppression.  When the library name implies
+        # the value (e.g. 'series.de' implies AUDIO_LANG=de), suppress that
+        # marker entirely — writing it everywhere is redundant noise.
+        _lib = obj.get('library', '')
+        _lib_suppress = (DPM_LIBRARY_SUPPRESS or {}).get(_lib, {})
+        if _lib_suppress:
+            for _plex_var, _suppress_val in _lib_suppress.items():
+                if var.get(_plex_var) == _suppress_val:
+                    var[_plex_var] = 'unknown'   # 'unknown' bucket renders no marker
 
     return var
 
@@ -33295,6 +33372,19 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
         err(2, "DISK_PLEX_MAP is empty — nothing to write to disk.\n"
               "  Configure DISK_PLEX_MAP in ~/.my-plex.conf "
               "(see `my-plex --help plex2disk`).")
+
+    # v2.69 bugfix: refresh per-item view-state from Plex DB BEFORE plan
+    # build.  Plex view-state changes (view_count, last_viewed_at) do
+    # NOT bump library.updatedAt, so incremental --update-cache misses
+    # them and we'd write no [vu] for items watched only in Plex.
+    # The sweep is a single SQL query joined by GUID — cheap.
+    if not OFFLINE and not READ_ONLY_MODE:
+        try:
+            n_changed, _n_total = sync_view_state_into_cache()
+            if n_changed:
+                print(f"  state-sync: refreshed view-state for {n_changed} item(s) from Plex DB")
+        except Exception as _e:
+            if DBG: print(f"{DBGPFX}plex2disk: view-state sweep failed: {_e}")
 
     # series_strategy='bottom_up' — lazy compute of uniform fields if missing
     # from cache (e.g. user upgraded to v1.3 without running --update-cache).
