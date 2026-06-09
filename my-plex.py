@@ -40145,6 +40145,36 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
     #    1: PLEXOBJECT found: treat global_cmds
     #       1 --> 2 : if another PLEXOBJECT found while still collecting obj_args for obj of obj_typ
     #       1 --> 3 : reached END of args (none left), while collecting obj_args for obj of obj_typ
+    # v2.69: top-level --sync / --plex-disk-sync dispatch.
+    #
+    # When --sync is invoked with no leftover args (e.g. `--sync SCOPE
+    # --yes`), the main parser consumes everything and `remaining_args`
+    # is empty.  Without this top-level dispatch, the MAIN DOIT LOOP
+    # below never runs → execute_global_commands() (where the sync
+    # dispatch in fact lives) is never called → silent no-op.
+    # This is the same class of bug the --sync 4-way fallback addressed,
+    # but at the loop-entry level rather than the namespace-fallback
+    # level.
+    _early_sync = (safe_getattr(args, 'plex_disk_sync', None) or
+                   safe_getattr(args, 'sync', None))
+    if _early_sync is not None and not remaining_args:
+        if args.force:
+            err(1092, "--force cannot be used with --sync / --plex-disk-sync")
+        _dry_run = safe_getattr(args, 'dry_run', False)
+        # Inline equivalent of execute_global_commands._collapse_scope_arg.
+        if _early_sync is True:
+            target = None
+        elif isinstance(_early_sync, list):
+            target = None if not _early_sync else (_early_sync[0] if len(_early_sync) == 1 else _early_sync)
+        else:
+            target = _early_sync
+        print("=== Phase 1: Syncing disk markers → Plex ===")
+        cmd_disk2plex(target, dry_run=_dry_run, yes=bool(args.yes))
+        print()
+        print("=== Phase 2: Syncing Plex metadata → disk ===")
+        cmd_plex2disk(target, dry_run=_dry_run)
+        sys.exit(0)
+
     state = 0 # means we did not yet find a PLEXOBJECT
     obj = None
     obj_type = None
