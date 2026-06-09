@@ -1820,6 +1820,29 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # UNCOLLECTED_ALLOW_CROSS_LIBRARY = {CONFIG_DEFAULTS['UNCOLLECTED_ALLOW_CROSS_LIBRARY']!r}
 
 ###############################################################################
+# --plex2disk: library-context suppression (v2.69)
+###############################################################################
+
+# DPM_LIBRARY_SUPPRESS — when a plex2disk marker value would be
+# redundant given the LIBRARY the item lives in, suppress it.  E.g.
+# writing `[de]` to every file in 'series.de' is noise — the library
+# name already encodes the language.
+#
+# Map: {{library_name: {{plex_var: value_to_suppress}}}}
+#
+# Default: (empty — library does NOT affect markers)
+#
+# Example (uncomment + customize to use):
+# DPM_LIBRARY_SUPPRESS = {{
+#     'movies.de':  {{'AUDIO_LANG': 'de'}},
+#     'movies.en':  {{'AUDIO_LANG': 'en'}},
+#     'movies.fr':  {{'AUDIO_LANG': 'fr'}},
+#     'series.de':  {{'AUDIO_LANG': 'de'}},
+#     'series.en':  {{'AUDIO_LANG': 'en'}},
+#     'series.fr':  {{'AUDIO_LANG': 'fr'}},
+# }}
+
+###############################################################################
 # --clean / --naming housekeeping (planned for v3 — STUBS)
 ###############################################################################
 
