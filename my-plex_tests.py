@@ -10155,6 +10155,26 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         region = src[m_start:m_end]
         self.assertIn("'operation_number': 1", region)
 
+    def test_plex2disk_triggers_scan_and_waits(self):
+        """After committing renames, cmd_plex2disk must:
+          (a) trigger Plex library scan on each affected library,
+          (b) wait for the scan to finish (wait_for_plex_scan_complete),
+          (c) refresh cache (update_cache_for_library) so downstream
+              commands see the new file paths.
+
+        Without this, the user's next --sync sees stale Plex DB paths,
+        triggers another set of renames that re-rename the SAME files,
+        and the cache stays out of sync with disk.
+        """
+        src = self._read_script()
+        # The block must appear AFTER the rename-commit branch.
+        m_start = src.index('def cmd_plex2disk(')
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        self.assertIn('_affected_libs.add', region)
+        self.assertIn('wait_for_plex_scan_complete', region)
+        self.assertIn('update_cache_for_library(None)', region)
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,

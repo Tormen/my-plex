@@ -33508,6 +33508,41 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
         for stat in scope_stats:
             print(f"  {stat}")
 
+    # v2.69: after renames land on disk, Plex still has the OLD file
+    # paths in its DB.  Until it rescans, every downstream tool (Plex
+    # UI, my-plex cache via update-cache, mismatched detector, etc.)
+    # sees stale paths.  Trigger a scan on each affected library and
+    # wait for it to finish so the next command (or the user's own
+    # actions) operates on a consistent view.
+    if not dry_run and total_renamed > 0 and not OFFLINE and not READ_ONLY_MODE:
+        _affected_libs = set()
+        for _, cache_key, obj in items:
+            _lib = obj.get('library', '')
+            if _lib:
+                _affected_libs.add(_lib)
+        if _affected_libs:
+            print()
+            print(f"  Triggering Plex scan + waiting for {len(_affected_libs)} affected librar{'y' if len(_affected_libs) == 1 else 'ies'}: {', '.join(sorted(_affected_libs))}")
+            try:
+                _plex_for_scan = ensure_plex_api(required=False)
+                if _plex_for_scan is not None:
+                    for _lib in sorted(_affected_libs):
+                        try:
+                            _sec = _plex_for_scan.library.section(_lib)
+                            _sec.update()
+                            _ok, _elapsed = wait_for_plex_scan_complete(_plex_for_scan, _lib, _sec, max_wait=300, verbose=False)
+                            print(f"    {_lib}: scan {'completed' if _ok else 'timed out'} in {_elapsed:.1f}s")
+                        except Exception as _e:
+                            print(f"    {_lib}: scan failed: {_e}")
+                    # Now refresh cache so it reflects the new paths.
+                    try:
+                        update_cache_for_library(None)
+                        print("  Cache refreshed; ready for next command.")
+                    except Exception as _e:
+                        print(f"  Cache refresh failed: {_e}")
+            except Exception as _e:
+                print(f"  Could not connect to Plex for scan-wait: {_e}")
+
 def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
     """Strip markers from a set of paths using sidecar data.
 
