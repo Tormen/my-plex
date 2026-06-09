@@ -10297,6 +10297,31 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             m.DISK_PLEX_MAP = saved_dpm
             m.DPM_LIBRARY_SUPPRESS = saved_lib_suppress
 
+    def test_rename_file_siblings_marker_stripped_match(self):
+        """rename_file_siblings must detect siblings even when the parent
+        media file's basename carries a [marker] that the sibling lacks.
+
+        Repro of the bug user found: an EiP S01E07.mkv was renamed
+        `.mkv` → `... [vu@2026-06-09].mkv`.  The .srt sibling base was
+        `...S01E07.720p.NF.WEBRip.x264-GalaxyTV.de.srt`, which does NOT
+        start with `... [vu].` (because the .srt never had a marker).
+        The legacy detector missed it; orphans on disk.
+
+        Fix: the v2.69 sibling-detector ALSO matches by marker-stripped
+        prefix.  This test asserts the source contains the strip and
+        the alternate match branch.
+        """
+        src = self._read_script()
+        m_start = src.index('def rename_file_siblings(')
+        m_end = src.index('\ndef ', m_start + 1)
+        region = src[m_start:m_end]
+        self.assertIn('v2.69 bugfix', region)
+        self.assertIn('_strip_markers', region)
+        self.assertIn('marker-stripped match', region)
+        # The clean_prefix must be derived from BOTH old and new basenames.
+        self.assertIn('_old_clean', region)
+        self.assertIn('_new_clean', region)
+
     def test_merge_disk_preserves_user_edited_marker(self):
         """AUDIO_LANG has merge='disk' — preserve sidecar value when Plex
         is empty.  This is the inverse of merge='newer'."""
