@@ -10297,6 +10297,51 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             m.DISK_PLEX_MAP = saved_dpm
             m.DPM_LIBRARY_SUPPRESS = saved_lib_suppress
 
+    def test_problem_categories_enabled_semantics(self):
+        """v3: PROBLEM_CATEGORIES_DISABLED was renamed to _ENABLED with
+        new semantics:
+          - None  → run EVERY registered category (default).
+          - []    → run NONE.
+          - [...] → run only the listed categories.
+
+        Behavioral test: patch the module-level var, call
+        _enabled_problem_categories(), assert the right subset."""
+        m = self.m
+        saved = m.PROBLEM_CATEGORIES_ENABLED
+        try:
+            # Default = None → all.
+            m.PROBLEM_CATEGORIES_ENABLED = None
+            self.assertEqual(set(m._enabled_problem_categories().keys()),
+                             set(m.PROBLEM_CATEGORIES_REGISTRY.keys()),
+                             "None must enable EVERY category")
+
+            # Empty list → none.
+            m.PROBLEM_CATEGORIES_ENABLED = []
+            self.assertEqual(m._enabled_problem_categories(), {},
+                             "[] must run NO categories (explicit opt-out)")
+
+            # Explicit list → only those.
+            sample = sorted(m.PROBLEM_CATEGORIES_REGISTRY.keys())[:2]
+            m.PROBLEM_CATEGORIES_ENABLED = sample
+            self.assertEqual(set(m._enabled_problem_categories().keys()),
+                             set(sample),
+                             "explicit list must enable only those categories")
+
+            # Order preserved per registry.
+            m.PROBLEM_CATEGORIES_ENABLED = list(m.PROBLEM_CATEGORIES_REGISTRY.keys())
+            self.assertEqual(list(m._enabled_problem_categories().keys()),
+                             list(m.PROBLEM_CATEGORIES_REGISTRY.keys()),
+                             "filter must preserve registry insertion order")
+        finally:
+            m.PROBLEM_CATEGORIES_ENABLED = saved
+
+    def test_problem_categories_disabled_is_gone(self):
+        """The old PROBLEM_CATEGORIES_DISABLED key must NOT appear in
+        CONFIG_DEFAULTS (no backwards-compat shim — clean rename per
+        feedback_no_backwards_compat).  Catches accidental re-introduction."""
+        self.assertNotIn('PROBLEM_CATEGORIES_DISABLED', self.m.CONFIG_DEFAULTS)
+        self.assertIn('PROBLEM_CATEGORIES_ENABLED', self.m.CONFIG_DEFAULTS)
+
     def test_rename_file_siblings_marker_stripped_match(self):
         """rename_file_siblings must detect siblings even when the parent
         media file's basename carries a [marker] that the sibling lacks.

@@ -1037,12 +1037,17 @@ CONFIG_DEFAULTS = {
     'REMUX_TRASH_ORIGINAL': True,
     'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
 
-    # Problem categories to SKIP when running --problems.  Each entry is a
-    # category name as registered in PROBLEM_CATEGORIES_REGISTRY (e.g.
-    # 'remux', 'junk', 'no_audio_language', 'missing_episodes').  Empty
-    # list = run every registered category.  Use `my-plex --problems` to
-    # see the full list of categories my-plex currently knows about.
-    'PROBLEM_CATEGORIES_DISABLED': [],
+    # PROBLEM_CATEGORIES_ENABLED — list of problem-category names to run
+    # when `--problems` executes.  Each entry must be registered in
+    # PROBLEM_CATEGORIES_REGISTRY (see `my-plex --help problems`).
+    #
+    #   None (default):  run EVERY registered category.
+    #   []   (empty list): run NONE — explicit opt-out.
+    #   ['broken', 'unmatched']: run only the listed categories.
+    #
+    # Renamed from PROBLEM_CATEGORIES_DISABLED in v3 (explicit beats
+    # implicit; mirrors CLEAN_CATEGORIES_ENABLED).
+    'PROBLEM_CATEGORIES_ENABLED': None,
 
     # UNCOLLECTED_MIN_MEMBERS — minimum number of in-library Movies that
     # must share a TMDB collection before `--uncollected` flags the group.
@@ -1759,18 +1764,20 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']!r}
 
 ###############################################################################
-# --problems Categories Toggle (v2.69)
+# --problems Category Selection (v3 — was PROBLEM_CATEGORIES_DISABLED)
 ###############################################################################
 
-# PROBLEM_CATEGORIES_DISABLED — list of registered problem-category names
-# to SKIP when running --problems.  Each entry must be a registered key in
-# PROBLEM_CATEGORIES_REGISTRY (see `my-plex --help problems` for the full
-# list).  Empty list = run every registered category.
+# PROBLEM_CATEGORIES_ENABLED — which registered categories `--problems`
+# runs.  Each entry must be a key of PROBLEM_CATEGORIES_REGISTRY (see
+# `my-plex --help problems`).  Mirrors CLEAN_CATEGORIES_ENABLED — both
+# use enabled-list semantics (explicit beats implicit).
 #
-# Example: PROBLEM_CATEGORIES_DISABLED = ['remux', 'junk']
+#   None  (default):  run EVERY registered category.
+#   []    (empty):    run NONE — explicit opt-out.
+#   ['broken', 'unmatched']:  run only the listed categories.
 #
 # Default:
-# PROBLEM_CATEGORIES_DISABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_DISABLED']!r}
+# PROBLEM_CATEGORIES_ENABLED = {CONFIG_DEFAULTS['PROBLEM_CATEGORIES_ENABLED']!r}
 
 ###############################################################################
 # --uncollected: minimum in-library members per TMDB collection (v2.69)
@@ -2704,7 +2711,7 @@ def _compile_junk_patterns():
     _JUNK_PATTERNS_COMPILED = out
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
-PROBLEM_CATEGORIES_DISABLED  = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_DISABLED', [])
+PROBLEM_CATEGORIES_ENABLED   = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_ENABLED', None)
 UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
 UNCOLLECTED_ALLOW_CROSS_LIBRARY = CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', True)
@@ -28578,18 +28585,25 @@ def main_print_help(args, remaining_args, main_parser):
                     print(f"      Fix:  {_fix}")
                 print()
             print(f"Total registered categories: {len(PROBLEM_CATEGORIES_REGISTRY)}")
-            _disabled = sorted(set(PROBLEM_CATEGORIES_DISABLED) & set(PROBLEM_CATEGORIES_REGISTRY))
-            if _disabled:
-                print(f"Currently disabled via PROBLEM_CATEGORIES_DISABLED: {', '.join(_disabled)}")
+            _active = sorted(_enabled_problem_categories().keys())
+            _all = sorted(PROBLEM_CATEGORIES_REGISTRY.keys())
+            _skipped = sorted(set(_all) - set(_active))
+            if PROBLEM_CATEGORIES_ENABLED is None:
+                print(f"Currently enabled (default = ALL):     {', '.join(_active)}")
+            elif _active:
+                print(f"Currently enabled via PROBLEM_CATEGORIES_ENABLED: {', '.join(_active)}")
             else:
-                print("Currently disabled via PROBLEM_CATEGORIES_DISABLED: (none)")
+                print("Currently enabled via PROBLEM_CATEGORIES_ENABLED: (none — explicit opt-out)")
+            if _skipped:
+                print(f"Currently skipped (not in ENABLED list): {', '.join(_skipped)}")
             print()
-            print("DISABLING CATEGORIES:")
+            print("SELECTING CATEGORIES:")
             print()
-            print("  Add unwanted category names to PROBLEM_CATEGORIES_DISABLED in")
-            print("  ~/.my-plex.conf, e.g.")
-            print("    PROBLEM_CATEGORIES_DISABLED = ['remux', 'junk']")
-            print("  Empty list = run every registered category.")
+            print("  Set PROBLEM_CATEGORIES_ENABLED in ~/.my-plex.conf:")
+            print("    None        run EVERY registered category (default)")
+            print("    []          run NONE")
+            print("    [...]       run only the listed categories")
+            print("  Example:  PROBLEM_CATEGORIES_ENABLED = ['broken', 'unmatched']")
             print()
             print("EXCESS VERSIONS (--excess-versions LIMIT):")
             print()
@@ -31218,7 +31232,7 @@ def is_special_episode(filename, specials_pattern=None):
 #   • The --problems runner (which checks to run, in what order).
 #   • The --help problems body (auto-generated from the dict).
 #   • The README problems section (audit-script-generated from this dict).
-#   • The PROBLEM_CATEGORIES_DISABLED CONF list (lets users skip categories).
+#   • The PROBLEM_CATEGORIES_ENABLED CONF list (selects which categories to run).
 #
 # Each entry's `invoke` callable takes (obj_keys, library, tsv_only) and
 # returns a non-negative count.  Returning 0 means "nothing flagged".
@@ -31449,9 +31463,18 @@ PROBLEM_CATEGORIES_REGISTRY = {
 
 def _enabled_problem_categories():
     """Return PROBLEM_CATEGORIES_REGISTRY filtered by the user's
-    PROBLEM_CATEGORIES_DISABLED CONF list (preserves insertion order)."""
-    disabled = set(globals().get('PROBLEM_CATEGORIES_DISABLED', []) or [])
-    return {k: v for k, v in PROBLEM_CATEGORIES_REGISTRY.items() if k not in disabled}
+    PROBLEM_CATEGORIES_ENABLED CONF list (preserves insertion order).
+
+    Semantics:
+      None  → run EVERY registered category (default).
+      []    → run NONE (explicit opt-out).
+      [...] → run only the listed categories (still ordered by registry).
+    """
+    enabled = globals().get('PROBLEM_CATEGORIES_ENABLED')
+    if enabled is None:
+        return dict(PROBLEM_CATEGORIES_REGISTRY)
+    enabled_set = set(enabled)
+    return {k: v for k, v in PROBLEM_CATEGORIES_REGISTRY.items() if k in enabled_set}
 
 
 def _emit_problem_categories_markdown():
@@ -39954,12 +39977,12 @@ def execute_global_commands(args, cmd_args):
             with contextlib.redirect_stdout(sink):
                 return func(*args, **kwargs)
 
-        # v2.69: iterate the PROBLEM_CATEGORIES_REGISTRY — single source of
-        # truth.  Adding a new --problems check is a 1-place edit (append to
-        # the registry).  Users can suppress categories via the
-        # PROBLEM_CATEGORIES_DISABLED CONF list.
+        # v2.69 / v3: iterate the PROBLEM_CATEGORIES_REGISTRY — single source
+        # of truth.  Adding a new --problems check is a 1-place edit (append
+        # to the registry).  Users select which categories run via
+        # PROBLEM_CATEGORIES_ENABLED in CONF (None = all, [] = none, [...]
+        # = only those listed).
         live_problems = {}
-        skipped = []
         for cat_name, cat in _enabled_problem_categories().items():
             if tsv_only and not cat.get('tsv_relevant'):
                 continue
@@ -39971,10 +39994,11 @@ def execute_global_commands(args, cmd_args):
                 count = 0
             live_problems[cat_name] = int(count) if count else 0
 
-        disabled_now = set(globals().get('PROBLEM_CATEGORIES_DISABLED', []) or [])
-        skipped = sorted(disabled_now & set(PROBLEM_CATEGORIES_REGISTRY.keys()))
+        active_now = set(_enabled_problem_categories().keys())
+        skipped = sorted(set(PROBLEM_CATEGORIES_REGISTRY.keys()) - active_now)
         if skipped:
-            print(f"  >> ({len(skipped)} categor{'ies' if len(skipped) != 1 else 'y'} disabled via PROBLEM_CATEGORIES_DISABLED: {', '.join(skipped)})")
+            _label = "ies" if len(skipped) != 1 else "y"
+            print(f"  >> ({len(skipped)} categor{_label} skipped — not in PROBLEM_CATEGORIES_ENABLED: {', '.join(skipped)})")
 
         total_problems = sum(int(v or 0) for v in live_problems.values())
         vrb_hint = "" if VRB else " (use -V to show details)"
