@@ -1046,7 +1046,7 @@ CONFIG_DEFAULTS = {
     #   ['broken', 'unmatched']: run only the listed categories.
     #
     # Renamed from PROBLEM_CATEGORIES_DISABLED in v3 (explicit beats
-    # implicit; mirrors CLEAN_CATEGORIES_ENABLED).
+    # implicit).
     'PROBLEM_CATEGORIES_ENABLED': None,
 
     # UNCOLLECTED_MIN_MEMBERS — minimum number of in-library Movies that
@@ -1092,20 +1092,12 @@ CONFIG_DEFAULTS = {
 
     # --- Planned in v3 (--clean / --naming architecture) — STUBS ONLY ---
     #
-    # CLEAN_CATEGORIES_ENABLED — list of housekeeping categories that
-    # `--clean` runs by default.  Mirrors --problems' pattern but uses
-    # an ENABLED list (not _DISABLED) — explicit beats implicit.
-    # The full registry lives in CLEAN_CATEGORIES_REGISTRY in code; this
-    # CONF list selects which of those categories run.
-    # Categories (planned): junk, empty_dirs, orphan_sidecars,
-    #   release_folders, legacy_markers, duplicate_dotfiles, naming.
-    # See: my-plex --help clean
-    'CLEAN_CATEGORIES_ENABLED': [
-        'junk', 'empty_dirs', 'orphan_sidecars',
-        'release_folders', 'legacy_markers',
-        'duplicate_dotfiles', 'naming',
-    ],
-
+    # NOTE on --clean: there is NO CLEAN_CATEGORIES_REGISTRY / _ENABLED
+    # split.  --clean is a PIPELINE (see PIPELINES_DEFAULTS / PIPELINES)
+    # whose phases are real my-plex commands (--junk, --orphan-sidecars,
+    # --naming, …).  To customise: override PIPELINES['--clean'] in
+    # ~/.my-plex.conf.  Each phase has its own `--help <phase>` page.
+    #
     # NAMING_RULES — per-Plex-object-type renaming rules consumed by
     # `--naming` and by `--clean naming`.  Each entry's `template` /
     # `transforms` define the canonical on-disk name.  All preserve_*
@@ -1769,8 +1761,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # PROBLEM_CATEGORIES_ENABLED — which registered categories `--problems`
 # runs.  Each entry must be a key of PROBLEM_CATEGORIES_REGISTRY (see
-# `my-plex --help problems`).  Mirrors CLEAN_CATEGORIES_ENABLED — both
-# use enabled-list semantics (explicit beats implicit).
+# `my-plex --help problems`).  Uses enabled-list semantics (explicit
+# beats implicit).
 #
 #   None  (default):  run EVERY registered category.
 #   []    (empty):    run NONE — explicit opt-out.
@@ -1853,25 +1845,11 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # --clean / --naming housekeeping (planned for v3 — STUBS)
 ###############################################################################
 
-# CLEAN_CATEGORIES_ENABLED — list of housekeeping categories that
-# `--clean` runs by default.  Mirrors --problems' pattern but uses an
-# ENABLED list (not _DISABLED) — explicit beats implicit.  The full
-# registry lives in CLEAN_CATEGORIES_REGISTRY in code; this CONF list
-# selects which of those categories run.
-#
-# Categories (planned for implementation):
-#   junk                trash .DS_Store / .RARBG.txt / Thumbs.db / etc.
-#   empty_dirs          find + trash empty dirs in library roots
-#   orphan_sidecars     .srt/.nfo whose video sibling is gone
-#   release_folders     consolidate `*.s\d+.complete.*` wrappers
-#   legacy_markers      upgrade `[vu]` (no date) → `[vu@DATE]` from Plex
-#   duplicate_dotfiles  macOS ._* alongside real files
-#   naming              apply NAMING_RULES — see below
-#
-# See: my-plex --help clean   (auto-generated from the registry)
-#
-# Default (the value below is the actual default — uncomment changes nothing):
-# CLEAN_CATEGORIES_ENABLED = {CONFIG_DEFAULTS['CLEAN_CATEGORIES_ENABLED']!r}
+# --clean is a PIPELINE (see PIPELINES_DEFAULTS / PIPELINES section).
+# Each phase is a real my-plex command (--junk, --orphan-sidecars,
+# --empty-dirs, --naming, …) with its own `--help <phase>` page.
+# To customise the order or skip a phase, override PIPELINES['--clean']
+# in this CONF file.  No CLEAN_CATEGORIES_REGISTRY / _ENABLED split.
 
 # NAMING_RULES — per-Plex-object-type renaming rules consumed by
 # `--naming` and by `--clean naming`.  Each entry's `template` /
@@ -2716,7 +2694,6 @@ UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
 UNCOLLECTED_ALLOW_CROSS_LIBRARY = CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', True)
 DPM_LIBRARY_SUPPRESS         = CONFIG_DEFAULTS.get('DPM_LIBRARY_SUPPRESS', {})
-CLEAN_CATEGORIES_ENABLED     = CONFIG_DEFAULTS.get('CLEAN_CATEGORIES_ENABLED', [])
 NAMING_RULES                 = CONFIG_DEFAULTS.get('NAMING_RULES', {})
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
@@ -31489,44 +31466,6 @@ def _emit_problem_categories_markdown():
         desc = (cat.get('description') or '').replace('|', '\\|')
         fix  = (cat.get('fix_hint')    or '').replace('|', '\\|')
         print(f"| {i} | `{name}` | `{flag}` | {tsv} | {desc} | {fix} |")
-
-
-# ---------------------------------------------------------------------------
-# --clean Category Registry (v3 — housekeeping mirror of --problems)
-# ---------------------------------------------------------------------------
-# Every housekeeping category my-plex knows how to run is registered here.
-# This dict drives:
-#   • The --clean runner (which chores to perform, in what order).
-#   • The --help clean body (auto-generated from the dict).
-#   • The CLEAN_CATEGORIES_ENABLED CONF list (selects which to run).
-#
-# Each entry's `invoke` callable takes (obj_keys, library, dry_run) and
-# returns a non-negative count of items processed (0 = nothing to do).
-#
-# Adding a new --clean category is a 1-place edit: append an entry here.
-# No edits to the runner, help, or README are needed beyond that.
-#
-# Mirror of PROBLEM_CATEGORIES_REGISTRY — see _enabled_problem_categories()
-# / _enabled_clean_categories() for identical None/[]/[list] semantics.
-# ---------------------------------------------------------------------------
-
-CLEAN_CATEGORIES_REGISTRY = {}
-
-
-def _enabled_clean_categories():
-    """Return CLEAN_CATEGORIES_REGISTRY filtered by the user's
-    CLEAN_CATEGORIES_ENABLED CONF list (preserves insertion order).
-
-    Semantics (identical to _enabled_problem_categories):
-      None  → run EVERY registered category (default).
-      []    → run NONE (explicit opt-out).
-      [...] → run only the listed categories (still ordered by registry).
-    """
-    enabled = globals().get('CLEAN_CATEGORIES_ENABLED')
-    if enabled is None:
-        return dict(CLEAN_CATEGORIES_REGISTRY)
-    enabled_set = set(enabled)
-    return {k: v for k, v in CLEAN_CATEGORIES_REGISTRY.items() if k in enabled_set}
 
 
 # ---------------------------------------------------------------------------

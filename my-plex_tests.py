@@ -10342,62 +10342,6 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertNotIn('PROBLEM_CATEGORIES_DISABLED', self.m.CONFIG_DEFAULTS)
         self.assertIn('PROBLEM_CATEGORIES_ENABLED', self.m.CONFIG_DEFAULTS)
 
-    def test_clean_registry_skeleton_present(self):
-        """v3 step 3: CLEAN_CATEGORIES_REGISTRY exists as a dict (initially
-        empty — handlers land in step 4+) and CLEAN_CATEGORIES_ENABLED is
-        a module-level binding mirroring the PROBLEM pattern."""
-        m = self.m
-        self.assertTrue(hasattr(m, 'CLEAN_CATEGORIES_REGISTRY'),
-                        "CLEAN_CATEGORIES_REGISTRY must exist as a module attr")
-        self.assertIsInstance(m.CLEAN_CATEGORIES_REGISTRY, dict,
-                              "CLEAN_CATEGORIES_REGISTRY must be a dict")
-        self.assertTrue(hasattr(m, 'CLEAN_CATEGORIES_ENABLED'),
-                        "CLEAN_CATEGORIES_ENABLED must be a module attr")
-        self.assertIn('CLEAN_CATEGORIES_ENABLED', m.CONFIG_DEFAULTS,
-                      "CLEAN_CATEGORIES_ENABLED must be in CONFIG_DEFAULTS")
-
-    def test_enabled_clean_categories_semantics(self):
-        """v3 step 3: _enabled_clean_categories() must mirror the
-        _enabled_problem_categories() None/[]/[list] semantics exactly.
-
-        With an empty registry, None and any [list] both yield {}; the
-        test patches the registry with a temporary fixture to exercise
-        all three branches behaviorally."""
-        m = self.m
-        saved_reg = m.CLEAN_CATEGORIES_REGISTRY
-        saved_enabled = m.CLEAN_CATEGORIES_ENABLED
-        try:
-            m.CLEAN_CATEGORIES_REGISTRY = {
-                'a': {'header': 'A', 'description': 'a', 'invoke': lambda *a, **k: 0},
-                'b': {'header': 'B', 'description': 'b', 'invoke': lambda *a, **k: 0},
-                'c': {'header': 'C', 'description': 'c', 'invoke': lambda *a, **k: 0},
-            }
-            m.CLEAN_CATEGORIES_ENABLED = None
-            self.assertEqual(set(m._enabled_clean_categories().keys()), {'a', 'b', 'c'},
-                             "None must enable EVERY category")
-            m.CLEAN_CATEGORIES_ENABLED = []
-            self.assertEqual(m._enabled_clean_categories(), {},
-                             "[] must run NO categories (explicit opt-out)")
-            m.CLEAN_CATEGORIES_ENABLED = ['a', 'c']
-            self.assertEqual(list(m._enabled_clean_categories().keys()), ['a', 'c'],
-                             "explicit list must enable only those, in registry order")
-            m.CLEAN_CATEGORIES_ENABLED = ['c', 'a']
-            self.assertEqual(list(m._enabled_clean_categories().keys()), ['a', 'c'],
-                             "filter must preserve REGISTRY order, not ENABLED list order")
-        finally:
-            m.CLEAN_CATEGORIES_REGISTRY = saved_reg
-            m.CLEAN_CATEGORIES_ENABLED = saved_enabled
-
-    def test_clean_categories_mirrors_problem_pattern(self):
-        """Naming homogeneity: every PROBLEM_CATEGORIES_* symbol has a
-        CLEAN_CATEGORIES_* counterpart (and vice versa for the helper)."""
-        m = self.m
-        for sym in ('CATEGORIES_REGISTRY', 'CATEGORIES_ENABLED'):
-            self.assertTrue(hasattr(m, f'PROBLEM_{sym}'), f"PROBLEM_{sym} missing")
-            self.assertTrue(hasattr(m, f'CLEAN_{sym}'),   f"CLEAN_{sym} missing")
-        self.assertTrue(callable(getattr(m, '_enabled_problem_categories', None)))
-        self.assertTrue(callable(getattr(m, '_enabled_clean_categories',   None)))
-
     def test_rename_file_siblings_marker_stripped_match(self):
         """rename_file_siblings must detect siblings even when the parent
         media file's basename carries a [marker] that the sibling lacks.
