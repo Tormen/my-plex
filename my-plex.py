@@ -1820,6 +1820,65 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # UNCOLLECTED_ALLOW_CROSS_LIBRARY = {CONFIG_DEFAULTS['UNCOLLECTED_ALLOW_CROSS_LIBRARY']!r}
 
 ###############################################################################
+# --clean / --naming housekeeping (planned for v3 — STUBS)
+###############################################################################
+
+# CLEAN_CATEGORIES_ENABLED — list of housekeeping categories that
+# `--clean` runs by default.  Mirrors --problems' pattern but uses an
+# ENABLED list (not _DISABLED) — explicit beats implicit.  The full
+# registry lives in CLEAN_CATEGORIES_REGISTRY in code; this CONF list
+# selects which of those categories run.
+#
+# Categories (planned for implementation):
+#   junk                trash .DS_Store / .RARBG.txt / Thumbs.db / etc.
+#   empty_dirs          find + trash empty dirs in library roots
+#   orphan_sidecars     .srt/.nfo whose video sibling is gone
+#   release_folders     consolidate `*.s\d+.complete.*` wrappers
+#   legacy_markers      upgrade `[vu]` (no date) → `[vu@DATE]` from Plex
+#   duplicate_dotfiles  macOS ._* alongside real files
+#   naming              apply NAMING_RULES — see below
+#
+# See: my-plex --help clean   (auto-generated from the registry)
+#
+# Default (the value below is the actual default — uncomment changes nothing):
+# CLEAN_CATEGORIES_ENABLED = {CONFIG_DEFAULTS['CLEAN_CATEGORIES_ENABLED']!r}
+
+# NAMING_RULES — per-Plex-object-type renaming rules consumed by
+# `--naming` and by `--clean naming`.  Each entry's `template` /
+# `transforms` define the canonical on-disk name.  All preserve_* keys
+# default to True.  Listing only preserve flags = no-op → loader warns.
+#
+# Variables: every cache field for the item, uppercased and wrapped in
+# {{…}}.  Full list: my-plex --help info.
+#
+# Modifiers (chain with dots; right-to-left application):
+#   .lower / .upper       case
+#   .dots                 spaces & '_' → '.'
+#   .nodiacritic          ä→a ö→o ü→u é→e ß→ss œ→oe æ→ae ç→c ł→l ø→o ñ→n
+#   .nopunct              strip punctuation (keeps '.' and '-')
+#   .alnum                keep alphanumeric + '.' + '-' only
+#   .pad2 / .pad3         zero-pad an int (S → 01, E → 007)
+#
+# Transforms: list[(regex, replacement)] applied in order after the
+# template renders.  Replacement supports sed-style backrefs (\1, \2, …)
+# and can UPDATE, ADD, or REMOVE arbitrary parts of the name.
+#
+# Defaults: preserve_markers=True, preserve_labels=True, preserve_ext=True.
+#
+# Default: (empty — populate to opt in)
+#
+# Example (uncomment + customize to use):
+# NAMING_RULES = {{
+#     'SERIES_DIR':   {{'template': '{{TITLE.lower.nodiacritic.dots}}'}},
+#     'SEASON_DIR':   {{'template': 's{{S.pad2}}'}},
+#     'EPISODE_FILE': {{'template': 'S{{S.pad2}}E{{E.pad2}} - {{TITLE}}',
+#                       'preserve_ext': True}},
+#     'MOVIE_DIR':    {{'template': '{{TITLE.lower.nodiacritic.dots}}.({{YEAR}})'}},
+#     'MOVIE_FILE':   {{'template': '{{TITLE.lower.nodiacritic.dots}}.{{YEAR}}.{{RESOLUTION}}',
+#                       'preserve_ext': True}},
+# }}
+
+###############################################################################
 # --misplaced --resolve target-library mapping (v2.69)
 ###############################################################################
 
