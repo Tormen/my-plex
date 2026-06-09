@@ -10144,6 +10144,17 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertIn('sync_view_state_into_cache()', region,
                       "view-state sweep must run before plan-build in cmd_plex2disk")
 
+    def test_push_audio_lang_dpm_includes_operation_number(self):
+        """The pending_op dict that _push_audio_lang_dpm hands to
+        apply_pending_operations MUST carry 'operation_number'.  Without
+        it, every audio_lang push errors out with KeyError (caught 103
+        such errors in the series.de live --sync test)."""
+        src = self._read_script()
+        m_start = src.index('def _push_audio_lang_dpm(')
+        m_end = src.index('apply_pending_operations(', m_start)
+        region = src[m_start:m_end]
+        self.assertIn("'operation_number': 1", region)
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,

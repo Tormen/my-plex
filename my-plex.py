@@ -33782,7 +33782,10 @@ def _push_audio_lang_dpm(obj, change, dry_run):
         print(f"    Would set audio language to '{lang_3}': {title}  ({tool_name})")
         return True
     # Build pending op compatible with apply_pending_operations() and apply.
+    # operation_number is required by apply_pending_operations' progress
+    # log; single-item path → '1' suffices.
     pending_op = {
+        'operation_number': 1,
         'cache_key': cache_key,
         'filepath': resolved,
         'plex_id':  obj.get('id', 'N/A'),
