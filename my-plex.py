@@ -31492,6 +31492,44 @@ def _emit_problem_categories_markdown():
 
 
 # ---------------------------------------------------------------------------
+# --clean Category Registry (v3 — housekeeping mirror of --problems)
+# ---------------------------------------------------------------------------
+# Every housekeeping category my-plex knows how to run is registered here.
+# This dict drives:
+#   • The --clean runner (which chores to perform, in what order).
+#   • The --help clean body (auto-generated from the dict).
+#   • The CLEAN_CATEGORIES_ENABLED CONF list (selects which to run).
+#
+# Each entry's `invoke` callable takes (obj_keys, library, dry_run) and
+# returns a non-negative count of items processed (0 = nothing to do).
+#
+# Adding a new --clean category is a 1-place edit: append an entry here.
+# No edits to the runner, help, or README are needed beyond that.
+#
+# Mirror of PROBLEM_CATEGORIES_REGISTRY — see _enabled_problem_categories()
+# / _enabled_clean_categories() for identical None/[]/[list] semantics.
+# ---------------------------------------------------------------------------
+
+CLEAN_CATEGORIES_REGISTRY = {}
+
+
+def _enabled_clean_categories():
+    """Return CLEAN_CATEGORIES_REGISTRY filtered by the user's
+    CLEAN_CATEGORIES_ENABLED CONF list (preserves insertion order).
+
+    Semantics (identical to _enabled_problem_categories):
+      None  → run EVERY registered category (default).
+      []    → run NONE (explicit opt-out).
+      [...] → run only the listed categories (still ordered by registry).
+    """
+    enabled = globals().get('CLEAN_CATEGORIES_ENABLED')
+    if enabled is None:
+        return dict(CLEAN_CATEGORIES_REGISTRY)
+    enabled_set = set(enabled)
+    return {k: v for k, v in CLEAN_CATEGORIES_REGISTRY.items() if k in enabled_set}
+
+
+# ---------------------------------------------------------------------------
 # Episode scraper interface
 # ---------------------------------------------------------------------------
 
