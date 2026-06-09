@@ -5695,10 +5695,16 @@ def rename_file(src_path, new_filename, remote_host=None):
 def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, log_prefix=''):
     """Rename sibling files alongside a renamed media file.
 
-    Sibling = any file in the same directory whose name starts with the old
-    file's basename-without-extension followed by a '.' (e.g. .nfo, .srt,
-    .en.srt, .nfo.bak).  Each is renamed so its prefix matches the new
-    file's basename-without-extension.
+    Sibling = any file in the same directory whose name starts with EITHER:
+      (a) the old file's basename-without-extension + '.', OR
+      (b) the MARKER-STRIPPED prefix of the old/new basename + '.'
+          (so an .srt file that never carried the marker still matches
+          its parent .mkv when the .mkv gains/loses a [vu@…] marker).
+
+    v2.69 bugfix: variant (b) is required because subtitle / .nfo files
+    often live alongside a media file but never carried the in-flight
+    marker (e.g. .srt added later).  Without it, plex2disk's [vu@DATE]
+    rename of the .mkv left the .srt orphaned with a mismatched base.
 
     Args:
         old_path:    Full path to the original file (already renamed on disk)
@@ -5714,6 +5720,19 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
     new_base_no_ext = os.path.splitext(new_path)[0]
     if base_no_ext == new_base_no_ext:
         return (0, 0)
+    # v2.69: compute the marker-stripped common prefix.  Strip any trailing
+    # ` [marker]` runs from BOTH old and new basenames; the longer of the
+    # two leftovers (they should be equal) is the canonical sibling
+    # prefix.  A trailing space is also stripped.
+    import re as _re
+    def _strip_markers(s):
+        return _re.sub(r'(?:\s*\[[^\]\[/]+\])+\s*$', '', s)
+    _old_clean = _strip_markers(base_no_ext)
+    _new_clean = _strip_markers(new_base_no_ext)
+    # Use the SHORTER of the two clean prefixes so we don't risk including
+    # a `[…]` segment that's actually canonical and not a marker.
+    clean_prefix = _old_clean if len(_old_clean) <= len(_new_clean) else _new_clean
+
     current_dir = os.path.dirname(old_path)
     ok, listing = my_plex_file_operation('LIST_DIR', current_dir, remote_host, maxdepth=1)
     if not ok or not listing:
@@ -5723,9 +5742,36 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
     for sib in listing:
         if sib == old_path or sib == new_path:
             continue
-        if not sib.startswith(base_no_ext + '.'):
+        # Compute the sibling's marker-stripped basename for matching.
+        sib_stripped = _strip_markers(os.path.splitext(sib)[0])
+        # Match (a) exact-prefix (legacy), OR (b) clean-prefix match
+        # ignoring any pre-existing markers on either side.
+        if sib.startswith(base_no_ext + '.'):
+            sib_suffix = sib[len(base_no_ext):]
+        elif clean_prefix and sib_stripped == clean_prefix:
+            # sib is e.g. 'X.de.srt' and clean_prefix is 'X'; rebuild
+            # sib_new_basename with marker-stripped sib + new marker
+            # appended onto new_base_no_ext.
+            _orig_ext_part = sib[len(sib_stripped):]   # '.de.srt'
+            sib_new_basename = os.path.basename(new_base_no_ext + _orig_ext_part)
+            if dry_run:
+                print(f"{log_prefix}Sibling (marker-stripped match): {os.path.basename(sib)} → {sib_new_basename}")
+                renamed += 1
+                continue
+            sib_ok, _ = rename_file(sib, sib_new_basename, remote_host=remote_host)
+            if sib_ok:
+                renamed += 1
+                sib_actual = os.path.join(current_dir, sib_new_basename)
+                if sib in PLEX_Media.OBJ_BY_FILEPATH:
+                    sib_key = PLEX_Media.OBJ_BY_FILEPATH.pop(sib)
+                    PLEX_Media.OBJ_BY_FILEPATH[sib_actual] = sib_key
+                print(f"{log_prefix}Sibling renamed: {os.path.basename(sib)} → {sib_new_basename}")
+            else:
+                errors += 1
+                print(f"{log_prefix}ERROR renaming sibling: {sib}")
             continue
-        sib_suffix = sib[len(base_no_ext):]
+        else:
+            continue
         sib_new_basename = os.path.basename(new_base_no_ext + sib_suffix)
         if dry_run:
             print(f"{log_prefix}Sibling: {os.path.basename(sib)} → {sib_new_basename}")
