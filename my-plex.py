@@ -33229,13 +33229,27 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
         # as the "aspect" name so the sidecar can track per-plex_var.
 
         # Merge with sidecar's previously-written markers (only relevant when
-        # not --replace and not --force).
+        # not --replace and not --force).  v2.69: honor the per-aspect
+        # `merge` field in DISK_PLEX_MAP[plex_var] — defaults to 'disk'
+        # (preserve sidecar value when Plex empty).  'plex' / 'newer'
+        # drop the stale sidecar marker so Plex stays authoritative; this
+        # is essential for WATCHED (a series that was fully watched and
+        # had new episodes added becomes "not fully watched" → the old
+        # series-level [vu] must be removed).
         if sidecar_entry and 'markers' in sidecar_entry and not (replace or force):
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and not new_markers.get(aspect):
+                    _aspec = (DISK_PLEX_MAP.get(aspect) or {})
+                    _merge_mode = _aspec.get('merge', 'disk') if isinstance(_aspec, dict) else 'disk'
+                    if _merge_mode in ('plex', 'newer'):
+                        # Plex is authoritative for this aspect — drop the
+                        # stale sidecar value rather than re-injecting it.
+                        if VRB or dry_run:
+                            print(f"{prefix}Dropping stale [{aspect}] ({old_val}) — Plex says no value, merge={_merge_mode!r}: {name}")
+                        continue
                     new_markers[aspect] = old_val
                     if VRB or dry_run:
-                        print(f"{prefix}Preserving [{aspect}] ({old_val}): {name}  (Plex empty; use --force to remove)")
+                        print(f"{prefix}Preserving [{aspect}] ({old_val}): {name}  (merge={_merge_mode!r}; --force to remove)")
         elif sidecar_entry and 'markers' in sidecar_entry and force:
             # --force: drop any aspect whose Plex value went empty
             for aspect, old_val in sidecar_entry['markers'].items():
@@ -33516,8 +33530,11 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     # actions) operates on a consistent view.
     if not dry_run and total_renamed > 0 and not OFFLINE and not READ_ONLY_MODE:
         _affected_libs = set()
-        for _, cache_key, obj in items:
-            _lib = obj.get('library', '')
+        for _entry in items:
+            _obj = _entry[1] if isinstance(_entry, tuple) and len(_entry) >= 2 else None
+            if not isinstance(_obj, dict):
+                continue
+            _lib = _obj.get('library', '')
             if _lib:
                 _affected_libs.add(_lib)
         if _affected_libs:
