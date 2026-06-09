@@ -1085,6 +1085,39 @@ CONFIG_DEFAULTS = {
     # Default empty = library does not affect markers.
     'DPM_LIBRARY_SUPPRESS': {},
 
+    # --- Planned in v3 (--clean / --naming architecture) — STUBS ONLY ---
+    #
+    # CLEAN_CATEGORIES_ENABLED — list of housekeeping categories that
+    # `--clean` runs by default.  Mirrors --problems' pattern but uses
+    # an ENABLED list (not _DISABLED) — explicit beats implicit.
+    # The full registry lives in CLEAN_CATEGORIES_REGISTRY in code; this
+    # CONF list selects which of those categories run.
+    # Categories (planned): junk, empty_dirs, orphan_sidecars,
+    #   release_folders, legacy_markers, duplicate_dotfiles, naming.
+    # See: my-plex --help clean
+    'CLEAN_CATEGORIES_ENABLED': [
+        'junk', 'empty_dirs', 'orphan_sidecars',
+        'release_folders', 'legacy_markers',
+        'duplicate_dotfiles', 'naming',
+    ],
+
+    # NAMING_RULES — per-Plex-object-type renaming rules consumed by
+    # `--naming` and by `--clean naming`.  Each entry's `template` /
+    # `transforms` define the canonical on-disk name.  All preserve_*
+    # keys default to True.  Listing only preserve flags = no-op (loader
+    # warns).  See: my-plex --help naming  /  my-plex --help info
+    #
+    # Variables: every cache field for the item, uppercased and wrapped
+    # in {…}.  Full list: my-plex --help info.  Modifiers (chain with
+    # dots): .lower .upper .dots .nodiacritic .nopunct .alnum .pad2/.pad3.
+    # Transforms: list[(regex, replacement)] applied in order after the
+    # template; replacement supports sed-style backrefs (\1, \2, …) and
+    # can UPDATE / ADD / REMOVE parts of the name.
+    'NAMING_RULES': {
+        # Empty by default — user must opt in by populating templates.
+        # See --help naming for examples.
+    },
+
     # MISPLACED_TARGET_LIBRARY — optional default mapping for `--misplaced
     # --resolve` Series→Movies transitions.  Key is the source series.*
     # library name, value is the target movies.* library name to move
@@ -2594,6 +2627,8 @@ UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
 UNCOLLECTED_ALLOW_CROSS_LIBRARY = CONFIG_DEFAULTS.get('UNCOLLECTED_ALLOW_CROSS_LIBRARY', True)
 DPM_LIBRARY_SUPPRESS         = CONFIG_DEFAULTS.get('DPM_LIBRARY_SUPPRESS', {})
+CLEAN_CATEGORIES_ENABLED     = CONFIG_DEFAULTS.get('CLEAN_CATEGORIES_ENABLED', [])
+NAMING_RULES                 = CONFIG_DEFAULTS.get('NAMING_RULES', {})
 MISPLACED_TARGET_LIBRARY     = CONFIG_DEFAULTS.get('MISPLACED_TARGET_LIBRARY', {})
 
 # --misplaced heuristic constants — fixed, not user-tunable.
