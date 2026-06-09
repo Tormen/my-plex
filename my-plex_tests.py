@@ -10144,16 +10144,37 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertIn('sync_view_state_into_cache()', region,
                       "view-state sweep must run before plan-build in cmd_plex2disk")
 
-    def test_push_audio_lang_dpm_includes_operation_number(self):
-        """The pending_op dict that _push_audio_lang_dpm hands to
-        apply_pending_operations MUST carry 'operation_number'.  Without
-        it, every audio_lang push errors out with KeyError (caught 103
-        such errors in the series.de live --sync test)."""
+    def test_push_audio_lang_dpm_is_noop(self):
+        """ARCHITECTURAL INVARIANT: --sync (Phase 1 / --disk2plex) MUST
+        NOT mutate file CONTENT — only FILENAME / PATHNAME may change.
+
+        The legacy _push_audio_lang_dpm invoked mp4box / mkvpropedit to
+        rewrite media containers' audio-track language tags in place.
+        That's file-content mutation hiding inside --sync.  Disabled.
+
+        The handler must:
+          - Be present in the registry (so it's invoked, not "no handler")
+          - Always return None (skip / no action)
+          - NOT call apply_pending_operations
+          - NOT call mp4box or mkvpropedit
+        """
+        m = self.m
+        # 1. Calling the handler is a no-op (returns None).
+        out = m._push_audio_lang_dpm(
+            obj={'title': 't', 'file': '/x.mp4', 'library': 'series.de'},
+            change={'disk_val': 'de', 'cache_key': 'Episode:1'},
+            dry_run=False)
+        self.assertIsNone(out)
+        # 2. Source must show NO mp4box / mkvpropedit / apply_pending_operations
+        #    call from inside this handler.
         src = self._read_script()
         m_start = src.index('def _push_audio_lang_dpm(')
         m_end = src.index('\ndef ', m_start + 1)
         region = src[m_start:m_end]
-        self.assertIn("'operation_number': 1", region)
+        self.assertNotIn('apply_pending_operations(', region)
+        self.assertNotIn("'mp4box'", region)
+        self.assertNotIn("'mkvpropedit'", region)
+        self.assertIn("no-op", region)
 
     def test_plex2disk_triggers_scan_and_waits(self):
         """After committing renames, cmd_plex2disk must:

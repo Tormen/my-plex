@@ -29528,6 +29528,16 @@ def main_print_help(args, remaining_args, main_parser):
             print("  This ensures manual marker edits on disk are picked up by Plex first,")
             print("  then the now-unified state is written back to all files and directories.")
             print()
+            print("  IMPORTANT — SCOPE OF MODIFICATION:")
+            print("    --sync touches FILENAMES and PATHNAMES only — NEVER file content.")
+            print("    The bytes of your .mp4/.mkv/.avi files are not modified.  Container")
+            print("    audio-track tags / codecs / container format are out of scope.  Use")
+            print("    explicit commands when you want file mutation:")
+            print("      --no-audio-language --resolve  → rewrites audio-track language tags")
+            print("                                       in containers (mp4box / mkvpropedit)")
+            print("      --remux                        → repackages container (no re-encode)")
+            print("      --reencode                     → re-encodes streams")
+            print()
             print("  Supports --dry-run to preview without making changes.")
             print()
             print("  NOTE: --force cannot be used with --sync. --force is destructive and")
@@ -29653,11 +29663,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  plex_var handler registry.")
             print()
             print("  Built-in push handlers:")
-            print("    WATCHED      → markWatched + lastViewedAt (Plex API)")
-            print("    AUDIO_LANG   → mp4box / mkvpropedit on the file container,")
-            print("                   then trigger Plex re-analyze.  Items in MULTI")
-            print("                   libraries skip the auto-write — use")
-            print("                   --no-audio-language --resolve for those.")
+            print("    WATCHED      → markWatched + last_viewed_at (Plex API + DB)")
+            print("    AUDIO_LANG   → NO-OP (v2.69).  AUDIO_LANG is a DERIVED")
+            print("                   attribute, not a push target.  Plex re-")
+            print("                   detects audio language from the container")
+            print("                   at every scan, so 'pushing' would mean")
+            print("                   rewriting the media file's audio-track tag")
+            print("                   in place.  --sync / --disk2plex MUST NOT")
+            print("                   modify file content — only filenames /")
+            print("                   pathnames.  If you do want the container")
+            print("                   tag rewritten, use --no-audio-language")
+            print("                   --resolve explicitly.")
             print("  Other plex_vars without a registered handler print a clear")
             print("  'no push handler' note and are skipped.")
             print()
@@ -33801,61 +33817,27 @@ def _push_watched_dpm(obj, change, dry_run):
 
 
 def _push_audio_lang_dpm(obj, change, dry_run):
-    """Push AUDIO_LANG to the file's audio track tag.
+    """v2.69: AUDIO_LANG is a DERIVED attribute, not a push target.
 
-    Reuses the apply_pending_operations machinery from --no-audio-language
-    --resolve to invoke mp4box / mkvpropedit (locally or via SSH) and then
-    trigger Plex to re-analyze the file.
+    Earlier versions tried to "push" disk's AUDIO_LANG marker into Plex
+    by invoking mp4box / mkvpropedit to rewrite the media file's
+    audio-track language tag in place.  That had two structural
+    problems:
+      (a) Plex has no API for "audio language" — Plex always re-detects
+          from the container.  So the "push" really meant rewriting
+          the on-disk media file (a file-mutation operation hiding
+          inside `--sync`).
+      (b) The handoff to apply_pending_operations missed multiple
+          required keys (operation_number, choice, …), causing silent
+          mid-flight KeyError failures — sometimes after the file had
+          already been partially rewritten.
 
-    For batched efficiency we rely on the caller to gather one or more
-    audio-lang changes and then apply them via apply_pending_operations
-    in bulk; this single-item handler is the simple path.
+    Policy: AUDIO_LANG flows Plex → disk only (via plex2disk).  Disk →
+    Plex is a no-op.  The explicit container-tag rewrite remains
+    available via `--no-audio-language --resolve` where it's
+    intentional and the user expects file mutation.
     """
-    cache_key = change.get('cache_key', '?')
-    title = obj.get('title', '?')
-    filepath = obj.get('file', '') or ''
-    if not filepath:
-        print(f"    SKIP: no filepath for {title}")
-        return None
-    tool_name, container = _detect_container_tool(filepath)
-    if not tool_name:
-        print(f"    SKIP: unsupported container '{container}' for {title}")
-        return None
-    remote_host, exists, resolved = determine_remote_host(filepath)
-    if not exists:
-        print(f"    SKIP: file not found {filepath} for {title}")
-        return None
-    lang_2 = str(change.get('disk_val') or '').lower()[:2]
-    if not lang_2 or lang_2 == 'unknown':
-        print(f"    SKIP: invalid AUDIO_LANG value {change.get('disk_val')!r} for {title}")
-        return None
-    lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
-    if dry_run:
-        print(f"    Would set audio language to '{lang_3}': {title}  ({tool_name})")
-        return True
-    # Build pending op compatible with apply_pending_operations() and apply.
-    # operation_number is required by apply_pending_operations' progress
-    # log; single-item path → '1' suffices.
-    pending_op = {
-        'operation_number': 1,
-        'cache_key': cache_key,
-        'filepath': resolved,
-        'plex_id':  obj.get('id', 'N/A'),
-        'library':  obj.get('library', 'N/A'),
-        'tool_name': tool_name,
-        'lang_code_2': lang_2,
-        'lang_code_3': lang_3,
-        'remote_host': remote_host,
-        'title': title,
-    }
-    log_data = {'metadata': {'started': '', 'command': 'disk2plex', 'timestamp': ''}, 'operations': []}
-    try:
-        apply_pending_operations([pending_op], log_data, default_remote_host=remote_host)
-        print(f"  Pushed audio_lang '{lang_2}': {title}")
-        return True
-    except Exception as ex:
-        print(f"  ERROR pushing audio_lang for {title}: {ex}")
-        return False
+    return None  # no-op — audio_lang is derived, not pushed
 
 
 # Registry: plex_var → push handler.  Push handlers for plex_vars not in
