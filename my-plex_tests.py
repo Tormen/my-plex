@@ -10447,6 +10447,33 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_orphaned_help_page_and_docs_wired(self):
+        """Step 4b-followup: --help orphaned page must exist in the help
+        dispatcher; --orphaned must appear in the zsh completion args_spec
+        and as a help-topic entry; the README must document the three
+        sub-categories."""
+        src = self._read_script()
+        # Help dispatcher case for 'orphaned'
+        self.assertIn("case 'orphaned':", src)
+        self.assertIn('print("ORPHANED HELP")', src)
+        # Zsh completion: --orphaned in args_spec + the sub-flag hints
+        self.assertRegex(src, r"'--orphaned\[Orphan sidecars")
+        self.assertRegex(src, r"'--files\[With --orphaned:")
+        self.assertRegex(src, r"'--dirs\[With --orphaned:")
+        self.assertRegex(src, r"'--my-plex\[With --orphaned:")
+        # Zsh --help <topic> completion list
+        self.assertRegex(src, r"'orphaned:Orphan sidecars")
+        # README documents --orphaned
+        readme_path = os.path.join(os.path.dirname(MAIN_SCRIPT), 'README.md')
+        try:
+            readme = open(readme_path, 'r', encoding='utf-8').read()
+        except FileNotFoundError:
+            self.skipTest(f"README.md not found at {readme_path}")
+        self.assertIn('--orphaned', readme)
+        self.assertIn('--orphaned --files', readme)
+        self.assertIn('--orphaned --dirs', readme)
+        self.assertIn('--orphaned --my-plex', readme)
+
     def test_junk_macos_dotunderscore_pattern_compiles_and_matches(self):
         """Step 4a: JUNK_PATTERNS['macos_dotunderscore'] must exist, compile,
         and match macOS AppleDouble shadow files like ._foo.mkv but NOT the

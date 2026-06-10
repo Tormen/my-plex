@@ -336,6 +336,7 @@ _my-plex() {
             'list-libraries:Library listing'
             'media:Media scope and query syntax'
             'mismatched:Title/dirname + multi-version mismatch'
+            'orphaned:Orphan sidecars + empty dirs + stale my-plex sidecars'
             'missing:Missing episode detection'
             'offline:Offline mode and access requirements'
             'plex2disk:Sync Plex metadata to disk'
@@ -451,6 +452,10 @@ _my-plex() {
         '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatched[Mismatches: title vs directory + multi-version Plex grouping]'
+        '--orphaned[Orphan sidecars + empty dirs + stale ~/.my-plex sidecars. Sub-flags: --files / --dirs / --my-plex. Add --resolve to trash/rmdir.]'
+        '--files[With --orphaned: only orphan sidecar files]'
+        '--dirs[With --orphaned: only empty directories]'
+        '--my-plex[With --orphaned: only stale ~/.my-plex/state-preservation sidecars]'
         '--multi-movie-folder[Wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder)]'
         '--library-language-mismatch[Items whose audio language disagrees with their library convention]'
         '(--bad-structure --nested-media)'{--bad-structure,--nested-media}'[Media files nested too deeply on disk (Movie ≤1 dir below library root, Episode ≤2). Optional SCOPE.]'
@@ -29123,6 +29128,73 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --junk --no-recursive               # Force depth-1 globally")
             print("  my-plex --junk --resolve                    # Trash with prompt")
             print("  my-plex --junk --resolve --try              # Preview only")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'orphaned':
+            print()
+            print("=" * 76)
+            print("ORPHANED HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --orphaned [SCOPE]")
+            print("                          [--files] [--dirs] [--my-plex]")
+            print("                          [--resolve [--try] [--yes]]")
+            print()
+            print("Detects orphan artifacts under your library roots plus the")
+            print("my-plex state directory.  Three independent sub-categories;")
+            print("no sub-flag = run all three.")
+            print()
+            print("SUB-CATEGORIES:")
+            print()
+            print("  --files     Sidecar files (.nfo, .srt, .jpg, .png, ...) whose")
+            print("              video sibling has vanished.  A sidecar is OWNED by a")
+            print("              video stem in its directory:")
+            print("                movie.mkv + movie.nfo + movie.de.srt   → owned")
+            print("                movie.mkv gone, movie.nfo still there  → ORPHANED")
+            print("              2-character language suffixes are stripped from the")
+            print("              candidate stem when matching (.de.srt, .en.srt, ...).")
+            print("              Cover-art files (cover.jpg, folder.jpg, poster.jpg,")
+            print("              fanart.jpg, banner.jpg) are kept when ANY video lives")
+            print("              in the same directory.")
+            print()
+            print("  --dirs      Empty directories anywhere under the library roots.")
+            print("              Found via BSD-compatible `find -mindepth 1 -type d")
+            print("              -empty`.  --resolve rmdirs them (non-recursive — only")
+            print("              truly empty dirs go).")
+            print()
+            print("  --my-plex   ~/.my-plex/state-preservation/<rk>.json sidecars whose")
+            print("              <rk> (cache key) no longer exists in OBJ_BY_ID.  These")
+            print("              are not managed by --update-cache (since the parent is")
+            print("              gone), so --orphaned cleans them.")
+            print()
+            print("ACTIONS:")
+            print("  --orphaned                  List candidates (read-only).")
+            print("  --orphaned --resolve        Trash files (move_to_trash) and rmdir")
+            print("                              empty dirs.  Loops until idle so a dir")
+            print("                              emptied by sidecar trashing is caught")
+            print("                              in the next pass.  Writes a JSON log:")
+            print("                                ~/.my-plex/logs/orphaned_<TS>.json")
+            print("  --orphaned --resolve --try  Dry run — show what would be done.")
+            print("  --orphaned --resolve --yes  Skip per-run confirmation.")
+            print()
+            print("SCOPE:")
+            print("  Optional.  Restricts the walk to one library / item / path.")
+            print("  Default scope = every library root in CACHE['library_stats'].")
+            print()
+            print("INTEGRATION:")
+            print("  Part of the --cleanup pipeline.  Run automatically after media")
+            print("  state changes (moves, deletes) that would leave sidecars behind.")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --orphaned                       # All three categories")
+            print("  my-plex --orphaned --files               # Just orphan sidecars")
+            print("  my-plex --orphaned --dirs                # Just empty dirs")
+            print("  my-plex --orphaned --my-plex             # Just state sidecars")
+            print("  my-plex --orphaned MOVIE_LIB             # Scope to one library")
+            print("  my-plex --orphaned --resolve --try       # Dry-run cleanup")
+            print("  my-plex --orphaned --resolve --yes       # Cleanup, no prompt")
             print()
             print("=" * 76)
             sys.exit(0)
