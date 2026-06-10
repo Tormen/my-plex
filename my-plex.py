@@ -23183,6 +23183,220 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
+    def _list_orphaned(do_files=True, do_dirs=True, do_my_plex=True,
+                       scope=None, resolve=False, dry_run=False, yes=False):
+        """Detect orphan files / empty dirs / stale my-plex sidecars.
+
+        Categories (any combination; default = all three):
+          files    — non-video files in a library wrapper whose matching
+                     video sibling no longer exists.  Stem match: strip
+                     extension + optional 2-char language code (.en/.de/…).
+          dirs     — directories under library roots that are empty.
+          my_plex  — ~/.my-plex/state-preservation/<rk>.json files whose
+                     ratingKey no longer exists in OBJ_BY_ID.
+
+        --resolve loops: trash files / remove sidecars / rmdir dirs /
+        re-scan, repeating until no new orphans appear (because trashing
+        the last sidecar in a dir may make that dir empty in turn).
+
+        Returns total count of orphans handled (across all rounds).
+        """
+        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        roots = []
+        for paths in lib_locations.values():
+            for p in (paths or []):
+                if p and p not in roots:
+                    roots.append(p)
+        if not roots:
+            print("  No library roots known — run --update-cache first.")
+            return 0
+
+        def _scan_files():
+            if not do_files:
+                return []
+            found = []  # (filepath, reason)
+            for d in roots:
+                escaped = escape_path_for_ssh(d)
+                if PLEX_DB_REMOTE_HOST:
+                    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
+                           f'find "{escaped}" -name ".*" -prune -o -type f -print']
+                else:
+                    cmd = ['find', d, '-name', '.*', '-prune', '-o', '-type', 'f', '-print']
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    if VRB: print(f"  ⚠ orphan-files scan failed for {d}: {r.stderr.strip()}")
+                    continue
+                # Group files by parent dir.
+                per_dir = {}
+                for line in r.stdout.splitlines():
+                    fp = line.strip()
+                    if not fp or not fp.startswith('/'):
+                        continue
+                    parent, _, fname = fp.rpartition('/')
+                    per_dir.setdefault(parent, []).append(fname)
+                for parent, fnames in per_dir.items():
+                    video_stems = set()
+                    non_video = []
+                    for fn in fnames:
+                        stem, _, ext = fn.rpartition('.')
+                        ext_lc = ('.' + ext).lower() if ext else ''
+                        if ext_lc in VIDEO_EXTENSIONS:
+                            # Video file: stem participates; also strip a
+                            # trailing 2-char lang code so .en.mkv aliases
+                            # match .de.srt sidecars.
+                            video_stems.add(stem)
+                            if len(stem) >= 3 and stem[-3] == '.' and stem[-2:].isalpha():
+                                video_stems.add(stem[:-3])
+                        else:
+                            non_video.append((fn, stem))
+                    for fn, stem in non_video:
+                        # Try direct + lang-code-stripped stem.
+                        if stem in video_stems:
+                            continue
+                        if len(stem) >= 3 and stem[-3] == '.' and stem[-2:].isalpha() \
+                                and stem[:-3] in video_stems:
+                            continue
+                        # Common cover/poster art — leave alone unless dir
+                        # is otherwise empty of video (covered by next round).
+                        if fn.lower() in ('poster.jpg', 'poster.png', 'folder.jpg',
+                                          'folder.png', 'cover.jpg', 'cover.png',
+                                          'fanart.jpg', 'fanart.png', 'banner.jpg'):
+                            if video_stems:
+                                continue
+                        found.append((f'{parent}/{fn}', 'no video sibling'))
+            return sorted(set(found))
+
+        def _scan_dirs():
+            if not do_dirs:
+                return []
+            found = []
+            for d in roots:
+                escaped = escape_path_for_ssh(d)
+                if PLEX_DB_REMOTE_HOST:
+                    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
+                           f'find "{escaped}" -mindepth 1 -type d -empty']
+                else:
+                    cmd = ['find', d, '-mindepth', '1', '-type', 'd', '-empty']
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    if VRB: print(f"  ⚠ orphan-dirs scan failed for {d}: {r.stderr.strip()}")
+                    continue
+                for line in r.stdout.splitlines():
+                    dp = line.strip()
+                    if dp and dp.startswith('/'):
+                        found.append(dp)
+            # Deepest first so parents get caught next round once their
+            # last child is rmdir'd.
+            return sorted(set(found), key=lambda p: -p.count('/'))
+
+        def _scan_my_plex():
+            if not do_my_plex:
+                return []
+            state_dir = _MOVE_STATE_DIR
+            if not os.path.isdir(state_dir):
+                return []
+            # Build the live rk set from OBJ_BY_ID keys ('Type:NNN').
+            live_rks = set()
+            for k in PLEX_Media.OBJ_BY_ID.keys():
+                if ':' in k:
+                    live_rks.add(k.split(':', 1)[1])
+            found = []
+            for fn in os.listdir(state_dir):
+                if not fn.endswith('.json'):
+                    continue
+                rk = fn[:-5]
+                if rk in live_rks:
+                    continue
+                found.append((os.path.join(state_dir, fn), f'rk {rk} not in cache'))
+            return sorted(found)
+
+        log_entries = []
+        total_files = total_dirs = total_my_plex = 0
+        rounds = 0
+        while True:
+            rounds += 1
+            files    = _scan_files()
+            dirs     = _scan_dirs()
+            sidecars = _scan_my_plex()
+            if not (files or dirs or sidecars):
+                if rounds == 1:
+                    print(f"\n  No orphans found across {len(roots)} root(s).")
+                break
+            if files:
+                print(f"\n  Orphan files ({len(files)}):")
+                for fp, reason in files:
+                    print(f"    {fp}   ({reason})")
+            if dirs:
+                print(f"\n  Empty dirs ({len(dirs)}):")
+                for d in dirs:
+                    print(f"    {d}")
+            if sidecars:
+                print(f"\n  Orphan my-plex sidecars ({len(sidecars)}):")
+                for sp, reason in sidecars:
+                    print(f"    {sp}   ({reason})")
+            total_files   += len(files)
+            total_dirs    += len(dirs)
+            total_my_plex += len(sidecars)
+            if not resolve:
+                break  # preview = single round
+            if dry_run:
+                print(f"\n  --try: would trash {len(files)+len(sidecars)} file(s),"
+                      f" rmdir {len(dirs)} dir(s).  No changes applied.")
+                break
+            if not yes:
+                try:
+                    resp = input(f"\n  Trash {len(files)} file(s), remove "
+                                 f"{len(sidecars)} sidecar(s), rmdir "
+                                 f"{len(dirs)} empty dir(s)? [y/N]: ").strip().lower()
+                except EOFError:
+                    resp = ''
+                if resp != 'y':
+                    print("  Aborted — no changes.")
+                    break
+                yes = True
+            for fp, reason in files:
+                ok, info = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
+                log_entries.append({'category': 'files', 'path': fp,
+                                    'reason': reason,
+                                    'status': 'trashed' if ok else 'failed'})
+                print(f"  {'✓ trashed' if ok else '✗ FAILED  '}: {fp}")
+            for sp, reason in sidecars:
+                try:
+                    os.remove(sp)
+                    ok = True
+                except Exception:
+                    ok = False
+                log_entries.append({'category': 'my_plex', 'path': sp,
+                                    'reason': reason,
+                                    'status': 'removed' if ok else 'failed'})
+                print(f"  {'✓ removed' if ok else '✗ FAILED  '}: {sp}")
+            for dp in dirs:
+                if PLEX_DB_REMOTE_HOST:
+                    cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
+                           f'rmdir "{escape_path_for_ssh(dp)}"']
+                else:
+                    cmd = ['rmdir', dp]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                ok = (r.returncode == 0)
+                log_entries.append({'category': 'dirs', 'path': dp,
+                                    'status': 'rmdir' if ok else 'failed'})
+                print(f"  {'✓ rmdir   ' if ok else '✗ FAILED  '}: {dp}")
+            # Loop continues — re-scan picks up dirs that became empty.
+        print(f"\n  Summary: {total_files} orphan file(s), {total_dirs} empty dir(s),"
+              f" {total_my_plex} orphan my-plex sidecar(s) across {rounds} round(s).")
+        if resolve and not dry_run and log_entries:
+            log_path = _write_resolve_log('orphaned', {
+                'rounds': rounds,
+                'total_files':   total_files,
+                'total_dirs':    total_dirs,
+                'total_my_plex': total_my_plex,
+                'entries':       log_entries,
+            })
+            if log_path:
+                print(f"  Log: {log_path}")
+        return total_files + total_dirs + total_my_plex
+
+    @staticmethod
     def _list_episode_numbering_issues(obj_keys, library_name=None):
         """List series where Plex and scraped episode numbering disagree.
         Accepts obj_keys of any type — derives series_keys internally.
@@ -40058,6 +40272,28 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_junk_files(pattern_names, resolve=resolve, dry_run=dry_run, yes=yes, recursive_override=_rec)
         return
 
+    # Handle --orphaned [SCOPE]: orphan files / empty dirs / stale my-plex sidecars.
+    # Sub-flags --files / --dirs / --my-plex narrow the categories; none = all three.
+    orphaned_val = safe_getattr(cmd_args, 'orphaned', None)
+    if orphaned_val is not None:
+        resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
+        dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+        yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
+        do_files   = bool(safe_getattr(cmd_args, 'orphaned_files_flag',   False) or safe_getattr(args, 'orphaned_files_flag',   False))
+        do_dirs    = bool(safe_getattr(cmd_args, 'orphaned_dirs_flag',    False) or safe_getattr(args, 'orphaned_dirs_flag',    False))
+        do_my_plex = bool(safe_getattr(cmd_args, 'orphaned_my_plex_flag', False) or safe_getattr(args, 'orphaned_my_plex_flag', False))
+        # No sub-flag set → run all three (the default).
+        if not (do_files or do_dirs or do_my_plex):
+            do_files = do_dirs = do_my_plex = True
+        scope = orphaned_val if isinstance(orphaned_val, list) and orphaned_val else None
+        _bits = [n for n, on in (('files', do_files), ('dirs', do_dirs),
+                                  ('my-plex', do_my_plex)) if on]
+        print(f"\n--- Orphaned: {', '.join(_bits)} ---")
+        PLEX_Media._list_orphaned(do_files=do_files, do_dirs=do_dirs,
+                                  do_my_plex=do_my_plex, scope=scope,
+                                  resolve=resolve, dry_run=dry_run, yes=yes)
+        return
+
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
     mmf_val = safe_getattr(cmd_args, 'multi_movie_folder', None)
     if mmf_val is not None:
@@ -40489,6 +40725,7 @@ def main():
         '--reencode': 'reencode', '--renumber': 'renumber', '--problems': 'problems', '--broken': 'broken',
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
+        '--orphaned': 'orphaned',
         '--multi-movie-folder': 'multi-movie-folder',
         '--misplaced': 'misplaced', '--wrong-library': 'misplaced',
         '--uncollected': 'uncollected', 'uncollected': 'uncollected',
@@ -41240,6 +41477,10 @@ def main():
     main_parser.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
+    main_parser.add_argument('--orphaned', metavar='SCOPE', nargs='*', default=None, dest='orphaned', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--files', action='store_true', default=False, dest='orphaned_files_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
+    main_parser.add_argument('--dirs', action='store_true', default=False, dest='orphaned_dirs_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
+    main_parser.add_argument('--my-plex', action='store_true', default=False, dest='orphaned_my_plex_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
     main_parser.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--uncollected', metavar='SCOPE', nargs='*', default=None, dest='uncollected', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
@@ -41320,6 +41561,10 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--mismatched', metavar='SCOPE', nargs='*', default=None, dest='mismatched', help="List Plex mismatches: title vs directory + multi-version Plex grouping. Use --help mismatched for details.")
     GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="Pure disk-walk clutter detection in scope (recursive by default; --no-recursive for depth-1). Add --resolve to trash matches. Use --help junk for details.")
     GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
+    GLOBAL_CMD_PARSER.add_argument('--orphaned', metavar='SCOPE', nargs='*', default=None, dest='orphaned', help="Detect orphans across library roots: --files (sidecars whose video sibling is gone), --dirs (empty directories), --my-plex (~/.my-plex/state-preservation/<rk>.json with a vanished rk). Default (no sub-flag) = all three. Add --resolve to trash/rmdir; loops until idle.")
+    GLOBAL_CMD_PARSER.add_argument('--files', action='store_true', default=False, dest='orphaned_files_flag', help="(--orphaned) restrict to orphan files (non-video files with no matching video sibling).")
+    GLOBAL_CMD_PARSER.add_argument('--dirs', action='store_true', default=False, dest='orphaned_dirs_flag', help="(--orphaned) restrict to empty directories.")
+    GLOBAL_CMD_PARSER.add_argument('--my-plex', action='store_true', default=False, dest='orphaned_my_plex_flag', help="(--orphaned) restrict to stale my-plex sidecars (~/.my-plex/state-preservation/<rk>.json with vanished rk).")
     GLOBAL_CMD_PARSER.add_argument('--multi-movie-folder', metavar='SCOPE', nargs='*', default=None, help="List wrappers shared by >=2 distinct Movies (Plex expects one Movie per folder). Use --help multi-movie-folder for details.")
     GLOBAL_CMD_PARSER.add_argument('--misplaced', '--wrong-library', metavar='SCOPE', nargs='*', default=None, dest='misplaced', help="List items whose content type does not fit their library (Series-of-Movies, Movie-with-SxxEyy). Use --help misplaced for details.")
     GLOBAL_CMD_PARSER.add_argument('--uncollected', metavar='SCOPE', nargs='*', default=None, dest='uncollected', help="List Movies belonging to a TMDB collection that aren't grouped under a matching Plex Collection. Add --resolve [--auto] [--try] to create/extend the Plex Collection. Use --help uncollected for details.")
@@ -41688,6 +41933,7 @@ def main():
     _reinject_variadic('unsorted',                  '--unsorted')
     _reinject_variadic('mismatched',                '--mismatched')
     _reinject_variadic('junk',                      '--junk')
+    _reinject_variadic('orphaned',                  '--orphaned')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('misplaced',                 '--misplaced')
     _reinject_variadic('uncollected',               '--uncollected')

@@ -10386,6 +10386,67 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         finally:
             m.DISK_PLEX_MAP = saved_dpm
 
+    def test_orphaned_static_method_exists_with_three_categories(self):
+        """Step 4b: PLEX_Media._list_orphaned must exist and accept
+        do_files / do_dirs / do_my_plex / scope / resolve / dry_run / yes."""
+        m = self.m
+        self.assertTrue(hasattr(m.PLEX_Media, '_list_orphaned'),
+                        "PLEX_Media._list_orphaned must exist")
+        import inspect
+        sig = inspect.signature(m.PLEX_Media._list_orphaned)
+        for param in ('do_files', 'do_dirs', 'do_my_plex',
+                      'scope', 'resolve', 'dry_run', 'yes'):
+            self.assertIn(param, sig.parameters,
+                          f"_list_orphaned must accept {param!r}")
+
+    def test_orphaned_empty_roots_returns_zero(self):
+        """With no library roots known (empty library_stats.locations),
+        --orphaned reports nothing and returns 0 — does NOT crash."""
+        m = self.m
+        saved = m.CACHE.copy() if isinstance(m.CACHE, dict) else None
+        try:
+            m.CACHE = {}  # No library_stats → no roots
+            from io import StringIO
+            import contextlib
+            buf = StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = m.PLEX_Media._list_orphaned(do_files=True, do_dirs=True,
+                                                  do_my_plex=False, resolve=False)
+            self.assertEqual(rc, 0)
+            self.assertIn('No library roots known', buf.getvalue())
+        finally:
+            if saved is not None:
+                m.CACHE = saved
+
+    def test_orphaned_argparse_wiring(self):
+        """Step 4b: --orphaned + --files/--dirs/--my-plex sub-flags must
+        be registered in both main_parser and GLOBAL_CMD_PARSER, plus
+        the variadic re-injection list."""
+        src = self._read_script()
+        # main_parser hidden registration
+        self.assertRegex(src, r"main_parser\.add_argument\('--orphaned'")
+        self.assertRegex(src, r"dest='orphaned_files_flag'")
+        self.assertRegex(src, r"dest='orphaned_dirs_flag'")
+        self.assertRegex(src, r"dest='orphaned_my_plex_flag'")
+        # GLOBAL_CMD_PARSER documented help
+        self.assertRegex(src, r"GLOBAL_CMD_PARSER\.add_argument\('--orphaned'.*help=\"[^\"]+sub-flag")
+        # Help-topic synonym map
+        self.assertRegex(src, r"'--orphaned':\s*'orphaned'")
+        # Variadic reinject
+        self.assertRegex(src, r"_reinject_variadic\('orphaned',\s*'--orphaned'\)")
+        # Dispatcher path
+        self.assertIn("orphaned_val = safe_getattr(cmd_args, 'orphaned', None)", src)
+        self.assertIn("PLEX_Media._list_orphaned(do_files=do_files", src)
+
+    def test_orphaned_default_runs_all_three_categories(self):
+        """Dispatcher: when none of --files / --dirs / --my-plex is set,
+        all three are enabled.  Source-pattern assertion of the gating
+        statement (no behavioral run needed)."""
+        src = self._read_script()
+        # The exact gate line in the dispatcher
+        self.assertRegex(src,
+            r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
+
     def test_junk_macos_dotunderscore_pattern_compiles_and_matches(self):
         """Step 4a: JUNK_PATTERNS['macos_dotunderscore'] must exist, compile,
         and match macOS AppleDouble shadow files like ._foo.mkv but NOT the
