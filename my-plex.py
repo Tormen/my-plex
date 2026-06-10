@@ -423,7 +423,7 @@ _my-plex() {
         '--scan[Trigger Plex lib.refresh() (re-walk disk on the server) + sync cache. Does NOT re-probe files via ffmpeg — add --force-metadata for that.]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
         '--resolve[Interactive resolver: duplicates / no-audio-language / unmatched. With --unmatched: year-lookup + bulk rename via TMDB/TVDB]'
-        '--auto[Skip interactive prompts in --resolve-style operations: --unmatched --resolve (top hit ≥ UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT), --bad-structure --resolve (skip conflict prompts), --clean pipeline.]'
+        '--auto[Skip interactive prompts in --resolve-style operations: --unmatched --resolve (top hit ≥ UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT), --bad-structure --resolve (skip conflict prompts), pipeline phases.]'
         '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
         '--list-labels[List all labels and item counts]'
         '--list-label[List media with specific label]:label:'
@@ -475,7 +475,7 @@ _my-plex() {
         '(--unrecognized --alien)'{--unrecognized,--alien}'[List top-level entries in each library rootpath that Plex DB does NOT index (no matching media_part). Optional LIB scope. Synonyms.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--strip[With --plex2disk: strip all markers from disk]'
-        '--clean[Bundled pipeline: --unmatched --resolve --auto + --original-languages + --sort-new. Optional SCOPE. Honours --try, --yes, --force.]'
+        '--cleanup[Safe housekeeping pipeline (default): --junk --resolve + --orphaned --resolve. Optional SCOPE. Honours --try, --yes, --force. Define your own pipelines (incl. --clean) via PIPELINES dict in CONF.]'
         '--replace[With --plex2disk: re-canonicalise existing markers]'
         '(--map-to-filename --map-from-filename)'{--map-to-filename,--map-from-filename}'[Legacy alias for --plex2disk]'
         '--force-plex[With --update-cache: re-read EVERY item from Plex DB (cache pickle dropped + rebuilt; TSVs and ffmpeg metadata preserved on disk).]'
@@ -779,19 +779,25 @@ CONFIG_DEFAULTS = {
     #
     # Add your own pipelines in ~/.my-plex.conf, e.g.:
     #   PIPELINES = {
-    #       '--clean': [...],
-    #       '--full-refresh': [['--update-cache', '--force-plex'],
-    #                          ['--original-languages']],
+    #       '--clean': [['--cleanup'],
+    #                   ['--unmatched', '--resolve', '--auto'],
+    #                   ['--sort-new']],          # side-effecty wrapper
+    #       '--full-refresh': [['--update-cache', '--force-plex']],
     #       '--nightly': [['--update-cache'], ['--problems']],
     #   }
     # Each key becomes a usable my-plex flag.
+    #
+    # PIPELINES = {} in CONF removes every default pipeline.  Setting a
+    # single key replaces just that entry; defaults for the others stick.
+    #
+    # --cleanup is the ship-it default: safe housekeeping only (trash junk,
+    # prune orphans).  Side-effecty steps (--unmatched --resolve --auto,
+    # --sort-new) belong in the user's own PIPELINES['--clean'] override.
+    # --naming joins --cleanup once step 5 lands.
     'PIPELINES': {
-        '--clean': [
-            ['--unmatched', '--resolve', '--auto'],
-            ['--update-cache'],
-            ['--junk', '--resolve'],
-            ['--original-languages'],
-            ['--sort-new'],
+        '--cleanup': [
+            ['--junk',     '--resolve'],
+            ['--orphaned', '--resolve'],
         ],
     },
 
@@ -29841,10 +29847,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
-        case 'pipelines' | 'pipeline' | 'clean':
+        case 'pipelines' | 'pipeline' | 'clean' | 'cleanup':
             print()
             print("=" * 76)
-            print("PIPELINES (--clean and friends) HELP")
+            print("PIPELINES (--cleanup, --clean, and friends) HELP")
             print("=" * 76)
             print()
             print("  PIPELINES is a CONF dict that maps a flag name → ordered list of")
@@ -29878,21 +29884,22 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Edit ~/.my-plex.conf:")
             print()
             print("    PIPELINES = {")
-            print("        '--clean': [                                # default")
-            print("            ['--unmatched', '--resolve', '--auto'],")
-            print("            ['--update-cache'],")
-            print("            ['--original-languages'],")
+            print("        '--cleanup': [                              # default")
+            print("            ['--junk',     '--resolve'],")
+            print("            ['--orphaned', '--resolve'],")
+            print("        ],")
+            print("        '--clean': [                                # custom (yours)")
+            print("            ['--cleanup'],                          # the safe bundle")
+            print("            ['--unmatched', '--resolve', '--auto'], # side-effecty steps")
             print("            ['--sort-new'],")
             print("        ],")
             print("        '--nightly': [                              # custom")
             print("            ['--update-cache'],")
             print("            ['--problems'],")
             print("        ],")
-            print("        '--full-refresh': [")
-            print("            ['--update-cache', '--force-plex'],")
-            print("            ['--original-languages'],")
-            print("        ],")
             print("    }")
+            print()
+            print("    PIPELINES = {} removes every default pipeline (including --cleanup).")
             print()
             print("  Each dict key MUST start with '--' and use kebab-case.  The runner")
             print("  registers it at startup and dispatches it like any built-in flag.")
@@ -31055,7 +31062,7 @@ def main_print_help(args, remaining_args, main_parser):
     # the match statement above; this handles every OTHER pipeline key.
     _h_norm = args.help.lower()
     _candidate = _h_norm if _h_norm.startswith('--') else f"--{_h_norm}"
-    if _candidate in PIPELINES and _candidate != '--clean':
+    if _candidate in PIPELINES and _h_norm not in ('cleanup', 'clean', 'pipelines', 'pipeline'):
         _phases = PIPELINES[_candidate]
         _is_custom = _candidate not in CONFIG_DEFAULTS.get('PIPELINES', {})
         print()
@@ -41572,11 +41579,13 @@ def main():
                 "Use PROBLEM_CATEGORIES_ENABLED instead "
                 "(None = all, [] = none, [list] = explicit).",
             'CLEAN_CATEGORIES_REGISTRY':
-                "Removed; --clean is now a PIPELINE — override "
-                "PIPELINES['--clean'] to customise.",
+                "Removed; housekeeping is now a PIPELINE — the default "
+                "is '--cleanup' (junk + orphaned).  Add your own "
+                "PIPELINES['--clean'] in CONF for the bundle you want.",
             'CLEAN_CATEGORIES_ENABLED':
-                "Removed; --clean is now a PIPELINE — override "
-                "PIPELINES['--clean'] to customise.",
+                "Removed; housekeeping is now a PIPELINE — the default "
+                "is '--cleanup' (junk + orphaned).  Add your own "
+                "PIPELINES['--clean'] in CONF for the bundle you want.",
         }
         _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}"
                   for _k in _legacy_set]

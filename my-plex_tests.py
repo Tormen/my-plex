@@ -10447,6 +10447,24 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_default_pipeline_is_cleanup_with_safe_phases(self):
+        """Step 4e: the only default-shipped pipeline must be '--cleanup',
+        composed of the two safe housekeeping commands (--junk, --orphaned).
+        The legacy default '--clean' must be GONE (now a user-defined
+        custom override in their personal CONF)."""
+        m = self.m
+        defaults = m.CONFIG_DEFAULTS['PIPELINES']
+        self.assertEqual(set(defaults), {'--cleanup'},
+            "default PIPELINES must contain ONLY '--cleanup'")
+        phases = defaults['--cleanup']
+        self.assertEqual(len(phases), 2,
+            "--cleanup default has 2 phases (junk, orphaned)")
+        self.assertEqual(phases[0][0], '--junk')
+        self.assertEqual(phases[1][0], '--orphaned')
+        # Each phase has --resolve as a follow-on token
+        self.assertIn('--resolve', phases[0])
+        self.assertIn('--resolve', phases[1])
+
     def test_help_pipelines_marks_custom_vs_default(self):
         """Step 4d: --help pipelines must mark each PIPELINES entry as
         either '(default)' or '(CUSTOM DEFINED COMMAND from CONF)' so a
@@ -10456,7 +10474,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertIn("CUSTOM DEFINED COMMAND from CONF", src)
         self.assertIn("_default_pipeline_keys = set(CONFIG_DEFAULTS.get('PIPELINES'", src)
         # Dynamic per-pipeline page exists and is reachable for non-default keys.
-        self.assertIn("_candidate in PIPELINES and _candidate != '--clean'", src)
+        self.assertIn("_candidate in PIPELINES and _h_norm not in", src)
         self.assertRegex(src, r"print\(f\"PIPELINE \{_candidate\}\"\)")
 
     def test_cleanup_managed_orphans_prunes_disk_map_when_filepath_gone(self):
