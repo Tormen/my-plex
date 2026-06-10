@@ -10447,6 +10447,25 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_plex2disk_replace_is_dpm_template_driven(self):
+        """Step 4i: --plex2disk --replace is the canonical stale-marker
+        rewrite path, driven entirely by DPM templates.  The processor
+        compiles disk2plex regexes from DISK_PLEX_MAP entries (no
+        hardcoded markers like 'vu' in the behavior) and strips matches
+        before re-applying the canonical plex2disk template."""
+        src = self._read_script()
+        # The processor builds _replace_patterns from DISK_PLEX_MAP entries
+        self.assertIn("_replace_patterns = []", src)
+        self.assertRegex(src, r"if replace:\s*\n(\s+[^\n]+\n){0,3}\s+for plex_var, var_spec in DISK_PLEX_MAP\.items\(\)")
+        # Each disk2plex regex from the entry is compiled
+        self.assertRegex(src, r"_replace_patterns\.append\(re\.compile\(rg, re\.IGNORECASE\)\)")
+        # Help text frames --replace as the stale/legacy marker rewrite
+        self.assertIn("Stale / legacy marker rewrite", src)
+        self.assertIn("no hardcoded marker syntax in my-plex itself", src)
+        # No standalone --legacy-markers flag introduced
+        self.assertNotIn("'--legacy-markers'", src)
+        self.assertNotIn("--legacy-markers ", src)
+
     def test_original_languages_standalone_flag_retired(self):
         """Step 4h: the standalone --original-languages CLI is GONE.  Its
         argparse defs (main_parser + GLOBAL_CMD_PARSER) and its dispatcher
