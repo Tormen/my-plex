@@ -10386,6 +10386,25 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         finally:
             m.DISK_PLEX_MAP = saved_dpm
 
+    def test_junk_macos_dotunderscore_pattern_compiles_and_matches(self):
+        """Step 4a: JUNK_PATTERNS['macos_dotunderscore'] must exist, compile,
+        and match macOS AppleDouble shadow files like ._foo.mkv but NOT the
+        primary foo.mkv.  Behavioral test against the compiled pattern dict."""
+        m = self.m
+        self.assertIn('macos_dotunderscore', m.JUNK_PATTERNS,
+                      "macos_dotunderscore pattern must be in JUNK_PATTERNS")
+        spec = m.JUNK_PATTERNS['macos_dotunderscore']
+        self.assertIn('FILENAME_REGEXP', spec)
+        rx = re.compile(spec['FILENAME_REGEXP'])
+        # Matches the shadow files
+        for name in ('._foo.mkv', '._.DS_Store', '._S01E01.srt'):
+            self.assertIsNotNone(rx.match(name),
+                                 f"pattern must match shadow file {name!r}")
+        # Does NOT match the primaries / other dotfiles
+        for name in ('foo.mkv', '.DS_Store', '.hidden.txt', 'subs.srt'):
+            self.assertIsNone(rx.match(name),
+                              f"pattern must NOT match {name!r}")
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
