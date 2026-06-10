@@ -2205,15 +2205,32 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 ###############################################################################
 #
 # Named pipelines that get registered as top-level my-plex CLI flags.
-# Each dict key is the flag name (e.g. '--clean'); each value is an
+# Each dict key is the flag name (e.g. '--cleanup'); each value is an
 # ordered list of phases.  Each phase is itself a list of CLI tokens
 # invoked as a subprocess.  The runner:
 #   • prepends the user's SCOPE (when given) to every phase
 #   • threads --try / --yes / --force when those are on the outer call
 #   • aborts the rest of the pipeline if any phase exits non-zero
 #
-# The default '--clean' chains: resolve unmatched → refresh cache →
-# backfill original_language → sort new arrivals.
+# Default ships a single safe housekeeping bundle '--cleanup':
+#   1. --junk     --resolve   (trash sample / promo / placeholder clutter)
+#   2. --orphaned --resolve   (trash orphan sidecars, rmdir empty dirs)
+#
+# PIPELINES uses TOTAL-REPLACE semantics: assigning this dict REPLACES
+# the shipped defaults entirely.  Setting PIPELINES = {{}} removes every
+# default pipeline (incl. --cleanup).  To KEEP --cleanup while adding
+# your own bundles, restate --cleanup in your dict.
+#
+# Example: power user who wants both --cleanup AND a --clean that chains
+# housekeeping + matcher + sort:
+#
+#   PIPELINES = {{
+#       '--cleanup': [['--junk',     '--resolve'],
+#                     ['--orphaned', '--resolve']],
+#       '--clean':   [['--cleanup'],
+#                     ['--unmatched', '--resolve', '--auto'],
+#                     ['--sort-new']],
+#   }}
 #
 # Default:
 {_fmt_default('PIPELINES', CONFIG_DEFAULTS['PIPELINES'])}
@@ -29899,7 +29916,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("        ],")
             print("    }")
             print()
-            print("    PIPELINES = {} removes every default pipeline (including --cleanup).")
+            print("  PIPELINES uses TOTAL-REPLACE semantics: assigning the dict")
+            print("  replaces the shipped defaults entirely.  PIPELINES = {} removes")
+            print("  every default (incl. --cleanup); to keep --cleanup alongside")
+            print("  your own pipelines, restate it in your override.")
             print()
             print("  Each dict key MUST start with '--' and use kebab-case.  The runner")
             print("  registers it at startup and dispatches it like any built-in flag.")
