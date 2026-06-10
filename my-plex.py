@@ -994,6 +994,16 @@ CONFIG_DEFAULTS = {
             'MAX_SIZE_MB':     0,
             'RECURSIVE':       'yes',
         },
+        # macOS resource-fork shadow files (._foo.mkv next to foo.mkv) —
+        # AppleDouble format, created when a Mac writes to a non-HFS+
+        # filesystem.  Never useful on a media server; safe to trash
+        # regardless of whether the primary sibling exists.
+        'macos_dotunderscore': {
+            'SCOPE':           '',
+            'FILENAME_REGEXP': r'^\._',
+            'MAX_SIZE_MB':     0,
+            'RECURSIVE':       'yes',
+        },
         'screenshots': {
             'SCOPE':           '',
             'FILENAME_REGEXP': r'(?i)screens?\.(jpe?g|png)$',
