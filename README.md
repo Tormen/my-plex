@@ -59,6 +59,12 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
     - **`--unmatched --resolve [--auto] [--try]`** — renames wrappers to canonical title + year, then re-triggers Plex's matcher.
     - **`--bad-structure --resolve [--auto]`** — flattens nested wrappers.
     - **`--misplaced --resolve`** *(v2.69, in progress)* — disk-level transition between media types (Series-of-Movies → Movie library; Movie-with-SxxEyy → Series library).
+- **Orphan detection** (`--orphaned`, v3) — housekeeping pass over library roots + the my-plex state directory. Three independent sub-categories; default = all three:
+  - `--orphaned --files` — sidecar files (`.nfo`, `.srt`, `.jpg`, `.png`, …) whose video sibling has vanished. 2-character language suffixes are stripped from the candidate stem when matching (`movie.de.srt` is owned by `movie.mkv`). Cover-art files (`cover.jpg`, `folder.jpg`, `poster.jpg`, `fanart.jpg`, `banner.jpg`) are kept while any video lives in the same directory.
+  - `--orphaned --dirs` — empty directories anywhere under the library roots (BSD-compatible `find -mindepth 1 -type d -empty`). `--resolve` rmdirs them.
+  - `--orphaned --my-plex` — stale `~/.my-plex/state-preservation/<rk>.json` sidecars whose cache key no longer exists in `OBJ_BY_ID`.
+  - `--orphaned --resolve [--try] [--yes]` trashes files (`move_to_trash`) and rmdirs empty dirs, looping until idle so a dir emptied by sidecar trashing is caught in the next pass. JSON log at `~/.my-plex/logs/orphaned_<TS>.json`.
+  - Scope-aware: `my-plex MOVIE_LIB --orphaned` narrows the walk to one library. See `my-plex --help orphaned`.
 - **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 
