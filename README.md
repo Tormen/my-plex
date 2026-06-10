@@ -59,6 +59,11 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
     - **`--unmatched --resolve [--auto] [--try]`** — renames wrappers to canonical title + year, then re-triggers Plex's matcher.
     - **`--bad-structure --resolve [--auto]`** — flattens nested wrappers.
     - **`--misplaced --resolve`** *(v2.69, in progress)* — disk-level transition between media types (Series-of-Movies → Movie library; Movie-with-SxxEyy → Series library).
+- **Managed-orphan cleanup during `--update-cache`** (v3) — every `--update-cache` run prunes the sidecar files it owns:
+  - `disk_map.json` entries whose filepath no longer exists are removed.
+  - `episodes.err` files in series directories that have vanished are trashed (`move_to_trash`, recoverable via Finder).
+  - Summary block (`>>> --update-cache: managed-orphan housekeeping`) only printed when something was pruned. Use `-V` to see the full filepath list.
+  - Files outside `--update-cache`'s ownership (state-preservation sidecars, raw sidecar files in library roots, empty directories) are NOT touched here — those are `--orphaned`'s job.
 - **Orphan detection** (`--orphaned`, v3) — housekeeping pass over library roots + the my-plex state directory. Three independent sub-categories; default = all three:
   - `--orphaned --files` — sidecar files (`.nfo`, `.srt`, `.jpg`, `.png`, …) whose video sibling has vanished. 2-character language suffixes are stripped from the candidate stem when matching (`movie.de.srt` is owned by `movie.mkv`). Cover-art files (`cover.jpg`, `folder.jpg`, `poster.jpg`, `fanart.jpg`, `banner.jpg`) are kept while any video lives in the same directory.
   - `--orphaned --dirs` — empty directories anywhere under the library roots (BSD-compatible `find -mindepth 1 -type d -empty`). `--resolve` rmdirs them.
