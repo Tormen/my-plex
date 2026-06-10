@@ -1044,9 +1044,6 @@ CONFIG_DEFAULTS = {
     #   None (default):  run EVERY registered category.
     #   []   (empty list): run NONE — explicit opt-out.
     #   ['broken', 'unmatched']: run only the listed categories.
-    #
-    # Renamed from PROBLEM_CATEGORIES_DISABLED in v3 (explicit beats
-    # implicit).
     'PROBLEM_CATEGORIES_ENABLED': None,
 
     # UNCOLLECTED_MIN_MEMBERS — minimum number of in-library Movies that
@@ -1090,13 +1087,7 @@ CONFIG_DEFAULTS = {
     # Default empty = library does not affect markers.
     'DPM_LIBRARY_SUPPRESS': {},
 
-    # --- Planned in v3 (--clean / --naming architecture) — STUBS ONLY ---
-    #
-    # NOTE on --clean: there is NO CLEAN_CATEGORIES_REGISTRY / _ENABLED
-    # split.  --clean is a PIPELINE (see PIPELINES_DEFAULTS / PIPELINES)
-    # whose phases are real my-plex commands (--junk, --orphan-sidecars,
-    # --naming, …).  To customise: override PIPELINES['--clean'] in
-    # ~/.my-plex.conf.  Each phase has its own `--help <phase>` page.
+    # --- Planned in v3 (--naming) ---
     #
     # NAMING_RULES — per-Plex-object-type renaming rules consumed by
     # `--naming` and by `--clean naming`.  Each entry's `template` /
@@ -1756,7 +1747,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']!r}
 
 ###############################################################################
-# --problems Category Selection (v3 — was PROBLEM_CATEGORIES_DISABLED)
+# --problems Category Selection
 ###############################################################################
 
 # PROBLEM_CATEGORIES_ENABLED — which registered categories `--problems`
@@ -1842,14 +1833,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # }}
 
 ###############################################################################
-# --clean / --naming housekeeping (planned for v3 — STUBS)
+# --naming (planned for v3 — STUB)
 ###############################################################################
-
-# --clean is a PIPELINE (see PIPELINES_DEFAULTS / PIPELINES section).
-# Each phase is a real my-plex command (--junk, --orphan-sidecars,
-# --empty-dirs, --naming, …) with its own `--help <phase>` page.
-# To customise the order or skip a phase, override PIPELINES['--clean']
-# in this CONF file.  No CLEAN_CATEGORIES_REGISTRY / _ENABLED split.
 
 # NAMING_RULES — per-Plex-object-type renaming rules consumed by
 # `--naming` and by `--clean naming`.  Each entry's `template` /
@@ -41111,17 +41096,30 @@ def main():
             print(f"  {_e}", file=sys.stderr)
         sys.exit(1)
 
-    # v1.2 hard cutover: legacy keys are no longer recognised.  If the user
+    # Hard cutover: legacy keys are no longer recognised.  If the user
     # conf still contains any of them, abort with a one-line migration hint.
     _legacy_keys = ('DISK_MAP', 'DISK_MAP_MOVIE_DIR', 'DISK_MAP_SERIES_DIR',
                     'DISK_MAP_SEASON_DIR', 'DISK_MAP_MERGE', 'DISK_MAP_PUSH',
-                    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN')
+                    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN',
+                    'PROBLEM_CATEGORIES_DISABLED',
+                    'CLEAN_CATEGORIES_REGISTRY', 'CLEAN_CATEGORIES_ENABLED')
     _legacy_set = [_k for _k in _legacy_keys if _k in loaded_config]
     if _legacy_set:
-        err(2, "Legacy config key(s) found: " + ", ".join(_legacy_set) + "\n"
-              "  These were removed in v1.2.  Move their values into "
-              "DISK_PLEX_MAP (see `my-plex --help plex2disk` for the new "
-              "schema), then delete the legacy lines from ~/.my-plex.conf.")
+        _hints = {
+            'PROBLEM_CATEGORIES_DISABLED':
+                "Use PROBLEM_CATEGORIES_ENABLED instead "
+                "(None = all, [] = none, [list] = explicit).",
+            'CLEAN_CATEGORIES_REGISTRY':
+                "Removed; --clean is now a PIPELINE — override "
+                "PIPELINES['--clean'] to customise.",
+            'CLEAN_CATEGORIES_ENABLED':
+                "Removed; --clean is now a PIPELINE — override "
+                "PIPELINES['--clean'] to customise.",
+        }
+        _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}"
+                  for _k in _legacy_set]
+        err(2, "Legacy config key(s) found:\n" + "\n".join(_lines) +
+               "\n  Delete them from ~/.my-plex.conf to continue.")
 
     # Re-derive values that are computed from config keys (not set directly by name in globals).
     # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
