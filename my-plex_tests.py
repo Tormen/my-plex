@@ -10447,6 +10447,28 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_original_languages_standalone_flag_retired(self):
+        """Step 4h: the standalone --original-languages CLI is GONE.  Its
+        argparse defs (main_parser + GLOBAL_CMD_PARSER) and its dispatcher
+        block must no longer exist.  The function cmd_original_languages
+        itself is retained — it's the helper now called from update_cache."""
+        m = self.m
+        src = self._read_script()
+        # Argparse defs removed
+        self.assertNotIn("main_parser.add_argument('--original-languages'", src)
+        self.assertNotIn("GLOBAL_CMD_PARSER.add_argument('--original-languages'", src)
+        # Dispatcher block removed
+        self.assertNotIn("olang_target = safe_getattr(cmd_args, 'original_languages'", src)
+        # Help-topic redirect removed (the dict-style entry)
+        self.assertNotIn("'--original-languages': 'original-languages'", src)
+        # Reinject block removed
+        self.assertNotIn("remaining_args.insert(0, '--original-languages')", src)
+        # Pipeline DRY_RUN_AWARE no longer lists it
+        self.assertNotRegex(src, r"DRY_RUN_AWARE\s*=\s*\{[^}]*'--original-languages'")
+        # Helper function preserved (used by --update-cache)
+        self.assertTrue(hasattr(m, 'cmd_original_languages'),
+            "cmd_original_languages() helper must be preserved")
+
     def test_update_cache_calls_original_languages_backfill(self):
         """Step 4g: --update-cache must fold the original_language backfill
         in.  Source-pattern check: the call to cmd_original_languages() must

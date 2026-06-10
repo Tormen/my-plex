@@ -471,7 +471,6 @@ _my-plex() {
         '--disk2plex[Sync disk markers to Plex metadata]'
         '--remux[Stream-copy outdated-container files (e.g. .avi) to .mkv with audio language metadata. Default: PREVIEW. Use --yes to execute.]'
         '(--mv-to --move-to)'{--mv-to,--move-to}'[Move media files (Movies/Episodes) to another Plex library. Usage: --mv-to DEST_LIB \[SCOPE...\] — first arg is destination, rest is universal scope. Default: PREVIEW. Use --yes to execute. Use --force to overwrite duplicates.]'
-        '(--original-languages --collect-original-languages)'{--original-languages,--collect-original-languages}'[Backfill obj.original_language from TMDB API for cached Movies/Series. Required for original_lang: / originallang: filter tokens. Optional SCOPE.]'
         '(--unrecognized --alien)'{--unrecognized,--alien}'[List top-level entries in each library rootpath that Plex DB does NOT index (no matching media_part). Optional LIB scope. Synonyms.]'
         '(--plex-disk-sync --sync)'{--plex-disk-sync,--sync}'[Bidirectional sync (disk2plex then plex2disk)]'
         '--strip[With --plex2disk: strip all markers from disk]'
@@ -11000,7 +10999,7 @@ def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
         print(f">>> Pipeline {name!r} is empty — nothing to do.")
         return
 
-    DRY_RUN_AWARE = {'--unmatched', '--sort-new', '--original-languages',
+    DRY_RUN_AWARE = {'--unmatched', '--sort-new',
                      '--plex2disk', '--disk2plex', '--rename', '--mv-to', '--remux',
                      '--renumber', '--junk'}
     YES_AWARE = {'--sort-new', '--remux', '--mv-to', '--update-cache', '--junk'}
@@ -27934,7 +27933,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'original_languages', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'uncollected', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'uncollected', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -30481,18 +30480,21 @@ def main_print_help(args, remaining_args, main_parser):
         case 'original-languages' | 'original_languages' | 'originallang' | 'original_lang':
             print()
             print("=" * 76)
-            print("ORIGINAL LANGUAGES HELP   NEW in v1.8")
+            print("ORIGINAL LANGUAGES — folded into --update-cache (v3 step 4h)")
             print("=" * 76)
             print()
-            print("Usage: my-plex --original-languages [SCOPE]       # backfill from TMDB")
-            print("       my-plex --original-languages --try         # dry-run preview only")
-            print("       my-plex --original-languages 'lib4'   # scoped backfill")
+            print("The standalone --original-languages flag is RETIRED.  Backfill now")
+            print("runs at the tail of every --update-cache when TMDB_API_KEY is set:")
             print()
-            print("Walks the cache and, for every Movie / Series that has a cached TMDB")
-            print("external_id but no `original_language` field yet, queries the TMDB API")
-            print("for the `original_language` value (ISO 639-1, e.g. 'fr', 'en', 'ja')")
-            print("and stores it in the cache.  Once populated, the field powers two new")
-            print("filter / scope tokens:")
+            print("  • Every Movie / Series with a cached TMDB external_id but no")
+            print("    `original_language` field gets a lookup against TMDB.")
+            print("  • ISO 639-1 code (e.g. 'fr', 'en', 'ja') stashed in obj.original_language.")
+            print("  • Rate-limited at 4 req/s; checkpoint-saved every 50 items so")
+            print("    ctrl-c keeps progress.")
+            print("  • Subsequent --update-cache runs are no-ops for items already")
+            print("    populated (silent fast-path).")
+            print()
+            print("Once populated, these filter / scope tokens become usable:")
             print()
             print("  original_lang:fr        → matches obj.original_language == 'fr'")
             print("  originallang:french     → same (English-name accepted via map)")
@@ -30502,24 +30504,14 @@ def main_print_help(args, remaining_args, main_parser):
             print("  country:france          → matches obj.countries (English names)")
             print("  country:fr              → ISO 3166-1 alpha-2 code (mapped to 'France')")
             print("  country:usa             → same as country:us  → 'United States'")
-            print("  (country data is already in the cache — no backfill needed.)")
             print()
             print("REQUIREMENTS:")
-            print("  TMDB_API_KEY must be set in ~/.my-plex.conf (free at themoviedb.org).")
-            print("  Items without a cached `external_ids.tmdb` value are silently skipped.")
-            print("  Run `my-plex --update-cache` first if you've never built the cache.")
-            print()
-            print("RATE LIMITING:")
-            print("  ~20 requests/second (50ms inter-request sleep).  TMDB allows ~50 r/s")
-            print("  so this is comfortably within their limit and finishes a 1000-movie")
-            print("  library in ~1 minute.  Subsequent runs are no-ops (cached values are")
-            print("  preserved unless you explicitly clear them).")
+            print("  TMDB_API_KEY in ~/.my-plex.conf (free at themoviedb.org).  Without it,")
+            print("  --update-cache silently skips the backfill — no fatal.")
             print()
             print("EXAMPLES:")
-            print("  my-plex --original-languages                # backfill all movies+series")
-            print("  my-plex --original-languages lib4      # one library only")
-            print("  my-plex --original-languages Movie:115547   # one item (test)")
-            print("  my-plex lib1 original_lang:fr          # filter (after backfill)")
+            print("  my-plex --update-cache                 # also backfills original_language")
+            print("  my-plex lib1 original_lang:fr          # filter after a cache update")
             print("  my-plex lib4 -- country:france         # all French-country movies")
             print()
             print("=" * 76)
@@ -40087,13 +40079,9 @@ def execute_global_commands(args, cmd_args):
         cmd_remux(target, yes=yes, no_audio_language_only=no_audio_lang_only)
         sys.exit(0)
 
-    # Handle --original-languages command (TMDB backfill for original_language field)
-    olang_target = safe_getattr(cmd_args, 'original_languages', None)
-    if olang_target is not None:
-        target = _collapse_scope_arg(olang_target)
-        dry_run = safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
-        cmd_original_languages(target=target, dry_run=dry_run)
-        sys.exit(0)
+    # --original-languages retired in v3 step 4h.  Backfill is folded into
+    # --update-cache (see _cleanup_managed_orphans + cmd_original_languages
+    # call near the tail of PLEX_Media.init).
 
     # Handle --unrecognized / --alien command (top-level entries Plex DB doesn't index)
     unrecognized_val = safe_getattr(cmd_args, 'unrecognized', None)
@@ -40995,7 +40983,6 @@ def main():
         '--clean': 'pipelines',  # generic — all pipelines share one help page
         '--remux': 'remux',
         '--mv-to': 'mv', '--move-to': 'mv',
-        '--original-languages': 'original-languages', '--collect-original-languages': 'original-languages',
         '--no-audio-language': 'no-audio-language', '--no-language': 'no-audio-language',
         '--no-plex-audio-language': 'no-plex-audio-language',
         '--unrecognized': 'unrecognized', '--alien': 'unrecognized',
@@ -41118,7 +41105,6 @@ def main():
     # at the flag and closes at the next dash-flag.
     _VARIADIC_SCOPE_FLAGS = {
         '--mv-to', '--move-to',
-        '--original-languages', '--collect-original-languages',
         '--add-label', '--remove-label',
         # v1.12: migrated to nargs='*' so compound SCOPE (lib + filter) works:
         '--remux',
@@ -41762,7 +41748,6 @@ def main():
     main_parser.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
-    main_parser.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
     main_parser.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help=argparse.SUPPRESS)
@@ -41863,7 +41848,6 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--plex2disk', metavar='SCOPE', nargs='*', default=None, help="Sync Plex metadata to disk markers (files + directories). SCOPE: library name or media item. Without SCOPE: all libraries. Use --dry-run to preview. Use --help plex2disk for details.")
     GLOBAL_CMD_PARSER.add_argument('--remux',     metavar='SCOPE', nargs='*', default=None, help="Stream-copy outdated-container files (e.g. .avi) to the configured target (default .mkv) and attach the resolved audio language as track metadata. SCOPE: library / cache key / Plex ID / type filter / lang filter / full filepath / no-audio-language filter — pass multiple tokens to AND-combine (e.g. `--remux lib1 country:france year>2020`). Default behavior: PREVIEW only. Re-run with --yes to execute. Combine with --no-audio-language to filter to items where Plex has no audio language yet. Use --help remux for details.")
     GLOBAL_CMD_PARSER.add_argument('--mv-to', '--move-to', nargs='+', metavar='ARG', default=None, dest='mv', help="Move media files (Movies / Episodes) to another Plex library. Usage: --mv-to DEST_LIB [SCOPE...]. The `-to` suffix makes it explicit that the FIRST arg is the destination library. SCOPE: library / cache key / Plex ID / title / filepath / filter expression — multiple tokens AND-combine. On duplicate (title+originalTitle+year) matches in DEST_LIB, prompts interactively (skip/overwrite/skip-all/overwrite-all/quit). Use --force to auto-overwrite. Default: PREVIEW. Re-run with --yes to execute. Triggers Plex library scans on source AND destination libs. Use --help mv for details.")
-    GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages', metavar='SCOPE', nargs='*', default=None, dest='original_languages', help="Backfill obj['original_language'] (ISO 639-1) from TMDB for cached Movies / Series. Required for `original_lang:fr` / `originallang:french` filter tokens. SCOPE: omitted = all eligible; otherwise universal scope (library, cache key, title, filepath). Requires TMDB_API_KEY in config. Use --help original-languages for details.")
     GLOBAL_CMD_PARSER.add_argument('--unrecognized', '--alien', metavar='LIB', nargs='?', const=True, default=None, dest='unrecognized', help="List top-level entries in each library rootpath that Plex DB doesn't have a media_part for. Catches download leftovers, mis-classified folders, or content dropped at a library root that Plex never matched. Optional LIB scope (single library). Use --help unrecognized for details. Synonym: --alien.")
     GLOBAL_CMD_PARSER.add_argument('--disk2plex', metavar='SCOPE', nargs='*', default=None, help="Sync disk markers back to Plex metadata. Pushes writable fields (watched, rating, labels, collections). Use --dry-run to preview.")
     GLOBAL_CMD_PARSER.add_argument('--plex-disk-sync', metavar='SCOPE', nargs='*', default=None, help="Bidirectional sync: first --disk2plex (push disk changes to Plex), then --plex2disk (write unified state back to disk). Use --dry-run to preview. Use --help plex-disk-sync for details.")
@@ -41989,7 +41973,6 @@ def main():
                 '--rename':                  'rename',
                 '--mv-to':                   'mv',
                 '--move-to':                 'mv',
-                '--original-languages':         'original-languages',
                 '--collect-original-languages': 'original-languages',
                 '--unrecognized':            'unrecognized',
                 '--alien':                   'unrecognized',
@@ -42259,12 +42242,7 @@ def main():
         for _i, _v in enumerate(_remux_vals, 1):
             remaining_args.insert(_i, _v)
 
-    # Re-inject --original-languages into remaining_args (nargs='*' → list of tokens)
-    if safe_getattr(args, 'original_languages', None) is not None:
-        _vals = args.original_languages if isinstance(args.original_languages, list) else ([args.original_languages] if args.original_languages and args.original_languages is not True else [])
-        remaining_args.insert(0, '--original-languages')
-        for _i, _v in enumerate(_vals, 1):
-            remaining_args.insert(_i, _v)
+    # --original-languages reinject removed in v3 step 4h (folded into --update-cache).
 
     # Re-inject --unrecognized / --alien into remaining_args
     if safe_getattr(args, 'unrecognized', None) is not None:
