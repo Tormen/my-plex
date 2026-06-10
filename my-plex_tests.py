@@ -10447,6 +10447,18 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_help_pipelines_marks_custom_vs_default(self):
+        """Step 4d: --help pipelines must mark each PIPELINES entry as
+        either '(default)' or '(CUSTOM DEFINED COMMAND from CONF)' so a
+        user can tell at a glance which pipelines came from their CONF."""
+        src = self._read_script()
+        # The pipelines case must consult CONFIG_DEFAULTS to decide custom-or-not.
+        self.assertIn("CUSTOM DEFINED COMMAND from CONF", src)
+        self.assertIn("_default_pipeline_keys = set(CONFIG_DEFAULTS.get('PIPELINES'", src)
+        # Dynamic per-pipeline page exists and is reachable for non-default keys.
+        self.assertIn("_candidate in PIPELINES and _candidate != '--clean'", src)
+        self.assertRegex(src, r"print\(f\"PIPELINE \{_candidate\}\"\)")
+
     def test_cleanup_managed_orphans_prunes_disk_map_when_filepath_gone(self):
         """Behavioral: when disk_map.json has an entry for a vanished file,
         _cleanup_managed_orphans() removes it and saves the sidecar.  When

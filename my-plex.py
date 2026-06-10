@@ -29853,8 +29853,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("Usage: my-plex [SCOPE] <pipeline-flag> [--try] [--yes] [--force]")
             print()
             print("REGISTERED PIPELINES:")
+            _default_pipeline_keys = set(CONFIG_DEFAULTS.get('PIPELINES', {}).keys())
             for _pflag, _phases in PIPELINES.items():
-                print(f"  {_pflag}")
+                _marker = "  (CUSTOM DEFINED COMMAND from CONF)" if _pflag not in _default_pipeline_keys else "  (default)"
+                print(f"  {_pflag}{_marker}")
                 for _i, _ph in enumerate(_phases, 1):
                     print(f"    phase {_i}: {' '.join(_ph)}")
             print()
@@ -31046,6 +31048,42 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
+
+    # v3 step 4d: --help <pipeline-name> — per-pipeline page rendered from
+    # PIPELINES dict so user-defined pipelines are documented for free.
+    # The 'pipelines' overview + the legacy 'clean' alias already live in
+    # the match statement above; this handles every OTHER pipeline key.
+    _h_norm = args.help.lower()
+    _candidate = _h_norm if _h_norm.startswith('--') else f"--{_h_norm}"
+    if _candidate in PIPELINES and _candidate != '--clean':
+        _phases = PIPELINES[_candidate]
+        _is_custom = _candidate not in CONFIG_DEFAULTS.get('PIPELINES', {})
+        print()
+        print("=" * 76)
+        print(f"PIPELINE {_candidate}")
+        print("=" * 76)
+        print()
+        print(f"Usage: my-plex {_candidate} [SCOPE] [--try] [--yes] [--force]")
+        print()
+        if _is_custom:
+            print("  CUSTOM DEFINED COMMAND — defined in ~/.my-plex.conf via PIPELINES dict.")
+        else:
+            print("  Default pipeline — override in ~/.my-plex.conf via PIPELINES dict.")
+        print()
+        print(f"Phases ({len(_phases)}):")
+        for _i, _phase in enumerate(_phases, 1):
+            if isinstance(_phase, (list, tuple)):
+                _cmd = ' '.join(_phase)
+            else:
+                _cmd = repr(_phase)
+            print(f"  {_i:>2}. {_cmd}")
+        print()
+        print("Each phase runs as a subprocess; non-zero exit aborts the pipeline.")
+        print(f"For per-phase help, run 'my-plex --help <phase-flag>' (e.g. 'my-plex --help junk').")
+        print("See also: 'my-plex --help pipelines' for the pipeline mechanism.")
+        print()
+        print("=" * 76)
+        sys.exit(0)
 
     if args.help.lower() not in PLEXOBJ[PARSER]: err(1001, f"Unknown parameter of --help '{args.help}'. Call without parameter for more info.")
 
