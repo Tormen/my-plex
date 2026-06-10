@@ -10447,6 +10447,27 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_update_cache_calls_original_languages_backfill(self):
+        """Step 4g: --update-cache must fold the original_language backfill
+        in.  Source-pattern check: the call to cmd_original_languages() must
+        appear inside the FORCE_CACHE_UPDATE finalize block, guarded by
+        TMDB_API_KEY (silent skip when absent), and sit near the
+        _cleanup_managed_orphans() call."""
+        src = self._read_script()
+        self.assertIn("cmd_original_languages(target=None, dry_run=False)", src)
+        # The call must be guarded by TMDB_API_KEY presence
+        self.assertRegex(src, r"if TMDB_API_KEY:\s*\n\s*try:\s*\n\s*cmd_original_languages\(")
+        # And must sit adjacent to (within a kb of) the managed-orphan cleanup
+        # call.  rfind because the function DEFINITION of _cleanup_managed_orphans
+        # appears earlier in the file (function defs precede the call site).
+        _idx_cleanup = src.rfind("_cleanup_managed_orphans()")
+        _idx_lang = src.find("cmd_original_languages(target=None, dry_run=False)",
+                              _idx_cleanup)
+        self.assertGreater(_idx_lang, _idx_cleanup,
+            "original-language backfill must come AFTER managed-orphan cleanup")
+        self.assertLess(_idx_lang - _idx_cleanup, 1500,
+            "backfill call must sit close to the cleanup call")
+
     def test_default_pipeline_is_cleanup_with_safe_phases(self):
         """Step 4e: the only default-shipped pipeline must be '--cleanup',
         composed of the two safe housekeeping commands (--junk, --orphaned).
@@ -10540,8 +10561,8 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         _idx_save = src.find("update_and_save_cache(build_media_cache_dict(", _idx_call)
         self.assertGreater(_idx_save, _idx_call,
             "the call to _cleanup_managed_orphans() must precede the final merged save")
-        self.assertLess(_idx_save - _idx_call, 1000,
-            "the call must be within ~1000 chars of the final save")
+        self.assertLess(_idx_save - _idx_call, 2000,
+            "the call must be within ~2000 chars of the final save")
         # disk_map.json prune logic uses load_disk_map_sidecar
         self.assertIn("load_disk_map_sidecar()", src)
         # episodes.err prune logic references the helper

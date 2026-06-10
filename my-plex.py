@@ -20431,6 +20431,22 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 import traceback
                 traceback.print_exc()
 
+        # v3 step 4g: lazy original_language backfill.  For every Movie/Series
+        # with a cached TMDB external_id but no original_language field, query
+        # TMDB and stash the ISO 639-1 code.  Same logic --original-languages
+        # used to run standalone; now folded in so a single --update-cache run
+        # leaves the cache fully populated.  TMDB_API_KEY required; absent →
+        # silent skip.  Function rate-limits (4 req/s) and checkpoints every
+        # 50 items so ctrl-c keeps progress.
+        if TMDB_API_KEY:
+            try:
+                cmd_original_languages(target=None, dry_run=False)
+            except Exception as _e:
+                print(f"  WARNING: original-language backfill failed: {_e}")
+                if DBG:
+                    import traceback
+                    traceback.print_exc()
+
         # v2.10: ONE merged save for the whole --update-cache run.  Pull in
         # the deferred extras stashed by _finalize_and_save_cache (library_stats,
         # library_object_counts, server_info) plus everything we just built
