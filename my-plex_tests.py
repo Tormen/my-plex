@@ -10447,6 +10447,76 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         self.assertRegex(src,
             r"if not \(do_files or do_dirs or do_my_plex\):\s*\n\s*do_files = do_dirs = do_my_plex = True")
 
+    def test_cleanup_managed_orphans_prunes_disk_map_when_filepath_gone(self):
+        """Behavioral: when disk_map.json has an entry for a vanished file,
+        _cleanup_managed_orphans() removes it and saves the sidecar.  When
+        FORCE_CACHE_UPDATE is False the helper is a no-op."""
+        m = self.m
+        import tempfile, json
+        tmp = tempfile.mkdtemp(prefix='myplex_cleanup_')
+        live_fp = os.path.join(tmp, 'live.mkv')
+        gone_fp = os.path.join(tmp, 'gone.mkv')
+        open(live_fp, 'w').close()
+        sidecar_data = {
+            live_fp: {'markers': {'AUDIO_LANG': '[de]'}, 'clean_name': 'live'},
+            gone_fp: {'markers': {'AUDIO_LANG': '[en]'}, 'clean_name': 'gone'},
+        }
+        sidecar_path = os.path.join(tmp, 'disk_map.json')
+        with open(sidecar_path, 'w', encoding='utf-8') as _f:
+            json.dump(sidecar_data, _f)
+
+        _saved_dmf = m.DISK_MAP_FILE
+        _saved_force = m.FORCE_CACHE_UPDATE
+        try:
+            m.DISK_MAP_FILE = sidecar_path
+            # No-op when not in --update-cache
+            m.FORCE_CACHE_UPDATE = False
+            m._cleanup_managed_orphans()
+            with open(sidecar_path, 'r', encoding='utf-8') as _f:
+                after_noop = json.load(_f)
+            self.assertIn(gone_fp, after_noop,
+                          "no-op when FORCE_CACHE_UPDATE=False")
+            # Active pass
+            m.FORCE_CACHE_UPDATE = True
+            m._cleanup_managed_orphans()
+            with open(sidecar_path, 'r', encoding='utf-8') as _f:
+                after_active = json.load(_f)
+            self.assertIn(live_fp, after_active,
+                          "live filepath entry must be preserved")
+            self.assertNotIn(gone_fp, after_active,
+                             "vanished filepath entry must be pruned")
+        finally:
+            m.DISK_MAP_FILE = _saved_dmf
+            m.FORCE_CACHE_UPDATE = _saved_force
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cleanup_managed_orphans_helper_exists_and_wired(self):
+        """Step 4c: _cleanup_managed_orphans() must exist, be guarded by
+        FORCE_CACHE_UPDATE, prune disk_map.json entries whose filepath is
+        gone, and be called from update_cache() right before the final
+        merged update_and_save_cache."""
+        m = self.m
+        src = self._read_script()
+        # Helper exists at module level
+        self.assertTrue(hasattr(m, '_cleanup_managed_orphans'),
+                        "module must expose _cleanup_managed_orphans()")
+        # Guarded by FORCE_CACHE_UPDATE
+        _body = src.split("def _cleanup_managed_orphans():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("if not FORCE_CACHE_UPDATE:", _body)
+        # Called from update_cache() right before the final merged save
+        self.assertIn("_cleanup_managed_orphans()", src)
+        _idx_call = src.rfind("_cleanup_managed_orphans()")
+        _idx_save = src.find("update_and_save_cache(build_media_cache_dict(", _idx_call)
+        self.assertGreater(_idx_save, _idx_call,
+            "the call to _cleanup_managed_orphans() must precede the final merged save")
+        self.assertLess(_idx_save - _idx_call, 1000,
+            "the call must be within ~1000 chars of the final save")
+        # disk_map.json prune logic uses load_disk_map_sidecar
+        self.assertIn("load_disk_map_sidecar()", src)
+        # episodes.err prune logic references the helper
+        self.assertIn("get_episodes_err_path", src.split("def _cleanup_managed_orphans")[1].split("\ndef ")[0])
+
     def test_orphaned_help_page_and_docs_wired(self):
         """Step 4b-followup: --help orphaned page must exist in the help
         dispatcher; --orphaned must appear in the zsh completion args_spec
