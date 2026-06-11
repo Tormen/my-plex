@@ -5380,14 +5380,23 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn("local://", body, "Must check for local:// guid prefix")
 
     def test_problems_includes_unmatched(self):
-        """--problems handler must call _list_unmatched."""
+        """--problems must run unmatched detection via PROBLEM_CATEGORIES_REGISTRY (v3)."""
         content = self._read_script()
         import re
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle)", content, re.DOTALL)
-        self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn('_list_unmatched', body, "Must call _list_unmatched in --problems")
-        self.assertIn('Unmatched', body, "Must have Unmatched section header")
+        # v3: the --problems handler iterates the registry instead of
+        # calling each lister literally.  Assert both halves of the chain:
+        # 1) handler walks _enabled_problem_categories()
+        idx = content.index('# Handle --problems:')
+        end = content.index('\n    # Handle ', idx)
+        body = content[idx:end]
+        self.assertIn('_enabled_problem_categories()', body,
+                      "--problems handler must iterate the problem-category registry")
+        # 2) the registry's 'unmatched' entry invokes _list_unmatched
+        reg = re.search(r"'unmatched': \{\n(.*?)\n    \},", content, re.DOTALL)
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unmatched'")
+        self.assertIn('_list_unmatched', reg.group(1),
+                      "registry 'unmatched' entry must invoke _list_unmatched")
+        self.assertIn('Unmatched', reg.group(1), "Must have Unmatched section header")
 
     def test_help_unmatched_exists(self):
         """--help unmatched must have a case block."""
@@ -5525,14 +5534,23 @@ class TestUnsorted(unittest.TestCase):
         self.assertIn("dirname", body, "Must use os.path.dirname to check episode paths")
 
     def test_problems_includes_unsorted(self):
-        """--problems handler must call _list_unsorted."""
+        """--problems must run unsorted detection via PROBLEM_CATEGORIES_REGISTRY (v3)."""
         import re
         content = self._read_script()
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --unmatched)", content, re.DOTALL)
-        self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn('_list_unsorted', body, "Must call _list_unsorted in --problems")
-        self.assertIn('Unsorted', body, "Must have Unsorted section header")
+        # v3: the --problems handler iterates the registry instead of
+        # calling each lister literally.  Assert both halves of the chain:
+        # 1) handler walks _enabled_problem_categories()
+        idx = content.index('# Handle --problems:')
+        end = content.index('\n    # Handle ', idx)
+        body = content[idx:end]
+        self.assertIn('_enabled_problem_categories()', body,
+                      "--problems handler must iterate the problem-category registry")
+        # 2) the registry's 'unsorted' entry invokes _list_unsorted
+        reg = re.search(r"'unsorted': \{\n(.*?)\n    \},", content, re.DOTALL)
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unsorted'")
+        self.assertIn('_list_unsorted', reg.group(1),
+                      "registry 'unsorted' entry must invoke _list_unsorted")
+        self.assertIn('Unsorted', reg.group(1), "Must have Unsorted section header")
 
     def test_problems_summary_includes_unsorted(self):
         """--problems summary must show unsorted count."""
@@ -6134,6 +6152,24 @@ class TestJunk(unittest.TestCase):
         idx2 = content.index('YES_AWARE = {')
         end2 = content.index('}', idx2)
         self.assertIn("'--junk'", content[idx2:end2])
+
+    def test_default_output_is_per_category_statistics(self):
+        """--junk default output = per-category counts; full file list only with -V."""
+        content = self._read_script()
+        idx = content.index('def _list_junk_files(')
+        end = content.index('\n    @staticmethod', idx)
+        body = content[idx:end]
+        # Statistics table: COUNT-first columns, one row per pattern category.
+        self.assertIn("'COUNT':>6", body,
+            "default output must print a per-category COUNT statistics table")
+        self.assertIn('per_category', body,
+            "flagged files must be grouped per pattern category")
+        # The per-file listing is verbose-gated.
+        self.assertIn('if VRB:', body,
+            "the full per-file listing must only print with -V")
+        # Hint so the operator knows how to see the filenames.
+        self.assertIn('Use -V to also list the actual filenames', body,
+            "default output must hint that -V lists the actual filenames")
 
 
 class TestShowDirDerivation(unittest.TestCase):

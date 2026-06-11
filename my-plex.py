@@ -23279,12 +23279,37 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         flagged.sort(key=lambda r: (r[1], r[0].lower()))
 
-        print(f"\n  {'PATTERN':<18}  {'REASON':<60}  FILE")
-        print("  " + "-" * 160)
+        # Default output: per-category STATISTICS only.  The full per-file
+        # listing (thousands of lines on a dirty tree) is verbose-gated.
+        per_category = {}
         for fp, pat_name, reason in flagged:
-            print(f"  {pat_name:<18}  {reason[:58]:<60}  {fp}")
+            per_category.setdefault(pat_name, []).append((fp, reason))
+
+        def _pattern_criteria(pat_name):
+            """Human-readable criteria summary for one compiled pattern."""
+            _scope, _regex, _max_bytes, _recursive = compiled[pat_name]
+            bits = []
+            if _regex is not None:
+                bits.append(f"regex /{_regex.pattern}/")
+            if _max_bytes > 0:
+                bits.append(f"size ≤ {_max_bytes/1048576:.1f} MB")
+            return " AND ".join(bits) or "no criteria"
+
+        print(f"\n  {'COUNT':>6}  {'PATTERN':<18}  CRITERIA")
+        print("  " + "-" * 100)
+        for pat_name in sorted(per_category.keys()):
+            print(f"  {len(per_category[pat_name]):>6}  {pat_name:<18}  {_pattern_criteria(pat_name)}")
+
+        if VRB:
+            print(f"\n  {'PATTERN':<18}  {'REASON':<60}  FILE")
+            print("  " + "-" * 160)
+            for fp, pat_name, reason in flagged:
+                _r = reason if len(reason) <= 58 else reason[:57] + '…'
+                print(f"  {pat_name:<18}  {_r:<60}  {fp}")
 
         print(f"\n  {len(flagged)} junk file(s) found across {len(roots_seen)} root(s).")
+        if not VRB:
+            print(f"  Use -V to also list the actual filenames per category.")
         if not resolve:
             print(f"  To trash these (move to system Trash, recoverable): my-plex --junk --resolve")
             print(f"  Configurable: JUNK_PATTERNS dict (in ~/.my-plex.conf)")
