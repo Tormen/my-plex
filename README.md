@@ -70,6 +70,13 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   - `--orphaned --my-plex` — stale `~/.my-plex/state-preservation/<rk>.json` sidecars whose cache key no longer exists in `OBJ_BY_ID`.
   - `--orphaned --resolve [--try] [--yes]` trashes files (`move_to_trash`) and rmdirs empty dirs, looping until idle so a dir emptied by sidecar trashing is caught in the next pass. JSON log at `~/.my-plex/logs/orphaned_<TS>.json`.
   - Scope-aware: `my-plex MOVIE_LIB --orphaned` narrows the walk to one library. See `my-plex --help orphaned`.
+- **Canonical naming** (`--naming`, v3) — template-driven renames from the `NAMING_RULES` CONF dict (opt-in; empty by default):
+  - Per object type (`MOVIE_FILE` / `MOVIE_DIR` / `EPISODE_FILE` / `SEASON_DIR` / `SERIES_DIR`) a rule defines a `template` of cache-field variables — `'{TITLE.lower.nodiacritic.dots} [{YEAR}]'` — plus optional sed-style `transforms` (regex/replacement pairs with backrefs).
+  - Modifiers chain with dots, applied left-to-right: `.lower` `.upper` `.dots` `.nodiacritic` `.nopunct` `.alnum` `.pad2`/`.pad3`.
+  - Canonical name shape: `<templated base> [user label …] [DPM marker …]<.ext>` — user `[label]` tokens and sidecar-owned DPM markers are preserved (configurable via `preserve_labels` / `preserve_markers` / `preserve_ext`).
+  - `--naming [SCOPE]` previews (read-only, KEY-first table); `--naming --resolve [--try] [--yes]` applies — conflicts abort before any rename, sibling files (`.nfo`, `.srt`, …) follow automatically, and the cache is updated in-process. JSON log at `~/.my-plex/logs/naming_<TS>.json`.
+  - Every applied rename records the FIRST original name as `naming_original` in `disk_map.json`; `--naming --revert [SCOPE]` restores it even across multiple `--naming` runs.
+  - Items whose template references an empty/missing field are skipped (listed with `-V`), never crashed. See `my-plex --help naming`.
 - **On-disk file labels** — `[label]` markers embedded in filenames/directories, read during `--update-cache`, indexed for instant offline lookup
 - **Interactive resolution** — guided duplicate/language cleanup with undo support
 

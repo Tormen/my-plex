@@ -336,6 +336,7 @@ _my-plex() {
             'list-libraries:Library listing'
             'media:Media scope and query syntax'
             'mismatched:Title/dirname + multi-version mismatch'
+            'naming:Template-driven canonical renames (NAMING_RULES)'
             'orphaned:Orphan sidecars + empty dirs + stale my-plex sidecars'
             'missing:Missing episode detection'
             'offline:Offline mode and access requirements'
@@ -453,6 +454,8 @@ _my-plex() {
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatched[Mismatches: title vs directory + multi-version Plex grouping]'
         '--orphaned[Orphan sidecars + empty dirs + stale ~/.my-plex sidecars. Sub-flags: --files / --dirs / --my-plex. Add --resolve to trash/rmdir.]'
+        '--naming[Template-driven canonical renames from NAMING_RULES (CONF). Preview by default; add --resolve to apply; --revert rolls back via naming_original.]'
+        '--revert[With --naming: roll back applied renames via the sidecar naming_original entries]'
         '--files[With --orphaned: only orphan sidecar files]'
         '--dirs[With --orphaned: only empty directories]'
         '--my-plex[With --orphaned: only stale ~/.my-plex/state-preservation sidecars]'
@@ -1864,7 +1867,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Variables: every cache field for the item, uppercased and wrapped in
 # {{…}}.  Full list: my-plex --help info.
 #
-# Modifiers (chain with dots; right-to-left application):
+# Modifiers (chain with dots; applied left-to-right):
 #   .lower / .upper       case
 #   .dots                 spaces & '_' → '.'
 #   .nodiacritic          ä→a ö→o ü→u é→e ß→ss œ→oe æ→ae ç→c ł→l ø→o ñ→n
