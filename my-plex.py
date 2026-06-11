@@ -6797,18 +6797,30 @@ def update_sidecar_entry(sidecar, old_path, new_path, markers, clean_name, is_di
         is_dir: True if this is a directory entry
     """
     from datetime import date
+    # --naming bookkeeping (naming_original / renamed_at) must SURVIVE a
+    # DPM rewrite of the entry — carry it over from whichever entry is
+    # being replaced (the rename source first, else the target itself).
+    _naming_keys = {}
+    for _carrier_path in (old_path, new_path):
+        _carrier = sidecar.get(_carrier_path) if _carrier_path else None
+        if _carrier and 'naming_original' in _carrier:
+            _naming_keys = {k: _carrier[k] for k in ('naming_original', 'renamed_at')
+                            if k in _carrier}
+            break
     if old_path and old_path in sidecar and old_path != new_path:
         del sidecar[old_path]
     # Only store non-empty markers
     active_markers = {k: v for k, v in markers.items() if v}
-    if active_markers:
+    if active_markers or _naming_keys:
         entry = {
-            'markers': active_markers,
             'clean_name': clean_name,
             'last_updated': date.today().isoformat(),
         }
+        if active_markers:
+            entry['markers'] = active_markers
         if is_dir:
             entry['is_dir'] = True
+        entry.update(_naming_keys)
         sidecar[new_path] = entry
     elif new_path in sidecar:
         del sidecar[new_path]
@@ -7064,10 +7076,17 @@ def assemble_naming_name(rendered_stem, labels, sidecar_entry, extension,
 
     Labels keep their on-disk order; markers are re-applied via the shared
     apply_markers*/sidecar machinery (sorted by aspect — same canonical
-    order --plex2disk writes)."""
+    order --plex2disk writes).
+
+    Idempotency: a label whose bracketed form already appears in the
+    rendered stem is NOT appended again — templates may legitimately emit
+    bracketed tokens (e.g. ' [{YEAR}]') which the next run re-reads as
+    labels; without this guard every run would duplicate them."""
     name = rendered_stem
     if preserve_labels and labels:
-        name += ' ' + ' '.join(f'[{label}]' for label in labels)
+        fresh_labels = [label for label in labels if f'[{label}]' not in rendered_stem]
+        if fresh_labels:
+            name += ' ' + ' '.join(f'[{label}]' for label in fresh_labels)
     markers = (sidecar_entry or {}).get('markers', {}) if preserve_markers else {}
     if is_dir:
         return apply_markers_to_dir(name, markers) if markers else name
@@ -23987,6 +24006,259 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_files + total_dirs + total_my_plex
 
     @staticmethod
+    def _list_naming(scope=None, resolve=False, dry_run=False, yes=False, revert=False):
+        """--naming: template-driven canonical renames from NAMING_RULES.
+
+        Modes:
+          (default)            preview — list planned renames, change nothing
+          --resolve            apply the plan (files first, then dirs bottom-up)
+          --resolve --try      dry-run of the apply
+          --revert [SCOPE]     roll back via the sidecar's naming_original
+                               (first-original-wins: always restores the
+                               pre-first---naming name)
+
+        Returns the number of renames planned / applied / reverted.
+        """
+        sidecar = load_disk_map_sidecar()
+
+        # ---- --revert: independent of NAMING_RULES -------------------------
+        if revert:
+            return PLEX_Media._naming_revert(sidecar, scope=scope,
+                                             dry_run=dry_run, yes=yes)
+
+        usable_rules, rule_problems = validate_naming_rules(NAMING_RULES)
+        for problem in rule_problems:
+            print(f"  ⚠ {problem}")
+        if not usable_rules:
+            print("  NAMING_RULES is empty (or no rule survived validation) — nothing to do.")
+            print("  Populate NAMING_RULES in your CONF to opt in.  See: my-plex --help naming")
+            return 0
+
+        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
+        if not library_roots:
+            print("  No library roots known — run --update-cache first.")
+            return 0
+
+        items = _get_universal_scope(scope)
+        plan = build_naming_plan(items, usable_rules, sidecar, library_roots)
+
+        renames    = [e for e in plan if e['status'] == 'rename']
+        unchanged  = [e for e in plan if e['status'] == 'unchanged']
+        skipped    = [e for e in plan if e['status'] == 'skipped']
+        conflicts  = [e for e in plan if e['status'] == 'conflict']
+
+        if renames or conflicts:
+            print(f"\n  {'KEY':<16} {'RULE':<13} OLD → NEW")
+            print("  " + "-" * 120)
+            for entry in renames + conflicts:
+                old_name = os.path.basename(entry['old_path'])
+                new_name = os.path.basename(entry['new_path'])
+                flag = '  ⚠ CONFLICT: ' + entry['reason'] if entry['status'] == 'conflict' else ''
+                print(f"  {entry['key']:<16} {entry['rule']:<13} {old_name} → {new_name}{flag}")
+                if VRB:
+                    print(f"    in {os.path.dirname(entry['old_path'])}")
+        if VRB and skipped:
+            print(f"\n  Skipped ({len(skipped)}):")
+            for entry in skipped:
+                print(f"  {entry['key']:<16} {entry['rule']:<13} {os.path.basename(entry['old_path'])}   ({entry['reason']})")
+
+        print(f"\n  Summary: {len(renames)} rename(s), {len(unchanged)} already canonical,"
+              f" {len(skipped)} skipped, {len(conflicts)} conflict(s).")
+        if skipped and not VRB:
+            print(f"  Use -V to list the skipped items with reasons.")
+        if not resolve:
+            if renames:
+                print(f"  Apply with: my-plex --naming --resolve  (add --try for a dry-run)")
+            return len(renames)
+
+        # ---- --resolve -----------------------------------------------------
+        if conflicts:
+            print(f"\nERROR: {len(conflicts)} conflict(s) in the plan — nothing was renamed.")
+            print("Possible reasons:")
+            print("  - two items render to the same canonical name (add a distinguishing")
+            print("    field like {RESOLUTION} or {YEAR} to the template)")
+            print("  - the target name already belongs to another cached file")
+            print("Resolve the conflicts (adjust NAMING_RULES or rename manually), then re-run.")
+            sys.exit(1)
+        if not renames:
+            print("  Nothing to rename — every in-scope name is already canonical.")
+            return 0
+        if dry_run:
+            print(f"\n  --try: would rename {len(renames)} entr{'y' if len(renames)==1 else 'ies'}.  No changes applied.")
+            return len(renames)
+        if not yes:
+            try:
+                response = input(f"\n  Apply {len(renames)} rename(s)? [y/N]: ").strip().lower()
+            except EOFError:
+                response = ''
+            if response != 'y':
+                print("  Aborted — no changes.")
+                return 0
+
+        from datetime import date
+        applied, failed = [], []
+        log_entries = []
+        for entry in renames:
+            old_path, new_path = entry['old_path'], entry['new_path']
+            new_name = os.path.basename(new_path)
+            is_dir = entry['rule'].endswith('_DIR')
+            # Never clobber: the plan checked the cache, the disk is checked here.
+            target_exists, _ = my_plex_file_operation('CHECK', new_path, PLEX_DB_REMOTE_HOST)
+            if target_exists:
+                failed.append(entry)
+                log_entries.append({'key': entry['key'], 'rule': entry['rule'],
+                                    'old_path': old_path, 'new_path': new_path,
+                                    'status': 'failed', 'reason': 'target exists on disk'})
+                print(f"  ✗ FAILED  : {old_path} → {new_name}   (target exists on disk)")
+                continue
+            ok, _ = rename_file(old_path, new_name, remote_host=PLEX_DB_REMOTE_HOST)
+            if not ok:
+                failed.append(entry)
+                log_entries.append({'key': entry['key'], 'rule': entry['rule'],
+                                    'old_path': old_path, 'new_path': new_path,
+                                    'status': 'failed', 'reason': 'rename failed'})
+                print(f"  ✗ FAILED  : {old_path} → {new_name}")
+                continue
+
+            # ---- cache integrity (no --update-cache needed afterwards) ----
+            if is_dir:
+                _update_cache_child_paths(old_path, new_path)
+                _update_sidecar_child_paths(sidecar, old_path, new_path)
+            else:
+                obj = PLEX_Media.OBJ_BY_ID.get(entry['key'])
+                if obj is not None:
+                    _update_cache_filepath(obj, old_path, new_path)
+                if old_path in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[new_path] = PLEX_Media.OBJ_BY_FILEPATH.pop(old_path)
+                rename_file_siblings(old_path, new_path,
+                                     remote_host=PLEX_DB_REMOTE_HOST,
+                                     log_prefix='    ')
+
+            # ---- sidecar: re-key + record the FIRST original ---------------
+            sidecar_entry = sidecar.pop(old_path, None) or {}
+            sidecar_entry.setdefault('naming_original', os.path.basename(old_path))
+            sidecar_entry['renamed_at'] = date.today().isoformat()
+            if is_dir:
+                sidecar_entry['is_dir'] = True
+            sidecar[new_path] = sidecar_entry
+
+            applied.append(entry)
+            log_entries.append({'key': entry['key'], 'rule': entry['rule'],
+                                'old_path': old_path, 'new_path': new_path,
+                                'status': 'renamed'})
+            print(f"  ✓ renamed : {os.path.basename(old_path)} → {new_name}")
+
+        save_disk_map_sidecar(sidecar)
+        update_and_save_cache(build_media_cache_dict())
+
+        print(f"\n  SUMMARY  --naming --resolve")
+        print(f"  RENAMED   : {len(applied)}")
+        print(f"  FAILED    : {len(failed)}")
+        print(f"  SKIPPED   : {len(skipped)} (missing fields)")
+        print(f"  UNCHANGED : {len(unchanged)}")
+        log_path = _write_resolve_log('naming', {
+            'total_planned': len(renames),
+            'total_renamed': len(applied),
+            'total_failed':  len(failed),
+            'entries':       log_entries,
+        })
+        if log_path:
+            print(f"  Log: {log_path}")
+        return len(applied)
+
+    @staticmethod
+    def _naming_revert(sidecar, scope=None, dry_run=False, yes=False):
+        """Roll back --naming renames using the sidecar's naming_original.
+
+        Scope-restricted when SCOPE is given (an entry qualifies when its
+        path IS one of the scope items' paths or lives underneath one).
+        Children revert before parent dirs (deepest paths first)."""
+        candidates = [(path, entry) for path, entry in sidecar.items()
+                      if isinstance(entry, dict) and entry.get('naming_original')]
+        if scope:
+            scope_paths = set()
+            for _key, _obj in _get_universal_scope(scope):
+                _fp = _obj.get('file')
+                if _fp:
+                    scope_paths.add(_fp)
+                    scope_paths.add(os.path.dirname(_fp))
+            def _in_scope(path):
+                return any(path == sp or path.startswith(sp + os.sep)
+                           or sp.startswith(path + os.sep)
+                           for sp in scope_paths)
+            candidates = [(p, e) for p, e in candidates if _in_scope(p)]
+        if not candidates:
+            print("  No naming_original entries found — nothing to revert.")
+            return 0
+        candidates.sort(key=lambda item: -item[0].count('/'))
+
+        print(f"\n  {len(candidates)} revert candidate(s):")
+        for path, entry in candidates:
+            print(f"  {os.path.basename(path)} → {entry['naming_original']}")
+        if dry_run:
+            print(f"\n  --try: would revert {len(candidates)} rename(s).  No changes applied.")
+            return len(candidates)
+        if not yes:
+            try:
+                response = input(f"\n  Revert {len(candidates)} rename(s)? [y/N]: ").strip().lower()
+            except EOFError:
+                response = ''
+            if response != 'y':
+                print("  Aborted — no changes.")
+                return 0
+
+        reverted, failed = 0, 0
+        log_entries = []
+        for path, entry in candidates:
+            original_name = entry['naming_original']
+            restored_path = os.path.join(os.path.dirname(path), original_name)
+            is_dir = bool(entry.get('is_dir'))
+            ok, _ = rename_file(path, original_name, remote_host=PLEX_DB_REMOTE_HOST)
+            if not ok:
+                failed += 1
+                log_entries.append({'old_path': path, 'new_path': restored_path,
+                                    'status': 'failed'})
+                print(f"  ✗ FAILED  : {path} → {original_name}")
+                continue
+            if is_dir:
+                _update_cache_child_paths(path, restored_path)
+                _update_sidecar_child_paths(sidecar, path, restored_path)
+            else:
+                owner_key = PLEX_Media.OBJ_BY_FILEPATH.get(path)
+                obj = PLEX_Media.OBJ_BY_ID.get(owner_key) if owner_key else None
+                if obj is not None:
+                    _update_cache_filepath(obj, path, restored_path)
+                if path in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[restored_path] = PLEX_Media.OBJ_BY_FILEPATH.pop(path)
+                rename_file_siblings(path, restored_path,
+                                     remote_host=PLEX_DB_REMOTE_HOST,
+                                     log_prefix='    ')
+            entry = sidecar.pop(path, None) or {}
+            entry.pop('naming_original', None)
+            entry.pop('renamed_at', None)
+            if entry.get('markers'):
+                sidecar[restored_path] = entry
+            reverted += 1
+            log_entries.append({'old_path': path, 'new_path': restored_path,
+                                'status': 'reverted'})
+            print(f"  ✓ reverted: {os.path.basename(path)} → {original_name}")
+
+        save_disk_map_sidecar(sidecar)
+        update_and_save_cache(build_media_cache_dict())
+        print(f"\n  SUMMARY  --naming --revert")
+        print(f"  REVERTED : {reverted}")
+        print(f"  FAILED   : {failed}")
+        log_path = _write_resolve_log('naming_revert', {
+            'total_reverted': reverted,
+            'total_failed':   failed,
+            'entries':        log_entries,
+        })
+        if log_path:
+            print(f"  Log: {log_path}")
+        return reverted
+
+    @staticmethod
     def _list_episode_numbering_issues(obj_keys, library_name=None):
         """List series where Plex and scraped episode numbering disagree.
         Accepts obj_keys of any type — derives series_keys internally.
@@ -28375,7 +28647,7 @@ def main_print_help(args, remaining_args, main_parser):
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
-    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'uncollected', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
+    has_standalone_cmd = FORCE_CACHE_UPDATE or args.verify_cache or safe_getattr(args, 'info', None) is not None or safe_getattr(args, 'missing', None) is not None or safe_getattr(args, 'unmatched', None) is not None or safe_getattr(args, 'unsorted', None) is not None or safe_getattr(args, 'mismatched', None) is not None or safe_getattr(args, 'junk', None) is not None or safe_getattr(args, 'naming', None) is not None or safe_getattr(args, 'episode_numbering_issues', None) is not None or safe_getattr(args, 'reencode', None) is not None or safe_getattr(args, 'renumber', None) is not None or safe_getattr(args, 'broken', None) is not None or safe_getattr(args, 'problems', None) is not None or safe_getattr(args, 'sort_new', False) or safe_getattr(args, 'rename', None) is not None or safe_getattr(args, 'plex2disk', None) is not None or safe_getattr(args, 'disk2plex', None) is not None or safe_getattr(args, 'plex_disk_sync', None) is not None or safe_getattr(args, 'sync', None) is not None or safe_getattr(args, 'map_to_filename', None) is not None or safe_getattr(args, 'map_from_filename', None) is not None or safe_getattr(args, 'remux', None) is not None or safe_getattr(args, 'mv', None) is not None or safe_getattr(args, 'unrecognized', None) is not None or safe_getattr(args, 'multi_movie_folder', None) is not None or safe_getattr(args, 'misplaced', None) is not None or safe_getattr(args, 'uncollected', None) is not None or safe_getattr(args, 'renumber_title_mismatch', None) is not None or safe_getattr(args, 'library_language_mismatch', None) is not None or safe_getattr(args, 'bad_structure', None) is not None or any(safe_getattr(args, _pf.lstrip('-').replace('-', '_'), False) for _pf in PIPELINES)
     # If argparse consumed a --flag=value as --help's nargs='?' value (e.g. --list=watched=no
     # from filter token normalization), reset to 'default' and put it back in remaining_args
     if args.help and args.help not in (None, 'default') and '=' in args.help and args.help.startswith('--'):
@@ -29780,6 +30052,81 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --orphaned MOVIE_LIB             # Scope to one library")
             print("  my-plex --orphaned --resolve --try       # Dry-run cleanup")
             print("  my-plex --orphaned --resolve --yes       # Cleanup, no prompt")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
+        case 'naming':
+            print()
+            print("=" * 76)
+            print("NAMING HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --naming [SCOPE]                       Preview (read-only)")
+            print("       my-plex --naming [SCOPE] --resolve [--try] [--yes]   Apply")
+            print("       my-plex --naming --revert [SCOPE] [--try] [--yes]    Roll back")
+            print()
+            print("Applies your NAMING_RULES (CONF dict) to rename files and directories")
+            print("to their canonical form.  Opt-in: the default NAMING_RULES is empty.")
+            print()
+            print("RULE TYPES (keys of NAMING_RULES):")
+            print("  MOVIE_FILE     each movie file (every version)")
+            print("  MOVIE_DIR      the movie's wrapper directory")
+            print("  EPISODE_FILE   each episode file")
+            print("  SEASON_DIR     season directories (derived from episode paths)")
+            print("  SERIES_DIR     series directories (derived from episode paths)")
+            print()
+            print("PER-RULE KEYS (all optional; template OR transforms must do real work):")
+            print("  template          '{FIELD.mod.mod}' pattern — FIELD is any cache field")
+            print("                    of the item, uppercased ({TITLE}, {YEAR}, {S0XE0X},")
+            print("                    {AUDIO_LANG}, {ORIGTITLE}, {S}, {E}, ...).")
+            print("  transforms        list of (regex, replacement) pairs applied AFTER the")
+            print("                    template, in order; sed-style backrefs (\\1, \\2).")
+            print("  preserve_ext      True (default): keep the file extension.")
+            print("  preserve_markers  True (default): keep DPM [marker] tokens (sidecar-owned).")
+            print("  preserve_labels   True (default): keep user [label] tokens.")
+            print()
+            print("MODIFIERS (chain with dots, applied left-to-right):")
+            print("  .lower / .upper   case")
+            print("  .dots             spaces & '_' → '.'")
+            print("  .nodiacritic      ä→a é→e ß→ss œ→oe æ→ae ø→o ł→l ...")
+            print("  .nopunct          strip punctuation (keeps '.' and '-')")
+            print("  .alnum            keep alphanumerics + '.' + '-' only")
+            print("  .pad2 / .pad3     zero-pad an integer ({S.pad2} → 01)")
+            print()
+            print("CANONICAL NAME SHAPE:")
+            print("  <templated base> [user label ...] [DPM marker ...]<.ext>")
+            print("  Items whose template references an empty/missing field are SKIPPED")
+            print("  (listed with -V).  Conflicting targets abort --resolve before any")
+            print("  rename happens.")
+            print()
+            print("ROLLBACK:")
+            print("  Every applied rename records the FIRST original name as")
+            print("  naming_original in ~/.my-plex/disk_map.json.  --naming --revert")
+            print("  restores it — even across multiple --naming runs.")
+            print()
+            print("INTEGRATION:")
+            print("  Renames go through the shared machinery: sidecar files (.nfo/.srt)")
+            print("  follow automatically, the cache is updated in-process (no")
+            print("  --update-cache needed afterwards), and a JSON log is written to")
+            print("  ~/.my-plex/logs/naming_<TS>.json.")
+            print()
+            print("EXAMPLE NAMING_RULES (CONF):")
+            print("  NAMING_RULES = {")
+            print("      'SERIES_DIR':   {'template': '{TITLE.lower.nodiacritic.dots}'},")
+            print("      'SEASON_DIR':   {'template': 's{S.pad2}'},")
+            print("      'EPISODE_FILE': {'template': 'S{S.pad2}E{E.pad2} - {TITLE}'},")
+            print("      'MOVIE_DIR':    {'template': '{TITLE.lower.nodiacritic.dots}.({YEAR})'},")
+            print("      'MOVIE_FILE':   {'template': '{TITLE.lower.nodiacritic.dots}.{YEAR}.{RESOLUTION}'},")
+            print("  }")
+            print()
+            print("EXAMPLES:")
+            print("  my-plex --naming                         # Preview everything")
+            print("  my-plex --naming LIB                     # Preview one library")
+            print("  my-plex --naming Series:123              # Preview one series")
+            print("  my-plex --naming --resolve --try         # Dry-run the apply")
+            print("  my-plex --naming --resolve --yes         # Apply, no prompt")
+            print("  my-plex --naming --revert LIB            # Roll back one library")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -40769,14 +41116,16 @@ def execute_global_commands(args, cmd_args):
         bool(safe_getattr(cmd_args, 'duplicates', False))
         or no_audio_language_flag
         or safe_getattr(cmd_args, 'junk', None) is not None
+        or safe_getattr(cmd_args, 'naming', None) is not None
+        or safe_getattr(args, 'naming', None) is not None
         or safe_getattr(cmd_args, 'unmatched', None) is not None
         or safe_getattr(cmd_args, 'bad_structure', None) is not None
         or safe_getattr(cmd_args, 'problems', None) is not None
     )
     if safe_getattr(cmd_args, 'resolve', False) and not _resolve_capable_flags:
         err(1063, "--resolve can only be used together with one of:\n"
-                  "  --duplicates / --no-audio-language / --junk / --unmatched /\n"
-                  "  --bad-structure / --problems\n"
+                  "  --duplicates / --no-audio-language / --junk / --naming /\n"
+                  "  --unmatched / --bad-structure / --problems\n"
                   "Example: my-plex --problems --resolve")
 
     # Check if --collections is used without a library (global context = no library)
@@ -40989,6 +41338,24 @@ def execute_global_commands(args, cmd_args):
         PLEX_Media._list_orphaned(do_files=do_files, do_dirs=do_dirs,
                                   do_my_plex=do_my_plex, scope=scope,
                                   resolve=resolve, dry_run=dry_run, yes=yes)
+        return
+
+    # Handle --naming [SCOPE]: NAMING_RULES-driven canonical renames.
+    # Preview by default; --resolve applies; --revert rolls back via the
+    # sidecar's naming_original.  --try / --yes honoured like everywhere.
+    naming_val = safe_getattr(cmd_args, 'naming', None)
+    if naming_val is None:
+        naming_val = safe_getattr(args, 'naming', None)
+    if naming_val is not None:
+        resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
+        dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
+        yes     = bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False))
+        revert  = bool(safe_getattr(cmd_args, 'naming_revert_flag', False) or safe_getattr(args, 'naming_revert_flag', False))
+        scope = naming_val if isinstance(naming_val, list) and naming_val else None
+        _mode = '--revert' if revert else ('--resolve' if resolve else 'preview')
+        print(f"\n--- Naming ({_mode}) ---")
+        PLEX_Media._list_naming(scope=scope, resolve=resolve, dry_run=dry_run,
+                                yes=yes, revert=revert)
         return
 
     # Handle --multi-movie-folder [SCOPE]: list wrappers shared by >=2 Movies
@@ -41423,6 +41790,7 @@ def main():
         '--scan': 'scan', '--missing': 'missing', '--unmatched': 'unmatched',
         '--unsorted': 'unsorted', '--mismatched': 'mismatched', '--junk': 'junk',
         '--orphaned': 'orphaned',
+        '--naming': 'naming',
         '--multi-movie-folder': 'multi-movie-folder',
         '--misplaced': 'misplaced', '--wrong-library': 'misplaced',
         '--uncollected': 'uncollected', 'uncollected': 'uncollected',
@@ -41566,6 +41934,7 @@ def main():
         '--broken', '--unmatched', '--unsorted',
         '--mismatched',
         '--junk',
+        '--naming',
         '--multi-movie-folder',
         '--misplaced', '--wrong-library',
         '--library-language-mismatch',
@@ -42175,6 +42544,8 @@ def main():
     main_parser.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER (controls --junk recursion)
     main_parser.add_argument('--orphaned', metavar='SCOPE', nargs='*', default=None, dest='orphaned', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--naming', metavar='SCOPE', nargs='*', default=None, dest='naming', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--revert', action='store_true', default=False, dest='naming_revert_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --naming
     main_parser.add_argument('--files', action='store_true', default=False, dest='orphaned_files_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
     main_parser.add_argument('--dirs', action='store_true', default=False, dest='orphaned_dirs_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
     main_parser.add_argument('--my-plex', action='store_true', default=False, dest='orphaned_my_plex_flag', help=argparse.SUPPRESS)  # Hidden - sub-flag for --orphaned
@@ -42258,6 +42629,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--junk', metavar='SCOPE', nargs='*', default=None, dest='junk', help="Pure disk-walk clutter detection in scope (recursive by default; --no-recursive for depth-1). Add --resolve to trash matches. Use --help junk for details.")
     GLOBAL_CMD_PARSER.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=None, dest='recursive', help="(--junk) Toggle recursion: default recursive; use --no-recursive for depth-1.")
     GLOBAL_CMD_PARSER.add_argument('--orphaned', metavar='SCOPE', nargs='*', default=None, dest='orphaned', help="Detect orphans across library roots: --files (sidecars whose video sibling is gone), --dirs (empty directories), --my-plex (~/.my-plex/state-preservation/<rk>.json with a vanished rk). Default (no sub-flag) = all three. Add --resolve to trash/rmdir; loops until idle.")
+    GLOBAL_CMD_PARSER.add_argument('--naming', metavar='SCOPE', nargs='*', default=None, dest='naming', help="Template-driven canonical renames from the NAMING_RULES CONF dict (per-type templates of cache-field variables + sed-style transforms; markers and user labels preserved). Preview by default; add --resolve to apply; --naming --revert rolls back via the sidecar's naming_original. Use --help naming for details.")
+    GLOBAL_CMD_PARSER.add_argument('--revert', action='store_true', default=False, dest='naming_revert_flag', help="(--naming) roll back applied renames using the naming_original entries recorded in disk_map.json.")
     GLOBAL_CMD_PARSER.add_argument('--files', action='store_true', default=False, dest='orphaned_files_flag', help="(--orphaned) restrict to orphan files (non-video files with no matching video sibling).")
     GLOBAL_CMD_PARSER.add_argument('--dirs', action='store_true', default=False, dest='orphaned_dirs_flag', help="(--orphaned) restrict to empty directories.")
     GLOBAL_CMD_PARSER.add_argument('--my-plex', action='store_true', default=False, dest='orphaned_my_plex_flag', help="(--orphaned) restrict to stale my-plex sidecars (~/.my-plex/state-preservation/<rk>.json with vanished rk).")
@@ -42628,6 +43001,10 @@ def main():
     _reinject_variadic('mismatched',                '--mismatched')
     _reinject_variadic('junk',                      '--junk')
     _reinject_variadic('orphaned',                  '--orphaned')
+    _reinject_variadic('naming',                    '--naming')
+    # --revert is --naming's sub-flag — keep it adjacent to the re-injected command.
+    if safe_getattr(args, 'naming_revert_flag', False) and '--revert' not in remaining_args:
+        remaining_args.append('--revert')
     _reinject_variadic('multi_movie_folder',        '--multi-movie-folder')
     _reinject_variadic('misplaced',                 '--misplaced')
     _reinject_variadic('uncollected',               '--uncollected')

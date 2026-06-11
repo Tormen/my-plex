@@ -11019,6 +11019,104 @@ class TestNaming(unittest.TestCase):
         self.assertEqual(_naming_sanitize('AC/DC: Live'), 'AC-DC∶ Live')
         self.assertEqual(_naming_sanitize('.hidden.'), 'hidden')
 
+    # --- idempotency -------------------------------------------------------
+
+    def test_assemble_does_not_duplicate_template_emitted_brackets(self):
+        """A template may emit bracketed tokens (' [{YEAR}]'); re-running
+        --naming re-reads them as labels — they must not double up."""
+        name = assemble_naming_name('series.name [2017]', ['2017', 'keepme'],
+                                    None, '', is_dir=True)
+        self.assertEqual(name, 'series.name [2017] [keepme]')
+
+    def test_plan_is_idempotent_for_bracket_emitting_template(self):
+        old_path = '/roots/library1/w/test.movie [2020] [keepme].mkv'
+        movie = self._movie_obj(file=old_path, files={'v': {'filepath': old_path}})
+        rules = {'MOVIE_FILE': {'template': '{TITLE.lower.dots} [{YEAR}]'}}
+        plan = self._plan([('Movie:1', movie)], rules)
+        self.assertEqual(plan[0]['status'], 'unchanged',
+                         f"second run must be a no-op, got {plan[0]}")
+
+    # --- 5b: CLI wiring ----------------------------------------------------
+
+    def _read_script(self):
+        with open(MAIN_SCRIPT, 'r') as f:
+            return f.read()
+
+    def test_cli_registration(self):
+        """--naming must be registered in both parsers + all routing tables."""
+        content = self._read_script()
+        self.assertIn("main_parser.add_argument('--naming'", content)
+        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--naming'", content)
+        self.assertIn("'--naming': 'naming'", content,
+                      "_OPTION_TO_HELP_TOPIC must map --naming")
+        idx = content.index('_VARIADIC_SCOPE_FLAGS = {')
+        end = content.index('}', idx)
+        self.assertIn("'--naming'", content[idx:end],
+                      "_VARIADIC_SCOPE_FLAGS must include --naming")
+        self.assertIn("_reinject_variadic('naming',", content,
+                      "bare --naming must be re-injected into the dispatch loop")
+        self.assertIn("safe_getattr(args, 'naming', None) is not None", content,
+                      "has_standalone_cmd must include --naming")
+
+    def test_cli_dispatch_and_revert_flag(self):
+        """execute_global_commands must dispatch --naming with --revert support."""
+        content = self._read_script()
+        self.assertIn('PLEX_Media._list_naming(', content)
+        self.assertIn("main_parser.add_argument('--revert'", content)
+        self.assertIn("dest='naming_revert_flag'", content)
+
+    def test_help_page_exists(self):
+        """--help naming must document templates, modifiers and rollback."""
+        content = self._read_script()
+        self.assertIn("case 'naming':", content)
+        idx = content.index("case 'naming':")
+        end = content.index('sys.exit(0)', idx)
+        section = content[idx:end]
+        for keyword in ('NAMING HELP', 'NAMING_RULES', 'template', 'transforms',
+                        '.nodiacritic', '.pad2', 'naming_original', '--revert',
+                        'preserve_markers', 'preserve_labels'):
+            self.assertIn(keyword, section, f"--help naming must mention '{keyword}'")
+
+    def test_resolve_writes_log_and_updates_cache(self):
+        """--naming --resolve must write a JSON log and persist the cache in-process."""
+        content = self._read_script()
+        idx = content.index('def _list_naming(')
+        end = content.index('\n    @staticmethod', idx)
+        body = content[idx:end]
+        self.assertIn("_write_resolve_log('naming'", body)
+        self.assertIn('update_and_save_cache(build_media_cache_dict())', body)
+        self.assertIn('rename_file_siblings(', body)
+        self.assertIn('_update_cache_child_paths(', body)
+
+    def test_sidecar_preserves_naming_keys(self):
+        """update_sidecar_entry must carry naming_original through a DPM rewrite,
+        and keep a naming-only entry alive when all markers go away."""
+        sidecar = {'/x/old.mkv': {'naming_original': 'orig.mkv',
+                                  'renamed_at': '2026-06-11',
+                                  'markers': {'AUDIO_LANG': 'de'},
+                                  'clean_name': 'old.mkv'}}
+        # DPM rewrites the entry (rename + new markers) — naming keys survive.
+        update_sidecar_entry(sidecar, '/x/old.mkv', '/x/new.mkv',
+                             {'AUDIO_LANG': 'en'}, 'new.mkv')
+        self.assertEqual(sidecar['/x/new.mkv']['naming_original'], 'orig.mkv')
+        self.assertEqual(sidecar['/x/new.mkv']['renamed_at'], '2026-06-11')
+        # All markers vanish — the naming-only entry must NOT be dropped.
+        update_sidecar_entry(sidecar, '/x/new.mkv', '/x/new.mkv', {}, 'new.mkv')
+        self.assertIn('/x/new.mkv', sidecar)
+        self.assertEqual(sidecar['/x/new.mkv']['naming_original'], 'orig.mkv')
+        self.assertNotIn('markers', sidecar['/x/new.mkv'])
+        # Entries without naming keys keep the original drop-when-empty rule.
+        sidecar2 = {'/y/a.mkv': {'markers': {'AUDIO_LANG': 'de'}, 'clean_name': 'a.mkv'}}
+        update_sidecar_entry(sidecar2, '/y/a.mkv', '/y/a.mkv', {}, 'a.mkv')
+        self.assertNotIn('/y/a.mkv', sidecar2)
+
+    def test_naming_in_resolve_capable_flags(self):
+        """--naming --resolve must pass the --resolve guard."""
+        content = self._read_script()
+        idx = content.index('_resolve_capable_flags = (')
+        end = content.index('\n    )', idx)
+        self.assertIn("'naming'", content[idx:end])
+
 
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
