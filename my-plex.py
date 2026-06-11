@@ -3724,6 +3724,12 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
                        '_format_episode_range',
+                       'NamingFieldMissing', 'apply_naming_modifier',
+                       'render_naming_template', 'apply_naming_transforms',
+                       'naming_variables', 'split_name_for_naming',
+                       'assemble_naming_name', 'validate_naming_rules',
+                       'derive_naming_paths', 'build_naming_plan',
+                       '_naming_sanitize', '_naming_strip_diacritics',
                        'PLEX_Media')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
@@ -6898,6 +6904,417 @@ def _cleanup_managed_orphans():
             print(f"    > NOT TRASHED {len(err_failed)} episodes.err file(s) — trash failed")
             for _err, _e in err_failed[:10]:
                 print(f"      - {_err}: {_e}")
+
+
+###########################################################################################
+#### NAMING — template-driven canonical renames (--naming)
+###########################################################################################
+# Engine for the NAMING_RULES CONF dict.  Per Plex object type
+# (MOVIE_FILE / MOVIE_DIR / EPISODE_FILE / SEASON_DIR / SERIES_DIR) a rule
+# defines the canonical on-disk name via a `template` of cache-field
+# variables ('{TITLE.lower.nodiacritic.dots}') plus optional sed-style
+# `transforms`.  DPM markers (sidecar-tracked) and user [labels] are
+# preserved around the templated base name in canonical order:
+#   <base> [label …] [marker …]<ext>
+# All functions here are PURE (no disk writes) — the plan they produce is
+# applied (or previewed) by the --naming command.
+
+class NamingFieldMissing(Exception):
+    """A template referenced a cache field that is empty/missing for the item."""
+    def __init__(self, field):
+        self.field = field
+        super().__init__(field)
+
+
+# Characters that NFKD decomposition can't strip — mapped by hand.
+_NAMING_DIACRITIC_MAP = {
+    'ß': 'ss', 'ẞ': 'SS', 'œ': 'oe', 'Œ': 'OE', 'æ': 'ae', 'Æ': 'AE',
+    'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L', 'đ': 'd', 'Đ': 'D',
+    'þ': 'th', 'Þ': 'TH', 'ð': 'd', 'Ð': 'D',
+}
+
+def _naming_strip_diacritics(value):
+    """ä→a ö→o é→e … via NFKD; ß→ss œ→oe æ→ae ø→o ł→l via explicit map."""
+    import unicodedata
+    value = ''.join(_NAMING_DIACRITIC_MAP.get(character, character) for character in value)
+    decomposed = unicodedata.normalize('NFKD', value)
+    return ''.join(character for character in decomposed
+                   if not unicodedata.combining(character))
+
+
+_NAMING_KNOWN_MODIFIERS = ('lower', 'upper', 'dots', 'nodiacritic',
+                           'nopunct', 'alnum', 'pad2', 'pad3')
+
+# {FIELD.mod1.mod2} — FIELD uppercase, modifiers lowercase, applied left-to-right.
+_NAMING_TOKEN_RE = re.compile(r'\{([A-Z][A-Z0-9_]*)((?:\.[a-z][a-z0-9]*)*)\}')
+
+# Bracketed token inside a name stem = user label (markers are stripped
+# via the sidecar BEFORE this regex ever sees the stem).
+_NAMING_LABEL_RE = re.compile(r'\s*\[([^\][]+)\]')
+
+
+def apply_naming_modifier(value, modifier, field):
+    """Apply ONE template modifier.  Raises NamingFieldMissing when a pad
+    modifier meets a non-integer value (the item is then skipped, not crashed)."""
+    if modifier in ('pad2', 'pad3'):
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise NamingFieldMissing(f"{field} (.{modifier} needs an integer, got {value!r})")
+        width = 2 if modifier == 'pad2' else 3
+        return f"{number:0{width}d}"
+    text = str(value)
+    if modifier == 'lower':
+        return text.lower()
+    if modifier == 'upper':
+        return text.upper()
+    if modifier == 'dots':
+        return re.sub(r'[ _]+', '.', text)
+    if modifier == 'nodiacritic':
+        return _naming_strip_diacritics(text)
+    if modifier == 'nopunct':
+        return re.sub(r'[^\w .-]+', '', text)
+    if modifier == 'alnum':
+        return ''.join(character for character in text
+                       if character.isalnum() or character in '.-')
+    # Unknown modifiers are rejected by validate_naming_rules() before any
+    # rendering happens — reaching this line is a programming error.
+    raise ValueError(f"unknown naming modifier '.{modifier}' on {{{field}}}")
+
+
+def render_naming_template(template, variables):
+    """Render every '{FIELD.mod…}' token in `template` from `variables`.
+
+    Modifier chains apply left-to-right: {TITLE.lower.dots} lowercases
+    first, then replaces spaces/underscores with dots.
+    Raises NamingFieldMissing when a referenced field is absent, None or ''.
+    """
+    def _render_token(match):
+        field, modifier_chain = match.group(1), match.group(2)
+        if field not in variables:
+            raise NamingFieldMissing(field)
+        value = variables[field]
+        if value is None or value == '':
+            raise NamingFieldMissing(field)
+        for modifier in [m for m in modifier_chain.split('.') if m]:
+            value = apply_naming_modifier(value, modifier, field)
+        return str(value)
+    return _NAMING_TOKEN_RE.sub(_render_token, template)
+
+
+def apply_naming_transforms(name, transforms):
+    """Apply sed-style (regex, replacement) pairs in order.  Replacement
+    supports backrefs (\\1, \\2, …).  Patterns are pre-validated by
+    validate_naming_rules()."""
+    for pattern, replacement in (transforms or []):
+        name = re.sub(pattern, replacement, name)
+    return name
+
+
+def naming_variables(obj, cache_key=None):
+    """Variable vocabulary for --naming templates of ONE cache item.
+
+    Two layers (later wins):
+      1. every scalar cache field, key uppercased ({TITLE}, {YEAR},
+         {S0XE0X}, {ORIGINALTITLE}, …)
+      2. the computed DISK_PLEX_MAP vocabulary ({AUDIO_LANG}, {GENRE},
+         {WATCHED_DATE}, {ACTOR1_LN}, …) — RAW values: marker suppression
+         and bottom-up promotion do NOT apply to naming.
+    Convenience aliases: {ORIGTITLE} = originalTitle, {S} = S_idx,
+    {E} = E_idx (ints — combine with .pad2/.pad3)."""
+    variables = {}
+    for field_name, field_value in obj.items():
+        if isinstance(field_value, (str, int, float, bool)):
+            variables[field_name.upper()] = field_value
+    if obj.get('originalTitle'):
+        variables['ORIGTITLE'] = obj['originalTitle']
+    if obj.get('S_idx') is not None:
+        variables['S'] = obj['S_idx']
+    if obj.get('E_idx') is not None:
+        variables['E'] = obj['E_idx']
+    for computed_name, computed_value in resolve_disk_map_variables(
+            obj, cache_key, _bottom_up_pass=True).items():
+        if isinstance(computed_value, (str, int, float, bool)):
+            variables[computed_name] = computed_value
+    return variables
+
+
+def split_name_for_naming(name, sidecar_entry, is_dir=False):
+    """Split an on-disk basename into (clean_stem, user_labels, extension).
+
+    DPM markers (tracked in `sidecar_entry`) are stripped first — they are
+    owned by --plex2disk/--disk2plex, not by --naming.  Every OTHER
+    bracketed token is a user label and is returned for re-attachment.
+    Extension is '' for directories."""
+    if is_dir:
+        without_markers = strip_markers_from_dir(name, sidecar_entry)
+        stem, extension = without_markers, ''
+    else:
+        without_markers = strip_our_markers(name, sidecar_entry)
+        stem, extension = os.path.splitext(without_markers)
+    labels = [label_match.group(1) for label_match in _NAMING_LABEL_RE.finditer(stem)]
+    clean_stem = _NAMING_LABEL_RE.sub('', stem)
+    clean_stem = re.sub(r'\s{2,}', ' ', clean_stem).strip()
+    return clean_stem, labels, extension
+
+
+def assemble_naming_name(rendered_stem, labels, sidecar_entry, extension,
+                         preserve_labels=True, preserve_markers=True, is_dir=False):
+    """Reassemble the canonical on-disk name:  <stem> [label …] [marker …]<ext>
+
+    Labels keep their on-disk order; markers are re-applied via the shared
+    apply_markers*/sidecar machinery (sorted by aspect — same canonical
+    order --plex2disk writes)."""
+    name = rendered_stem
+    if preserve_labels and labels:
+        name += ' ' + ' '.join(f'[{label}]' for label in labels)
+    markers = (sidecar_entry or {}).get('markers', {}) if preserve_markers else {}
+    if is_dir:
+        return apply_markers_to_dir(name, markers) if markers else name
+    if markers:
+        return apply_markers(name + extension, markers)
+    return name + extension
+
+
+_NAMING_RULE_TYPES = ('MOVIE_FILE', 'MOVIE_DIR', 'EPISODE_FILE',
+                      'SEASON_DIR', 'SERIES_DIR')
+_NAMING_RULE_KEYS = ('template', 'transforms', 'preserve_ext',
+                     'preserve_markers', 'preserve_labels')
+
+
+def validate_naming_rules(rules):
+    """Validate the NAMING_RULES CONF dict.
+
+    Returns (usable_rules, problems):
+      usable_rules — subset of `rules` that can actually run
+      problems     — list of human-readable strings; a structural problem
+                     drops the rule, an unknown extra key only warns."""
+    usable, problems = {}, []
+    for rule_type, rule in (rules or {}).items():
+        if rule_type not in _NAMING_RULE_TYPES:
+            problems.append(f"NAMING_RULES[{rule_type!r}]: unknown object-type key "
+                            f"(known: {', '.join(_NAMING_RULE_TYPES)}) — rule skipped")
+            continue
+        if not isinstance(rule, dict):
+            problems.append(f"NAMING_RULES[{rule_type!r}]: entry must be a dict — rule skipped")
+            continue
+        unknown_keys = [key for key in rule if key not in _NAMING_RULE_KEYS]
+        if unknown_keys:
+            problems.append(f"NAMING_RULES[{rule_type!r}]: unknown key(s) {unknown_keys} — ignored")
+        template = rule.get('template')
+        transforms = rule.get('transforms') or []
+        if not template and not transforms:
+            problems.append(f"NAMING_RULES[{rule_type!r}]: neither 'template' nor "
+                            f"'transforms' present — rule does no work, skipped")
+            continue
+        structurally_ok = True
+        if template:
+            for token_match in _NAMING_TOKEN_RE.finditer(template):
+                for modifier in [m for m in token_match.group(2).split('.') if m]:
+                    if modifier not in _NAMING_KNOWN_MODIFIERS:
+                        problems.append(f"NAMING_RULES[{rule_type!r}]: unknown modifier "
+                                        f"'.{modifier}' in {token_match.group(0)} "
+                                        f"(known: {', '.join(_NAMING_KNOWN_MODIFIERS)}) — rule skipped")
+                        structurally_ok = False
+        for transform_index, transform in enumerate(transforms):
+            if not (isinstance(transform, (list, tuple)) and len(transform) == 2
+                    and all(isinstance(part, str) for part in transform)):
+                problems.append(f"NAMING_RULES[{rule_type!r}]: transforms[{transform_index}] "
+                                f"must be a (regex, replacement) pair of strings — rule skipped")
+                structurally_ok = False
+                continue
+            try:
+                re.compile(transform[0])
+            except re.error as regex_error:
+                problems.append(f"NAMING_RULES[{rule_type!r}]: transforms[{transform_index}] "
+                                f"regex does not compile ({regex_error}) — rule skipped")
+                structurally_ok = False
+        if structurally_ok:
+            usable[rule_type] = rule
+    return usable, problems
+
+
+def derive_naming_paths(obj, library_roots):
+    """Classify the on-disk shape of one Movie/Episode cache obj.
+
+    Anchored on the known library roots (so an unsorted episode directly in
+    its series dir is not mistaken for a season layout).  Returns a dict
+    with any of 'movie_dir' / 'season_dir' / 'series_dir' (absolute paths).
+    Items nested deeper than Plex's expected layout (--bad-structure
+    territory) get NO dir targets — fix the structure first."""
+    filepath = obj.get('file') or ''
+    if not filepath:
+        return {}
+    parent = os.path.dirname(filepath)
+    grandparent = os.path.dirname(parent)
+    greatgrandparent = os.path.dirname(grandparent)
+    if parent in library_roots:
+        return {}   # bare file directly in the library root — nothing to rename but the file
+    obj_type = obj.get('type', '')
+    if obj_type == 'Movie':
+        if grandparent in library_roots:
+            return {'movie_dir': parent}
+        return {}
+    if obj_type == 'Episode':
+        if grandparent in library_roots:
+            return {'series_dir': parent}      # unsorted: episodes directly in series dir
+        if greatgrandparent in library_roots:
+            return {'season_dir': parent, 'series_dir': grandparent}
+        return {}
+    return {}
+
+
+def _naming_season_variables(episode_obj):
+    """Variables for a SEASON_DIR rule, anchored on one episode.
+
+    Uses the Season cache obj when it exists; always injects {S} from the
+    episode so 's{S.pad2}' works even when no Season obj is cached."""
+    series_key = episode_obj.get('series_key', '')
+    season_string = episode_obj.get('S_str', '')
+    season_obj = {}
+    if series_key and season_string:
+        season_key = (PLEX_Media.OBJ_BY_SERIES.get(series_key) or {}).get(season_string)
+        if season_key:
+            season_obj = PLEX_Media.OBJ_BY_ID.get(season_key, {}) or {}
+    variables = naming_variables(season_obj) if season_obj else {}
+    if episode_obj.get('S_idx') is not None:
+        variables['S'] = episode_obj['S_idx']
+        variables['S_STR'] = episode_obj.get('S_str', '')
+    return variables
+
+
+def _naming_series_variables(episode_obj):
+    """Variables for a SERIES_DIR rule, anchored on one episode."""
+    series_key = episode_obj.get('series_key', '')
+    series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {}
+    return naming_variables(series_obj, series_key) if series_obj else {}
+
+
+def _naming_sanitize(name):
+    """Make a rendered name filesystem-safe: no path separators, no
+    leading dot (hidden file), no trailing dots/spaces."""
+    name = name.replace('/', '-').replace(':', '∶').strip()
+    return name.lstrip('.').rstrip('. ').strip()
+
+
+def build_naming_plan(scope_items, rules, sidecar, library_roots):
+    """Compute the full --naming rename plan.  PURE — no disk access.
+
+    Args:
+        scope_items:   list of (cache_key, obj) from _get_universal_scope
+        rules:         usable NAMING_RULES (already validated)
+        sidecar:       disk_map.json dict (marker ownership)
+        library_roots: set of library root paths (dir-shape anchoring)
+
+    Returns:
+        list of plan entries, in APPLY ORDER (files first, then season
+        dirs, then movie dirs, then series dirs — deepest paths first
+        within each kind):
+          {'key': cache_key, 'rule': rule_type,
+           'old_path': str, 'new_path': str,
+           'status': 'rename'|'unchanged'|'skipped'|'conflict',
+           'reason': str}
+    """
+    entries_by_old_path = {}
+
+    def _plan_one(cache_key, rule_type, old_path, variables, is_dir):
+        rule = rules.get(rule_type)
+        if not rule or not old_path:
+            return
+        existing = entries_by_old_path.get(old_path)
+        basename = os.path.basename(old_path)
+        sidecar_entry = sidecar.get(old_path)
+        clean_stem, labels, extension = split_name_for_naming(
+            basename, sidecar_entry, is_dir=is_dir)
+        if not rule.get('preserve_ext', True):
+            extension = ''
+        entry = {'key': cache_key, 'rule': rule_type,
+                 'old_path': old_path, 'new_path': old_path,
+                 'status': 'rename', 'reason': ''}
+        try:
+            template = rule.get('template')
+            base = render_naming_template(template, variables) if template else clean_stem
+            base = apply_naming_transforms(base, rule.get('transforms'))
+            base = _naming_sanitize(base)
+            if not base:
+                entry.update(status='skipped', reason='rendered name is empty')
+            else:
+                new_name = assemble_naming_name(
+                    base, labels, sidecar_entry, extension,
+                    preserve_labels=rule.get('preserve_labels', True),
+                    preserve_markers=rule.get('preserve_markers', True),
+                    is_dir=is_dir)
+                entry['new_path'] = os.path.join(os.path.dirname(old_path), new_name)
+                if new_name == basename:
+                    entry.update(status='unchanged', reason='')
+        except NamingFieldMissing as missing:
+            entry.update(status='skipped', reason=f"field {missing.field} empty/missing")
+        if existing:
+            # Same on-disk target planned twice (multi-episode file, shared
+            # dir, …): identical outcome → keep first; divergent → conflict.
+            if existing['new_path'] != entry['new_path'] \
+                    and 'skipped' not in (existing['status'], entry['status']):
+                existing['status'] = entry['status'] = 'conflict'
+                existing['reason'] = entry['reason'] = (
+                    f"items {existing['key']} and {cache_key} demand different names")
+                entries_by_old_path[old_path + f'\x00{cache_key}'] = entry
+            return
+        entries_by_old_path[old_path] = entry
+
+    for cache_key, obj in scope_items:
+        obj_type = obj.get('type', '')
+        if obj_type == 'Movie':
+            variables = naming_variables(obj, cache_key)
+            version_paths = sorted({(info or {}).get('filepath') or ''
+                                    for info in (obj.get('files') or {}).values()} - {''}) \
+                            or ([obj['file']] if obj.get('file') else [])
+            for filepath in version_paths:
+                _plan_one(cache_key, 'MOVIE_FILE', filepath, variables, is_dir=False)
+            dir_paths = derive_naming_paths(obj, library_roots)
+            _plan_one(cache_key, 'MOVIE_DIR', dir_paths.get('movie_dir'),
+                      variables, is_dir=True)
+        elif obj_type == 'Episode':
+            variables = naming_variables(obj, cache_key)
+            _plan_one(cache_key, 'EPISODE_FILE', obj.get('file'), variables, is_dir=False)
+            dir_paths = derive_naming_paths(obj, library_roots)
+            if dir_paths.get('season_dir'):
+                _plan_one(cache_key, 'SEASON_DIR', dir_paths['season_dir'],
+                          _naming_season_variables(obj), is_dir=True)
+            if dir_paths.get('series_dir'):
+                _plan_one(cache_key, 'SERIES_DIR', dir_paths['series_dir'],
+                          _naming_series_variables(obj), is_dir=True)
+
+    # Cross-entry collision check: two different sources demanding the SAME
+    # new path, or a new path that already belongs to another cached file.
+    plan = list(entries_by_old_path.values())
+    new_path_owners = {}
+    for entry in plan:
+        if entry['status'] != 'rename':
+            continue
+        owner = new_path_owners.get(entry['new_path'])
+        if owner is not None:
+            entry['status'] = owner['status'] = 'conflict'
+            entry['reason'] = owner['reason'] = (
+                f"{owner['old_path']} and {entry['old_path']} both want this name")
+        else:
+            new_path_owners[entry['new_path']] = entry
+    for entry in plan:
+        if entry['status'] != 'rename':
+            continue
+        cached_owner = PLEX_Media.OBJ_BY_FILEPATH.get(entry['new_path'])
+        if cached_owner and entry['new_path'] != entry['old_path']:
+            entry['status'] = 'conflict'
+            entry['reason'] = f"target already exists in cache ({cached_owner})"
+
+    # Apply order: files first (their paths must not be invalidated by a
+    # parent-dir rename), then dirs bottom-up (season → movie → series),
+    # deepest paths first within each kind.
+    _KIND_ORDER = {'MOVIE_FILE': 0, 'EPISODE_FILE': 0,
+                   'SEASON_DIR': 1, 'MOVIE_DIR': 2, 'SERIES_DIR': 3}
+    plan.sort(key=lambda entry: (_KIND_ORDER.get(entry['rule'], 9),
+                                 -entry['old_path'].count('/'),
+                                 entry['old_path'].lower()))
+    return plan
 
 
 def move_file(src_path, dst_dir, remote_host=None):
