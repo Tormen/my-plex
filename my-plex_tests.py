@@ -10692,6 +10692,239 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
                               f"pattern must NOT match {name!r}")
 
 
+class TestNaming(unittest.TestCase):
+    """--naming engine: template render, modifiers, transforms, name
+    split/assembly, NAMING_RULES validation, dir-shape derivation, plan."""
+
+    def _movie_obj(self, **overrides):
+        obj = {
+            'type': 'Movie', 'title': 'Test Movie', 'year': 2020,
+            'library': 'library1',
+            'file': '/roots/library1/Test Movie (2020)/Test Movie.mkv',
+            'files': {'90.0min 1920x1080 (h264 aac)':
+                      {'filepath': '/roots/library1/Test Movie (2020)/Test Movie.mkv'}},
+            'viewCount': 0, 'lastViewedAt': None,
+            'userRating': None, 'criticsRating': None, 'audienceRating': None,
+            'contentRating': '', 'actors': [], 'countries': [], 'genres': [],
+            'directors': [], 'writers': [], 'resolution': '1080p',
+            'duration': 5400000, 'series': '', 'originalTitle': '',
+            'external_ids': {}, 'audio_languages': ['de'],
+            'subtitle_languages': [], 'collections': [], 'labels': [],
+        }
+        obj.update(overrides)
+        return obj
+
+    def _episode_obj(self, **overrides):
+        obj = self._movie_obj(
+            type='Episode', title='Pilot', series='Tagesschau',
+            series_key='', S_idx=1, E_idx=7, S_str='S01', E_str='E07',
+            S0XE0X='S01E07',
+            file='/roots/library2/Tagesschau/s01/Tagesschau S01E07.mkv',
+            files={'30.0min 1920x1080 (h264 aac)':
+                   {'filepath': '/roots/library2/Tagesschau/s01/Tagesschau S01E07.mkv'}})
+        obj.update(overrides)
+        return obj
+
+    # --- modifiers -------------------------------------------------------
+
+    def test_modifier_case_and_dots(self):
+        self.assertEqual(apply_naming_modifier('Test Movie', 'lower', 'TITLE'), 'test movie')
+        self.assertEqual(apply_naming_modifier('quiet', 'upper', 'TITLE'), 'QUIET')
+        self.assertEqual(apply_naming_modifier('a b_c  d', 'dots', 'TITLE'), 'a.b.c.d')
+
+    def test_modifier_nodiacritic(self):
+        self.assertEqual(apply_naming_modifier('Käßmänn œuvre Ærø łódź',
+                                               'nodiacritic', 'TITLE'),
+                         'Kassmann oeuvre AEro lodz')
+
+    def test_modifier_nopunct_and_alnum(self):
+        self.assertEqual(apply_naming_modifier("It's a Test: x!?", 'nopunct', 'TITLE'),
+                         'Its a Test x')
+        self.assertEqual(apply_naming_modifier('a.b-c d!e', 'alnum', 'TITLE'),
+                         'a.b-cde')
+
+    def test_modifier_pad(self):
+        self.assertEqual(apply_naming_modifier(7, 'pad2', 'S'), '07')
+        self.assertEqual(apply_naming_modifier('7', 'pad3', 'E'), '007')
+        with self.assertRaises(NamingFieldMissing):
+            apply_naming_modifier('not-a-number', 'pad2', 'S')
+
+    # --- template render -------------------------------------------------
+
+    def test_render_chain_left_to_right(self):
+        variables = {'TITLE': 'Müller & Söhne'}
+        self.assertEqual(
+            render_naming_template('{TITLE.lower.nodiacritic.dots}', variables),
+            'muller.&.sohne')
+
+    def test_render_missing_or_empty_field_raises(self):
+        with self.assertRaises(NamingFieldMissing):
+            render_naming_template('{NOPE}', {'TITLE': 'x'})
+        with self.assertRaises(NamingFieldMissing):
+            render_naming_template('{TITLE}', {'TITLE': ''})
+
+    def test_render_mixed_literal_and_tokens(self):
+        variables = {'S': 1, 'E': 7, 'TITLE': 'Pilot'}
+        self.assertEqual(
+            render_naming_template('S{S.pad2}E{E.pad2} - {TITLE}', variables),
+            'S01E07 - Pilot')
+
+    # --- transforms ------------------------------------------------------
+
+    def test_transforms_run_in_order_with_backrefs(self):
+        name = apply_naming_transforms('the.movie.2020',
+                                       [(r'^the\.', ''), (r'(\d{4})$', r'(\1)')])
+        self.assertEqual(name, 'movie.(2020)')
+
+    # --- split / assemble ------------------------------------------------
+
+    def test_split_separates_markers_labels_extension(self):
+        sidecar_entry = {'markers': {'AUDIO_LANG': 'de'}}
+        clean_stem, labels, extension = split_name_for_naming(
+            'Test Movie [reencode] [de].mkv', sidecar_entry, is_dir=False)
+        self.assertEqual(clean_stem, 'Test Movie')
+        self.assertEqual(labels, ['reencode'])
+        self.assertEqual(extension, '.mkv')
+
+    def test_split_without_sidecar_treats_brackets_as_labels(self):
+        clean_stem, labels, extension = split_name_for_naming(
+            'Test Movie [whatever].mkv', None, is_dir=False)
+        self.assertEqual(clean_stem, 'Test Movie')
+        self.assertEqual(labels, ['whatever'])
+
+    def test_assemble_canonical_order_base_labels_markers_ext(self):
+        sidecar_entry = {'markers': {'AUDIO_LANG': 'de'}}
+        name = assemble_naming_name('new.name', ['reencode'], sidecar_entry,
+                                    '.mkv', is_dir=False)
+        self.assertEqual(name, 'new.name [reencode] [de].mkv')
+
+    def test_assemble_preserve_flags_off_drop_tokens(self):
+        sidecar_entry = {'markers': {'AUDIO_LANG': 'de'}}
+        name = assemble_naming_name('new.name', ['reencode'], sidecar_entry,
+                                    '.mkv', preserve_labels=False,
+                                    preserve_markers=False, is_dir=False)
+        self.assertEqual(name, 'new.name.mkv')
+
+    def test_assemble_dir_has_no_extension_handling(self):
+        sidecar_entry = {'markers': {'AUDIO_LANG': 'fr'}}
+        name = assemble_naming_name('series.name', [], sidecar_entry, '',
+                                    is_dir=True)
+        self.assertEqual(name, 'series.name [fr]')
+
+    # --- validation ------------------------------------------------------
+
+    def test_validate_drops_noop_and_unknown_rules(self):
+        usable, problems = validate_naming_rules({
+            'MOVIE_FILE': {'preserve_ext': True},          # no-op
+            'BANANA_DIR': {'template': '{TITLE}'},         # unknown type
+            'MOVIE_DIR':  {'template': '{TITLE.lower}'},   # fine
+        })
+        self.assertEqual(list(usable.keys()), ['MOVIE_DIR'])
+        self.assertEqual(len(problems), 2)
+
+    def test_validate_rejects_bad_regex_and_unknown_modifier(self):
+        usable, problems = validate_naming_rules({
+            'MOVIE_FILE': {'transforms': [('([unclosed', 'x')]},
+            'MOVIE_DIR':  {'template': '{TITLE.banana}'},
+        })
+        self.assertEqual(usable, {})
+        self.assertEqual(len(problems), 2)
+
+    # --- dir-shape derivation -------------------------------------------
+
+    def test_derive_paths_movie_and_episode_layouts(self):
+        roots = {'/roots/library1', '/roots/library2'}
+        movie = self._movie_obj()
+        self.assertEqual(derive_naming_paths(movie, roots),
+                         {'movie_dir': '/roots/library1/Test Movie (2020)'})
+        episode = self._episode_obj()
+        self.assertEqual(derive_naming_paths(episode, roots),
+                         {'season_dir': '/roots/library2/Tagesschau/s01',
+                          'series_dir': '/roots/library2/Tagesschau'})
+
+    def test_derive_paths_unsorted_bare_and_nested(self):
+        roots = {'/roots/library2'}
+        unsorted_episode = self._episode_obj(
+            file='/roots/library2/Tagesschau/Tagesschau S01E07.mkv')
+        self.assertEqual(derive_naming_paths(unsorted_episode, roots),
+                         {'series_dir': '/roots/library2/Tagesschau'})
+        bare = self._movie_obj(file='/roots/library2/bare.mkv')
+        self.assertEqual(derive_naming_paths(bare, roots), {})
+        nested = self._movie_obj(file='/roots/library2/a/b/c/deep.mkv')
+        self.assertEqual(derive_naming_paths(nested, roots), {})
+
+    # --- plan builder ----------------------------------------------------
+
+    def _plan(self, items, rules, sidecar=None, roots=None):
+        usable, problems = validate_naming_rules(rules)
+        self.assertFalse(problems, f"rules must validate cleanly: {problems}")
+        return build_naming_plan(items, usable, sidecar or {},
+                                 roots or {'/roots/library1', '/roots/library2'})
+
+    def test_plan_movie_file_rename_and_unchanged(self):
+        movie = self._movie_obj()
+        rules = {'MOVIE_FILE': {'template': '{TITLE.lower.dots}.{YEAR}'}}
+        plan = self._plan([('Movie:1', movie)], rules)
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]['status'], 'rename')
+        self.assertEqual(os.path.basename(plan[0]['new_path']), 'test.movie.2020.mkv')
+        # Re-run against the already-canonical name → unchanged
+        movie2 = self._movie_obj(
+            file='/roots/library1/wrapper/test.movie.2020.mkv',
+            files={'v': {'filepath': '/roots/library1/wrapper/test.movie.2020.mkv'}})
+        plan2 = self._plan([('Movie:2', movie2)], rules)
+        self.assertEqual(plan2[0]['status'], 'unchanged')
+
+    def test_plan_skips_item_with_missing_field(self):
+        movie = self._movie_obj(originalTitle='')
+        rules = {'MOVIE_FILE': {'template': '{ORIGTITLE}'}}
+        plan = self._plan([('Movie:1', movie)], rules)
+        self.assertEqual(plan[0]['status'], 'skipped')
+        self.assertIn('ORIGTITLE', plan[0]['reason'])
+
+    def test_plan_conflict_when_two_items_want_same_name(self):
+        movie_a = self._movie_obj(
+            title='Same Title',
+            file='/roots/library1/w/a.mkv', files={'v': {'filepath': '/roots/library1/w/a.mkv'}})
+        movie_b = self._movie_obj(
+            title='Same Title',
+            file='/roots/library1/w/b.mkv', files={'v': {'filepath': '/roots/library1/w/b.mkv'}})
+        rules = {'MOVIE_FILE': {'template': '{TITLE.lower.dots}'}}
+        plan = self._plan([('Movie:1', movie_a), ('Movie:2', movie_b)], rules)
+        self.assertEqual([entry['status'] for entry in plan], ['conflict', 'conflict'])
+
+    def test_plan_transforms_only_rule_starts_from_clean_stem(self):
+        movie = self._movie_obj(
+            file='/roots/library1/w/The.Movie.2020.mkv',
+            files={'v': {'filepath': '/roots/library1/w/The.Movie.2020.mkv'}})
+        rules = {'MOVIE_FILE': {'transforms': [(r'^The\.', '')]}}
+        plan = self._plan([('Movie:1', movie)], rules)
+        self.assertEqual(os.path.basename(plan[0]['new_path']), 'Movie.2020.mkv')
+
+    def test_plan_order_files_before_dirs(self):
+        episode = self._episode_obj()
+        rules = {'EPISODE_FILE': {'template': 'S{S.pad2}E{E.pad2}'},
+                 'SEASON_DIR':   {'template': 's{S.pad2}'},
+                 'SERIES_DIR':   {'transforms': [(r'$', '')]}}
+        plan = self._plan([('Episode:1', episode)], rules)
+        kinds = [entry['rule'] for entry in plan]
+        self.assertEqual(kinds, ['EPISODE_FILE', 'SEASON_DIR', 'SERIES_DIR'])
+
+    def test_plan_preserves_markers_and_labels_through_rename(self):
+        old_path = '/roots/library1/w/Old Name [keepme] [de].mkv'
+        movie = self._movie_obj(file=old_path, files={'v': {'filepath': old_path}})
+        sidecar = {old_path: {'markers': {'AUDIO_LANG': 'de'},
+                              'clean_name': 'Old Name [keepme].mkv'}}
+        rules = {'MOVIE_FILE': {'template': '{TITLE.lower.dots}'}}
+        plan = self._plan([('Movie:1', movie)], rules, sidecar=sidecar)
+        self.assertEqual(os.path.basename(plan[0]['new_path']),
+                         'test.movie [keepme] [de].mkv')
+
+    def test_sanitize_blocks_separators_and_hidden_names(self):
+        self.assertEqual(_naming_sanitize('AC/DC: Live'), 'AC-DC∶ Live')
+        self.assertEqual(_naming_sanitize('.hidden.'), 'hidden')
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -10739,6 +10972,7 @@ _UNITTEST_SCOPES = {
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
     'sync':               [TestSyncDispatchAndDoubleMarkerFix],
+    'naming':             [TestNaming],
     'v269':               [TestV269RetroactiveCoverage],
 }
 
