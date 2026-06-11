@@ -766,6 +766,19 @@ CONFIG_DEFAULTS = {
     # (case-insensitive at use time).
     'SORT_NEW_SXXEYY_REGEX': r'S[0-9]{1,4}E[0-9]{1,4}',
 
+    # SORT_NEW_SEASON_TOKEN_REGEX — pattern used by --sort-new to detect
+    # release-wrapper SERIES directories that carry a season token in the
+    # directory name itself (Rings-of-Power style):
+    #   the.rings.of.power.s01.complete.720p.webrip-grp  →  token '.s01'
+    #   tagesschau.season 2 (1080p)                      →  token '.season 2'
+    # The wrapper name is CUT at the match: the part before it becomes the
+    # canonical series name, the captured digits the season number.  The
+    # wrapper's contents move to <library_root>/<series>/s<NN>/ and the
+    # emptied wrapper is removed.  Exactly ONE capture group must carry
+    # the season digits (alternations may use multiple groups — first
+    # non-empty wins).  Always applied case-insensitively.
+    'SORT_NEW_SEASON_TOKEN_REGEX': r'[._ -]s(\d{1,2})\b|[._ -]season[._ -]*(\d{1,2})\b',
+
     # PIPELINES — dict of named pipelines that get registered as top-level
     # my-plex CLI flags.  Each key is the flag name (e.g. '--clean'); each
     # value is an ordered list of phases.  Each phase is itself a list of
@@ -2154,6 +2167,21 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # Default:
 # SORT_NEW_SXXEYY_REGEX = {CONFIG_DEFAULTS['SORT_NEW_SXXEYY_REGEX']!r}
 
+# Regex used by `--sort-new` to detect release-wrapper SERIES directories
+# carrying a season token in the directory name (Rings-of-Power style):
+#   the.rings.of.power.s01.complete.720p.webrip-grp  →  token '.s01'
+#   tagesschau.season 2 (1080p)                      →  token '.season 2'
+# The wrapper name is CUT at the match: the part before it becomes the
+# canonical series name, the captured digits the season number.  The
+# wrapper's contents move to <library_root>/<series>/s<NN>/ and the
+# emptied wrapper is removed.  Exactly one capture group must carry the
+# season digits (alternations may use several groups — first non-empty
+# wins).  Always applied case-insensitively.
+# The shown value is the ACTUAL DEFAULT (uncommenting it changes nothing).
+#
+# Default:
+# SORT_NEW_SEASON_TOKEN_REGEX = {CONFIG_DEFAULTS['SORT_NEW_SEASON_TOKEN_REGEX']!r}
+
 ###############################################################################
 # Sort-new movie routing (SORT_NEW_MOVIE_ROUTES)
 ###############################################################################
@@ -2534,6 +2562,7 @@ SORT_NEW_MOVIE_ROUTES = CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']
 # See CONFIG_DEFAULTS doc-block above for full syntax (incl. 'touch' modes).
 SORT_NEW_SCAN_LOCATIONS = CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']
 SORT_NEW_SXXEYY_REGEX = CONFIG_DEFAULTS['SORT_NEW_SXXEYY_REGEX']
+SORT_NEW_SEASON_TOKEN_REGEX = CONFIG_DEFAULTS['SORT_NEW_SEASON_TOKEN_REGEX']
 
 _SORT_NEW_LOCATIONS_COMPILED = None  # lazy: [(path_str, touch_mode), …]
 
@@ -3727,6 +3756,7 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
                        'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
                        '_format_episode_range',
+                       '_season_token_match', 'SORT_NEW_SEASON_TOKEN_REGEX',
                        'NamingFieldMissing', 'apply_naming_modifier',
                        'render_naming_template', 'apply_naming_transforms',
                        'naming_variables', 'split_name_for_naming',
@@ -30748,6 +30778,29 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --unsorted --fix [--dry-run]          (equivalent)")
             print("       my-plex [SCOPE] --unsorted --fix [--dry-run]  (equivalent)")
             print()
+            print("PHASE 0 — SEASON-TOKEN WRAPPER CONSOLIDATION (v3):")
+            print()
+            print("  Release wrappers carrying a season token in the DIRECTORY name")
+            print("  ('<series>.s01.<release junk>') get consolidated before sorting:")
+            print()
+            print("    <root>/library2-series.s01.complete.720p.webrip-grp/")
+            print("      →  <root>/library2-series/s01/")
+            print()
+            print("  - The wrapper name is CUT at the token (SORT_NEW_SEASON_TOKEN_REGEX):")
+            print("    the part before it = canonical series name, the digits = season.")
+            print("  - Handles flat wrappers (episodes at depth 1) AND layered ones that")
+            print("    already contain an s<NN>/ subdir (the layer is stripped).")
+            print("  - Several wrappers of the same series merge into ONE series dir")
+            print("    (s01 + s02 wrappers → <series>/s01/ + <series>/s02/).")
+            print("  - Moves never clobber (mv -n); stale fake-series artifacts at wrapper")
+            print("    level (episodes.tsv*, episodes.err) are TRASHED (recoverable); the")
+            print("    emptied wrapper goes via non-recursive rmdir.")
+            print("  - Guard: a real series whose title merely contains '.sNN' is left")
+            print("    alone (no depth-1 videos + non-matching season layout).")
+            print("  - Cache + disk_map.json are updated in-process; JSON log at")
+            print("    ~/.my-plex/logs/sort_new_season_wrappers_<TS>.json.")
+            print("  - Run `my-plex --scan` afterwards so Plex re-catalogues the series.")
+            print()
             print("WHAT IS SCANNED — SORT_NEW_SCAN_LOCATIONS:")
             print()
             print("  --sort-new visits every library and, inside each library, scans the")
@@ -37339,6 +37392,278 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     return (n_moved, 0, n_errors)
 
 
+def _season_token_match(name):
+    """Detect a Rings-of-Power-style season token in a directory basename.
+
+    Matches SORT_NEW_SEASON_TOKEN_REGEX (case-insensitive) and CUTS the
+    name at the match: the part before it (trailing separators stripped)
+    is the canonical series name; the captured digits the season number.
+
+    Returns (canonical_series_name, season_number) or None when the name
+    carries no season token (or nothing is left of the series name).
+    """
+    match = re.search(SORT_NEW_SEASON_TOKEN_REGEX, name, re.IGNORECASE)
+    if not match:
+        return None
+    season_digits = next((g for g in match.groups() if g), None)
+    if season_digits is None:
+        return None
+    series_name = name[:match.start()].rstrip(' ._-')
+    if not series_name:
+        return None
+    return series_name, int(season_digits)
+
+
+def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=False):
+    """--sort-new phase 0: consolidate season-token release wrappers.
+
+    A release wrapper is a SERIES directory whose basename carries a
+    season token ('<series>.s01.<release junk>').  Plex catalogues each
+    such wrapper as its own series — splitting one real series over
+    several fake ones.  This phase:
+
+      1. cuts the wrapper name at the token → canonical series name + NN,
+      2. moves the wrapper's contents to <library_root>/<series>/s<NN>/
+         (created as needed; existing files are never clobbered — mv -n),
+      3. removes the emptied wrapper (rmdir, non-recursive),
+      4. updates cache + sidecar paths in-process.
+
+    Wrapper shapes handled (NN = the token's season number):
+      flat    — episodes directly in the wrapper        → move to <series>/sNN/
+      layered — wrapper already holds an sNN/ subdir
+                (e.g. a previous --sort-new sorted the
+                fake series internally)                  → sNN layer is stripped:
+                                                           wrapper/sNN/x → <series>/sNN/x
+    my-plex artifacts at wrapper level (episodes.tsv*, episodes.err) are
+    TRASHED — they describe the fake series and are rescraped fresh after
+    the consolidated series is catalogued.
+
+    Guard: a wrapper qualifies only when it has depth-1 videos (flat) or
+    every season-shaped subdir inside equals s<NN> (layered) — a real
+    series spanning several seasons whose title happens to contain '.sNN'
+    is left alone.
+
+    Returns the set of consolidated series cache keys (callers exclude
+    them from the per-series sort loop — their dirs are gone).
+    """
+    remote_host = PLEX_DB_REMOTE_HOST
+
+    # Wrapper discovery — TWO sources, dedup'd by wrapper dir:
+    #   a) each series obj's own directory, and
+    #   b) the series-level dir derived from every episode's path.
+    # (b) is required because Plex often merges several release wrappers
+    # into ONE series whose 'file' points at just one of them — the
+    # rings-of-power s02 wrapper has no series obj of its own.
+    scoped_keys = {key for key, _dict, _lib in all_series_list}
+    scoped_libraries = {lib for _key, _dict, lib in all_series_list}
+    lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+    library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
+    wrapper_dirs = {}   # wrapper_dir → (series_key, library_name)
+    for series_key, series_dict, library_name in all_series_list:
+        wrapper_dir = series_dict.get('file', '')
+        if wrapper_dir and _season_token_match(os.path.basename(wrapper_dir)):
+            wrapper_dirs.setdefault(wrapper_dir, (series_key, library_name))
+    for episode_key, episode_obj in PLEX_Media.OBJ_BY_ID.items():
+        if episode_obj.get('type') != 'Episode':
+            continue
+        if episode_obj.get('library') not in scoped_libraries:
+            continue
+        if episode_obj.get('series_key') and episode_obj['series_key'] not in scoped_keys:
+            continue
+        derived = derive_naming_paths(episode_obj, library_roots)
+        series_level_dir = derived.get('series_dir')
+        if not series_level_dir:
+            continue
+        if _season_token_match(os.path.basename(series_level_dir)):
+            wrapper_dirs.setdefault(series_level_dir,
+                                    (episode_obj.get('series_key') or episode_key,
+                                     episode_obj.get('library', '')))
+
+    candidates = []   # (series_key, library_name, wrapper_dir, dest_series_dir, dest_season_dir, moves, trashes)
+    for wrapper_dir, (series_key, library_name) in sorted(wrapper_dirs.items()):
+        token = _season_token_match(os.path.basename(wrapper_dir))
+        series_name, season_number = token
+        season_dir_name = f's{season_number:02d}'
+        ok, file_list = my_plex_file_operation('LIST_DIR', wrapper_dir, remote_host, maxdepth=10)
+        if not ok or not file_list:
+            continue
+        # Shape analysis on relative paths (dirname check enforces real
+        # depth — the LOCAL LIST_DIR branch walks recursively regardless
+        # of maxdepth).
+        depth1_videos = [fp for fp in file_list
+                         if os.path.dirname(fp) == wrapper_dir
+                         and os.path.splitext(fp)[1].lower() in VIDEO_EXTENSIONS]
+        season_shaped = {part for fp in file_list
+                         for part in [os.path.relpath(fp, wrapper_dir).split(os.sep)[0]]
+                         if re.fullmatch(r's\d{1,2}', part, re.IGNORECASE)}
+        token_matches_layout = season_shaped and all(
+            int(part[1:]) == season_number for part in season_shaped)
+        if not depth1_videos and not token_matches_layout:
+            continue   # neither flat nor cleanly-layered → leave alone
+        dest_series_dir = os.path.join(os.path.dirname(wrapper_dir), series_name)
+        dest_season_dir = os.path.join(dest_series_dir, season_dir_name)
+        moves, trashes = [], []
+        for src_path in sorted(file_list):
+            relative = os.path.relpath(src_path, wrapper_dir)
+            parts = relative.split(os.sep)
+            basename = parts[-1]
+            if len(parts) == 1 and (basename.startswith('episodes.tsv')
+                                    or basename == EPISODES_ERR_FILENAME):
+                trashes.append(src_path)   # stale fake-series artifact
+                continue
+            if re.fullmatch(r's\d{1,2}', parts[0], re.IGNORECASE) \
+                    and int(parts[0][1:]) == season_number:
+                relative = os.sep.join(parts[1:])   # strip the sNN layer
+            moves.append((src_path, os.path.join(dest_season_dir, relative)))
+        candidates.append((series_key, library_name, wrapper_dir,
+                           dest_series_dir, dest_season_dir, moves, trashes))
+
+    if not candidates:
+        return set()
+
+    print(f"\n>>> --sort-new: season-token wrapper consolidation "
+          f"({len(candidates)} wrapper(s) detected)")
+    for series_key, library_name, wrapper_dir, _dest_series, dest_season_dir, moves, trashes in candidates:
+        print(f"  {series_key}: [{library_name}] {os.path.basename(wrapper_dir)}")
+        print(f"    → {dest_season_dir}/   ({len(moves)} file(s) to move, "
+              f"{len(trashes)} stale artifact(s) to trash)")
+        if VRB:
+            for src_path, dest_path in moves:
+                print(f"      {os.path.relpath(src_path, wrapper_dir)} → {dest_path}")
+            for src_path in trashes:
+                print(f"      TRASH {os.path.basename(src_path)}")
+    if dry_run:
+        print(f"  --try: would consolidate {len(candidates)} wrapper(s).  No changes applied.")
+        return set()
+    if not yes:
+        try:
+            response = input(f"\n  Consolidate {len(candidates)} wrapper(s)? [y/N]: ").strip().lower()
+        except EOFError:
+            response = ''
+        if response != 'y':
+            print("  Skipped — no wrappers consolidated.")
+            return set()
+
+    sidecar = load_disk_map_sidecar()
+    consolidated_keys = set()
+    log_entries = []
+    moved_total = trashed_total = failed_total = 0
+
+    def _move_one(src_path, dest_path):
+        dest_dir = os.path.dirname(dest_path)
+        if remote_host:
+            escaped_dir = escape_path_for_ssh(dest_dir)
+            escaped_src = escape_path_for_ssh(src_path)
+            escaped_dst = escape_path_for_ssh(dest_path)
+            result = subprocess.run(
+                [*_ssh_args(remote_host),
+                 f'mkdir -p "{escaped_dir}" && mv -n "{escaped_src}" "{escaped_dst}" '
+                 f'&& [ ! -e "{escaped_src}" ] && echo MOVED || echo FAILED'],
+                capture_output=True, text=True)
+            return result.returncode == 0 and result.stdout.strip() == 'MOVED'
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            if os.path.exists(dest_path):
+                return False   # never clobber
+            import shutil as _shutil
+            _shutil.move(src_path, dest_path)
+            return True
+        except OSError:
+            return False
+
+    for series_key, library_name, wrapper_dir, dest_series_dir, dest_season_dir, moves, trashes in candidates:
+        wrapper_failed = 0
+        for src_path, dest_path in moves:
+            if _move_one(src_path, dest_path):
+                moved_total += 1
+                # Per-file cache + sidecar integrity (layered wrappers strip
+                # the sNN component, so a plain prefix rewrite cannot cover this).
+                owner_key = PLEX_Media.OBJ_BY_FILEPATH.get(src_path)
+                owner_obj = PLEX_Media.OBJ_BY_ID.get(owner_key) if owner_key else None
+                if owner_obj is not None:
+                    _update_cache_filepath(owner_obj, src_path, dest_path)
+                if src_path in PLEX_Media.OBJ_BY_FILEPATH:
+                    PLEX_Media.OBJ_BY_FILEPATH[dest_path] = PLEX_Media.OBJ_BY_FILEPATH.pop(src_path)
+                if src_path in sidecar:
+                    sidecar[dest_path] = sidecar.pop(src_path)
+                status = 'moved'
+            else:
+                wrapper_failed += 1
+                failed_total += 1
+                print(f"    ✗ NOT MOVED: {src_path}  (target exists or move failed)")
+                status = 'failed'
+            log_entries.append({'series_key': series_key, 'from': src_path,
+                                'to': dest_path, 'status': status})
+        for src_path in trashes:
+            ok, _info = move_to_trash(src_path, remote_host)
+            if ok:
+                trashed_total += 1
+            else:
+                wrapper_failed += 1
+                failed_total += 1
+                print(f"    ✗ NOT TRASHED: {src_path}")
+            log_entries.append({'series_key': series_key, 'from': src_path,
+                                'to': None,
+                                'status': 'trashed' if ok else 'failed'})
+        if wrapper_failed == 0:
+            # When the wrapper was the series obj's OWN directory, repoint it
+            # to the consolidated location and drop the series from the
+            # per-series sort loop (its old dir is gone).  Episode-derived
+            # wrappers (Plex merged several wrappers into one series) leave
+            # the series obj untouched.
+            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+            own_dir_consolidated = (series_obj is not None
+                                    and series_obj.get('file') == wrapper_dir)
+            if own_dir_consolidated:
+                series_obj['file'] = dest_series_dir
+            # Remove the emptied wrapper tree: the season-dir layer first,
+            # then the wrapper itself (rmdir, non-recursive — empty-only).
+            for empty_dir in sorted({os.path.dirname(src) for src, _ in moves} | {wrapper_dir},
+                                    key=lambda p: -p.count('/')):
+                if not (empty_dir == wrapper_dir or empty_dir.startswith(wrapper_dir + os.sep)):
+                    continue
+                if remote_host:
+                    escaped_dir = escape_path_for_ssh(empty_dir)
+                    subprocess.run([*_ssh_args(remote_host),
+                                    f'rmdir "{escaped_dir}" 2>/dev/null'],
+                                   capture_output=True, text=True)
+                else:
+                    try:
+                        os.rmdir(empty_dir)
+                    except OSError:
+                        pass
+            wrapper_exists, _ = my_plex_file_operation('CHECK', wrapper_dir, remote_host)
+            if not wrapper_exists:
+                if own_dir_consolidated:
+                    consolidated_keys.add(series_key)
+                print(f"  ✓ consolidated: {os.path.basename(wrapper_dir)} "
+                      f"→ {dest_season_dir}/  (wrapper removed)")
+            else:
+                print(f"  ⚠ NOT EMPTY: {wrapper_dir} — contents moved but the wrapper "
+                      f"still holds something (dotfiles?), left in place")
+        else:
+            print(f"  ⚠ {series_key}: {wrapper_failed} file(s) failed — wrapper kept")
+
+    save_disk_map_sidecar(sidecar)
+    update_and_save_cache(build_media_cache_dict())
+    print(f"\n  SUMMARY  --sort-new season-token consolidation")
+    print(f"  MOVED     : {moved_total} file(s)")
+    print(f"  TRASHED   : {trashed_total} stale artifact(s) (episodes.tsv*, episodes.err)")
+    print(f"  FAILED    : {failed_total} file(s)")
+    print(f"  REMOVED   : {len(consolidated_keys)} wrapper dir(s)")
+    log_path = _write_resolve_log('sort_new_season_wrappers', {
+        'total_wrappers': len(candidates),
+        'total_moved':    moved_total,
+        'total_trashed':  trashed_total,
+        'total_failed':   failed_total,
+        'entries':        log_entries,
+    })
+    if log_path:
+        print(f"  Log: {log_path}")
+    print(f"  Run `my-plex --scan` so Plex re-catalogues the consolidated series.")
+    return consolidated_keys
+
+
 def cmd_sort_new(args, dry_run=False, target=None):
     """Sort unsorted recordings into season directories for all series.
 
@@ -37369,6 +37694,16 @@ def cmd_sort_new(args, dry_run=False, target=None):
     if not all_series_list and not target:
         print("No series found in series-type libraries.")
         # Fall through to movie section below
+
+    # Phase 0 (v3): consolidate season-token release wrappers
+    # ('<series>.s01.<release junk>' catalogued as its own series) into
+    # <library_root>/<series>/s<NN>/.  Consolidated series leave the
+    # per-series sort loop — their directories are gone.
+    _consolidated = _sort_new_consolidate_season_wrappers(
+        all_series_list, dry_run=dry_run, yes=bool(safe_getattr(args, 'yes', False)))
+    if _consolidated:
+        all_series_list = [(k, d, lib) for k, d, lib in all_series_list
+                           if k not in _consolidated]
 
     total_sorted = 0
     total_failed = 0
