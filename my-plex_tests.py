@@ -14,6 +14,46 @@ import subprocess
 
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
+
+def _pick_most_populated_library(list_libraries_stdout):
+    """Pick the library with the MOST items from `--list-libraries` output.
+
+    Data-dependent E2E tests need a library that actually has content —
+    the first row may be a near-empty staging library.  Library names stay
+    dynamic (per feedback_no_local_plex_examples: never hard-code them).
+    Returns the library name, or None when no data row parses.
+    """
+    best_name, best_items = None, -1
+    for line in list_libraries_stdout.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 7:
+            continue
+        name = parts[0].strip()
+        if not name or name[0] in ('-', '=') or 'NAME' in name.upper():
+            continue
+        try:
+            items = int(parts[6].strip())
+        except ValueError:
+            continue
+        if items > best_items:
+            best_name, best_items = name, items
+    return best_name
+
+
+def _registry_entry_block(content, category):
+    """Return the source block of ONE PROBLEM_CATEGORIES_REGISTRY entry.
+
+    Scoped to the registry dict so same-named keys elsewhere (e.g.
+    PROBLEMS2DISK['reencode']) can never shadow the lookup.
+    Returns the entry body string, or None when not found."""
+    registry = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL)
+    if not registry:
+        return None
+    entry = re.search(r"'%s': \{\n(.*?)\n    \}," % re.escape(category),
+                      registry.group(1), re.DOTALL)
+    return entry.group(1) if entry else None
+
+
 ############################################################
 #### REGRESSION TESTING
 
@@ -2069,14 +2109,18 @@ class TestProblems(unittest.TestCase):
         self.assertIn("_list_broken_files", body)
 
     def test_problems_runs_excess_versions(self):
-        """--problems must call _list_excess_versions with limit 3 (via _run_check wrapper)."""
+        """--problems must run excess-versions with limit 3 via the registry (v3)."""
         content = self._read_script()
         import re
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
-        self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn("_list_excess_versions", body)
-        self.assertIn(", 3)", body, "Must use limit 3 for excess versions")
+        # Registry entry delegates to _pc_excess …
+        reg = _registry_entry_block(content, 'excess_versions')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'excess_versions'")
+        self.assertIn('_pc_excess', reg)
+        # … and _pc_excess calls _list_excess_versions with limit 3.
+        helper = re.search(r"def _pc_excess\(.*?\n(.*?)\n\n", content, re.DOTALL)
+        self.assertIsNotNone(helper, "Must find _pc_excess helper")
+        self.assertIn("_list_excess_versions", helper.group(1))
+        self.assertIn(", 3)", helper.group(1), "Must use limit 3 for excess versions")
 
     def test_problems_prints_summary(self):
         """--problems must print a closing PROBLEM DETECTION milestone."""
@@ -2096,8 +2140,14 @@ class TestProblems(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("PROBLEMS HELP", body)
-        self.assertIn("--broken", body)
-        self.assertIn("--excess-versions", body)
+        # v3: per-category lines are auto-generated from the registry — the
+        # help case must iterate it, and the registry must carry the flags.
+        self.assertIn("PROBLEM_CATEGORIES_REGISTRY.items()", body,
+                      "--help problems must auto-generate categories from the registry")
+        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        self.assertIsNotNone(reg, "Must find PROBLEM_CATEGORIES_REGISTRY")
+        self.assertIn("'--broken'", reg)
+        self.assertIn("'--excess-versions'", reg)
 
     def test_broken_returns_count(self):
         """_list_broken_files must return a count for --problems summary."""
@@ -2173,14 +2223,20 @@ class TestReencode(unittest.TestCase):
         self.assertIn("_list_reencode_candidates(", body)
 
     def test_reencode_in_problems_summary(self):
-        """--problems summary must include reencode count."""
+        """--problems must count reencode candidates via the registry (v3)."""
         src = self._read_script()
         import re
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", src, re.DOTALL)
-        self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn("reencode_count", body)
-        self.assertIn("--reencode", body)
+        reg = _registry_entry_block(src, 'reencode')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'reencode'")
+        self.assertIn('_list_reencode_candidates', reg,
+                      "registry 'reencode' entry must invoke _list_reencode_candidates")
+        self.assertIn("'--reencode'", reg,
+                      "registry 'reencode' entry must carry the --reencode cli_flag")
+        # The shared warning printer iterates the registry, so the count
+        # reaches the --problems / --update-cache summaries automatically.
+        idx = src.index('def _print_problem_warnings(')
+        end = src.index('\ndef ', idx + 1)
+        self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', src[idx:end])
 
     def test_problems_verbose_suppresses_details(self):
         """--problems without -V must suppress detail output (redirect_stdout)."""
@@ -2216,13 +2272,16 @@ class TestReencode(unittest.TestCase):
         self.assertIn("return total_file_count", body, "Must return total count")
 
     def test_reencode_in_problems_help(self):
-        """--help problems must mention --reencode."""
+        """--help problems must surface --reencode (auto-generated from the registry)."""
         src = self._read_script()
         import re
         match = re.search(r"case 'problems':\n(.*?)sys\.exit\(0\)", src, re.DOTALL)
         self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn("--reencode", body)
+        self.assertIn("PROBLEM_CATEGORIES_REGISTRY.items()", match.group(1),
+                      "--help problems must auto-generate categories from the registry")
+        reg = _registry_entry_block(src, 'reencode')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'reencode'")
+        self.assertIn("'--reencode'", reg)
 
     def test_reencode_help_page_exists(self):
         """--help reencode must have a dedicated help page (case 'reencode':)."""
@@ -3023,8 +3082,10 @@ class TestEndToEnd(unittest.TestCase):
         result = self._run_cmd('--problems')
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
         self.assertIn("PROBLEM DETECTION", result.stdout)
-        self.assertIn("broken/truncated files", result.stdout)
-        self.assertIn("excess version entries", result.stdout)
+        # v3 registry-driven category headers (always printed, independent of counts)
+        self.assertIn("Broken / Truncated Files", result.stdout)
+        self.assertIn("Excess Versions (3+)", result.stdout)
+        self.assertRegex(result.stdout, r"PROBLEM DETECTION.*: \d+ problem\(s\) found")
 
     def test_list_labels(self):
         """my-plex --list-labels must list labels."""
@@ -3210,14 +3271,7 @@ class TestFilter(unittest.TestCase):
         libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
                                      capture_output=True, text=True, timeout=30)
         cls._any_lib = None
-        for line in libs_result.stdout.splitlines():
-            parts = line.split('\t')
-            if len(parts) >= 2 and parts[0].strip() and not parts[0].strip().startswith('LIBRARY'):
-                # Skip header line and library-NAME header
-                first = parts[0].strip()
-                if first and first[0] not in ('-', '=') and 'NAME' not in first.upper():
-                    cls._any_lib = first
-                    break
+        cls._any_lib = _pick_most_populated_library(libs_result.stdout)
 
     def _run(self, *args):
         import subprocess
@@ -3439,19 +3493,25 @@ class TestFilter(unittest.TestCase):
             self.assertTrue(has_path, f"Rolled-up row must contain absolute path: {line!r}")
 
     def test_series_rollup_lang_does_not_explode(self):
-        """genre:Comedy type:series lang:de must return fewer Show: rows than genre:Comedy type:series.
+        """Adding lang:de must not EXPLODE the row count (rollup regression).
 
-        Regression: lang:de added AUDIO/SUBS extra cols whose varying values broke rollup,
-        causing MORE rows with lang:de than without.
-        """
-        comedy_shows    = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series')
-                           if l.startswith('Series:')}
-        comedy_de_shows = {l.split()[0] for l in self._lines('genre:Comedy', 'type:series', 'lang:de')
-                           if l.startswith('Series:')}
-        self.assertTrue(comedy_de_shows.issubset(comedy_shows),
-            f"Comedy+de show keys must be subset of comedy show keys.\n"
-            f"  comedy: {sorted(comedy_shows)[:5]}\n"
-            f"  comedy+de: {sorted(comedy_de_shows)[:5]}")
+        Regression: lang:de added AUDIO/SUBS extra cols whose varying values
+        broke rollup, causing MORE rows with lang:de than without.
+
+        Note: a strict Series:-key subset check is intentionally NOT used —
+        narrowing to one language can legitimately make a previously
+        non-uniform row set display-uniform, ROLLING IT UP HIGHER (e.g. a
+        series split over two wrapper dirs shows Episode+Season rows plain,
+        but one partial Series row with lang:de).  The regression guarded
+        here is row EXPLOSION, so assert on total row counts."""
+        _row_re = re.compile(r'^(Movie|Episode|Season|Series):')
+        comedy_rows    = [l for l in self._lines('genre:Comedy', 'type:series')
+                          if _row_re.match(l)]
+        comedy_de_rows = [l for l in self._lines('genre:Comedy', 'type:series', 'lang:de')
+                          if _row_re.match(l)]
+        self.assertLessEqual(len(comedy_de_rows), len(comedy_rows),
+            f"Adding lang:de must not produce MORE rows "
+            f"({len(comedy_de_rows)} with lang:de vs {len(comedy_rows)} without)")
 
     # --- Combined filters (AND logic) ---
 
@@ -3487,14 +3547,7 @@ class TestDefaultScope(unittest.TestCase):
         import subprocess
         libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
                                      capture_output=True, text=True, timeout=30)
-        cls._any_lib = None
-        for line in libs_result.stdout.splitlines():
-            parts = line.split('\t')
-            if len(parts) >= 2:
-                first = parts[0].strip()
-                if first and first[0] not in ('-', '=') and 'NAME' not in first.upper():
-                    cls._any_lib = first
-                    break
+        cls._any_lib = _pick_most_populated_library(libs_result.stdout)
 
     def _run(self, *args):
         import subprocess
@@ -5152,17 +5205,25 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertNotIn('TITLE', result.stdout, "Episode table TITLE header should NOT appear without -V")
 
     def test_series_info_verbose_has_episode_table(self):
-        """my-plex 'boston legal' --info -V should show an episode table."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info', '-V'],
-            capture_output=True, text=True, timeout=30)
-        output = result.stdout + result.stderr
-        if result.returncode != 0 and 'Traceback' not in result.stderr:
-            self.skipTest("'boston legal' not in cache or cache empty — cannot test show info episode table")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn('EPISODE', result.stdout, "Should have EPISODE header")
-        self.assertIn('TITLE', result.stdout, "Should have TITLE header")
-        # Boston Legal uses absolute numbering (S01E101, S01E102, ...)
-        self.assertRegex(result.stdout, r'S01E\d+', "Should show S01 episodes")
+        """my-plex <Series:KEY> --info -V should show an episode table.
+
+        Series picked dynamically from the cache (never a hard-coded local
+        title).  Episode IDs may be negative when Plex mis-parsed the
+        numbering, so match the S..E shape, not specific digits."""
+        list_result = subprocess.run([sys.executable, MAIN_SCRIPT, 'type:series', '--list'],
+            capture_output=True, text=True, timeout=60)
+        series_keys = [line.split()[0] for line in list_result.stdout.splitlines()
+                       if line.startswith('Series:')]
+        if not series_keys:
+            self.skipTest("No series in cache — cannot test series info episode table")
+        for series_key in series_keys[:5]:
+            result = subprocess.run([sys.executable, MAIN_SCRIPT, series_key, '--info', '-V'],
+                capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and 'EPISODE' in result.stdout:
+                self.assertIn('TITLE', result.stdout, "Should have TITLE header")
+                self.assertRegex(result.stdout, r'S\d+E', "Should show episode rows")
+                return
+        self.skipTest("No cached series produced an episode table (no episodes on disk)")
 
 
 class TestEpisodesErr(unittest.TestCase):
@@ -5258,26 +5319,31 @@ class TestEpisodesErr(unittest.TestCase):
         self.assertIn('_fallback_from', body, "Must record fallback origin")
 
     def test_problems_includes_tsv_section(self):
-        """--problems handler must call _list_tsv_problems."""
+        """--problems must run TSV detection via the registry's 'tsv' category (v3)."""
         with open(MAIN_SCRIPT, 'r') as f:
             content = f.read()
         import re
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
-        self.assertIsNotNone(match, "Must find --problems handler block")
-        body = match.group(1)
-        self.assertIn('_list_tsv_problems', body, "Must call _list_tsv_problems")
-        self.assertIn('Episode Data', body, "Must have Episode Data section header")
+        reg = _registry_entry_block(content, 'tsv')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'tsv'")
+        self.assertIn('_list_tsv_problems', reg, "Must invoke _list_tsv_problems")
+        self.assertIn('Episode Data', reg, "Must have Episode Data section header")
+        self.assertIn("'tsv_relevant':  True", reg,
+                      "'tsv' category must be flagged tsv_relevant for --problems --tsv")
 
     def test_problems_summary_includes_tsv_count(self):
-        """--problems summary must include tsv_problem_count."""
+        """--problems summary must surface the tsv count via the registry-driven warnings."""
         with open(MAIN_SCRIPT, 'r') as f:
             content = f.read()
         import re
-        match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
-        self.assertIsNotNone(match)
-        body = match.group(1)
-        self.assertIn('tsv_problem_count', body)
-        self.assertIn('Episode data issues', body)
+        # The shared warning printer iterates the registry, which carries the
+        # tsv description shown in the summary.
+        idx = content.index('def _print_problem_warnings(')
+        end = content.index('\ndef ', idx + 1)
+        self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', content[idx:end])
+        reg = _registry_entry_block(content, 'tsv')
+        self.assertIsNotNone(reg)
+        self.assertIn('Episode-scrape failures', reg,
+                      "registry 'tsv' description must explain the count")
 
     def test_problems_e2e(self):
         """--problems runs without error (E2E)."""
@@ -5392,11 +5458,11 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn('_enabled_problem_categories()', body,
                       "--problems handler must iterate the problem-category registry")
         # 2) the registry's 'unmatched' entry invokes _list_unmatched
-        reg = re.search(r"'unmatched': \{\n(.*?)\n    \},", content, re.DOTALL)
+        reg = _registry_entry_block(content, 'unmatched')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unmatched'")
-        self.assertIn('_list_unmatched', reg.group(1),
+        self.assertIn('_list_unmatched', reg,
                       "registry 'unmatched' entry must invoke _list_unmatched")
-        self.assertIn('Unmatched', reg.group(1), "Must have Unmatched section header")
+        self.assertIn('Unmatched', reg, "Must have Unmatched section header")
 
     def test_help_unmatched_exists(self):
         """--help unmatched must have a case block."""
@@ -5546,11 +5612,11 @@ class TestUnsorted(unittest.TestCase):
         self.assertIn('_enabled_problem_categories()', body,
                       "--problems handler must iterate the problem-category registry")
         # 2) the registry's 'unsorted' entry invokes _list_unsorted
-        reg = re.search(r"'unsorted': \{\n(.*?)\n    \},", content, re.DOTALL)
+        reg = _registry_entry_block(content, 'unsorted')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unsorted'")
-        self.assertIn('_list_unsorted', reg.group(1),
+        self.assertIn('_list_unsorted', reg,
                       "registry 'unsorted' entry must invoke _list_unsorted")
-        self.assertIn('Unsorted', reg.group(1), "Must have Unsorted section header")
+        self.assertIn('Unsorted', reg, "Must have Unsorted section header")
 
     def test_problems_summary_includes_unsorted(self):
         """--problems summary must show unsorted count."""
@@ -6053,20 +6119,22 @@ class TestJunk(unittest.TestCase):
             return f.read()
 
     def test_functions_exist(self):
-        """_detect_junk_file + _list_junk_files must exist."""
+        """_list_junk_files + _compile_junk_patterns must exist (v3 JUNK_PATTERNS design)."""
         content = self._read_script()
-        self.assertIn('def _detect_junk_file(', content)
         self.assertIn('def _list_junk_files(', content)
+        self.assertIn('def _compile_junk_patterns(', content)
+        # The v2 per-file heuristic detector was retired with the
+        # JUNK_PATTERNS redesign (no backwards compatibility).
+        self.assertNotIn('def _detect_junk_file(', content)
 
     def test_config_defaults_present(self):
-        """Junk-file thresholds must be in CONFIG_DEFAULTS + module-level loaders."""
+        """JUNK_PATTERNS dict must be in CONFIG_DEFAULTS + module-level loader."""
         content = self._read_script()
-        self.assertIn("'JUNK_FILENAME_PATTERNS'", content)
-        self.assertIn("'JUNK_MAX_SIZE_MB'", content)
-        self.assertIn("'JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING'", content)
-        self.assertIn("JUNK_FILENAME_PATTERNS_COMPILED = [re.compile(", content)
-        self.assertIn("JUNK_MAX_SIZE_MB = CONFIG_DEFAULTS.get(", content)
-        self.assertIn("JUNK_MAX_DURATION_PCT_OF_LARGEST_SIBLING = CONFIG_DEFAULTS.get(", content)
+        self.assertIn("'JUNK_PATTERNS'", content)
+        self.assertIn("JUNK_PATTERNS = CONFIG_DEFAULTS.get(", content)
+        # Old scalar knobs were replaced by per-pattern fields.
+        self.assertNotIn("'JUNK_FILENAME_PATTERNS'", content)
+        self.assertNotIn("'JUNK_MAX_SIZE_MB'", content)
 
     def test_library_argparser(self):
         """--junk must be in library argparser; --trash flag must NOT exist (use --resolve)."""
@@ -6093,28 +6161,28 @@ class TestJunk(unittest.TestCase):
         self.assertIn("'junk'", line)
 
     def test_help_exists(self):
-        """--help junk must work, mention all 3 signals, and use --resolve as the action verb."""
+        """--help junk must document the JUNK_PATTERNS design and use --resolve as the action verb."""
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--help', 'junk'],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, f"--help junk failed: {result.stderr}")
         self.assertIn('JUNK FILES', result.stdout)
-        self.assertIn('FILENAME PATTERN', result.stdout)
-        self.assertIn('TINY SIZE', result.stdout)
-        self.assertIn('TINY DURATION', result.stdout)
+        self.assertIn('JUNK_PATTERNS', result.stdout)
+        self.assertIn('FILENAME_REGEXP', result.stdout)
+        self.assertIn('MAX_SIZE_MB', result.stdout)
+        self.assertIn('RECURSIVE', result.stdout)
         self.assertIn('--resolve', result.stdout, "Help must use --resolve as the action verb")
 
     def test_problems_integration(self):
-        """--junk must be wired into --problems suite + --update-cache summary."""
+        """--junk must be wired into --problems via the registry's 'junk' category (v3)."""
         content = self._read_script()
-        # _problems_cache must have a 'junk' key (populated during --update-cache)
-        self.assertIn("'junk':              _pc_junk,", content,
-            "--update-cache must populate _problems_cache['junk']")
-        # _print_problem_warnings must surface it with the --junk --resolve fix command
-        self.assertIn("--junk --resolve", content,
-            "Problem warning row must point to --junk --resolve")
-        # The --problems detail run must include _list_junk_files
-        self.assertIn("_run_check(PLEX_Media._list_junk_files,", content)
+        import re
+        reg = _registry_entry_block(content, 'junk')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'junk'")
+        self.assertIn('_list_junk_files', reg,
+            "registry 'junk' entry must invoke _list_junk_files")
+        self.assertIn('--junk --resolve', reg,
+            "registry 'junk' fix hint must point to --junk --resolve")
 
     def test_e2e_runs(self):
         """--junk must run without error."""
@@ -6123,25 +6191,29 @@ class TestJunk(unittest.TestCase):
             capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, f"--junk failed: {result.stderr}")
 
-    def test_size_and_duration_signals_gate_on_small_cluster(self):
-        """Size and duration signals must only fire when len(siblings) <= 2.
-        Big multi-version groupings (e.g. 1000+ broadcast recordings) produce
-        false positives if every short member is compared to the longest one."""
+    def test_pattern_criteria_use_and_semantics(self):
+        """When a JUNK_PATTERNS entry sets BOTH regex and size, they must AND-combine.
+        (Replaces the retired _detect_junk_file sibling-cluster gating test —
+        the v3 design has no sibling heuristics, only per-pattern criteria.)"""
         content = self._read_script()
-        idx = content.index('def _detect_junk_file(')
+        idx = content.index('def _list_junk_files(')
         end = content.index('\n    @staticmethod', idx)
         body = content[idx:end]
-        self.assertIn('len(siblings) <= 2', body,
-            "Both size and duration signals must gate on len(siblings) <= 2")
+        self.assertIn('regex_pass and size_pass', body,
+            "Active criteria must AND-combine (regex AND size)")
 
-    def test_clean_pipeline_includes_junk_resolve(self):
-        """--clean pipeline must include ['--junk', '--resolve'] as a step."""
+    def test_cleanup_pipeline_includes_junk_resolve(self):
+        """Default --cleanup pipeline must include ['--junk', '--resolve'] as a phase.
+        (v3: --clean was retired from the defaults; --cleanup is the safe default.)"""
         content = self._read_script()
-        idx = content.index("'--clean': [")
+        idx = content.index("'--cleanup': [")
         end = content.index("\n        ],", idx)
         section = content[idx:end]
-        self.assertIn("'--junk', '--resolve'", section,
-            f"PIPELINES['--clean'] must run --junk --resolve; got: {section}")
+        # Tolerate alignment whitespace inside the phase lists.
+        self.assertRegex(section, r"\['--junk',\s+'--resolve'\]",
+            f"PIPELINES['--cleanup'] must run --junk --resolve; got: {section}")
+        self.assertRegex(section, r"\['--orphaned',\s+'--resolve'\]",
+            f"PIPELINES['--cleanup'] must run --orphaned --resolve; got: {section}")
 
     def test_pipeline_dry_run_and_yes_propagation(self):
         """--junk must be in DRY_RUN_AWARE and YES_AWARE sets so --clean propagates --try / --yes."""
@@ -6696,9 +6768,11 @@ class TestRenumber(unittest.TestCase):
         """--renumber must be registered in main_parser."""
         content = self._read_script()
         self.assertIn("'--renumber'", content)
-        # Check both main_parser and GLOBAL_CMD_PARSER have it
+        # Scan the WHOLE main_parser block (a fixed-size window silently
+        # grows stale as new flags push --renumber's registration past it).
         idx = content.index('main_parser.add_argument')
-        section = content[idx:idx+5000]
+        end = content.index('GLOBAL_CMD_PARSER = argparse.ArgumentParser', idx)
+        section = content[idx:end]
         self.assertIn("'--renumber'", section)
 
     def test_command_registration_global_parser(self):
@@ -6772,37 +6846,48 @@ class TestRenumber(unittest.TestCase):
         self.assertIn('--renumber', section)
 
     def test_problems_integration_checks(self):
-        """--problems must include all 4 renumber checks (#9-#12)."""
+        """--problems must include all 4 renumber checks via the registry (v3)."""
         content = self._read_script()
-        idx = content.index('def execute_global_commands(')
-        end = content.index('\ndef ', idx + 1)
-        section = content[idx:end]
+        import re
+        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        self.assertIsNotNone(reg, "Must find PROBLEM_CATEGORIES_REGISTRY")
+        section = reg
         self.assertIn('_list_renumber_candidates', section)
         self.assertIn('_list_renumber_lack_of_data', section)
         self.assertIn('_list_renumber_season_mismatch', section)
         self.assertIn('_list_renumber_abs_mismatch', section)
 
     def test_print_problem_warnings_includes_renumber(self):
-        """_print_problem_warnings must show renumber warning lines."""
+        """The registry-driven warning printer must cover all renumber categories."""
         content = self._read_script()
+        # _print_problem_warnings iterates the registry …
         idx = content.index('def _print_problem_warnings(')
         end = content.index('\ndef ', idx + 1)
-        section = content[idx:end]
-        self.assertIn('renumber', section)
-        self.assertIn('renumber_nodata', section)
-        self.assertIn('renumber_season', section)
-        self.assertIn('renumber_abs', section)
+        self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', content[idx:end])
+        # … which must define every renumber category.
+        import re
+        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        self.assertIsNotNone(reg)
+        for category in ("'renumber'", "'renumber_nodata'",
+                         "'renumber_season'", "'renumber_abs'"):
+            self.assertIn(f"    {category}: {{", reg,
+                          f"registry must define {category}")
 
     def test_help_problems_lists_renumber_checks(self):
-        """--help problems must document renumber checks #9-#12."""
+        """--help problems must document the renumber checks (registry headers)."""
         content = self._read_script()
+        # Help is auto-generated from the registry; the registry headers
+        # carry the human-readable check names.
         idx = content.index("case 'problems':")
         end = content.index("sys.exit(0)", idx)
-        section = content[idx:end]
-        self.assertIn('--renumber', section)
-        self.assertIn('Lack of Data', section)
-        self.assertIn('Season Mismatch', section)
-        self.assertIn('Absolute Numbering Mismatch', section)
+        self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', content[idx:end])
+        import re
+        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        self.assertIsNotNone(reg)
+        self.assertIn("'--renumber'", reg)
+        self.assertIn('Lack of Data', reg)
+        self.assertIn('Season Mismatch', reg)
+        self.assertIn('Absolute Numbering Mismatch', reg)
 
     def test_renumber_e2e(self):
         """--renumber runs without error (E2E)."""
@@ -8684,9 +8769,10 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         self.assertIn("_VARIADIC_SCOPE_FLAGS", src)
         self.assertIn("_in_variadic_window", src)
-        # Every variadic-scope flag must appear in the set (v1.20+: --mv / --move dropped, --mv-to / --move-to are the canonical names)
+        # Every variadic-scope flag must appear in the set (v1.20+: --mv / --move
+        # dropped; v3 step 4h: --original-languages retired entirely)
         for flag in ("'--mv-to'", "'--move-to'",
-                     "'--original-languages'", "'--add-label'", "'--remove-label'",
+                     "'--add-label'", "'--remove-label'",
                      "'--remux'", "'--plex2disk'", "'--disk2plex'"):
             self.assertIn(flag, src, f"_VARIADIC_SCOPE_FLAGS must include {flag}")
 
@@ -8751,11 +8837,12 @@ class TestUniversalScope(unittest.TestCase):
         self.assertIn("_get_universal_scope(", body)
 
     def test_action_commands_use_nargs_star(self):
-        """--remux / --plex2disk / --disk2plex / --rename / --renumber / --original-languages
-        must use nargs='*' so compound SCOPE (lib + filter) reaches the dispatcher."""
+        """--remux / --plex2disk / --disk2plex / --rename / --renumber
+        must use nargs='*' so compound SCOPE (lib + filter) reaches the dispatcher.
+        (v3 step 4h: --original-languages retired from this list.)"""
         src = self._read_script()
         for flag in ('--remux', '--plex2disk', '--disk2plex', '--plex-disk-sync', '--sync',
-                     '--rename', '--renumber', '--original-languages',
+                     '--rename', '--renumber',
                      '--map-to-filename', '--map-from-filename'):
             self.assertIn(f"'{flag}'", src)
         # Spot-check the nargs setting (look for the GLOBAL_CMD_PARSER line)
@@ -9083,12 +9170,15 @@ class TestUnrecognized(unittest.TestCase):
         self.assertIn("'--alien': 'unrecognized'", src)
 
     def test_problems_integration(self):
-        """--problems must include 'unrecognized' count + warning row."""
+        """--problems must include 'unrecognized' via the registry (v3)."""
         src = self._read_script()
-        self.assertIn("unrecognized_count = _count_unrecognized_top_level", src)
-        self.assertIn("'unrecognized':      unrecognized_count", src)
-        # _print_problem_warnings must surface the unrecognized count
-        self.assertIn("unrecognized top-level entries", src)
+        import re
+        reg = _registry_entry_block(src, 'unrecognized')
+        self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unrecognized'")
+        self.assertIn('_count_unrecognized_top_level', reg,
+                      "registry 'unrecognized' entry must invoke _count_unrecognized_top_level")
+        self.assertIn("'--unrecognized'", reg,
+                      "registry 'unrecognized' entry must carry the cli_flag")
 
     def test_help_page_exists(self):
         """--help unrecognized must have a dedicated help page (covers --alien synonym too)."""
@@ -9167,25 +9257,30 @@ class TestOriginalLanguages(unittest.TestCase):
         self.assertIn("'country', 'countries'", src)
         self.assertIn("_country_matches(", src)
 
-    def test_original_languages_registered_in_main_parser(self):
-        """--original-languages must be registered in main_parser."""
+    def test_original_languages_cli_retired(self):
+        """v3 step 4h: the standalone --original-languages CLI flag is RETIRED.
+        It must NOT be registered in either parser (the backfill lives in
+        --update-cache now; no backwards compatibility)."""
         src = self._read_script()
-        self.assertIn("main_parser.add_argument('--original-languages', '--collect-original-languages'", src)
+        self.assertNotIn("main_parser.add_argument('--original-languages'", src)
+        self.assertNotIn("GLOBAL_CMD_PARSER.add_argument('--original-languages'", src)
 
-    def test_original_languages_registered_in_global_cmd_parser(self):
-        """--original-languages must be registered in GLOBAL_CMD_PARSER with help text."""
+    def test_original_languages_backfill_function_exists(self):
+        """cmd_original_languages stays as the internal TMDB backfill engine."""
         src = self._read_script()
-        self.assertIn("GLOBAL_CMD_PARSER.add_argument('--original-languages', '--collect-original-languages'", src)
+        self.assertIn("def cmd_original_languages(", src)
 
-    def test_original_languages_in_has_standalone_cmd(self):
-        """--original-languages must be in has_standalone_cmd check."""
+    def test_original_languages_backfill_in_update_cache(self):
+        """--update-cache must run the original_language backfill in-process (v3 step 4g)."""
         src = self._read_script()
-        self.assertIn("safe_getattr(args, 'original_languages', None) is not None", src)
+        self.assertIn("cmd_original_languages(target=None, dry_run=False)", src,
+                      "--update-cache must invoke the lazy original_language backfill")
 
-    def test_original_languages_handler_in_execute_global_commands(self):
-        """execute_global_commands must dispatch --original-languages to cmd_original_languages()."""
+    def test_original_languages_filter_token_still_works(self):
+        """The original_lang: filter vocabulary must survive the CLI retirement."""
         src = self._read_script()
-        self.assertIn("cmd_original_languages(target=target", src)
+        self.assertIn("original_language", src)
+        self.assertIn("original_lang", src)
 
     def test_original_languages_help_page_exists(self):
         """--help original-languages must have a dedicated help page."""
@@ -11618,7 +11713,8 @@ def run_regression_tests(main_globals, scope=None):
         test_parser.add_argument('--type', type=str)
         test_parser.add_argument('--update-cache', action='store_true')
         test_parser.add_argument('--force', action='store_true')
-        test_parser.add_argument('--force-plex', action='store_true')
+        # Mirror the real parser: --force-plex stores into dest='from_scratch'
+        test_parser.add_argument('--force-plex', dest='from_scratch', action='store_true')
 
         validation_tests = [
             # (args, should_fail, description)
