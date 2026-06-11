@@ -4696,6 +4696,61 @@ class TestSortNew(unittest.TestCase):
         src = self._read_script()
         self.assertIn("'--dry-run'", src, "--dry-run not found in argparse")
 
+    # --- season-token wrapper consolidation (v3 roadmap item 6) ---------
+
+    def test_season_token_match_detects_release_wrappers(self):
+        """_season_token_match must cut '<series>.sNN.<junk>' wrapper names."""
+        self.assertEqual(
+            _season_token_match('the.rings.of.power.s01.complete.720p.webrip-grp'),
+            ('the.rings.of.power', 1))
+        self.assertEqual(
+            _season_token_match('library2-series.season 2 (1080p)'),
+            ('library2-series', 2))
+        self.assertEqual(_season_token_match('tagesschau'), None)
+        # Nothing left of the series name → not a wrapper
+        self.assertEqual(_season_token_match('.s01.complete'), None)
+        # SxxEyy episode tokens must NOT match (digits run into 'e02' — no
+        # word boundary), so a dir merely named after an episode is safe.
+        self.assertIsNone(_season_token_match('wrapper.s01e02.named.dir'))
+
+    def test_season_token_regex_in_config(self):
+        """SORT_NEW_SEASON_TOKEN_REGEX must live in CONFIG_DEFAULTS + loader + template."""
+        src = self._read_script()
+        self.assertIn("'SORT_NEW_SEASON_TOKEN_REGEX'", src)
+        self.assertIn("SORT_NEW_SEASON_TOKEN_REGEX = CONFIG_DEFAULTS[", src)
+        self.assertIn("SORT_NEW_SEASON_TOKEN_REGEX = {CONFIG_DEFAULTS["
+                      "'SORT_NEW_SEASON_TOKEN_REGEX']!r}", src,
+                      "--create-config template must document the default")
+
+    def test_consolidation_phase_wired_into_sort_new(self):
+        """cmd_sort_new must run the consolidation phase and exclude its results."""
+        src = self._read_script()
+        self.assertIn('def _sort_new_consolidate_season_wrappers(', src)
+        idx = src.index('def cmd_sort_new(')
+        end = src.index('\ndef ', idx + 1)
+        body = src[idx:end]
+        self.assertIn('_sort_new_consolidate_season_wrappers(', body,
+                      'cmd_sort_new must invoke the consolidation phase')
+        self.assertIn('k not in _consolidated', body,
+                      'consolidated series must leave the per-series sort loop')
+
+    def test_consolidation_safety_properties(self):
+        """Consolidation must never clobber, must trash (not rm) stale artifacts,
+        must rmdir (non-recursive) the emptied wrapper, and must keep cache +
+        sidecar + JSON-log integrity in-process."""
+        src = self._read_script()
+        idx = src.index('def _sort_new_consolidate_season_wrappers(')
+        end = src.index('\ndef cmd_sort_new(', idx)
+        body = src[idx:end]
+        self.assertIn('mv -n', body, 'moves must be no-clobber')
+        self.assertIn('move_to_trash(', body, 'stale artifacts must be TRASHED, never rm')
+        self.assertNotIn('rm -r', body, 'consolidation must never rm recursively')
+        self.assertIn('rmdir', body, 'emptied wrapper goes via non-recursive rmdir')
+        self.assertIn('_update_cache_filepath(', body, 'per-file cache update required')
+        self.assertIn('update_and_save_cache(build_media_cache_dict())', body)
+        self.assertIn("_write_resolve_log('sort_new_season_wrappers'", body)
+        self.assertIn('episodes.tsv', body, 'stale fake-series TSVs must be handled')
+
     def test_sort_new_handles_movie_libraries(self):
         """cmd_sort_new must process Movie libraries for bare files."""
         src = self._read_script()
