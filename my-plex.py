@@ -36522,10 +36522,16 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     movables = []
     for cache_key, obj in items:
         type_str = obj.get('type_str', '') or obj.get('type', '')
+        # Multi-version items carry a trailing '*' in type_str (e.g.
+        # 'Movie*' = 2+ file versions).  Normalize it away for every type
+        # comparison below — otherwise multi-version Movies/Episodes were
+        # silently unmovable (they never matched the ('Movie','Episode')
+        # membership test).
+        base_type = type_str.rstrip('*')
         # v2.2: uncatalogued top-level folders (synthesized by layout: filter)
         # — moved as whole directories via SSH `mv`, no cache update needed
         # because they were never in the cache to begin with.
-        if type_str == 'Folder':
+        if base_type == 'Folder':
             src_lib = obj.get('library', '')
             if src_lib == dest_lib:
                 if DBG: print(f"{DBGPFX}cmd_move: skipping {cache_key} (already in destination library {dest_lib})")
@@ -36537,9 +36543,9 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             # raw filesystem content, no Plex type yet.  Plex will classify
             # them after the post-move scan based on the destination library
             # type.
-            movables.append((cache_key, obj, src_lib, type_str, [folder_path]))
+            movables.append((cache_key, obj, src_lib, base_type, [folder_path]))
             continue
-        if type_str not in ('Movie', 'Episode'):
+        if base_type not in ('Movie', 'Episode'):
             continue
         src_lib = obj.get('library', '')
         if not src_lib:
@@ -36548,10 +36554,10 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             if DBG: print(f"{DBGPFX}cmd_move: skipping {cache_key} (already in destination library {dest_lib})")
             continue
         # Type compatibility
-        if dest_lib_type == 'Movie' and type_str != 'Movie':
-            err(1104, f"--mv: cannot move {type_str} '{obj.get('title','?')}' ({cache_key}) into Movie library '{dest_lib}'.\n  Movie libraries only accept Movies. Use a Series-type destination library for Episodes.")
-        if dest_lib_type == 'Series' and type_str != 'Episode':
-            err(1104, f"--mv: cannot move {type_str} '{obj.get('title','?')}' ({cache_key}) into Series library '{dest_lib}'.\n  Series libraries only accept Episodes. Pick a Movie-type destination library for Movies.")
+        if dest_lib_type == 'Movie' and base_type != 'Movie':
+            err(1104, f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Movie library '{dest_lib}'.\n  Movie libraries only accept Movies. Use a Series-type destination library for Episodes.")
+        if dest_lib_type == 'Series' and base_type != 'Episode':
+            err(1104, f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Series library '{dest_lib}'.\n  Series libraries only accept Episodes. Pick a Movie-type destination library for Movies.")
         filepaths = _get_all_filepaths(obj)
         if not filepaths:
             continue
