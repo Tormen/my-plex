@@ -8582,6 +8582,22 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         self.assertIn("def cmd_move(", src)
 
+    def test_cmd_move_handles_multiversion_type_str(self):
+        """Multi-version items carry type_str 'Movie*' / 'Episode*'.  cmd_move
+        must normalize the trailing '*' so they remain movable (regression:
+        'Movie*' never matched the ('Movie','Episode') membership test, so any
+        multi-version movie was silently unmovable)."""
+        src = self._read_script()
+        idx = src.index('def cmd_move(')
+        end = src.index('\ndef ', idx + 1)
+        body = src[idx:end]
+        self.assertIn("base_type = type_str.rstrip('*')", body,
+                      "cmd_move must strip the multi-version '*' from type_str")
+        self.assertIn("if base_type not in ('Movie', 'Episode'):", body,
+                      "membership + compat checks must use the normalized base_type")
+        # The raw 'Movie*' must NOT be used in the membership test any more.
+        self.assertNotIn("if type_str not in ('Movie', 'Episode'):", body)
+
     def test_cmd_move_signature(self):
         """cmd_move() must accept dry_run, force, yes kwargs."""
         src = self._read_script()
