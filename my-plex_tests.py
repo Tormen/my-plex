@@ -9929,6 +9929,48 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             finally:
                 self.m._MOVE_STATE_DIR = saved
 
+    # ---- Date preservation across cross-library moves ----
+
+    def test_plex_dt_to_epoch_normalizes(self):
+        """_plex_dt_to_epoch accepts int / datetime / date / None."""
+        import datetime as _dt
+        self.assertIsNone(self.m._plex_dt_to_epoch(None))
+        self.assertEqual(self.m._plex_dt_to_epoch(1700000000), 1700000000)
+        dt = _dt.datetime(2023, 11, 14, 12, 0, 0)
+        self.assertEqual(self.m._plex_dt_to_epoch(dt), int(dt.timestamp()))
+        d = _dt.date(2023, 11, 14)
+        self.assertEqual(self.m._plex_dt_to_epoch(d),
+                         int(_dt.datetime(2023, 11, 14).timestamp()))
+
+    def test_snapshot_captures_all_dates(self):
+        """Snapshot must capture addedAt + lastViewedAt + lastRatedAt +
+        originallyAvailableAt — a cross-library move resets them on the new
+        ratingKey, so they must be preserved."""
+        obj = {'id': 42, 'addedAt': 1600000000, 'lastViewedAt': 1610000000,
+               'viewCount': 3, 'userRating': 7.0, 'labels': [], 'collections': [],
+               'guid': 'plex://movie/x'}
+        snap = self.m._snapshot_plex_item_state(plex=None, obj=obj, playlist_map={})
+        self.assertEqual(snap['addedAt'], 1600000000)
+        self.assertEqual(snap['lastViewedAt'], 1610000000)
+        self.assertIn('lastRatedAt', snap)
+        self.assertIn('originallyAvailableAt', snap)
+
+    def test_restore_sets_editable_dates_not_lastviewed(self):
+        """Restore must edit addedAt + originallyAvailableAt (Plex-settable),
+        rely on markPlayed for watch status, and NEVER claim to set an exact
+        lastViewedAt (no Plex API for it)."""
+        src = self._read_script()
+        idx = src.index('def _restore_plex_item_state(')
+        end = src.index('\ndef ', idx + 1)
+        body = src[idx:end]
+        self.assertIn("'addedAt.value'", body, 'restore must re-set addedAt')
+        self.assertIn("'originallyAvailableAt.value'", body,
+                      'restore must re-set originallyAvailableAt')
+        self.assertIn('markPlayed', body, 'watch status still via markPlayed')
+        # Honesty guard: must NOT pretend to set lastViewedAt directly.
+        self.assertNotIn("'lastViewedAt.value'", body,
+                         'Plex has no API to set an arbitrary lastViewedAt — must not fake it')
+
     def test_replay_handles_missing_filepath_gracefully(self):
         """A state file with status='moved' but no new_filepath must NOT crash."""
         import tempfile
