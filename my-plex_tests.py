@@ -8597,6 +8597,11 @@ class TestMove(unittest.TestCase):
                       "membership + compat checks must use the normalized base_type")
         # The raw 'Movie*' must NOT be used in the membership test any more.
         self.assertNotIn("if type_str not in ('Movie', 'Episode'):", body)
+        # The movables tuple must carry base_type so the execution loop's
+        # `type_str == 'Movie'` whole-wrapper-move test fires for multi-version
+        # items (else their .nfo/.srt sidecars are orphaned by a per-file move).
+        self.assertIn("movables.append((cache_key, obj, src_lib, base_type, filepaths))", body,
+                      "multi-version Movie move must relocate the whole wrapper, not per-file")
 
     def test_cmd_move_signature(self):
         """cmd_move() must accept dry_run, force, yes kwargs."""

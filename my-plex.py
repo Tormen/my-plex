@@ -36561,7 +36561,11 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         filepaths = _get_all_filepaths(obj)
         if not filepaths:
             continue
-        movables.append((cache_key, obj, src_lib, type_str, filepaths))
+        # Store the NORMALIZED base_type (not raw 'Movie*'/'Episode*') so the
+        # execution loop's `type_str == 'Movie'` whole-wrapper-move test fires
+        # for multi-version items too — otherwise they fell through to the
+        # per-file path and left their .nfo/.srt sidecars orphaned behind.
+        movables.append((cache_key, obj, src_lib, base_type, filepaths))
 
     if not movables:
         print(f"--mv: nothing to move (scope resolved {len(items)} entries, but no movable Movie/Episode/Folder content found in libraries other than '{dest_lib}').")
