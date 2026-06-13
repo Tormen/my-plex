@@ -36082,17 +36082,54 @@ def _build_playlist_membership_map(plex):
     return out
 
 
+def _plex_dt_to_epoch(value):
+    """Normalize a Plex datetime-ish value to a unix epoch int (or None).
+
+    Plex returns datetime objects for addedAt/lastViewedAt/lastRatedAt and
+    a date for originallyAvailableAt; the cache stores ints.  Accepts int,
+    datetime, or None — returns int seconds or None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        import datetime as _dt
+        if isinstance(value, _dt.datetime):
+            return int(value.timestamp())
+        if isinstance(value, _dt.date):
+            return int(_dt.datetime(value.year, value.month, value.day).timestamp())
+    except Exception:
+        return None
+    return None
+
+
 def _snapshot_plex_item_state(plex, obj, playlist_map):
-    """Capture all preservable state for the cache obj of one item."""
+    """Capture all preservable state for the cache obj of one item.
+
+    Dates: cross-library moves get a FRESH Plex ratingKey with reset
+    timestamps, so every date worth keeping is snapshotted here:
+      addedAt               — date the item entered the library
+      lastViewedAt          — most recent watch (see restore caveat below)
+      lastRatedAt           — when the user rating was set
+      originallyAvailableAt — release / air date (ISO 'YYYY-MM-DD')
+    Restore caveat: Plex's API can re-set addedAt and originallyAvailableAt
+    (metadata edit), but there is NO public API to set an arbitrary
+    lastViewedAt — markPlayed() stamps it to 'now'.  We still snapshot the
+    original so the value is never lost from our own records.
+    """
     rk = int(obj.get('id') or 0)
     snap = {
         'labels':         list(obj.get('labels') or []),
         'collections':    list(obj.get('collections') or []),
         'viewCount':      obj.get('viewCount') or 0,
-        'lastViewedAt':   obj.get('lastViewedAt') or None,
+        'lastViewedAt':   _plex_dt_to_epoch(obj.get('lastViewedAt')),
         'userRating':     obj.get('userRating') or None,
         'guid':           obj.get('guid') or '',
         'playlists':      list(playlist_map.get(rk, [])),
+        # Dates (epoch ints; originallyAvailableAt also kept as ISO string).
+        'addedAt':                _plex_dt_to_epoch(obj.get('addedAt')),
+        'lastRatedAt':            None,
+        'originallyAvailableAt':  None,
     }
     # Live Plex API supplements (in case cache is missing fields).
     if plex is not None and rk:
@@ -36100,11 +36137,20 @@ def _snapshot_plex_item_state(plex, obj, playlist_map):
             item = plex.fetchItem(rk)
             for attr, key in (('viewCount', 'viewCount'),
                               ('userRating', 'userRating'),
-                              ('viewOffset', 'viewOffset'),
-                              ('lastViewedAt', 'lastViewedAt')):
+                              ('viewOffset', 'viewOffset')):
                 v = getattr(item, attr, None)
                 if v not in (None, 0, ''):
                     snap[key] = v
+            for attr in ('addedAt', 'lastViewedAt', 'lastRatedAt'):
+                v = _plex_dt_to_epoch(getattr(item, attr, None))
+                if v:
+                    snap[attr] = v
+            oaa = getattr(item, 'originallyAvailableAt', None)
+            if oaa is not None:
+                try:
+                    snap['originallyAvailableAt'] = oaa.strftime('%Y-%m-%d')
+                except Exception:
+                    snap['originallyAvailableAt'] = str(oaa)[:10] or None
             try:
                 snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})
             except Exception:
@@ -36139,6 +36185,26 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     if (snap.get('viewCount') or 0) > 0:
         try: item.markPlayed()
         except Exception as e: errors.append(f'markPlayed: {e}')
+
+    # Dates.  Plex's metadata edit endpoint accepts addedAt (epoch int) and
+    # originallyAvailableAt (ISO date); both are locked so a later library
+    # refresh can't silently revert them.  lastViewedAt is intentionally
+    # NOT restored here — Plex exposes no API to set an arbitrary watch
+    # timestamp (markPlayed above stamps 'now'); the original value remains
+    # preserved in the snapshot/JSON log for the record.
+    _added = snap.get('addedAt')
+    if _added:
+        try:
+            item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})
+        except Exception as e:
+            errors.append(f'edit(addedAt={_added}): {e}')
+    _oaa = snap.get('originallyAvailableAt')
+    if _oaa:
+        try:
+            item.edit(**{'originallyAvailableAt.value': str(_oaa),
+                         'originallyAvailableAt.locked': 1})
+        except Exception as e:
+            errors.append(f'edit(originallyAvailableAt={_oaa}): {e}')
 
     for pl_title in (snap.get('playlists') or []):
         try:
