@@ -1,6 +1,6 @@
 """One-time cache patch for the multi-episode + padding refactor.
 
-Avoids `my-plex --update-cache --from-scratch` by patching the existing
+Avoids `my-plex --update-cache --force-plex` by patching the existing
 cache.pkl in place with the new fields introduced across:
 
   - 8a9ea37 episodes: zero-pad S0XE0X per show; drop episode_map
