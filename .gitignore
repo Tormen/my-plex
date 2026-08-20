@@ -40,4 +40,8 @@ Thumbs.db
 # Project-internal (not for publishing)
 .archive/
 test-playground/
-.claude
+
+# Local-only files: never published, carried between machines by
+# the container repo (see its .git.force-add-patterns).
+*.local
+*.local.*
