@@ -645,6 +645,7 @@ import requests.exceptions
 # Config file search paths (in order of precedence)
 CONFIG_FILE_PATHS = [
     '/LINKS/default/my-plex.conf',                   # Primary system-wide location.
+    '/LINKS/default/my-plex',                        # ...both spellings accepted here.
                                                      # Spelled out on purpose: a search
                                                      # keyed on a value that lives inside
                                                      # a config file cannot find that file.
