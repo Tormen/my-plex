@@ -250,7 +250,14 @@ my-plex --disk2plex --dry-run
 
 ## Configuration
 
-Configuration file: `~/.my-plex.conf` (Python syntax, loaded via `exec()`)
+Configuration file (Python syntax, loaded via `exec()`). Searched in order,
+first hit wins:
+
+1. `/LINKS/default/my-plex.conf` — primary system-wide location
+2. `~/.my-plex/my-plex.conf`
+3. `~/.my-plex.conf` — legacy, still honoured
+4. `/etc/my-plex.conf`
+5. `/usr/local/etc/my-plex.conf`
 
 ```python
 # Required: SSH host for Plex server

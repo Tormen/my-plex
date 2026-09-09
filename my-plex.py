@@ -613,7 +613,8 @@ import requests.exceptions
 #      - PLEX_DB_PATH must be configured for direct database access
 #
 #   2. CONFIG_FILE (medium priority)
-#      - Loaded from ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
+#      - Loaded from /LINKS/default/my-plex.conf, ~/.my-plex/my-plex.conf,
+#        ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
 #      - Values in config file override CONFIG_DEFAULTS
 #      - Use --config-file | -C to specify a custom config file path
 #      - Use --create with --config-file to generate a config file with default values
@@ -643,7 +644,11 @@ import requests.exceptions
 
 # Config file search paths (in order of precedence)
 CONFIG_FILE_PATHS = [
-    os.path.expanduser('~/.my-plex/my-plex.conf'),    # Preferred location (new)
+    '/LINKS/default/my-plex.conf',                   # Primary system-wide location.
+                                                     # Spelled out on purpose: a search
+                                                     # keyed on a value that lives inside
+                                                     # a config file cannot find that file.
+    os.path.expanduser('~/.my-plex/my-plex.conf'),   # Preferred per-user location
     os.path.expanduser('~/.my-plex.conf'),           # Legacy location (backward compat)
     '/etc/my-plex.conf',
     '/usr/local/etc/my-plex.conf'
