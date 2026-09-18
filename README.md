@@ -356,6 +356,24 @@ my-plex --test rename
 my-plex --unittest -v
 ```
 
+## Version and release
+
+```bash
+my-plex --version              # v2.69 (build 1a2b3c4d5e6f, from commit 325612a)
+my-plex --stamp-version        # analyze: what would be stamped
+my-plex --stamp-version go     # record HEAD in SCRIPT_COMMIT, amend HEAD
+```
+
+- The **build id** is a hash of the file itself, so two installs that differ
+  never report the same `--version`; compare installs by diffing it.
+- `SCRIPT_COMMIT` names the commit the file was released from. It lags HEAD
+  by one, because the stamp amends HEAD and a commit cannot contain its own sha.
+- Release order: commit, `--stamp-version go`, push. The stamp refuses a
+  commit that is already pushed, anything staged, or uncommitted edits to
+  `my-plex.py` itself.
+- A tagged version number is never reused: once HEAD has moved past the tag
+  for `SCRIPT_VERSION`, bump it (`my-plex --test version` enforces this).
+
 ## Contributing
 
 Open Source — contributions are welcome.

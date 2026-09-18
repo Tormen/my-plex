@@ -61,12 +61,15 @@
 
 # ---------------------------------------------------------------------------
 # Version / license constants.
-# SCRIPT_VERSION tracks the latest git tag; bump in lockstep with `git tag`.
-# SCRIPT_COMMIT is baked into the file via `--stamp-version` so deployed
-# copies (no .git alongside) still print the commit they were built from.
+# SCRIPT_VERSION is the release number.  A number that has been TAGGED is
+# never reused: once HEAD moves past a tag of this version, bump it (the
+# test suite's `version` scope refuses the reuse).
+# SCRIPT_COMMIT is the commit this file was released from, written by
+# `--stamp-version go`.  Authoritative at runtime: a deployed copy needs
+# neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "325612a"
+SCRIPT_COMMIT  = "a4e585e"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -126,32 +129,21 @@ def _bootstrap_venv():
 
 
 # --- Early --version / --stamp-version handling (no venv / no Plex needed) ---
-def _script_version_string():
-    """Display version: SCRIPT_VERSION + commit sha (baked or live).
+def _script_build_id() -> str:
+    """Hash of this file's own bytes: the authoritative identity of the build.
+    It cannot be stale -- two copies that differ report different ids."""
+    import hashlib
+    try:
+        with open(os.path.realpath(__file__), 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:12]
+    except OSError:
+        return 'unknown'
 
-    SCRIPT_COMMIT (baked at --stamp-version time) is authoritative when set.
-    Otherwise falls back to a live `git rev-parse` from the script's directory
-    (with a -dirty suffix if the working copy has uncommitted changes)."""
-    v = SCRIPT_VERSION
-    sha = ""
-    if SCRIPT_COMMIT:
-        sha = SCRIPT_COMMIT
-    else:
-        try:
-            here = os.path.dirname(os.path.realpath(__file__))
-            r = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
-                               capture_output=True, text=True, timeout=2)
-            if r.returncode == 0 and r.stdout.strip():
-                sha = r.stdout.strip()
-                d = subprocess.run(['git', '-C', here, 'diff', '--quiet'],
-                                   capture_output=True, timeout=2)
-                ds = subprocess.run(['git', '-C', here, 'diff', '--cached', '--quiet'],
-                                    capture_output=True, timeout=2)
-                if d.returncode != 0 or ds.returncode != 0:
-                    sha += "-dirty"
-        except Exception:
-            pass
-    return f"{v} ({sha})" if sha else v
+def _script_version_string() -> str:
+    """'v2.69 (build <id>, from commit <sha>)', or '..., unstamped)'.
+    Comparing two installs is: run --version on each and diff the output."""
+    origin = f"from commit {SCRIPT_COMMIT}" if SCRIPT_COMMIT else "unstamped"
+    return f"{SCRIPT_VERSION} (build {_script_build_id()}, {origin})"
 
 def _print_version_and_exit():
     print(f"my-plex {_script_version_string()}")
@@ -169,43 +161,99 @@ def _print_version_and_exit():
     print('license (this is the "copyleft" obligation of the GPL).')
     sys.exit(0)
 
-def _stamp_version_and_exit():
-    """Bake current HEAD short sha into SCRIPT_COMMIT and amend the commit."""
-    here = os.path.dirname(os.path.realpath(__file__))
+def _stamp_fail(code: int, msg: str) -> NoReturn:
+    # err() is defined further down; this runs before the venv bootstrap.
+    print(f"\nERROR #{code}: --stamp-version: {msg}\n", file=sys.stderr)
+    sys.exit(1)
+
+def _stamp_version_and_exit(go: bool) -> NoReturn:
+    """--stamp-version [go] -- record the commit this file is released from.
+
+    Four guards, each for a failure that has actually happened somewhere:
+      * refuse when anything is STAGED, or this file has edits of its own --
+        the amend below would fold them into the release commit;
+      * refuse when HEAD is already PUSHED -- an amend rewrites published
+        history and the next push is rejected as non-fast-forward;
+      * idempotent, by asking "has anything changed since the stamp was
+        written" rather than "does SCRIPT_COMMIT equal HEAD" (never, by design);
+      * write via a temp file in the same directory and rename it over this
+        one, preserving the mode -- never a half-written file.
+
+    The stamped sha necessarily LAGS HEAD by one: amending changes the sha,
+    so a commit cannot contain its own.  That is unavoidable, not a bug."""
+    import re as _re, shutil, tempfile
     self_path = os.path.realpath(__file__)
-    r = subprocess.run(['git', '-C', here, 'rev-parse', '--show-toplevel'],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"ERROR: Not in a git repo (script dir: {here})", file=sys.stderr)
-        sys.exit(1)
-    new_sha = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
-                             capture_output=True, text=True).stdout.strip()
+    here = os.path.dirname(self_path)
+
+    def git(*a: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
+
+    top = git('rev-parse', '--show-toplevel').stdout.strip()
+    if not top:
+        _stamp_fail(1192, f"'{self_path}' is not inside a git checkout -- there is no commit to stamp from.")
+    rel = os.path.relpath(self_path, top)
+    sha = git('rev-parse', '--short', 'HEAD').stdout.strip()
+    if not sha:
+        _stamp_fail(1192, f"'{top}' has no commit to stamp from.")
+
+    if (git('rev-parse', '--abbrev-ref', '@{upstream}').returncode == 0
+            and git('merge-base', '--is-ancestor', 'HEAD', '@{upstream}').returncode == 0):
+        _stamp_fail(1193, "HEAD is already pushed -- amending it would rewrite published history.\n"
+                          "    commit your change first, then stamp, then push.")
+
+    stamp_re = _re.compile(r'^SCRIPT_COMMIT\s*=.*$', _re.MULTILINE)
     with open(self_path, 'r') as f:
         src = f.read()
-    import re as _re
-    new_src, n = _re.subn(r'^SCRIPT_COMMIT\s*=\s*"[^"]*"',
-                          f'SCRIPT_COMMIT  = "{new_sha}"',
-                          src, count=1, flags=_re.MULTILINE)
-    if n == 0:
-        print("ERROR: Could not find SCRIPT_COMMIT line to stamp.", file=sys.stderr)
-        sys.exit(1)
-    if new_src == src:
-        print(f"SCRIPT_COMMIT already matches HEAD ({new_sha}); nothing to do.")
+    if SCRIPT_COMMIT:
+        was = git('show', f'{SCRIPT_COMMIT}:{rel}')
+        if was.returncode == 0 and stamp_re.sub('', was.stdout) == stamp_re.sub('', src):
+            print(f"--stamp-version: '{rel}' is unchanged since it was stamped ({SCRIPT_COMMIT}) -- nothing to do.")
+            sys.exit(0)
+
+    # `git commit --amend` folds in what is STAGED and nothing else, so that
+    # is exactly the guard.  Unstaged work elsewhere is no concern of the amend.
+    staged = git('diff', '--cached', '--name-only').stdout.split()
+    if staged:
+        print("something is staged -- the amend would fold it into the release commit:", file=sys.stderr)
+        for p in staged:
+            print(f"    > {p}", file=sys.stderr)
+        _stamp_fail(1194, "commit or unstage it first.")
+    if git('diff', '--quiet', '--', rel).returncode != 0:
+        _stamp_fail(1195, f"'{rel}' has uncommitted edits -- commit them first, the stamp amends the commit they belong to.")
+
+    head = git('log', '-1', '--format=%h %s').stdout.strip()
+    print(f" >>> stamp SCRIPT_COMMIT={sha} (currently {SCRIPT_COMMIT or '<unstamped>'}), then amend {head}")
+    if not go:
+        print(f"    > analyze only -- re-run with 'go' to apply:  my-plex --stamp-version go")
         sys.exit(0)
-    with open(self_path, 'w') as f:
-        f.write(new_src)
-    subprocess.run(['git', '-C', here, 'add', self_path], check=True)
-    subprocess.run(['git', '-C', here, 'commit', '--amend', '--no-edit', '--no-verify'], check=True)
-    final_sha = subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
-                               capture_output=True, text=True).stdout.strip()
-    print(f"Stamped SCRIPT_COMMIT='{new_sha}'; HEAD is now '{final_sha}'.")
-    print("Note: amend rewrote HEAD's sha, so SCRIPT_COMMIT lags HEAD by 1.")
+
+    new_src, n = stamp_re.subn(f'SCRIPT_COMMIT  = "{sha}"', src, count=1)
+    if n != 1:
+        _stamp_fail(1196, "could not find the SCRIPT_COMMIT line to stamp.")
+    fd, tmp = tempfile.mkstemp(dir=here, prefix='.my-plex.stamp.')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(new_src)
+        shutil.copymode(self_path, tmp)
+        os.replace(tmp, self_path)
+    except OSError as e:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        _stamp_fail(1196, f"could not install the stamped file: {e}")
+    if git('add', '--', rel).returncode != 0:
+        _stamp_fail(1197, f"could not stage '{rel}'.")
+    r = git('commit', '-q', '--amend', '--no-edit')
+    if r.returncode != 0:
+        _stamp_fail(1197, f"could not amend the release commit: {r.stderr.strip()}")
+    print(f" >>> stamped {sha} -- HEAD is now {git('rev-parse', '--short', 'HEAD').stdout.strip()}")
+    print("    > the stamp lags HEAD by one amend: a commit cannot contain its own sha")
     sys.exit(0)
 
 if any(a in ('--version', '-version') for a in sys.argv[1:]):
     _print_version_and_exit()
 if '--stamp-version' in sys.argv[1:]:
-    _stamp_version_and_exit()
+    _i = sys.argv.index('--stamp-version')
+    _stamp_version_and_exit(go=sys.argv[_i + 1:_i + 2] == ['go'])
 
 # If we're not already running inside our venv, bootstrap it
 if os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
@@ -440,6 +488,8 @@ _my-plex() {
         '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--test[Run regression tests]'
+        '--version[Print version, released commit and a build id hashed from this file]'
+        '--stamp-version[Record the commit this file is released from; analyze only unless go]:go:(go)'
         '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
         '--config[Print current config (no arg) or use FILE (with arg)]::file:_files'
         '--create-config[Print default config (no arg) or write to FILE (with arg)]::file:_files'
@@ -42968,6 +43018,10 @@ def main():
     main_parser = argparse.ArgumentParser( description="Plex Database Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
     main_parser.add_argument('-O', '--offline', action='store_true', help=f"Work entirely from local cache without connecting to Plex server or SSH. Defaults to '{OFFLINE}'", default=OFFLINE)
     main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}", default=PLEX_XML_URL)
+    # --version / --stamp-version are handled before the venv bootstrap and exit
+    # there; they are declared here only so --help lists them.
+    main_parser.add_argument('--version', action='store_true', help="Print version, released commit and a build id hashed from this file itself. Comparing two installs: run it on each and diff the output.")
+    main_parser.add_argument('--stamp-version', nargs='?', const='', metavar='go', help="Record the commit this file is released from, then amend that commit. Run it BEFORE pushing a release. Analyze only, unless followed by 'go'.")
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}", default=PLEX_TOKEN)
     # Add --type and --info to main_parser so it knows to consume their values instead of treating them as CMD_OR_PLEXOBJECT
