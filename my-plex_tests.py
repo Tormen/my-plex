@@ -11531,6 +11531,44 @@ class TestRunViaSymlink(unittest.TestCase):
         self.assertEqual(r.returncode, 0, out[-600:])
 
 
+class TestArgvValueFlags(unittest.TestCase):
+    """The argv normalizer turns a bare word into a title search -- except the
+    value of a flag that takes one.  Probed with -D and a trailing --help, so
+    the normalizer runs and prints its translations but nothing executes."""
+
+    def _probe(self, *args):
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--offline', '-D', *args, '--help'],
+                           capture_output=True, text=True, timeout=60)
+        return r.stdout + r.stderr
+
+    def test_single_values_are_not_title_searches(self):
+        for flag, value in (('--audio', 'de'), ('--remove', '1,3'), ('--rm', '2,4'),
+                            ('--set-watched', '2026-01-01'), ('--set-user-rating', '4.5'),
+                            ('--unrecognized', 'somelib'), ('--plex-url', 'http://h:1')):
+            with self.subTest(flag=flag):
+                out = self._probe(flag, value)
+                self.assertNotIn(f"Search token '{value}'", out,
+                                 f"{flag} {value}: the value was stolen as a title search")
+
+    def test_remove_versions_never_turn_into_remove_all(self):
+        """`--remove 1,3` asks for versions 1 and 3; stealing '1,3' left --remove
+        bare, and bare --remove means ALL versions."""
+        out = self._probe('--remove', '1,3')
+        self.assertNotIn('--list=title~1,3', out)
+
+    def test_every_item_of_a_multi_value_flag_is_kept(self):
+        out = self._probe('--add-to', 'itemA', 'itemB')
+        self.assertNotIn("Search token 'itemA'", out)
+        self.assertNotIn("Search token 'itemB'", out)
+
+    def test_debug_output_never_prints_a_token(self):
+        secret = 'sEcReTtOkEn123'
+        out = self._probe('--plex-token', secret)
+        self.assertNotIn(secret, out)
+        out = self._probe('--plex-xml-url', f'https://h:32400/library/metadata/1?X-Plex-Token={secret}')
+        self.assertNotIn(secret, out)
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -11573,7 +11611,7 @@ _UNITTEST_SCOPES = {
     'renumber':   [TestRenumber],
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
-    'scope':              [TestUniversalScope],
+    'scope':              [TestUniversalScope, TestArgvValueFlags],
     'unrecognized':       [TestUnrecognized],
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
