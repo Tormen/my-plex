@@ -3656,7 +3656,7 @@ class TestDefaultScope(unittest.TestCase):
         """--help must not crash when combined with filter tokens."""
         result = self._run(self._any_lib, 'watched:no', '--help')
         self.assertEqual(result.returncode, 0)
-        self.assertNotIn('ERROR', result.stdout)
+        self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_unwatched_columns_no_duplicate_rating(self):
         """watched:no must not produce duplicate RATING columns."""
@@ -3671,14 +3671,14 @@ class TestDefaultScope(unittest.TestCase):
         """--help must not crash when combined with multiple filter tokens."""
         result = self._run(self._any_lib, 'watched:no', 'rating>7', '--help')
         self.assertEqual(result.returncode, 0)
-        self.assertNotIn('ERROR', result.stdout)
+        self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_bare_token_adds_column(self):
         """A bare field name (e.g. 'genre') must add a display column without filtering."""
         self._skip_if_no_lib()
         result = self._run(self._any_lib, 'genre', '-V')
         self.assertIn('GENRE', result.stdout, "Bare 'genre' token must add GENRE column")
-        self.assertNotIn('ERROR', result.stdout)
+        self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_bare_token_combined_with_filter(self):
         """Bare token + filter token must work together (e.g. 'rating>7 genre')."""
@@ -3723,7 +3723,7 @@ class TestDefaultScope(unittest.TestCase):
         result = self._run('tagesschau', '-V')
         self.assertIn('title~tagesschau', result.stdout,
             "Bare word must be interpreted as title search")
-        self.assertNotIn('ERROR', result.stdout)
+        self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_cat_d_title_search_results(self):
         """Title search must return items whose title matches the search term."""
@@ -3912,7 +3912,7 @@ class TestDefaultScope(unittest.TestCase):
         result = self._run('lang:de')
         self.assertEqual(result.returncode, 0)
         # Either matches exist or empty; both are acceptable as long as no error.
-        self.assertNotIn('ERROR', result.stdout,
+        self.assertNotIn('ERROR', result.stdout + result.stderr,
             "lang:de must not error out")
 
 
@@ -3947,6 +3947,28 @@ class TestErrorOutputConventions(unittest.TestCase):
         body = match.group(1)
         self.assertIn('Possible reasons:', body, "SSH failure paths must have 'Possible reasons' guidance")
 
+
+    def _run_cli(self, *args):
+        return subprocess.run([sys.executable, MAIN_SCRIPT, *args],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_err_goes_to_stderr_not_stdout(self):
+        """err() is fatal output: stderr only, so `my-plex ... > out` still shows it
+        and `my-plex ... | next` never feeds it to the next program as data."""
+        r = self._run_cli('--offline', '--plex-token')   # argparse error -> err(1090)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('ERROR #', r.stderr)
+        self.assertNotIn('ERROR', r.stdout)
+
+    def test_error_block_goes_to_stderr_whole(self):
+        """An ERROR line and the guidance printed right after it travel together."""
+        r = self._run_cli('--offline', '--rename')
+        out = r.stdout + r.stderr
+        if 'requires a library' not in out:
+            self.skipTest(f"--rename without target did not reach its error path: {out[-300:]}")
+        self.assertIn('ERROR: --rename requires a library', r.stderr)
+        self.assertIn('Use --help rename for details.', r.stderr)
+        self.assertNotIn('ERROR', r.stdout)
 
 class TestObjByLibraryDedup(unittest.TestCase):
     """Ensure OBJ_BY_LIBRARY appends have dedup checks to prevent duplicate keys."""
@@ -5147,7 +5169,7 @@ class TestRename(unittest.TestCase):
             self.skipTest("'boston legal' not in cache or cache empty — cannot test --rename dry-run")
         self.assertEqual(result.returncode, 0, f"--rename --dry-run should succeed, stderr: {result.stderr}")
         self.assertIn('[DRY-RUN]', result.stdout, "Dry run should show [DRY-RUN] prefix")
-        self.assertNotIn('ERROR', result.stdout, "Dry run should not have errors")
+        self.assertNotIn('ERROR', result.stdout + result.stderr, "Dry run should not have errors")
         self.assertNotIn('Traceback', result.stderr, "Should not produce stack trace")
 
     def test_rename_obj_form_dry_run(self):
@@ -11319,8 +11341,8 @@ class TestPlexConnectNotRequired(unittest.TestCase):
         g['OFFLINE'] = False; g['PLEX_SERVER'] = None; g['PLEX_CONNECT_ERROR'] = None
         buf, exc = io.StringIO(), None
         try:
-            from contextlib import redirect_stdout
-            with redirect_stdout(buf):
+            from contextlib import redirect_stdout, redirect_stderr
+            with redirect_stdout(buf), redirect_stderr(buf):
                 try:
                     connect_to_plex(self.url, self.TOKEN, required=required)
                 except SystemExit as e:
@@ -12044,10 +12066,10 @@ def run_regression_tests(main_globals, scope=None):
             print(f"  Testing: show_item_info('') - system info")
             try:
                 import io
-                from contextlib import redirect_stdout
+                from contextlib import redirect_stdout, redirect_stderr
 
                 f = io.StringIO()
-                with redirect_stdout(f):
+                with redirect_stdout(f), redirect_stderr(f):
                     show_item_info('')  # Empty string triggers system info
                 output = f.getvalue()
 
@@ -12065,11 +12087,11 @@ def run_regression_tests(main_globals, scope=None):
             print(f"  Testing: show_item_info('ID:{test_id}')")
             try:
                 import io
-                from contextlib import redirect_stdout
+                from contextlib import redirect_stdout, redirect_stderr
 
                 # Capture output
                 f = io.StringIO()
-                with redirect_stdout(f):
+                with redirect_stdout(f), redirect_stderr(f):
                     show_item_info(f'ID:{test_id}')
                 output = f.getvalue()
 
@@ -12087,7 +12109,7 @@ def run_regression_tests(main_globals, scope=None):
             print(f"  Testing: show_item_info('{test_key}')")
             try:
                 f = io.StringIO()
-                with redirect_stdout(f):
+                with redirect_stdout(f), redirect_stderr(f):
                     show_item_info(test_key)
                 output = f.getvalue()
 
@@ -12105,7 +12127,7 @@ def run_regression_tests(main_globals, scope=None):
                 print(f"  Testing: show_item_info('{search_term}')")
                 try:
                     f = io.StringIO()
-                    with redirect_stdout(f):
+                    with redirect_stdout(f), redirect_stderr(f):
                         show_item_info(search_term)
                     output = f.getvalue()
 
