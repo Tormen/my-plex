@@ -66,7 +66,7 @@
 # copies (no .git alongside) still print the commit they were built from.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = ""
+SCRIPT_COMMIT  = "325612a"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -2886,6 +2886,7 @@ EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_la
 
 GLOBAL_CMD_PARSER: Any = None # will hold the global_cmd_parser
 PLEX_SERVER: Any = None # server instance will be set where needed
+PLEX_CONNECT_ERROR: str | None = None  # why the last connect failed (set only by a non-required connect)
 
 # MAIN DICT used by this script(s command-line parser) to perform it's actions:
 PARSER = 'arg-parser'
@@ -3769,6 +3770,7 @@ _EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_t
                        'assemble_naming_name', 'validate_naming_rules',
                        'derive_naming_paths', 'build_naming_plan',
                        '_naming_sanitize', '_naming_strip_diacritics',
+                       'connect_to_plex',
                        'PLEX_Media')
 def _inject_episode_funcs_into_test_mod():
     """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
@@ -3820,8 +3822,10 @@ def ensure_plex_api(required=True) -> Any:
     if OFFLINE:
         if required: err(1070, "This operation requires the Plex API but --offline mode is active.")
         return None
-    if PLEX_URL and PLEX_TOKEN:
-        connect_to_plex(PLEX_URL, PLEX_TOKEN)
+    # A non-required caller does not retry a connect that already failed once
+    # in this run; a required one does, so it fails with the real reason.
+    if PLEX_URL and PLEX_TOKEN and (required or PLEX_CONNECT_ERROR is None):
+        connect_to_plex(PLEX_URL, PLEX_TOKEN, required=required)
     if PLEX_SERVER is None and required:
         err(1071, "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
     return PLEX_SERVER
@@ -3903,9 +3907,11 @@ def wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120, verbose=True)
     elapsed = time.time() - start
     return (elapsed <= max_wait, elapsed)
 
-def connect_to_plex(plex_url, plex_token):
-    """ Infrastructure for API-dependent operations. Connect to plex server and return PLEX_SERVER object. """
-    global PLEX_SERVER, OFFLINE
+def connect_to_plex(plex_url: str, plex_token: str, required: bool = True) -> None:
+    """ Infrastructure for API-dependent operations. Connect to plex server and set PLEX_SERVER.
+    On failure: fatal ERROR #1016 if required, else PLEX_SERVER stays None and the
+    reason is kept in PLEX_CONNECT_ERROR for the caller to report. """
+    global PLEX_SERVER, OFFLINE, PLEX_CONNECT_ERROR
 
     # Default timeout if not configured
     PLEX_TIMEOUT = 42
@@ -3961,7 +3967,13 @@ def connect_to_plex(plex_url, plex_token):
         )
         if DBG: print(f"{DBGPFX}Connected to Plex server: {PLEX_SERVER.friendlyName}")
     except Exception as e:
-        err(1016, f"Failed to connect to PLEX Server: {plex_url=} {plex_token=} {PLEX_TIMEOUT=}: {e}")
+        if not required:
+            PLEX_SERVER = None
+            PLEX_CONNECT_ERROR = str(e)
+            if DBG: print(f"{DBGPFX}Plex connect failed (not required, continuing): {e}")
+            return
+        # Never print the token itself: this message reaches terminals, logs and cron mail.
+        err(1016, f"Failed to connect to PLEX Server: {plex_url=} plex_token=<redacted, {len(plex_token)} chars> {PLEX_TIMEOUT=}: {e}")
 
 
 def get_alternative_paths(path, including_path=False, path_2nd=None) -> list:
@@ -39273,7 +39285,12 @@ def show_system_info():
         if plex:
             print(f"  {'Plex API':<16} ✓ connected ({PLEX_URL})")
         elif PLEX_URL and PLEX_TOKEN:
-            print(f"  {'Plex API':<16} ✗ configured but not connected")
+            _why = ''
+            if PLEX_CONNECT_ERROR:
+                _first = PLEX_CONNECT_ERROR.splitlines()[0].split(';')[0].strip()
+                _cut = '…' if _first != PLEX_CONNECT_ERROR.strip() else ''
+                _why = f" ({_first}{_cut})"
+            print(f"  {'Plex API':<16} ✗ configured but not connected{_why}")
         else:
             print(f"  {'Plex API':<16} ✗ not configured (set PLEX_URL + PLEX_TOKEN)")
 
@@ -42580,7 +42597,8 @@ def main():
                             '--source', '--rename',
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
-                            '--test', '--unittest', '--complete'}
+                            '--test', '--unittest', '--complete',
+                            '--plex-url', '--plex-token', '--plex-xml-url'}
             # v2.1: a bare token that matches a library name is normally
             # treated as a SCOPE (library scope).  EXCEPT when the user
             # has ALSO written an explicit `library:NAME` somewhere — that
