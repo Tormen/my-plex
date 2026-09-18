@@ -389,7 +389,7 @@ class TestInitLoopRobustness(unittest.TestCase):
         self.assertEqual(processed, ['Collection', 'Collection'])
 
     def test_unknown_type_raises(self):
-        """An unknown type should raise ValueError (matching err(1051) behavior)."""
+        """An unknown type should raise ValueError (matching the err() behavior)."""
         objects = {'Bogus:1': {'type': 'Bogus', 'library': 'x'}}
         with self.assertRaises(ValueError):
             self._simulate_init_loop(objects)
@@ -1804,13 +1804,13 @@ class TestListMethodSplit(unittest.TestCase):
         self.assertIn('"Series"', body)
 
     def test_normalize_list_args_validates_media_type(self):
-        """_normalize_list_args must reject invalid media types with err(1043)."""
+        """_normalize_list_args must reject invalid media types with err()."""
         content = self._read_script()
         import re
         match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("1043", body, "Must error 1043 on invalid media_type")
+        self.assertIn("UNSUPPORTED media_type", body, "Must err() on an invalid media_type")
 
     def test_print_list_header_exists(self):
         """_print_list_header must exist."""
@@ -3959,7 +3959,7 @@ class TestErrorOutputConventions(unittest.TestCase):
     def test_err_goes_to_stderr_not_stdout(self):
         """err() is fatal output: stderr only, so `my-plex ... > out` still shows it
         and `my-plex ... | next` never feeds it to the next program as data."""
-        r = self._run_cli('--offline', '--plex-token')   # argparse error -> err(1090)
+        r = self._run_cli('--offline', '--plex-token')   # argparse error -> err()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('ERROR #', r.stderr)
         self.assertNotIn('ERROR', r.stdout)
@@ -6431,7 +6431,7 @@ class TestShowDirDerivation(unittest.TestCase):
         self.assertIsNone(forbidden,
             "No legacy season-dir heuristic call — series_dir derivation must use PATHS_DICT only")
         # Must error if lib_root not found
-        self.assertIn('err(1073', content)
+        self.assertIn('Cannot determine library root for series', content)
 
     def test_series_dir_uses_paths_dict(self):
         """series_dir must be derived from PATHS_DICT (subtract lib root, take first dir)."""
@@ -11396,8 +11396,9 @@ class TestPlexConnectNotRequired(unittest.TestCase):
 
     def test_required_is_fatal_and_redacts_token(self):
         exc, out, why, _ = self._connect(required=True)
-        self.assertIsNotNone(exc, "required=True must still be fatal (ERROR #1016)")
-        self.assertIn('ERROR #1016', out)
+        self.assertIsNotNone(exc, "required=True must still be fatal")
+        self.assertIn('ERROR #', out)
+        self.assertIn('Failed to connect to PLEX Server', out)
         self.assertIn(f'<redacted, {len(self.TOKEN)} chars>', out)
         self.assertNotIn(self.TOKEN, out)
         self.assertIsNone(why, "a fatal connect has nothing to hand back")
@@ -11606,6 +11607,31 @@ class TestArgvValueFlags(unittest.TestCase):
         self.assertNotIn(secret, out)
 
 
+class TestErrCodes(unittest.TestCase):
+    """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
+    numbered 00001.. in file order with no gap -- so a code in an error
+    message greps to exactly one line."""
+
+    CALL = re.compile(r'(\b(?:err|_stamp_fail)\(\s*|_media_api_action\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
+
+    def test_codes_are_unique_and_in_file_order(self):
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        found = [m.group(0) for m in self.CALL.finditer(src)]
+        codes = [m.group(2) for m in self.CALL.finditer(src)]
+        self.assertGreater(len(codes), 100, "the pattern no longer finds the err() calls")
+        bad = [f for f in found if not re.search(r'"\d{5}"$', f)]
+        self.assertEqual(bad, [], "every code is a quoted five-digit string")
+        self.assertEqual(codes, [f"{i:05d}" for i in range(1, len(codes) + 1)],
+                         "codes must run 00001.. in file order: renumber with the one-liner in the header")
+
+    def test_every_err_call_carries_a_code(self):
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        bare = re.findall(r'\berr\(\s*(?!"\d{5}"|err_code\b)[^\s)]', src)
+        self.assertEqual(bare, [], "an err() call without a five-digit code")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -11656,6 +11682,7 @@ _UNITTEST_SCOPES = {
     'naming':             [TestNaming],
     'v269':               [TestV269RetroactiveCoverage],
     'version':            [TestVersionAndStamp, TestVersionNotReused, TestRunViaSymlink],
+    'errcodes':           [TestErrCodes],
 }
 
 # List of all unittest classes for run_regression_tests()
@@ -12703,7 +12730,7 @@ def run_regression_tests(main_globals, scope=None):
 
         # 16b: --collections error in execute_global_commands
         source = inspect.getsource(execute_global_commands)
-        if 'collections' in source and '1072' in source:
+        if '--collections requires a library name' in source:
             print(f"✓ PASS: execute_global_commands() validates --collections requires library")
         else:
             print(f"✗ FAIL: execute_global_commands() missing --collections validation")
