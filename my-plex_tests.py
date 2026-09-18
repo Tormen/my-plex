@@ -11276,6 +11276,74 @@ class TestNaming(unittest.TestCase):
         self.assertIn("'naming'", content[idx:end])
 
 
+class TestPlexConnectNotRequired(unittest.TestCase):
+    """A connect that is NOT required must never be fatal, and no connect
+    failure may print the token.  Driven against a local server that answers
+    every request with 401 -- exactly what a rejected PLEX_TOKEN looks like --
+    so the result does not depend on the real server or its credentials."""
+
+    TOKEN = 'secretTOKEN-must-not-leak'
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server, threading
+        class _Unauthorized(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401); self.end_headers(); self.wfile.write(b'Unauthorized')
+            def log_message(self, *args): pass
+        cls._httpd = http.server.HTTPServer(('127.0.0.1', 0), _Unauthorized)
+        threading.Thread(target=cls._httpd.serve_forever, daemon=True).start()
+        cls.url = f'http://127.0.0.1:{cls._httpd.server_address[1]}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._httpd.shutdown(); cls._httpd.server_close()
+
+    def test_info_reports_rejected_token_instead_of_exiting(self):
+        """my-plex --info with a rejected token exits 0 and names the reason."""
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--info',
+                            '--plex-url', self.url, '--plex-token', self.TOKEN],
+                           capture_output=True, text=True, timeout=180)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, f"--info must not die on a failed connect:\n{out[-800:]}")
+        self.assertIn('configured but not connected (', r.stdout)
+        self.assertIn('401', r.stdout)
+        self.assertNotIn(self.TOKEN, out)
+
+    def _connect(self, required):
+        """Call connect_to_plex in-process; returns (SystemExit or None, stdout, PLEX_CONNECT_ERROR)."""
+        import socket
+        g = connect_to_plex.__globals__
+        saved = {k: g[k] for k in ('OFFLINE', 'PLEX_SERVER', 'PLEX_CONNECT_ERROR')}
+        saved_timeout = socket.getdefaulttimeout()
+        g['OFFLINE'] = False; g['PLEX_SERVER'] = None; g['PLEX_CONNECT_ERROR'] = None
+        buf, exc = io.StringIO(), None
+        try:
+            from contextlib import redirect_stdout
+            with redirect_stdout(buf):
+                try:
+                    connect_to_plex(self.url, self.TOKEN, required=required)
+                except SystemExit as e:
+                    exc = e
+            return exc, buf.getvalue(), g['PLEX_CONNECT_ERROR'], g['PLEX_SERVER']
+        finally:
+            g.update(saved); socket.setdefaulttimeout(saved_timeout)
+
+    def test_not_required_returns_with_reason(self):
+        exc, out, why, server = self._connect(required=False)
+        self.assertIsNone(exc, f"required=False must not exit: {out}")
+        self.assertIsNone(server)
+        self.assertIn('401', why or '')
+
+    def test_required_is_fatal_and_redacts_token(self):
+        exc, out, why, _ = self._connect(required=True)
+        self.assertIsNotNone(exc, "required=True must still be fatal (ERROR #1016)")
+        self.assertIn('ERROR #1016', out)
+        self.assertIn(f'<redacted, {len(self.TOKEN)} chars>', out)
+        self.assertNotIn(self.TOKEN, out)
+        self.assertIsNone(why, "a fatal connect has nothing to hand back")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -11314,7 +11382,7 @@ _UNITTEST_SCOPES = {
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
                    TestShowInfoSeasonTable, TestMismatched, TestJunk,
-                   TestShowDirDerivation],
+                   TestShowDirDerivation, TestPlexConnectNotRequired],
     'renumber':   [TestRenumber],
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
@@ -11791,6 +11859,13 @@ def run_regression_tests(main_globals, scope=None):
         failed += 1
 
     # Test: --info command functionality
+    def _info_failure(e: BaseException, buf: "io.StringIO") -> str:
+        """A fatal err() inside show_item_info() raises SystemExit; report it as this
+        check's failure (with the last line it printed) instead of ending the suite."""
+        if isinstance(e, SystemExit):
+            lines = buf.getvalue().strip().splitlines()
+            return f"exited [rc {e.code}]" + (f": {lines[-1]}" if lines else "")
+        return str(e)
     print("\n[TEST] --info Command Functionality")
     print("-" * 80)
     try:
@@ -11834,8 +11909,8 @@ def run_regression_tests(main_globals, scope=None):
                 else:
                     print(f"  ✗ System info (--info without parameter): FAIL - output missing expected sections")
                     if DBG: print(f"    Output: {output[:200]}...")
-            except Exception as e:
-                print(f"  ✗ System info (--info without parameter): FAIL - {e}")
+            except (Exception, SystemExit) as e:
+                print(f"  ✗ System info (--info without parameter): FAIL - {_info_failure(e, f)}")
 
             # Test 1: Call show_item_info() with ID: prefix (required format)
             print(f"  Testing: show_item_info('ID:{test_id}')")
@@ -11856,8 +11931,8 @@ def run_regression_tests(main_globals, scope=None):
                 else:
                     print(f"  ✗ Search by ID:{test_id}: FAIL - output missing key info")
                     if DBG: print(f"    Output: {output[:200]}...")
-            except Exception as e:
-                print(f"  ✗ Search by ID:{test_id}: FAIL - {e}")
+            except (Exception, SystemExit) as e:
+                print(f"  ✗ Search by ID:{test_id}: FAIL - {_info_failure(e, f)}")
 
             # Test 2: Call show_item_info() with full key
             print(f"  Testing: show_item_info('{test_key}')")
@@ -11872,8 +11947,8 @@ def run_regression_tests(main_globals, scope=None):
                     tests_passed += 1
                 else:
                     print(f"  ✗ Search by full key ({test_key}): FAIL - output missing key info")
-            except Exception as e:
-                print(f"  ✗ Search by full key ({test_key}): FAIL - {e}")
+            except (Exception, SystemExit) as e:
+                print(f"  ✗ Search by full key ({test_key}): FAIL - {_info_failure(e, f)}")
 
             # Test 3: Call show_item_info() with title search
             if test_title and len(test_title) >= 5:
@@ -11891,8 +11966,8 @@ def run_regression_tests(main_globals, scope=None):
                         tests_passed += 1
                     else:
                         print(f"  ✗ Search by title ('{search_term}'): FAIL - no results found")
-                except Exception as e:
-                    print(f"  ✗ Search by title ('{search_term}'): FAIL - {e}")
+                except (Exception, SystemExit) as e:
+                    print(f"  ✗ Search by title ('{search_term}'): FAIL - {_info_failure(e, f)}")
             else:
                 print(f"  ⚠ SKIP: Title search (title too short)")
                 tests_total = 3
