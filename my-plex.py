@@ -69,7 +69,7 @@
 # neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "a4e585e"
+SCRIPT_COMMIT  = "35cd5bf"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3156,7 +3156,7 @@ def _graceful_shutdown_handler(signum, _frame):
                 PLEX_Media.save_checkpoint(silent=True)
                 print(f"Checkpoint saved: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects")
         except Exception as e:
-            print(f"WARNING: Could not save checkpoint: {e}")
+            print(f"WARNING: Could not save checkpoint: {e}", file=sys.stderr)
         os._exit(1)
 
     signal_name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else "SIGTERM"
@@ -3195,7 +3195,7 @@ def prompt_yes_no(question):
 
 def err(err_code, err_msg="") -> NoReturn:
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
-    print(f"\nERROR #{err_code}: {err_msg}\n")
+    print(f"\nERROR #{err_code}: {err_msg}\n", file=sys.stderr)
     sys.exit(1)
 
 def _build_version_string(duration_ms, width, height, video_codec, audio_codec, filesize, part_id, existing_files=None):
@@ -3531,8 +3531,8 @@ def load_cache():
                             print(f"{DBGPFX}CACHE found: {num_items} items, {cache_size_mb:.2f} MB ({CACHE_FILE})")
                 except Exception as e:
                     print(f"CACHE file '{CACHE_FILE}' is CORRUPTED - needs to be rebuilt.")
-                    print(f"Error: {e}")
-                    print(f"Please run: my-plex --update-cache")
+                    print(f"Error: {e}", file=sys.stderr)
+                    print(f"Please run: my-plex --update-cache", file=sys.stderr)
                     CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
         else:
             # Don't show error if we're doing a force-plex rebuild (cache was intentionally moved aside)
@@ -4436,33 +4436,33 @@ def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context
         stderr: Optional stderr output
         extra_context: Optional dict with additional context (e.g., {'source': path, 'destination': path})
     """
-    print(f"\n{'='*80}")
-    print(f"ERROR: Failed to {operation} on SSH host '{remote_host}'")
-    print(f"{'='*80}")
+    print(f"\n{'='*80}", file=sys.stderr)
+    print(f"ERROR: Failed to {operation} on SSH host '{remote_host}'", file=sys.stderr)
+    print(f"{'='*80}", file=sys.stderr)
 
     if extra_context:
         for key, value in extra_context.items():
-            print(f"{key.capitalize()}: {value}")
+            print(f"{key.capitalize()}: {value}", file=sys.stderr)
 
     if cmd:
         # Handle cmd as either string or list
         cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
-        print(f"Command failed: {cmd_str}")
+        print(f"Command failed: {cmd_str}", file=sys.stderr)
     if stderr:
-        print(f"Error output: {stderr}")
+        print(f"Error output: {stderr}", file=sys.stderr)
 
-    print(f"\nTo fix this issue, please ensure:")
-    print(f"  1. The SSH host '{remote_host}' is configured in your ~/.ssh/config")
-    print(f"  2. You can connect with: ssh {remote_host}")
-    print(f"  3. SSH keys are properly set up (no password prompt)")
-    print(f"  4. The remote host is running and accessible")
+    print(f"\nTo fix this issue, please ensure:", file=sys.stderr)
+    print(f"  1. The SSH host '{remote_host}' is configured in your ~/.ssh/config", file=sys.stderr)
+    print(f"  2. You can connect with: ssh {remote_host}", file=sys.stderr)
+    print(f"  3. SSH keys are properly set up (no password prompt)", file=sys.stderr)
+    print(f"  4. The remote host is running and accessible", file=sys.stderr)
 
-    print(f"\nExample ~/.ssh/config entry:")
-    print(f"  Host {remote_host}")
-    print(f"    HostName <your-server-ip-or-hostname>")
-    print(f"    User <your-username>")
-    print(f"    IdentityFile ~/.ssh/id_rsa")
-    print(f"{'='*80}\n")
+    print(f"\nExample ~/.ssh/config entry:", file=sys.stderr)
+    print(f"  Host {remote_host}", file=sys.stderr)
+    print(f"    HostName <your-server-ip-or-hostname>", file=sys.stderr)
+    print(f"    User <your-username>", file=sys.stderr)
+    print(f"    IdentityFile ~/.ssh/id_rsa", file=sys.stderr)
+    print(f"{'='*80}\n", file=sys.stderr)
 
 def get_trash_dir(remote_host=None, file_path=None):
     """Get or create trash directory for the current OS or remote host
@@ -4646,7 +4646,7 @@ def run_tool_locally(tool_name, args, capture_output=True, text=True, timeout=No
     """
     tool_path, config_key = _resolve_tool_path(tool_name, 'LOCAL')
     if not tool_path:
-        print(f"ERROR: Tool '{tool_name}' not found locally. Install it or set {config_key} in ~/.my-plex.conf")
+        print(f"ERROR: Tool '{tool_name}' not found locally. Install it or set {config_key} in ~/.my-plex.conf", file=sys.stderr)
         return None
 
     cmd = [tool_path] + list(args)
@@ -4655,10 +4655,10 @@ def run_tool_locally(tool_name, args, capture_output=True, text=True, timeout=No
     try:
         return subprocess.run(cmd, capture_output=capture_output, text=text, timeout=timeout)
     except FileNotFoundError:
-        print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf")
+        print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf", file=sys.stderr)
         return None
     except subprocess.TimeoutExpired:
-        print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.")
+        print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.", file=sys.stderr)
         return None
 
 
@@ -4706,7 +4706,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
     if not tool_path:
         location = f"on Plex server '{remote_host}'" if remote_host else "locally"
         install_hint = f"Install it on the server" if remote_host else "Install it"
-        print(f"ERROR: Tool '{tool_name}' not found {location}. {install_hint} or set {config_key} in ~/.my-plex.conf")
+        print(f"ERROR: Tool '{tool_name}' not found {location}. {install_hint} or set {config_key} in ~/.my-plex.conf", file=sys.stderr)
         return None
 
     if remote_host:
@@ -4720,10 +4720,10 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
         try:
             return subprocess.run(cmd, capture_output=capture_output, text=text, timeout=timeout)
         except FileNotFoundError:
-            print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf")
+            print(f"ERROR: Tool binary not found at '{tool_path}'. Set {config_key} in ~/.my-plex.conf", file=sys.stderr)
             return None
         except subprocess.TimeoutExpired:
-            print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.")
+            print(f"ERROR: Tool '{tool_name}' timed out after {timeout}s.", file=sys.stderr)
             return None
 
 
@@ -4907,7 +4907,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 return (False, None)
 
         else:
-            print(f"ERROR: Unknown operation '{operation}'")
+            print(f"ERROR: Unknown operation '{operation}'", file=sys.stderr)
             return (False, None)
 
     else:
@@ -4931,7 +4931,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Moved to trash: {trash_path}")
                 return (True, trash_path)
             except Exception as e:
-                print(f"ERROR: Failed to move file to trash: {e}")
+                print(f"ERROR: Failed to move file to trash: {e}", file=sys.stderr)
                 return (False, None)
 
         elif operation == 'RENAME':
@@ -4945,7 +4945,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
                 return (True, dst_path)
             except Exception as e:
-                print(f"ERROR: Failed to rename file: {e}")
+                print(f"ERROR: Failed to rename file: {e}", file=sys.stderr)
                 return (False, None)
 
         elif operation == 'MOVE':
@@ -4956,7 +4956,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
                 return (True, dest_path)
             except Exception as e:
-                print(f"ERROR: Failed to move file: {e}")
+                print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
                 return (False, None)
 
         elif operation == 'REMOVE':
@@ -4965,7 +4965,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"{VRBPFX}Removed: {filepath}")
                 return (True, None)
             except Exception as e:
-                print(f"ERROR: Failed to remove file: {e}")
+                print(f"ERROR: Failed to remove file: {e}", file=sys.stderr)
                 return (False, None)
 
         elif operation == 'LIST_DIR':
@@ -4982,7 +4982,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 return (False, None)
 
         else:
-            print(f"ERROR: Unknown operation '{operation}'")
+            print(f"ERROR: Unknown operation '{operation}'", file=sys.stderr)
             return (False, None)
 
 ################################################################################
@@ -5092,7 +5092,7 @@ def query_plex_database(query, mode='rows'):
                 print(f"ID: {row[0]}, Title: {row[1]}, Year: {row[2]}")
     """
     if not query or not query.strip():
-        print(f"ERROR: Empty query provided to query_plex_database()")
+        print(f"ERROR: Empty query provided to query_plex_database()", file=sys.stderr)
         return None
 
     # Auto-detect: if DB file exists locally, use sqlite3 directly (no SSH needed)
@@ -5135,11 +5135,11 @@ def query_plex_database(query, mode='rows'):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding='utf-8', errors='replace')
 
         if result.returncode != 0:
-            print(f"ERROR: Plex database query failed")
-            print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
-            print(f"  Return code: {result.returncode}")
+            print(f"ERROR: Plex database query failed", file=sys.stderr)
+            print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
+            print(f"  Return code: {result.returncode}", file=sys.stderr)
             if result.stderr:
-                print(f"  Error: {result.stderr}")
+                print(f"  Error: {result.stderr}", file=sys.stderr)
             return None
 
         # Return based on mode
@@ -5151,16 +5151,16 @@ def query_plex_database(query, mode='rows'):
             # Parse CSV output to list of tuples
             return _parse_csv_to_rows(result.stdout)
         else:
-            print(f"ERROR: Unknown mode '{mode}' in query_plex_database()")
+            print(f"ERROR: Unknown mode '{mode}' in query_plex_database()", file=sys.stderr)
             return None
 
     except subprocess.TimeoutExpired:
-        print(f"ERROR: Plex database query timed out (>300s)")
-        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        print(f"ERROR: Plex database query timed out (>300s)", file=sys.stderr)
+        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"ERROR: Exception during Plex database query: {e}")
-        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        print(f"ERROR: Exception during Plex database query: {e}", file=sys.stderr)
+        print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
         return None
 
 def sync_view_state_into_cache():
@@ -5231,7 +5231,7 @@ def query_plex_database_write(query):
     DB refresh tick.
     """
     if not query or not query.strip():
-        print(f"ERROR: Empty query provided to query_plex_database_write()")
+        print(f"ERROR: Empty query provided to query_plex_database_write()", file=sys.stderr)
         return False
     local_db_path = os.path.expanduser(PLEX_DB_PATH)
     use_local = os.path.exists(local_db_path)
@@ -5246,14 +5246,14 @@ def query_plex_database_write(query):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, encoding='utf-8', errors='replace')
         if result.returncode != 0:
-            print(f"ERROR: Plex DB write failed (rc={result.returncode}): {result.stderr.strip()}")
+            print(f"ERROR: Plex DB write failed (rc={result.returncode}): {result.stderr.strip()}", file=sys.stderr)
             return False
         return True
     except subprocess.TimeoutExpired:
-        print(f"ERROR: Plex DB write timed out")
+        print(f"ERROR: Plex DB write timed out", file=sys.stderr)
         return False
     except Exception as e:
-        print(f"ERROR: Plex DB write exception: {e}")
+        print(f"ERROR: Plex DB write exception: {e}", file=sys.stderr)
         return False
 
 
@@ -5329,9 +5329,9 @@ def validate_plex_database_schema():
             )
 
     if validation_errors:
-        print(f"ERROR: Plex database schema validation FAILED!")
-        print(f"This may indicate that your Plex version has a different database structure.")
-        print(f"Validation errors:")
+        print(f"ERROR: Plex database schema validation FAILED!", file=sys.stderr)
+        print(f"This may indicate that your Plex version has a different database structure.", file=sys.stderr)
+        print(f"Validation errors:", file=sys.stderr)
         for error in validation_errors:
             print(f"  - {error}")
         print(f"\nPlease report this issue to the my-plex maintainer with your Plex version.")
@@ -6886,7 +6886,7 @@ def load_disk_map_sidecar():
         with open(DISK_MAP_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"  WARNING: Failed to load {DISK_MAP_FILE}: {e}")
+        print(f"  WARNING: Failed to load {DISK_MAP_FILE}: {e}", file=sys.stderr)
         return {}
 
 def save_disk_map_sidecar(sidecar):
@@ -7496,7 +7496,7 @@ def move_file(src_path, dst_dir, remote_host=None):
             print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
             return True
     except Exception as e:
-        print(f"ERROR: Failed to move file: {e}")
+        print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
         return False
 
 
@@ -9912,10 +9912,10 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except Exception as e:
-            print(f"ERROR: SSH bulk-mv failed: {e}")
+            print(f"ERROR: SSH bulk-mv failed: {e}", file=sys.stderr)
             return
         if result.returncode != 0 and not result.stdout:
-            print(f"ERROR: SSH returned {result.returncode}\n{result.stderr}")
+            print(f"ERROR: SSH returned {result.returncode}\n{result.stderr}", file=sys.stderr)
             return
 
         # Parse per-op result
@@ -11769,7 +11769,7 @@ def _get_known_filepaths_from_plex_db(force_refresh=False):
         if VRB:
             print("WARNING: --unrecognized / --alien needs CACHE['plex_known_filepaths'] "
                   "but it's empty and --offline forbids live DB access.  Run "
-                  "`my-plex --update-cache` once (without --offline) to populate it.")
+                  "`my-plex --update-cache` once (without --offline) to populate it.", file=sys.stderr)
         _PLEX_DB_KNOWN_FILES_CACHE = set()
         return set()
     paths = _compute_known_filepaths_from_plex_db_live()
@@ -11803,7 +11803,7 @@ def _list_top_level_entries(rootpath, remote_host=None):
         rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=120)
         if rd.returncode != 0 and rf.returncode != 0:
             if VRB:
-                print(f"WARNING: list_top_level_entries failed for {rootpath}: {(rd.stderr or rf.stderr).strip()}")
+                print(f"WARNING: list_top_level_entries failed for {rootpath}: {(rd.stderr or rf.stderr).strip()}", file=sys.stderr)
             return []
         for p in (rd.stdout or '').splitlines():
             p = p.strip()
@@ -11814,7 +11814,7 @@ def _list_top_level_entries(rootpath, remote_host=None):
             if p:
                 out.append((p, 'file'))
     except Exception as e:
-        print(f"WARNING: list_top_level_entries error for {rootpath}: {e}")
+        print(f"WARNING: list_top_level_entries error for {rootpath}: {e}", file=sys.stderr)
         return []
     return sorted(out, key=lambda t: t[0])
 
@@ -11917,7 +11917,7 @@ def _compute_layout_index_live():
                 rd = subprocess.run(cmd_d, capture_output=True, text=True, timeout=300)
                 rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=300)
             except Exception as e:
-                if VRB: print(f"WARNING: _build_layout_index find failed for {rp_norm}: {e}")
+                if VRB: print(f"WARNING: _build_layout_index find failed for {rp_norm}: {e}", file=sys.stderr)
                 continue
             level1_dirs   = []   # top-level dirs (direct child of rp_norm)
             level2_in_dir = {}   # dir_basename → list of (basename, kind) inside it
@@ -12007,7 +12007,7 @@ def _build_layout_index(force_refresh=False):
         if VRB:
             print("WARNING: layout: filter needs CACHE['layout_index'] but it's empty "
                   "and --offline forbids live SSH.  Run `my-plex --update-cache` once "
-                  "(without --offline) to populate it.")
+                  "(without --offline) to populate it.", file=sys.stderr)
         _LAYOUT_INDEX_CACHE = {}
         return {}
     index = _compute_layout_index_live()
@@ -12090,9 +12090,9 @@ def cmd_unrecognized(target=None):
 
     known = _get_known_filepaths_from_plex_db()
     if not known:
-        print("WARNING: Plex DB returned 0 media_parts paths. Either --update-cache hasn't been run, ")
-        print("         the DB is unreachable, or the library is empty. Continuing — every top-level ")
-        print("         entry will be flagged as unrecognized.")
+        print("WARNING: Plex DB returned 0 media_parts paths. Either --update-cache hasn't been run, ", file=sys.stderr)
+        print("         the DB is unreachable, or the library is empty. Continuing — every top-level ", file=sys.stderr)
+        print("         entry will be flagged as unrecognized.", file=sys.stderr)
 
     print()
     print("=" * 76)
@@ -12456,7 +12456,7 @@ def play_media_file(filepath, remote_host=None):
     if not file_exists_local:
         if DBG:
             print(f"{DBGPFX}  -> File does NOT exist locally, returning error")
-        print(f"ERROR: File not found: {filepath}")
+        print(f"ERROR: File not found: {filepath}", file=sys.stderr)
         return False
 
     if DBG:
@@ -12503,8 +12503,8 @@ def play_media_file(filepath, remote_host=None):
         else:
             print("Infuse app not found")
 
-    print("ERROR: No suitable media player found!")
-    print("Please install one of: mpv (brew install mpv), Plex app, or Infuse app")
+    print("ERROR: No suitable media player found!", file=sys.stderr)
+    print("Please install one of: mpv (brew install mpv), Plex app, or Infuse app", file=sys.stderr)
     return False
 
 def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed_files):
@@ -12594,7 +12594,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     # Don't delete the object, just modified it
                     return library
                 else:
-                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    print(f"Warning: Could not find file '{removed_file}' in files dict", file=sys.stderr)
                     return library
             else:
                 # Single-version item: remove the entire object
@@ -12693,7 +12693,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                     # Don't delete the object, just modified it
                     return library
                 else:
-                    print(f"Warning: Could not find file '{removed_file}' in files dict")
+                    print(f"Warning: Could not find file '{removed_file}' in files dict", file=sys.stderr)
                     return library
             else:
                 # Single-version item: remove the entire object
@@ -14641,7 +14641,7 @@ def resolve_no_audio_language(obj_keys, args):
                 try:
                     _compiled = re.compile(_rg, re.IGNORECASE)
                 except re.error as _e:
-                    print(f"  WARNING: bad regex in DISK_PLEX_MAP['AUDIO_LANG']: {_rg!r} ({_e})")
+                    print(f"  WARNING: bad regex in DISK_PLEX_MAP['AUDIO_LANG']: {_rg!r} ({_e})", file=sys.stderr)
                     continue
                 # For the wildcard '*' the value comes from the regex's named
                 # group (?P<AUDIO_LANG>...).  For specific value keys, the key
@@ -14784,10 +14784,10 @@ def resolve_no_audio_language(obj_keys, args):
 
                 if choice_upper == 'Q':
                     if pending_operations:
-                        print(f"\n  Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
-                        print("  Y = Yes, quit without applying")
-                        print("  N = No, go back")
-                        print("\nYour choice: ", end='', flush=True)
+                        print(f"\n  Warning: {len(pending_operations)} pending operation(s) will NOT be applied!", file=sys.stderr)
+                        print("  Y = Yes, quit without applying", file=sys.stderr)
+                        print("  N = No, go back", file=sys.stderr)
+                        print("\nYour choice: ", end='', flush=True, file=sys.stderr)
                         confirm = readchar.readchar()
                         print(confirm)
                         if confirm.upper() != 'Y':
@@ -19105,9 +19105,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         existing_count = len(CACHE.get('obj_by_id', {}))
         new_count = len(PLEX_Media.OBJ_BY_ID)
         if new_count == 0 and existing_count > 0:
-            print(f"WARNING: Refusing to save empty cache (existing cache has {existing_count} items).")
-            print("  This likely means --update-cache was interrupted before any data was collected.")
-            print("  Your existing cache is preserved. Run --update-cache again.")
+            print(f"WARNING: Refusing to save empty cache (existing cache has {existing_count} items).", file=sys.stderr)
+            print("  This likely means --update-cache was interrupted before any data was collected.", file=sys.stderr)
+            print("  Your existing cache is preserved. Run --update-cache again.", file=sys.stderr)
             return
 
         # Collect server info for offline display
@@ -19188,9 +19188,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if FORCE_CACHE_UPDATE and not OFFLINE:
             if DBG: print(f"{DBGPFX}update_cache(): Validating Plex database schema...")
             if not validate_plex_database_schema():
-                print(f"\nERROR: Database schema validation failed!")
-                print(f"Cannot proceed with cache update - database structure may have changed.")
-                print(f"Please report this issue with your Plex version.")
+                print(f"\nERROR: Database schema validation failed!", file=sys.stderr)
+                print(f"Cannot proceed with cache update - database structure may have changed.", file=sys.stderr)
+                print(f"Please report this issue with your Plex version.", file=sys.stderr)
                 return
 
             # FETCH LIBRARIES FROM DATABASE
@@ -19235,7 +19235,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
 
             except Exception as e:
-                print(f"\nERROR: Failed to fetch libraries from database: {e}")
+                print(f"\nERROR: Failed to fetch libraries from database: {e}", file=sys.stderr)
                 if DBG:
                     import traceback
                     traceback.print_exc()
@@ -19711,7 +19711,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                     cache_needs_save = True
                             except Exception as e:
                                 if not _shutdown_requested:  # Don't print errors during shutdown
-                                    print(f"ERROR: Library '{title}' failed to update: {e}")
+                                    print(f"ERROR: Library '{title}' failed to update: {e}", file=sys.stderr)
                                     if DBG:
                                         import traceback
                                         traceback.print_exc()
@@ -20058,7 +20058,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj  # obj is the library name string
             lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             if lib_type != 'Series':
-                print(f"ERROR: --rename is only available for Series libraries, not {lib_type} (library '{lib_name}')")
+                print(f"ERROR: --rename is only available for Series libraries, not {lib_type} (library '{lib_name}')", file=sys.stderr)
             else:
                 lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
                 series_keys = lib_data.get('Series', [])
@@ -20330,7 +20330,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         os.rename(CACHE_FILE, backup_cache_file)
                         print(f"Moved old cache aside: {backup_cache_file}")
                     except Exception as e:
-                        print(f"Warning: Could not move old cache aside: {e}")
+                        print(f"Warning: Could not move old cache aside: {e}", file=sys.stderr)
 
                 # Delete partial cache if it exists - we want a completely fresh rebuild with --force-plex
                 if os.path.exists(partial_cache_file):
@@ -20338,7 +20338,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         os.remove(partial_cache_file)
                         if VRB: print(f"{VRBPFX}Deleted partial cache for fresh rebuild: {partial_cache_file}")
                     except Exception as e:
-                        print(f"Warning: Could not delete partial cache: {e}")
+                        print(f"Warning: Could not delete partial cache: {e}", file=sys.stderr)
 
                 if VRB: print(f"{VRBPFX}Force-plex rebuild mode (--force-plex): starting with empty cache...")
 
@@ -20367,7 +20367,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     PLEX_Media._preserved_file_metadata[fp] = fm
                         del old_cache, old_obj_by_id
                     except Exception as e:
-                        print(f"  Warning: Could not read file metadata from backup: {e}")
+                        print(f"  Warning: Could not read file metadata from backup: {e}", file=sys.stderr)
                 if PLEX_Media._preserved_file_metadata:
                     print(f"\n  ⚠ Preserving ffmpeg file metadata for {len(PLEX_Media._preserved_file_metadata)} files (use --force-metadata to re-scan)")
                 if not FORCE_TSV:
@@ -20963,12 +20963,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             _layout_idx_live = _compute_layout_index_live()
         except Exception as _e:
-            if VRB: print(f"WARNING: layout_index live build failed: {_e}")
+            if VRB: print(f"WARNING: layout_index live build failed: {_e}", file=sys.stderr)
             _layout_idx_live = CACHE.get('layout_index') or {}
         try:
             _known_paths_live = sorted(_compute_known_filepaths_from_plex_db_live())
         except Exception as _e:
-            if VRB: print(f"WARNING: plex_known_filepaths live build failed: {_e}")
+            if VRB: print(f"WARNING: plex_known_filepaths live build failed: {_e}", file=sys.stderr)
             _known_paths_live = sorted(CACHE.get('plex_known_filepaths') or [])
 
         # v3 step 4c: prune orphans from sidecar files we manage.
@@ -20979,7 +20979,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             _cleanup_managed_orphans()
         except Exception as _e:
-            print(f"  WARNING: managed-orphan cleanup failed: {_e}")
+            print(f"  WARNING: managed-orphan cleanup failed: {_e}", file=sys.stderr)
             if DBG:
                 import traceback
                 traceback.print_exc()
@@ -20995,7 +20995,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             try:
                 cmd_original_languages(target=None, dry_run=False)
             except Exception as _e:
-                print(f"  WARNING: original-language backfill failed: {_e}")
+                print(f"  WARNING: original-language backfill failed: {_e}", file=sys.stderr)
                 if DBG:
                     import traceback
                     traceback.print_exc()
@@ -21612,13 +21612,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         else:
             found_items = resolve_cache_items(media_identifier)
             if not found_items:
-                print(f"ERROR: No items found matching '{media_identifier}'")
+                print(f"ERROR: No items found matching '{media_identifier}'", file=sys.stderr)
                 return
             if len(found_items) > 1:
                 # Multiple matches — filter to Series/Season/Episode only
                 series_items = [(k, o) for k, o in found_items if o.get('type') in ('Series', 'Season', 'Episode')]
                 if not series_items:
-                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type")
+                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type", file=sys.stderr)
                     return
                 if len(series_items) > 1:
                     # Multiple series/episodes — check if there's exactly one Series
@@ -21640,7 +21640,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         obj_library = obj.get('library', '')
         lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj_library, '')
         if lib_type != 'Series':
-            print(f"ERROR: --rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'")
+            print(f"ERROR: --rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'", file=sys.stderr)
             return
 
         pattern = EPISODE_NAME_PATTERN
@@ -21664,7 +21664,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         elif obj['type'] == 'Episode':
             episode_keys = [key]
         else:
-            print(f"ERROR: --rename cannot operate on {obj['type']} objects (no episode files)")
+            print(f"ERROR: --rename cannot operate on {obj['type']} objects (no episode files)", file=sys.stderr)
             return
 
         renamed_count = 0
@@ -21888,7 +21888,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         success, actual_new_path = rename_file(filepath, new_filename, remote_host=PLEX_DB_REMOTE_HOST)
         if not success:
-            print(f"    ERROR: rename failed for {current_filename}")
+            print(f"    ERROR: rename failed for {current_filename}", file=sys.stderr)
             return 'error'
 
         # Update cache
@@ -21984,7 +21984,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             new_basename = pattern.format(**var)
         except KeyError as e:
-            print(f"  ERROR: Unknown pattern variable {e} in EPISODE_NAME_PATTERN")
+            print(f"  ERROR: Unknown pattern variable {e} in EPISODE_NAME_PATTERN", file=sys.stderr)
             return 'error'
 
         # Strip trailing whitespace (e.g. if {TITLE} is empty: "Series S01E02 " → "Series S01E02")
@@ -22091,7 +22091,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 renamed_dirs[path] = new_path
                 target_labeled_dirs.add(new_path)
             else:
-                print(f"  WARNING: rename failed: {old_name}")
+                print(f"  WARNING: rename failed: {old_name}", file=sys.stderr)
             return ok
 
         # Movies: label movie directory
@@ -22111,7 +22111,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Sample a filepath to derive directories
             sample_fp = next((fp for s_fps in seasons.values() for fp in s_fps if fp), None)
             if not sample_fp:
-                print(f"  WARNING: no filepath found for {series_key}")
+                print(f"  WARNING: no filepath found for {series_key}", file=sys.stderr)
                 continue
 
             season_dir = os.path.dirname(sample_fp)
@@ -22635,7 +22635,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         matched but missing external IDs (no TMDB/TVDB → can't scrape episodes).
         Returns count of unmatched items."""
         if getattr(PLEX_Media, '_cache_missing_guid', False):
-            print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --force-plex")
+            print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --force-plex", file=sys.stderr)
             return 0
         unmatched = []       # (obj_type, plex_id, title, library, filepath, reason)
         missing_guid_count = 0
@@ -22669,8 +22669,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         if missing_guid_count > 0:
             scope = f" in '{library_name}'" if library_name else ""
-            print(f"  WARNING: {missing_guid_count} item(s){scope} have no guid in cache — results incomplete.")
-            print(f"  Run: my-plex --update-cache --force-plex")
+            print(f"  WARNING: {missing_guid_count} item(s){scope} have no guid in cache — results incomplete.", file=sys.stderr)
+            print(f"  Run: my-plex --update-cache --force-plex", file=sys.stderr)
 
         if not unmatched:
             scope = f" in '{library_name}'" if library_name else ""
@@ -24192,12 +24192,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # ---- --resolve -----------------------------------------------------
         if conflicts:
-            print(f"\nERROR: {len(conflicts)} conflict(s) in the plan — nothing was renamed.")
-            print("Possible reasons:")
-            print("  - two items render to the same canonical name (add a distinguishing")
-            print("    field like {RESOLUTION} or {YEAR} to the template)")
-            print("  - the target name already belongs to another cached file")
-            print("Resolve the conflicts (adjust NAMING_RULES or rename manually), then re-run.")
+            print(f"\nERROR: {len(conflicts)} conflict(s) in the plan — nothing was renamed.", file=sys.stderr)
+            print("Possible reasons:", file=sys.stderr)
+            print("  - two items render to the same canonical name (add a distinguishing", file=sys.stderr)
+            print("    field like {RESOLUTION} or {YEAR} to the template)", file=sys.stderr)
+            print("  - the target name already belongs to another cached file", file=sys.stderr)
+            print("Resolve the conflicts (adjust NAMING_RULES or rename manually), then re-run.", file=sys.stderr)
             sys.exit(1)
         if not renames:
             print("  Nothing to rename — every in-scope name is already canonical.")
@@ -25045,7 +25045,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             try:
                 new_basename = RENUMBER_NAME_PATTERN.format(**var)
             except KeyError as e:
-                print(f"  ERROR: Unknown pattern variable {e} in RENUMBER_NAME_PATTERN")
+                print(f"  ERROR: Unknown pattern variable {e} in RENUMBER_NAME_PATTERN", file=sys.stderr)
                 error_count += 1
                 continue
 
@@ -26812,7 +26812,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if success:
                 print(f"  Renamed: {old_name}\n        → {new_name}")
                 return True, os.path.join(parent, new_name)
-            print(f"  WARNING: rename failed: {old_name}")
+            print(f"  WARNING: rename failed: {old_name}", file=sys.stderr)
             return False, path
 
         remote_host = None
@@ -27841,7 +27841,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         play_media_file(resolved_file_to_play, remote_host_play)
                                         print("\nFile player launched. You can continue with other actions on this pair.")
                                     else:
-                                        print(f"ERROR: Cannot find file: {file_to_play}")
+                                        print(f"ERROR: Cannot find file: {file_to_play}", file=sys.stderr)
                                     continue  # Go back to menu for next choice
     
                                 # Check if this is a trash action for file 3
@@ -27860,8 +27860,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 # Determine if files are local or remote, and resolve file paths
                                 remote_host, exists, resolved_file1 = determine_remote_host(file1)
                                 if not exists:
-                                    print(f"ERROR: Cannot find file locally or on remote host: {file1}")
-                                    print("Skipping this pair.")
+                                    print(f"ERROR: Cannot find file locally or on remote host: {file1}", file=sys.stderr)
+                                    print("Skipping this pair.", file=sys.stderr)
                                     break
 
                                 # For play actions with file2, resolve file2 as well
@@ -27869,8 +27869,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if choice == '2' and file2 != 'N/A':
                                     _, exists2, resolved_file2 = determine_remote_host(file2)
                                     if not exists2:
-                                        print(f"ERROR: Cannot find file locally or on remote host: {file2}")
-                                        print("Skipping this pair.")
+                                        print(f"ERROR: Cannot find file locally or on remote host: {file2}", file=sys.stderr)
+                                        print("Skipping this pair.", file=sys.stderr)
                                         break
 
                                 # Handle the chosen action
@@ -27931,8 +27931,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 print("\n\nInterrupted by user. Exiting resolution mode.")
                                 break  # Break out of duplicate pairs loop, will still save cache
                             except Exception as e:
-                                print(f"ERROR: {e}")
-                                print("Skipping this pair.")
+                                print(f"ERROR: {e}", file=sys.stderr)
+                                print("Skipping this pair.", file=sys.stderr)
                                 break
 
                         # DEBUG: Confirm we finished processing this duplicate
@@ -32298,13 +32298,13 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
         input=content, capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"  WARNING: Failed to write {server_tsv} via SSH: {result.stderr.strip()}")
+        print(f"  WARNING: Failed to write {server_tsv} via SSH: {result.stderr.strip()}", file=sys.stderr)
         # Fallback: try local write
         try:
             with open(tsv_path, 'w', encoding='utf-8') as f:
                 f.write(content)
         except Exception as e2:
-            print(f"  WARNING: Local fallback also failed: {e2}")
+            print(f"  WARNING: Local fallback also failed: {e2}", file=sys.stderr)
 
 
 def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
@@ -32470,13 +32470,13 @@ def _load_custom_date_extractors():
     import importlib.util, os
     module_path = CUSTOM_DATE_EXTRACTORS
     if not os.path.isfile(module_path):
-        print(f"WARNING: CUSTOM_DATE_EXTRACTORS module not found: {module_path}")
+        print(f"WARNING: CUSTOM_DATE_EXTRACTORS module not found: {module_path}", file=sys.stderr)
         return
 
     try:
         spec = importlib.util.spec_from_file_location("custom_date_extractors", module_path)
         if spec is None or spec.loader is None:
-            print(f"WARNING: Could not load CUSTOM_DATE_EXTRACTORS module: {module_path}")
+            print(f"WARNING: Could not load CUSTOM_DATE_EXTRACTORS module: {module_path}", file=sys.stderr)
             return
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -32485,9 +32485,9 @@ def _load_custom_date_extractors():
             if VRB:
                 print(f"  Loaded {len(mod.EXTRACTORS)} custom date extractor(s) from {module_path}")
         else:
-            print(f"WARNING: CUSTOM_DATE_EXTRACTORS module has no EXTRACTORS dict: {module_path}")
+            print(f"WARNING: CUSTOM_DATE_EXTRACTORS module has no EXTRACTORS dict: {module_path}", file=sys.stderr)
     except Exception as e:
-        print(f"WARNING: Failed to load CUSTOM_DATE_EXTRACTORS: {e}")
+        print(f"WARNING: Failed to load CUSTOM_DATE_EXTRACTORS: {e}", file=sys.stderr)
 
 
 # Built-in extractors registry
@@ -32529,7 +32529,7 @@ def extract_episode_date(filename, format_type='auto'):
     if func:
         return func(filename)
 
-    print(f"WARNING: Unknown date extractor format: '{format_type}'")
+    print(f"WARNING: Unknown date extractor format: '{format_type}'", file=sys.stderr)
     return None
 
 
@@ -32915,7 +32915,7 @@ def scrape_episodes(series_title, series_dir, source=None, force=False, external
         case 'tmdb':
             result = _scrape_tmdb(series_title, metadata, existing_episodes, external_ids)
         case _:
-            if VRB: print(f"  WARNING: Unknown scraper source '{source}' for '{series_title}'")
+            if VRB: print(f"  WARNING: Unknown scraper source '{source}' for '{series_title}'", file=sys.stderr)
             return metadata, existing_episodes
 
     # Fallback chain: if primary source failed or returned 0 episodes, try alternatives
@@ -33050,8 +33050,8 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
 
     if not tvdb_id:
         if VRB:
-            print(f"  WARNING: No TVDB ID found for '{series_title}' — cannot scrape TVDB")
-            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+            print(f"  WARNING: No TVDB ID found for '{series_title}' — cannot scrape TVDB", file=sys.stderr)
+            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB", file=sys.stderr)
         return None
 
     # Authenticate
@@ -33070,7 +33070,7 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
         except Exception as e:
-            if VRB: print(f"  WARNING: TVDB API request failed (page {page}): {e}")
+            if VRB: print(f"  WARNING: TVDB API request failed (page {page}): {e}", file=sys.stderr)
             if page == 0:
                 return None  # First page failed — fatal
             break  # Subsequent pages — use what we have
@@ -33112,7 +33112,7 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
         page += 1
 
     if not all_episodes:
-        if VRB: print(f"  WARNING: TVDB returned 0 episodes for '{series_title}' (tvdb:{tvdb_id})")
+        if VRB: print(f"  WARNING: TVDB returned 0 episodes for '{series_title}' (tvdb:{tvdb_id})", file=sys.stderr)
         return None
 
     new_metadata = {'tvdb_id': str(tvdb_id)}
@@ -33181,8 +33181,8 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
 
     if not tmdb_id:
         if VRB:
-            print(f"  WARNING: No TMDB ID found for '{series_title}' — cannot scrape TMDB")
-            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB")
+            print(f"  WARNING: No TMDB ID found for '{series_title}' — cannot scrape TMDB", file=sys.stderr)
+            print(f"  Possible reasons: show not matched in Plex, or missing external ID in Plex DB", file=sys.stderr)
         return None
 
     headers = {
@@ -33206,10 +33206,10 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
                 "  - TMDB_API_KEY should be the 'API Read Access Token' (long string), not the short 'API Key'\n"
                 "  Fix: Update TMDB_API_KEY in ~/.my-plex.conf")
         elif VRB:
-            print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}")
+            print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}", file=sys.stderr)
         return None
     except Exception as e:
-        if VRB: print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}")
+        if VRB: print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}", file=sys.stderr)
         return None
 
     num_seasons = series_data.get('number_of_seasons', 0)
@@ -33219,7 +33219,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
         num_seasons = max((s.get('season_number', 0) for s in seasons_list), default=0)
 
     if not num_seasons:
-        if VRB: print(f"  WARNING: TMDB reports 0 seasons for '{series_title}' (tmdb:{tmdb_id})")
+        if VRB: print(f"  WARNING: TMDB reports 0 seasons for '{series_title}' (tmdb:{tmdb_id})", file=sys.stderr)
         return None
 
     # Step 2: Fetch episodes for each season
@@ -33232,7 +33232,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 season_data = json.loads(resp.read().decode('utf-8'))
         except Exception as e:
-            if VRB: print(f"  WARNING: TMDB season {season_num} request failed: {e}")
+            if VRB: print(f"  WARNING: TMDB season {season_num} request failed: {e}", file=sys.stderr)
             continue
 
         for ep in season_data.get('episodes', []):
@@ -33252,7 +33252,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
             })
 
     if not all_episodes:
-        if VRB: print(f"  WARNING: TMDB returned 0 episodes for '{series_title}' (tmdb:{tmdb_id})")
+        if VRB: print(f"  WARNING: TMDB returned 0 episodes for '{series_title}' (tmdb:{tmdb_id})", file=sys.stderr)
         return None
 
     new_metadata = {'tmdb_id': str(tmdb_id)}
@@ -33373,7 +33373,7 @@ def _scrape_fernsehserien_de(series_title, metadata, existing_episodes, year=Non
         if VRB: print(f"  Discovering fernsehserien.de slug for '{series_title}'...")
         slug, series_id = _discover_fernsehserien_slug(series_title, year=year)
         if not slug:
-            if VRB: print(f"  WARNING: Could not find '{series_title}' on fernsehserien.de")
+            if VRB: print(f"  WARNING: Could not find '{series_title}' on fernsehserien.de", file=sys.stderr)
             return None
 
     new_metadata = {'slug': slug}
@@ -35188,7 +35188,7 @@ def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
                     print(f"  {name} → {clean}")
             else:
                 errors += 1
-                print(f"  ERROR renaming: {name}")
+                print(f"  ERROR renaming: {name}", file=sys.stderr)
     return (renamed, skipped, errors)
 
 def cmd_plex2disk_clean(target, dry_run=False):
@@ -35330,7 +35330,7 @@ def _push_watched_dpm(obj, change, dry_run):
     title = obj.get('title', '?')
     item_id = obj.get('item_id')
     if not item_id:
-        print(f"    ERROR: no item_id for {title}")
+        print(f"    ERROR: no item_id for {title}", file=sys.stderr)
         return False
     wd = (change.get('extras') or {}).get('WATCHED_DATE')
     if dry_run:
@@ -35373,7 +35373,7 @@ def _push_watched_dpm(obj, change, dry_run):
             print(f"  Pushed watched ({wd or 'no date'}): {title}")
         return True
     except Exception as ex:
-        print(f"  ERROR pushing watched for {title}: {ex}")
+        print(f"  ERROR pushing watched for {title}: {ex}", file=sys.stderr)
         return False
 
 
@@ -35599,7 +35599,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
             try:
                 ok = handler(obj, change, dry_run=False)
             except Exception as ex:
-                print(f"  ERROR pushing {plex_var} for {cache_key}: {ex}")
+                print(f"  ERROR pushing {plex_var} for {cache_key}: {ex}", file=sys.stderr)
                 errors += 1
                 continue
             if ok is None:
@@ -35867,10 +35867,10 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
     print(f"  Remuxing {cache_key} on {remote_host}: {os.path.basename(server_src)} → {new_name}  (lang={lang_2})")
     res = run_tool_on_PLEX_server('ffmpeg', ffmpeg_args, remote_host=remote_host, timeout=1800)
     if res is None:
-        print(f"    ERROR: ffmpeg not found on {remote_host or 'local'}")
+        print(f"    ERROR: ffmpeg not found on {remote_host or 'local'}", file=sys.stderr)
         return False
     if res.returncode != 0:
-        print(f"    ERROR: ffmpeg exit={res.returncode}")
+        print(f"    ERROR: ffmpeg exit={res.returncode}", file=sys.stderr)
         if res.stderr:
             print(f"    {res.stderr[-500:]}")
         # Best-effort cleanup of staging
@@ -35883,20 +35883,20 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
     # Verify output exists (server-side check)
     chk_ok, _ = my_plex_file_operation('CHECK', staging_path, remote_host)
     if not chk_ok:
-        print(f"    ERROR: staging file missing after ffmpeg: {staging_path}")
+        print(f"    ERROR: staging file missing after ffmpeg: {staging_path}", file=sys.stderr)
         return False
 
     # Atomic move staging → target (target is in the same dir, on server)
     mv_ok, _ = rename_file(staging_path, new_name, remote_host=remote_host)
     if not mv_ok:
-        print(f"    ERROR: atomic move failed: {staging_path} → {new_name}")
+        print(f"    ERROR: atomic move failed: {staging_path} → {new_name}", file=sys.stderr)
         return False
 
     # Trash original on the SERVER (.Trashes folder there, not Mac ~/.Trash)
     if REMUX_TRASH_ORIGINAL:
         trash_ok, _ = my_plex_file_operation('TRASH', server_src, remote_host)
         if not trash_ok:
-            print(f"    WARNING: failed to trash original {server_src}")
+            print(f"    WARNING: failed to trash original {server_src}", file=sys.stderr)
 
     # Update in-memory cache for this version: filepath flips to new_path,
     # extension flips, audio_languages updated to include the new language,
@@ -35989,7 +35989,7 @@ def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None
             update_sidecar_entry(sidecar, dst_path, new_dst_path, src_entry['markers'], clean_dst)
             print(f"  Transferred markers from {os.path.basename(src_path)} to {new_basename}")
         else:
-            print(f"  WARNING: Failed to transfer markers to {dst_basename}")
+            print(f"  WARNING: Failed to transfer markers to {dst_basename}", file=sys.stderr)
             new_dst_path = dst_path
             transfer_success = False
 
@@ -36054,7 +36054,7 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
             _update_sidecar_child_paths(sidecar, dst_dir, new_dst_dir)
             print(f"  Transferred dir markers from {os.path.basename(src_dir)} to {new_dirname}")
         else:
-            print(f"  WARNING: Failed to transfer dir markers to {dst_dirname}")
+            print(f"  WARNING: Failed to transfer dir markers to {dst_dirname}", file=sys.stderr)
             new_dst_dir = dst_dir
             transfer_success = False
 
@@ -37424,7 +37424,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except Exception as e:
-        print(f"ERROR: SSH bulk-mv failed: {e}")
+        print(f"ERROR: SSH bulk-mv failed: {e}", file=sys.stderr)
         return (0, 0, len(plan))
     outcomes = result.stdout.splitlines()
     n_moved = sum(1 for ln in outcomes if ln.strip() == 'MOVED')
@@ -37843,8 +37843,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
     redo = bool(safe_getattr(args, 'redo', False))
     if redo and not target:
-        print("ERROR: --redo requires an explicit SCOPE (library, series cache key, or series title).")
-        print("       Refusing to run --redo globally — too destructive.")
+        print("ERROR: --redo requires an explicit SCOPE (library, series cache key, or series title).", file=sys.stderr)
+        print("       Refusing to run --redo globally — too destructive.", file=sys.stderr)
         return
 
     all_series_list = get_all_series_in_series_libraries()
@@ -38049,7 +38049,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
             result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                print(f"    ERROR: mkdir {os.path.basename(target_dir_server)}/: {result.stderr.strip()}")
+                print(f"    ERROR: mkdir {os.path.basename(target_dir_server)}/: {result.stderr.strip()}", file=sys.stderr)
                 return False
             dst_server = os.path.join(target_dir_server, new_name)
             success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
@@ -38148,7 +38148,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
@@ -38168,7 +38168,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
@@ -38208,7 +38208,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                                 dry_run_lines.append((season, ep_num, f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}"))
                             else:
                                 if not _sort_move(fp, target_dir, new_name):
-                                    print(f"    ERROR: Failed to move {fn}")
+                                    print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                     failed_count += 1
                                     continue
                                 print(f"    [absolute] {fn} -> s{season:02d}/{new_name}")
@@ -38231,7 +38231,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         dry_run_lines.append((season, ep_num, f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
-                            print(f"    ERROR: Failed to move {fn}")
+                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
                         print(f"    [leading-num] {fn} -> s{season:02d}/{new_name}")
@@ -38257,7 +38257,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [special] S00E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [special] {fn} -> s00/{new_name}")
@@ -38290,7 +38290,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             dry_run_lines.append((season, ep_num, f"    [dry-run] [abs-idx={abs_num}] S{season:02d}E{ep_num:02d}: {fn}"))
                         else:
                             if not _sort_move(fp, target_dir, new_name):
-                                print(f"    ERROR: Failed to move {fn}")
+                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                 failed_count += 1
                                 continue
                             print(f"    [abs-idx={abs_num}] {fn} -> s{season:02d}/{new_name}")
@@ -38312,7 +38312,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [prose] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [prose] {fn} -> s{season:02d}/{new_name}")
@@ -38354,7 +38354,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
                         else:
                             if not _sort_move(fp, target_dir, new_name):
-                                print(f"    ERROR: Failed to move {fn}")
+                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                 failed_count += 1
                                 continue
                             print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
@@ -38387,7 +38387,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             subprocess.run(['bash', specials_script, fp], check=True, cwd=series_dir)
                             print(f"    {fn} -> sort_specials.sh")
                         except subprocess.CalledProcessError as e:
-                            print(f"    ERROR: sort_specials.sh failed for {fn}: {e}")
+                            print(f"    ERROR: sort_specials.sh failed for {fn}: {e}", file=sys.stderr)
                             failed_count += 1
                             continue
                 else:
@@ -38400,7 +38400,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
-                            print(f"    ERROR: Failed to move {fn}")
+                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
                         print(f"    {fn} -> specials/{new_name}")
@@ -38428,7 +38428,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}")
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
@@ -38569,7 +38569,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
                         result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                         if result.returncode != 0:
-                            print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}")
+                            print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}", file=sys.stderr)
                             movie_failed += 1
                             lib_failed_count += 1
                             continue
@@ -38602,7 +38602,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                                     else:
                                         print(f"      ⚠ touch placeholder failed: {os.path.basename(src_path)} ({tr.stderr.strip()})")
                         else:
-                            print(f"    ERROR: {fn}: some files failed to move")
+                            print(f"    ERROR: {fn}: some files failed to move", file=sys.stderr)
                             movie_failed += 1
                             lib_failed_count += 1
 
@@ -38946,8 +38946,8 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
 
     # Safety gate: >10 items requires --yes or --dry-run
     if len(obj_keys) > 10 and not yes and not dry_run:
-        print(f"\n  WARNING: --{action}-label '{label}' would affect {len(obj_keys)} items.")
-        print(f"  Use --dry-run to preview, or --yes to confirm.")
+        print(f"\n  WARNING: --{action}-label '{label}' would affect {len(obj_keys)} items.", file=sys.stderr)
+        print(f"  Use --dry-run to preview, or --yes to confirm.", file=sys.stderr)
         return
 
     action_fn = add_label_to_item if action == 'add' else remove_label_from_item
@@ -43657,12 +43657,12 @@ def main():
 
     # --rename requires a library or media object target
     if safe_getattr(args, 'rename', None) is not None and not any(a for a in remaining_args if not a.startswith('-')):
-        print("ERROR: --rename requires a library or series/season/episode target.")
-        print("  Usage: my-plex <LIBRARY> --rename          (rename all episodes in library)")
-        print("         my-plex <SERIES> --rename              (rename all episodes of a series)")
-        print("         my-plex <SEASON> --rename            (rename all episodes of a season)")
-        print("         my-plex <EPISODE> --rename           (rename a single episode)")
-        print("  Use --help rename for details.")
+        print("ERROR: --rename requires a library or series/season/episode target.", file=sys.stderr)
+        print("  Usage: my-plex <LIBRARY> --rename          (rename all episodes in library)", file=sys.stderr)
+        print("         my-plex <SERIES> --rename              (rename all episodes of a series)", file=sys.stderr)
+        print("         my-plex <SEASON> --rename            (rename all episodes of a season)", file=sys.stderr)
+        print("         my-plex <EPISODE> --rename           (rename a single episode)", file=sys.stderr)
+        print("  Use --help rename for details.", file=sys.stderr)
         sys.exit(1)
 
     parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args)
