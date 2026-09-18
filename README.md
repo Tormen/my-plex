@@ -380,4 +380,5 @@ Open Source — contributions are welcome.
 
 ## License
 
-MIT
+GPL-3.0-or-later (copyleft) -- see [LICENSE](LICENSE). Derivative works must be
+released under a compatible license.

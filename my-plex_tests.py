@@ -3232,7 +3232,7 @@ class TestEndToEnd(unittest.TestCase):
     def _pick_lib_with_language(self, lang_code):
         """Return any cached library whose configured language begins with lang_code,
         or None if none exists.  Used by localized-genre tests to stay agnostic
-        of the user's actual library names (per feedback_no_local_plex_examples)."""
+        of the actual library names: every install names them differently."""
         result = self._run_cmd('--list-libraries')
         if result.returncode != 0:
             return None
@@ -3304,7 +3304,7 @@ class TestFilter(unittest.TestCase):
         """Skip all filter tests when the cache has no media (run --update-cache first).
         Also discover a library name to use for scoped tests — picked dynamically
         from --list-libraries so the test suite stays agnostic of the user's
-        actual library names (per feedback_no_local_plex_examples)."""
+        actual library names: every install names them differently."""
         import subprocess
         result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list'],
                                 capture_output=True, text=True, timeout=30)
@@ -3586,8 +3586,8 @@ class TestDefaultScope(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Discover a library to use for scope-dependent tests (per
-        feedback_no_local_plex_examples: pick dynamically, don't hard-code)."""
+        """Discover a library to use for scope-dependent tests -- picked
+        dynamically, never hard-coded: every install names its libraries differently."""
         import subprocess
         libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
                                      capture_output=True, text=True, timeout=30)
@@ -8619,7 +8619,7 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(cls['action'], 'remux')
 
     def test_classify_disjoint_actions(self):
-        """Per feedback_reencode_minimal: an item is NEVER both --reencode
+        """--reencode lists only what remuxing cannot fix: an item is NEVER both --reencode
         AND --remux.  Run a small grid and verify no overlap."""
         cases = [
             self._mock_video_obj(ext='.mp4', audio_languages=['de']),                # none
@@ -8864,7 +8864,7 @@ class TestMove(unittest.TestCase):
         self.assertIn("if not yes:", body)
 
     def test_cmd_move_prints_summary(self):
-        """cmd_move must print a SUMMARY at the end (per feedback_summary_at_end)."""
+        """cmd_move must print a SUMMARY at the end, like every command whose output varies."""
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
@@ -10685,8 +10685,8 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
 
     def test_problem_categories_disabled_is_gone(self):
         """The old PROBLEM_CATEGORIES_DISABLED key must NOT appear in
-        CONFIG_DEFAULTS (no backwards-compat shim — clean rename per
-        feedback_no_backwards_compat).  Catches accidental re-introduction."""
+        CONFIG_DEFAULTS (no backwards-compat shim — a clean rename).
+        Catches accidental re-introduction."""
         self.assertNotIn('PROBLEM_CATEGORIES_DISABLED', self.m.CONFIG_DEFAULTS)
         self.assertIn('PROBLEM_CATEGORIES_ENABLED', self.m.CONFIG_DEFAULTS)
 
