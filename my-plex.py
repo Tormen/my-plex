@@ -69,7 +69,7 @@
 # neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "6b45eba"
+SCRIPT_COMMIT  = "293e1cd"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -17834,7 +17834,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
         # and (b) log genuine numbering disagreements into `numbering_issues` for
         # `--episode-numbering-issues`. The scraped E-number itself is NEVER used
         # as a display source — Plex is the single source of truth for episode ids
-        # (see feedback_default_normalized_episode_id). When Plex and the scraped
+        # (ids are displayed as Plex's own number, zero-padded). When Plex and the scraped
         # source disagree on an episode's number, the scraped number is stored on
         # the episode obj as `scraped_E_str` for debug/audit only (absent when they
         # agree).
@@ -24532,8 +24532,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 # v1.4: classifier-driven gating — listed only when the
                 # action is 'reencode' (high_bitrate or
                 # needs_reencode_container).  Outdated-container files
-                # with safe codecs go to --remux instead, NOT here
-                # (per feedback_reencode_minimal).
+                # with safe codecs go to --remux instead, NOT here:
+                # --reencode lists only what a cheaper migration cannot fix.
                 _cls = _classify_migration_action(obj, version=version)
                 if _cls['action'] != 'reencode':
                     continue
@@ -30498,7 +30498,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  - --unmatched --resolve can't pick a single target name for the")
             print("    shared wrapper — it shows a dedupe/conflict warning instead.")
             print("  - Per-item moves / labels / rename operations all operate on the")
-            print("    wrapper as a unit (see feedback_item_path_is_a_unit memory) and")
+            print("    whole wrapper directory as one unit, with all its sidecars, and")
             print("    can't address one film without dragging the other along.")
             print()
             print("HOW TO FIX:")
@@ -31322,7 +31322,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  modern container     →  no action (already MKV/MP4/M4V)")
             print("  language already known  (only when --no-audio-language --remux)")
             print()
-            print("UNIVERSAL SCOPE (per feedback_universal_scope):")
+            print("UNIVERSAL SCOPE (any library, series, season, episode, key or path):")
             print("  my-plex --remux                       # all candidates")
             print("  my-plex lib2 --remux             # one library")
             print("  my-plex 'Tagesschau' --remux          # one series")
@@ -31503,7 +31503,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Like --remux, --mv defaults to a dry-run preview even WITHOUT --try.")
             print("  Re-run with --yes to execute the moves.")
             print()
-            print("UNIVERSAL SCOPE (per feedback_universal_scope) — every Plex type the")
+            print("UNIVERSAL SCOPE — every Plex type the")
             print("cache knows about is accepted; Series / Season auto-expand to episodes:")
             print("  my-plex --mv lib4 Movie:12345         # one movie (all versions)")
             print("  my-plex --mv lib4 'Le Samouraï'       # by title")
@@ -31556,7 +31556,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("SIBLINGS:")
             print("  Files in the same directory sharing the same basename (e.g. foo.nfo,")
             print("  foo.en.srt, foo-poster.jpg next to foo.mkv) move alongside the main")
-            print("  video file (per feedback_rename_siblings).")
+            print("  video file, so no sidecar is left behind.")
             print()
             print("PLEX SYNC:")
             print("  After all moves, triggers lib.update() on BOTH the source and the")
@@ -34075,8 +34075,8 @@ def _resolve_target_to_cache_keys_via_filepath(target):
     any equivalent path form (e.g. /Volumes/2/foo vs /j2/foo) finds the
     same item.  Returns the list of cache_keys, or [] if no match.
 
-    Per `feedback_scope_filepath_universal`: every scope helper must
-    accept full filepaths.  Reuse this helper from any new scope
+    Every scope helper must accept full filepaths, in any of their
+    ALTERNATIVE_ROOTPATHS forms.  Reuse this helper from any new scope
     resolver — do NOT re-implement.
     """
     if not isinstance(target, str) or not target.startswith('/'):
@@ -34552,7 +34552,7 @@ def _get_disk_map_scope(target):
 
     # Filepath scope — if the target is a path string, resolve via
     # OBJ_BY_FILEPATH first so it's not shadowed by title-search.  Honours
-    # ALTERNATIVE_ROOTPATHS (per feedback_scope_filepath_universal).
+    # ALTERNATIVE_ROOTPATHS, so every equivalent path form names the same item.
     fp_keys = _resolve_target_to_cache_keys_via_filepath(target)
     if fp_keys:
         for k in fp_keys:
@@ -35866,7 +35866,7 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
     lang_3 = ISO_639_1_TO_2.get(lang_2.lower()[:2], lang_2.lower()[:3])
 
     # Verify file exists (allow local mount lookup), but force remote_host
-    # for the WRITE operations below — per feedback_ssh_for_writes the
+    # for the WRITE operations below — writes go through the server, so the
     # remux pipeline must always SSH to the Plex server even when the
     # path happens to be reachable via a locally-mounted volume (Mac
     # ~/.Trash would receive the original instead of the server's
