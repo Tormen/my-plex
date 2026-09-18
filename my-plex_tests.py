@@ -15,12 +15,14 @@ import subprocess
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
 
-def _pick_most_populated_library(list_libraries_stdout):
-    """Pick the library with the MOST items from `--list-libraries` output.
+def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
+    """Pick the library with the MOST items from `--list-libraries` output,
+    optionally only among libraries of one TYPE ('Movie', 'Series').
 
     Data-dependent E2E tests need a library that actually has content —
     the first row may be a near-empty staging library.  Library names stay
-    dynamic (per feedback_no_local_plex_examples: never hard-code them).
+    dynamic: every Plex install names its libraries differently, so a test
+    must never hard-code one.
     Returns the library name, or None when no data row parses.
     """
     best_name, best_items = None, -1
@@ -30,6 +32,8 @@ def _pick_most_populated_library(list_libraries_stdout):
             continue
         name = parts[0].strip()
         if not name or name[0] in ('-', '=') or 'NAME' in name.upper():
+            continue
+        if lib_type and parts[3].strip() != lib_type:
             continue
         try:
             items = int(parts[6].strip())
@@ -4546,6 +4550,39 @@ class TestCacheUpdateLog(unittest.TestCase):
 class TestEpisodesTSV(unittest.TestCase):
     """Test episodes.tsv read/write and format detection."""
 
+    def setUp(self):
+        # A unit test must never reach the real Plex server: no remote host,
+        # and any subprocess call (ssh) fails the test instead of running.
+        from unittest import mock
+        g = write_episodes_tsv.__globals__
+        self._saved_remote = g.get('PLEX_DB_REMOTE_HOST')
+        g['PLEX_DB_REMOTE_HOST'] = ''
+        # Calls are RECORDED as well as refused: code under test may swallow the
+        # exception, the record it cannot.
+        self._subprocess_calls = []
+        def _no_ssh(*a, **k):
+            self._subprocess_calls.append(a[0] if a else k)
+            raise AssertionError(f"episodes.tsv test ran a subprocess: {a[0] if a else k}")
+        self._patch = mock.patch('subprocess.run', side_effect=_no_ssh)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        write_episodes_tsv.__globals__['PLEX_DB_REMOTE_HOST'] = self._saved_remote
+        self.assertEqual(self._subprocess_calls, [], "a unit test must not run ssh / subprocesses")
+
+    def test_local_write_keeps_the_previous_file(self):
+        """Without a remote host the TSV is written locally, and an existing one
+        is kept as a backup -- the same as the SSH path does on the server."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tsv = os.path.join(d, 'episodes.tsv')
+            eps = [{'season': 1, 'episode': 1, 'date': '2025-01-01', 'title': 'One'}]
+            write_episodes_tsv(tsv, {'source': 'tmdb', 'slug': 'x'}, eps)
+            write_episodes_tsv(tsv, {'source': 'tmdb', 'slug': 'x', '_prev_updated': '2025-01-02'}, eps)
+            self.assertTrue(os.path.isfile(tsv))
+            self.assertTrue(os.path.isfile(tsv + '.2025-01-02'), sorted(os.listdir(d)))
+
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
@@ -5204,15 +5241,15 @@ class TestRename(unittest.TestCase):
 
     def test_rename_movie_error(self):
         """--rename on a movie library should print an error."""
-        # Check if 'lib3' library exists in cache
         probe = subprocess.run([sys.executable, MAIN_SCRIPT, '--offline', '--list-libraries'],
             capture_output=True, text=True, timeout=30)
-        if 'lib3' not in probe.stdout:
-            self.skipTest("'lib3' library not in cache — cannot test --rename movie error")
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename', 'lib3', '--dry-run'],
+        movie_lib = _pick_most_populated_library(probe.stdout, lib_type='Movie')
+        if not movie_lib:
+            self.skipTest("no Movie library in the cache -- cannot test --rename movie error")
+        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--offline', '--rename', movie_lib, '--dry-run'],
             capture_output=True, text=True, timeout=30)
-        output = result.stdout + result.stderr
-        self.assertIn('Movie', output, "--rename on movie library should mention Movie type")
+        self.assertNotEqual(result.returncode, 0, "--rename on a Movie library must fail")
+        self.assertIn('only available for Series libraries, not Movie', result.stderr)
 
 
 class TestRenameShared(unittest.TestCase):

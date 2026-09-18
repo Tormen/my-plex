@@ -69,7 +69,7 @@
 # neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "a3b0838"
+SCRIPT_COMMIT  = "6b45eba"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -20084,7 +20084,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj  # obj is the library name string
             lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             if lib_type != 'Series':
-                print(f"ERROR: --rename is only available for Series libraries, not {lib_type} (library '{lib_name}')", file=sys.stderr)
+                err(1202, f"--rename is only available for Series libraries, not {lib_type} (library '{lib_name}')")
             else:
                 lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
                 series_keys = lib_data.get('Series', [])
@@ -21638,14 +21638,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         else:
             found_items = resolve_cache_items(media_identifier)
             if not found_items:
-                print(f"ERROR: No items found matching '{media_identifier}'", file=sys.stderr)
-                return
+                err(1198, f"No items found matching '{media_identifier}'")
             if len(found_items) > 1:
                 # Multiple matches — filter to Series/Season/Episode only
                 series_items = [(k, o) for k, o in found_items if o.get('type') in ('Series', 'Season', 'Episode')]
                 if not series_items:
-                    print(f"ERROR: Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type", file=sys.stderr)
-                    return
+                    err(1199, f"Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type")
                 if len(series_items) > 1:
                     # Multiple series/episodes — check if there's exactly one Series
                     series_matches = [(k, o) for k, o in series_items if o.get('type') == 'Series']
@@ -21666,8 +21664,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         obj_library = obj.get('library', '')
         lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj_library, '')
         if lib_type != 'Series':
-            print(f"ERROR: --rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'", file=sys.stderr)
-            return
+            err(1200, f"--rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'")
 
         pattern = EPISODE_NAME_PATTERN
 
@@ -21690,8 +21687,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         elif obj['type'] == 'Episode':
             episode_keys = [key]
         else:
-            print(f"ERROR: --rename cannot operate on {obj['type']} objects (no episode files)", file=sys.stderr)
-            return
+            err(1201, f"--rename cannot operate on {obj['type']} objects (no episode files)")
 
         renamed_count = 0
         skipped_count = 0
@@ -32186,6 +32182,8 @@ def read_episodes_tsv(tsv_path):
     lines_iter = None
     if os.path.isfile(tsv_path):
         lines_iter = open(tsv_path, 'r', encoding='utf-8')
+    elif not PLEX_DB_REMOTE_HOST:
+        return None, None   # local library, and the file is not there
     else:
         # Try reading via SSH from server path
         server_path = get_server_path(os.path.dirname(tsv_path))
@@ -32258,7 +32256,8 @@ def read_episodes_tsv(tsv_path):
 
 
 def write_episodes_tsv(tsv_path, metadata, episodes):
-    """Write standardized episodes.tsv via SSH to the Plex server.
+    """Write standardized episodes.tsv via SSH to the Plex server, or locally
+    when no PLEX_DB_REMOTE_HOST is configured.
 
     If the file already exists, it is renamed to episodes.tsv.<updated-date> first.
 
@@ -32317,6 +32316,18 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     backup_suffix = f'.{old_updated}' if old_updated else '.prev'
     escaped_backup = escape_path_for_ssh(server_tsv + backup_suffix)
 
+    # No Plex server over SSH: the library is local, write it here -- with the
+    # same backup of the previous file the SSH path makes.
+    if not PLEX_DB_REMOTE_HOST:
+        try:
+            if os.path.exists(tsv_path):
+                os.replace(tsv_path, tsv_path + backup_suffix)
+            with open(tsv_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except OSError as e:
+            print(f"  WARNING: Failed to write {tsv_path}: {e}", file=sys.stderr)
+        return
+
     # SSH: if file exists, rename it; then write new content via cat
     rename_cmd = f'[ -f "{escaped_tsv}" ] && mv "{escaped_tsv}" "{escaped_backup}"; cat > "{escaped_tsv}"'
     result = subprocess.run(
@@ -32339,6 +32350,8 @@ def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
     if os.path.isfile(tsv_path):
         age = time.time() - os.path.getmtime(tsv_path)
         return age > max_age
+    if not PLEX_DB_REMOTE_HOST:
+        return True   # local library, and the file is not there: stale
     # Try SSH: check file age on server
     server_dir = get_server_path(os.path.dirname(tsv_path))
     server_tsv = os.path.join(server_dir, EPISODES_TSV_FILENAME)
