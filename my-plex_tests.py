@@ -11514,6 +11514,23 @@ class TestVersionNotReused(unittest.TestCase):
                          f"{version} is already a released tag and HEAD has moved past it -- bump SCRIPT_VERSION")
 
 
+class TestRunViaSymlink(unittest.TestCase):
+    """my-plex is deployed as a symlink (/LINKS/bin/my-plex -> .../my-plex.py).
+    Everything it loads from beside itself must be found next to the REAL
+    file, not next to the link."""
+
+    def test_runs_through_a_symlink_in_another_directory(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            link = os.path.join(d, 'my-plex')
+            os.symlink(MAIN_SCRIPT, link)
+            r = subprocess.run([sys.executable, link, '--help'],
+                               capture_output=True, text=True, timeout=60)
+        out = r.stdout + r.stderr
+        self.assertNotIn('my-plex_tests.py', out, f"looked for a sibling next to the link:\n{out[-600:]}")
+        self.assertEqual(r.returncode, 0, out[-600:])
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -11563,7 +11580,7 @@ _UNITTEST_SCOPES = {
     'sync':               [TestSyncDispatchAndDoubleMarkerFix],
     'naming':             [TestNaming],
     'v269':               [TestV269RetroactiveCoverage],
-    'version':            [TestVersionAndStamp, TestVersionNotReused],
+    'version':            [TestVersionAndStamp, TestVersionNotReused, TestRunViaSymlink],
 }
 
 # List of all unittest classes for run_regression_tests()

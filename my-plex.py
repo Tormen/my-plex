@@ -69,7 +69,7 @@
 # neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "35cd5bf"
+SCRIPT_COMMIT  = "0056f23"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3776,7 +3776,8 @@ import unittest
 # To merge tests back inline, replace this section with contents of 52_tests.py
 
 from importlib.util import spec_from_file_location, module_from_spec as _mfs
-_test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.abspath(__file__)), "my-plex_tests.py"))
+# realpath, not abspath: deployed as a symlink (/LINKS/bin/my-plex), the tests live next to the real file
+_test_spec = spec_from_file_location("_tests", os.path.join(os.path.dirname(os.path.realpath(__file__)), "my-plex_tests.py"))
 assert _test_spec is not None and _test_spec.loader is not None, "my-plex_tests.py not found next to my-plex.py"
 _test_mod = _mfs(_test_spec)
 _test_spec.loader.exec_module(_test_mod)
