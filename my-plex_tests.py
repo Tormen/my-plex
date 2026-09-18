@@ -11344,6 +11344,154 @@ class TestPlexConnectNotRequired(unittest.TestCase):
         self.assertIsNone(why, "a fatal connect has nothing to hand back")
 
 
+class TestVersionAndStamp(unittest.TestCase):
+    """--version identifies the exact build; --stamp-version [go] records the
+    release commit and refuses every amend that would do harm.  Each stamp
+    test runs a COPY of my-plex.py in a throwaway repo with a bare remote."""
+
+    GIT_ENV = {'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
+               'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        self.env = dict(os.environ, **self.GIT_ENV)
+        self.remote = os.path.join(self.root, 'remote.git')
+        self.work = os.path.join(self.root, 'work')
+        self.git('init', '-q', '--bare', self.remote, cwd=self.root)
+        self.git('init', '-q', '-b', 'main', self.work, cwd=self.root)
+        self.script = os.path.join(self.work, 'my-plex.py')
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        with open(self.script, 'w') as f:   # start unstamped, whatever the real file says
+            f.write(re.sub(r'^SCRIPT_COMMIT\s*=.*$', 'SCRIPT_COMMIT  = ""', src, count=1, flags=re.M))
+        with open(os.path.join(self.work, 'sibling.txt'), 'w') as f:
+            f.write('a\n')
+        self.git('add', '.'); self.git('commit', '-q', '-m', 'first')
+        self.git('remote', 'add', 'origin', self.remote)
+        self.git('push', '-q', '-u', 'origin', 'main')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def git(self, *a, cwd=None):
+        r = subprocess.run(['git', *a], cwd=cwd or self.work, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"git {' '.join(a)}: {r.stderr}")
+        return r.stdout.strip()
+
+    def run_tool(self, *a):
+        return subprocess.run([sys.executable, self.script, *a], cwd=self.work, env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def new_commit(self):
+        with open(self.script, 'a') as f:
+            f.write('\n# a change worth stamping\n')
+        self.git('add', 'my-plex.py'); self.git('commit', '-q', '-m', 'second')
+
+    def stamped(self):
+        with open(self.script) as f:
+            return re.search(r'^SCRIPT_COMMIT\s*=\s*"([^"]*)"', f.read(), re.M).group(1)
+
+    # --- --version ------------------------------------------------------
+    def test_version_names_build_and_stamp(self):
+        r = self.run_tool('--version')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.splitlines()[0], r'^my-plex v\d+\.\d+ \(build [0-9a-f]{12}, unstamped\)$')
+
+    def test_changed_file_reports_different_build(self):
+        before = self.run_tool('--version').stdout.splitlines()[0]
+        with open(self.script, 'a') as f:
+            f.write('\n# changed\n')
+        after = self.run_tool('--version').stdout.splitlines()[0]
+        self.assertNotEqual(before, after, "two different files must not report the same --version")
+
+    # --- --stamp-version guards -------------------------------------------
+    def test_refuses_pushed_commit(self):
+        head = self.git('rev-parse', 'HEAD')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('already pushed', r.stderr)
+        self.assertIn('rewrite published history', r.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head, "the pushed commit must be untouched")
+
+    def test_analyze_changes_nothing(self):
+        self.new_commit(); head = self.git('rev-parse', 'HEAD')
+        r = self.run_tool('--stamp-version')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("re-run with 'go'", r.stdout)
+        self.assertEqual(self.stamped(), '')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_go_stamps_the_unpushed_commit(self):
+        self.new_commit(); short = self.git('rev-parse', '--short', 'HEAD')
+        mode = os.stat(self.script).st_mode
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.stamped(), short)
+        self.assertEqual(os.stat(self.script).st_mode, mode, "the mode must survive the rewrite")
+        self.assertEqual(self.git('status', '--porcelain'), '', "the stamp must be IN the amended commit")
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD'), '2', "amend, not a new commit")
+        self.assertIn(f'from commit {short}', self.run_tool('--version').stdout)
+
+    def test_second_stamp_is_a_no_op(self):
+        self.new_commit()
+        self.assertEqual(self.run_tool('--stamp-version', 'go').returncode, 0)
+        head = self.git('rev-parse', 'HEAD')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('nothing to do', r.stdout)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head, "restamping must not walk the commit forward")
+
+    def test_refuses_when_something_is_staged(self):
+        self.new_commit()
+        with open(os.path.join(self.work, 'sibling.txt'), 'w') as f:
+            f.write('b\n')
+        self.git('add', 'sibling.txt')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('sibling.txt', r.stderr)
+        self.assertEqual(self.stamped(), '')
+
+    def test_refuses_uncommitted_edit_of_itself(self):
+        self.new_commit()
+        with open(self.script, 'a') as f:
+            f.write('\n# not committed\n')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('uncommitted edits', r.stderr)
+
+    def test_unstaged_sibling_does_not_block(self):
+        self.new_commit()
+        with open(os.path.join(self.work, 'sibling.txt'), 'w') as f:
+            f.write('someone else is editing this\n')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.git('diff', '--name-only'), 'sibling.txt', "their edit stays theirs, unstaged")
+        self.assertNotIn('sibling.txt', self.git('show', '--name-only', '--format=', 'HEAD'))
+
+
+class TestVersionNotReused(unittest.TestCase):
+    """A TAGGED version number is never reused: if a tag named SCRIPT_VERSION
+    exists, it must point at HEAD (this IS that release); otherwise bump."""
+
+    def test_script_version_is_not_a_tag_head_has_moved_past(self):
+        here = os.path.dirname(MAIN_SCRIPT)
+        with open(MAIN_SCRIPT) as f:
+            version = re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M).group(1)
+        def git(*a):
+            return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
+        if git('rev-parse', '--git-dir').returncode != 0:
+            self.skipTest('not a git checkout')
+        if not git('tag', '-l', version).stdout.strip():
+            return  # not released yet -- nothing to reuse
+        self.assertEqual(git('rev-list', '-n1', version).stdout.strip(),
+                         git('rev-parse', 'HEAD').stdout.strip(),
+                         f"{version} is already a released tag and HEAD has moved past it -- bump SCRIPT_VERSION")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
@@ -11393,6 +11541,7 @@ _UNITTEST_SCOPES = {
     'sync':               [TestSyncDispatchAndDoubleMarkerFix],
     'naming':             [TestNaming],
     'v269':               [TestV269RetroactiveCoverage],
+    'version':            [TestVersionAndStamp, TestVersionNotReused],
 }
 
 # List of all unittest classes for run_regression_tests()
