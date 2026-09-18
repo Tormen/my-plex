@@ -69,7 +69,7 @@
 # neither git nor a checkout to say where it came from.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "0056f23"
+SCRIPT_COMMIT  = "a3b0838"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3192,6 +3192,31 @@ def prompt_yes_no(question):
     else:
         response = input(f"{question} (yes/no): ").strip().lower()
         return response in ['yes', 'y']
+
+_SECRET_KEY_RE = re.compile(r'TOKEN|PASSWORD|SECRET|API_KEY', re.IGNORECASE)
+
+def _redact(key: str, value: Any) -> Any:
+    """Value safe to print in debug output: a secret-named key shows only its
+    length, and a token embedded in a URL (X-Plex-Token=...) is cut out."""
+    if value and _SECRET_KEY_RE.search(key):
+        return f"<redacted, {len(str(value))} chars>"
+    if isinstance(value, str):
+        return re.sub(r'(X-Plex-Token=)[^&\s]+', r'\1<redacted>', value)
+    return value
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    """argv safe to print: the value of a secret-bearing flag is redacted,
+    whether given as `--flag VALUE` or `--flag=VALUE`."""
+    out: list[str] = []
+    for i, a in enumerate(argv):
+        flag, eq, val = a.partition('=')
+        if eq and flag.startswith('--') and _SECRET_KEY_RE.search(flag.replace('-', '_')):
+            out.append(f"{flag}={_redact(flag, val)}")
+        elif i and _SECRET_KEY_RE.search(argv[i - 1].replace('-', '_')) and argv[i - 1].startswith('--'):
+            out.append(str(_redact(argv[i - 1], a)))
+        else:
+            out.append(str(_redact('', a)))
+    return out
 
 def err(err_code, err_msg="") -> NoReturn:
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
@@ -42286,7 +42311,7 @@ def main():
 
     # Debug: print sys.argv to see what arguments were actually passed
     if DBG or DEEPDBG:
-        print(f" ~~~ sys.argv = {sys.argv}", file=sys.stderr)
+        print(f" ~~~ sys.argv = {_redact_argv(sys.argv)}", file=sys.stderr)
 
     # Normalize: --<option> --help  →  --help <option>
     # Allows `my-plex --reencode --help` as a synonym for `my-plex --help reencode`.
@@ -42334,7 +42359,7 @@ def main():
             _topic = _OPTION_TO_HELP_TOPIC.get(_next)
             if _topic:
                 sys.argv = [sys.argv[0]] + [a for i, a in enumerate(sys.argv[1:], 1) if i not in (_help_idx, _help_idx + 1)] + ['--help', _topic]
-                if DBG: print(f" ~~~ Normalized --help (right): {sys.argv}", file=sys.stderr)
+                if DBG: print(f" ~~~ Normalized --help (right): {_redact_argv(sys.argv)}", file=sys.stderr)
         # Case 2: --XXX --help → look left (previous arg is a flag we recognize)
         if _help_idx > 0 and (_help_idx == len(sys.argv) - 1 or sys.argv[_help_idx + 1].startswith('-')):
             _prev = sys.argv[_help_idx - 1]
@@ -42342,7 +42367,7 @@ def main():
             if _topic:
                 # Rewrite: remove --help from current position, replace with --help <topic>
                 sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != '--help'] + ['--help', _topic]
-                if DBG: print(f" ~~~ Normalized --help (left): {sys.argv}", file=sys.stderr)
+                if DBG: print(f" ~~~ Normalized --help (left): {_redact_argv(sys.argv)}", file=sys.stderr)
 
     # Normalize key:value filter tokens → translate to existing flags or collect filter expressions.
     # Handles: type:movie  lang:de  watched:no  resolution:1080p  codec:h265  year>2015  etc.
@@ -42445,6 +42470,8 @@ def main():
         '--library-language-mismatch',
         '--bad-structure', '--nested-media',
         '--missing', '--reencode', '--problems',
+        # several items, all consumed by the flag (only the first was protected)
+        '--add-to', '--remove-from', '--create-playlist', '--search',
     }
     _in_variadic_window = False
     _i = 1
@@ -42649,7 +42676,12 @@ def main():
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
                             '--test', '--unittest', '--complete',
-                            '--plex-url', '--plex-token', '--plex-xml-url'}
+                            '--plex-url', '--plex-token', '--plex-xml-url',
+                            # a single value that is never a title search
+                            '--audio', '--excess-versions', '--set-watched',
+                            '--set-view-offset', '--set-user-rating',
+                            '--remove', '--rm',                  # VERSIONS: '1,3' must not become 'ALL'
+                            '--unrecognized', '--alien'}         # its value is re-injected as the scope
             # v2.1: a bare token that matches a library name is normally
             # treated as a SCOPE (library scope).  EXCEPT when the user
             # has ALSO written an explicit `library:NAME` somewhere — that
@@ -42710,7 +42742,7 @@ def main():
                      '--mv-to','--move-to','--remux'}
             if not any(a in _CMDS for a in sys.argv):
                 sys.argv += ['--list']
-        if DBG: print(f" ~~~ After key:value normalization sys.argv = {sys.argv}", file=sys.stderr)
+        if DBG: print(f" ~~~ After key:value normalization sys.argv = {_redact_argv(sys.argv)}", file=sys.stderr)
         # Echo translations to the user so they can see how input was interpreted (-VV only)
         if VERYVRB:
             translated_flags = ' '.join(_inject_flags) + (f" --list='{' AND '.join(_filter_exprs)}'" if _filter_exprs else '')
@@ -42749,7 +42781,7 @@ def main():
         if injected:
             sys.argv = normalized
             if DBG or DEEPDBG:
-                print(f" ~~~ Normalized sys.argv{label} = {sys.argv}", file=sys.stderr)
+                print(f" ~~~ Normalized sys.argv{label} = {_redact_argv(sys.argv)}", file=sys.stderr)
         return injected
 
     if has_resolve and has_no_audio_language and not has_list:
@@ -42784,7 +42816,7 @@ def main():
             if _FILTER_EXPR_RE.match(_fa):
                 sys.argv.insert(_fi, '--list')
                 has_list = True
-                if DBG: print(f" ~~~ Injected --list before filter expr '{_fa}': {sys.argv}", file=sys.stderr)
+                if DBG: print(f" ~~~ Injected --list before filter expr '{_fa}': {_redact_argv(sys.argv)}", file=sys.stderr)
             break  # only check first positional arg
 
     # Early argument parsing for --config / --config-file / --create-config options
@@ -43365,7 +43397,7 @@ def main():
     args.plex_token = PLEX_TOKEN
 
     READ_ONLY_MODE = args.verify_cache  # Enable read-only mode for --verify-cache (--info is handled in execute_global_commands)
-    if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+    if DBG: print(f"{DBGPFX}args : { {k: _redact(k, v) for k, v in vars(args).items()} }\n{DBGPFX}remaining_args : {remaining_args}")
     # ensuring remaining_args has ALL the potential [GLOBAL_CMDs] + [PLEXOBJECTs] + [PLEXOBJ_CMDS]:
     # Re-inject --info (consumed by main_parser to protect its value from CMD_OR_PLEXOBJECT)
     if safe_getattr(args, 'info', None) is not None:
@@ -43385,18 +43417,14 @@ def main():
     if has_scan:
         remaining_args.insert(0, '--scan')
     if args.CMD_OR_PLEXOBJECT is not None: remaining_args.insert(0, args.CMD_OR_PLEXOBJECT)
-    if DBG: print(f"{DBGPFX}args : {args}\n{DBGPFX}remaining_args : {remaining_args}")
+    if DBG: print(f"{DBGPFX}args : { {k: _redact(k, v) for k, v in vars(args).items()} }\n{DBGPFX}remaining_args : {remaining_args}")
 
     # DEBUG: Print all configuration variables after command-line parsing
     if DBG:
         print(f"\n{DBGPFX}=== ALL CONFIGURATION VARIABLES ===")
         for key in sorted(CONFIG_DEFAULTS.keys()):
             value = globals().get(key, '<not set>')
-            # Mask sensitive values if any (PLEX_DB_PATH might contain sensitive info)
-            if 'PASSWORD' in key.upper() or 'SECRET' in key.upper():
-                display_value = f"{'*' * len(value)}" if value and value != '<not set>' else value
-            else:
-                display_value = value
+            display_value = _redact(key, value) if value != '<not set>' else value
             print(f"{DBGPFX}  {key} = {display_value!r}")
         print(f"{DBGPFX}=== END CONFIGURATION VARIABLES ===\n")
 
