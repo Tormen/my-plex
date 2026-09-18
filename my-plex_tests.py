@@ -649,6 +649,46 @@ class TestRunToolLocally(unittest.TestCase):
 class TestRunToolOnPLEXServer(unittest.TestCase):
     """Tests for run_tool_on_PLEX_server() concept."""
 
+    def _script_lines(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'my-plex.py')
+        with open(path, encoding='utf-8') as f:
+            return f.read().splitlines()
+
+    def test_every_ssh_goes_through_the_options_helper(self):
+        """No ssh my-plex starts may become a FOREGROUND connection master.
+
+        With 'ControlMaster auto' and no ControlPersist in the user's ssh
+        config, a bare `ssh host` becomes the master and cannot exit while
+        another session rides on it -- the user's own later ssh to the Plex
+        server would keep my-plex waiting. _ssh_opts() carries ControlPersist,
+        so every call built from it is safe; a call that states ControlMaster
+        itself is its own decision. Anything else is the bug.
+        """
+        bad = []
+        for n, line in enumerate(self._script_lines(), 1):
+            code = line.split('#', 1)[0]
+            if 'NEVER use' in line:          # the docstrings that forbid it
+                continue
+            if "['ssh'," in code or "run_tool_locally('ssh'" in code:
+                if '_ssh_opts()' not in code and 'ControlMaster' not in code:
+                    bad.append(f"{n}: {line.strip()}")
+        self.assertEqual(bad, [], "ssh calls that bypass _ssh_opts():\n" + "\n".join(bad))
+
+    def test_ssh_opts_multiplex_safely_and_privately(self):
+        """_ssh_opts: auto only WITH ControlPersist, and the socket not in /tmp."""
+        text = "\n".join(self._script_lines())
+        import re
+        m = re.search(r"def _ssh_opts\(\).*?\n(?=\ndef )", text, re.DOTALL)
+        self.assertIsNotNone(m, "_ssh_opts() not found")
+        body = m.group(0)
+        self.assertIn("ControlMaster=auto", body)
+        self.assertIn("ControlPersist=", body,
+            "ControlMaster=auto without ControlPersist makes a foreground master")
+        self.assertNotIn("ControlPath=/tmp", body,
+            "the control socket belongs in a private directory, not the shared /tmp")
+        self.assertIn("ClearAllForwardings=yes", body,
+            "a tool's ssh must not set up the user's port forwards (VNC 5900 etc.)")
+
     def test_server_tool_not_found_locally(self):
         """shutil.which returns None for non-existent server tool."""
         import shutil

@@ -4497,23 +4497,40 @@ def get_trash_dir(remote_host=None, file_path=None):
         os.makedirs(trash_dir, exist_ok=True)
         return trash_dir
 
-def _ssh_args(host):
-    """v2.5: return ['ssh', ...flags..., host] with SSH ControlMaster
-    multiplexing flags so subsequent SSH calls within the session reuse
-    a single TCP connection (no SSH handshake per call).  Gives 10-20×
-    speedup on bulk operations like cmd_move's per-file `mv` calls.
+def _ssh_opts() -> list[str]:
+    """The options EVERY ssh my-plex starts carries -- the one source for them.
 
-    The control socket lives in /tmp and persists 60s after last use, so
-    even across multiple my-plex invocations within a minute, SSH stays
-    multiplexed.  Falls back gracefully on systems where ControlMaster
-    isn't supported (OpenSSH client ignores unknown -o flags? — actually
-    it errors, but every modern macOS / Linux OpenSSH supports this).
+    ControlMaster multiplexing, so subsequent SSH calls reuse a single TCP
+    connection (no handshake per call): 10-20x faster on bulk operations like
+    cmd_move's per-file `mv` calls.
+
+    ControlPersist is what makes `auto` safe. Without it the first ssh to a
+    host becomes the connection master and stays in the FOREGROUND, and a
+    master cannot exit while another session rides on it -- a later ssh of the
+    user's to the same host would keep my-plex waiting long after the remote
+    had answered. With it, the master detaches into the background, lives 60s
+    after its last use (so back-to-back my-plex runs stay multiplexed), and
+    every command exits normally.
+
+    The socket lives in ~/.ssh, private to the user, not in the shared /tmp.
+
+    ClearAllForwardings: the port forwards in the user's ssh config (VNC on
+    5900, a SOCKS port) are for their interactive logins. A tool's connection
+    must neither grab those ports -- a persisting master would hold them for
+    as long as it lives -- nor fail loudly because the user's session already
+    has them ("bind [127.0.0.1]:5900: Address already in use").
     """
-    return ['ssh',
-            '-o', 'ControlMaster=auto',
-            '-o', 'ControlPath=/tmp/my-plex-ssh-%C',
+    ssh_dir = os.path.expanduser('~/.ssh')
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+    return ['-o', 'ControlMaster=auto',
+            '-o', f'ControlPath={ssh_dir}/my-plex-%C',
             '-o', 'ControlPersist=60s',
-            host]
+            '-o', 'ClearAllForwardings=yes']
+
+
+def _ssh_args(host: str) -> list[str]:
+    """v2.5: ['ssh', <_ssh_opts()>, host] -- see _ssh_opts."""
+    return ['ssh', *_ssh_opts(), host]
 
 
 def escape_path_for_ssh(filepath):
@@ -4615,7 +4632,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
             tool_path = _remote_tool_path_cache[cache_key]
         else:
             # Auto-detect on remote via login shell (non-interactive SSH doesn't load PATH)
-            result = run_tool_locally('ssh', [remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
+            result = run_tool_locally('ssh', [*_ssh_opts(), remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
             if result and result.returncode == 0 and result.stdout.strip():
                 tool_path = result.stdout.strip()
                 _remote_tool_path_cache[cache_key] = tool_path
@@ -4634,7 +4651,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
         # Build remote command with proper quoting
         remote_cmd = f'{tool_path} {" ".join(shlex.quote(a) for a in args)}'
         if DBG: print(f"{DBGPFX}run_tool_on_PLEX_server: ssh {remote_host} {remote_cmd}")
-        return run_tool_locally('ssh', [remote_host, remote_cmd], capture_output=capture_output, text=text, timeout=timeout)
+        return run_tool_locally('ssh', [*_ssh_opts(), remote_host, remote_cmd], capture_output=capture_output, text=text, timeout=timeout)
     else:
         cmd = [tool_path] + list(args)
         if DBG: print(f"{DBGPFX}run_tool_on_PLEX_server (local): {' '.join(cmd)}")
@@ -11829,8 +11846,8 @@ def _compute_layout_index_live():
             find_d = f'find "{esc}" -maxdepth 2 -mindepth 1 -type d ! -name ".*"'
             find_f = f'find "{esc}" -maxdepth 2 -mindepth 1 -type f ! -name ".*"'
             if remote:
-                cmd_d = ['ssh', remote, find_d]
-                cmd_f = ['ssh', remote, find_f]
+                cmd_d = _ssh_args(remote) + [find_d]
+                cmd_f = _ssh_args(remote) + [find_f]
             else:
                 cmd_d = ['sh', '-c', find_d]
                 cmd_f = ['sh', '-c', find_f]
@@ -39264,7 +39281,7 @@ def show_system_info():
         if PLEX_DB_REMOTE_HOST:
             try:
                 result = subprocess.run(
-                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', PLEX_DB_REMOTE_HOST, 'echo ok'],
+                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', *_ssh_opts(), PLEX_DB_REMOTE_HOST, 'echo ok'],
                     capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
