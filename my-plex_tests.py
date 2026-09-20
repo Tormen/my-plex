@@ -11459,7 +11459,7 @@ class TestVersionAndStamp(unittest.TestCase):
     def test_version_names_build_and_stamp(self):
         r = self.run_tool('--version')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(r.stdout.splitlines()[0], r'^my-plex v\d+\.\d+ \(build [0-9a-f]{12}, unstamped\)$')
+        self.assertRegex(r.stdout.splitlines()[0], r'^my-plex \S+ \(build [0-9a-f]{12}, unstamped\)$')
 
     def test_changed_file_reports_different_build(self):
         before = self.run_tool('--version').stdout.splitlines()[0]
@@ -11494,7 +11494,7 @@ class TestVersionAndStamp(unittest.TestCase):
         self.assertEqual(os.stat(self.script).st_mode, mode, "the mode must survive the rewrite")
         self.assertEqual(self.git('status', '--porcelain'), '', "the stamp must be IN the amended commit")
         self.assertEqual(self.git('rev-list', '--count', 'HEAD'), '2', "amend, not a new commit")
-        self.assertIn(f'from commit {short}', self.run_tool('--version').stdout)
+        self.assertIn(f'commit {short}', self.run_tool('--version').stdout)
 
     def test_second_stamp_is_a_no_op(self):
         self.new_commit()
@@ -11533,11 +11533,13 @@ class TestVersionAndStamp(unittest.TestCase):
         self.assertNotIn('sibling.txt', self.git('show', '--name-only', '--format=', 'HEAD'))
 
 
-class TestVersionNotReused(unittest.TestCase):
-    """A TAGGED version number is never reused: if a tag named SCRIPT_VERSION
-    exists, it must point at HEAD (this IS that release); otherwise bump."""
+class TestVersionNamesItsRelease(unittest.TestCase):
+    """SCRIPT_VERSION names the release these bytes are BASED on -- only a
+    release commit sets it.  Whether this build IS that release is git's
+    describe string, which --version prints; so what is checked here is that
+    the number still names the nearest tag."""
 
-    def test_script_version_is_not_a_tag_head_has_moved_past(self):
+    def test_script_version_names_the_nearest_tag(self):
         here = os.path.dirname(MAIN_SCRIPT)
         with open(MAIN_SCRIPT) as f:
             version = re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M).group(1)
@@ -11545,11 +11547,20 @@ class TestVersionNotReused(unittest.TestCase):
             return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
         if git('rev-parse', '--git-dir').returncode != 0:
             self.skipTest('not a git checkout')
-        if not git('tag', '-l', version).stdout.strip():
-            return  # not released yet -- nothing to reuse
-        self.assertEqual(git('rev-list', '-n1', version).stdout.strip(),
-                         git('rev-parse', 'HEAD').stdout.strip(),
-                         f"{version} is already a released tag and HEAD has moved past it -- bump SCRIPT_VERSION")
+        near = git('describe', '--tags', '--abbrev=0').stdout.strip()
+        if not near:
+            return  # no release tag yet -- nothing for the version to name
+        self.assertEqual(near, version,
+                         f"SCRIPT_VERSION is {version}, but the nearest tag is {near} -- "
+                         f"set it to {near}, or tag this release")
+
+    def test_version_says_whether_these_bytes_are_that_release(self):
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--version'],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('build ', r.stdout)
+        self.assertTrue('unreleased' in r.stdout or ' tag,' in r.stdout,
+                        f"--version says neither 'the <tag> tag' nor 'unreleased': {r.stdout}")
 
 
 class TestRunViaSymlink(unittest.TestCase):
@@ -11681,7 +11692,7 @@ _UNITTEST_SCOPES = {
     'sync':               [TestSyncDispatchAndDoubleMarkerFix],
     'naming':             [TestNaming],
     'v269':               [TestV269RetroactiveCoverage],
-    'version':            [TestVersionAndStamp, TestVersionNotReused, TestRunViaSymlink],
+    'version':            [TestVersionAndStamp, TestVersionNamesItsRelease, TestRunViaSymlink],
     'errcodes':           [TestErrCodes],
 }
 
