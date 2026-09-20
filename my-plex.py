@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "6f5bbc8"
-SCRIPT_RELEASE = "v3-19-g6f5bbc8"
+SCRIPT_COMMIT  = "8e4c330"
+SCRIPT_RELEASE = "v3-20-g8e4c330"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -158,10 +158,26 @@ def _script_describe() -> str:
                      'describe', '--tags', '--long'],
                     capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            desc = r.stdout.strip()
+            # describe answers about WHERE this file sits, not about what it
+            # is: a copy dropped in a foreign repo gets THAT repo's tags
+            # (/LINKS/global is one, and it holds the copies update-LINKS
+            # promotes).  The stamped commit is the proof -- a repo that does
+            # not have it is not this tool's repo.
+            if SCRIPT_COMMIT:
+                own = subprocess.run(
+                    ["git", "-c", "safe.directory=*", "-C", os.path.dirname(os.path.realpath(__file__)),
+                     "cat-file", "-e", f"{SCRIPT_COMMIT}^{{commit}}"],
+                    capture_output=True, text=True, timeout=5)
+                if own.returncode != 0:
+                    return SCRIPT_RELEASE if SCRIPT_COMMIT else ""
+            return desc
     except (OSError, _sp.SubprocessError):
         pass
-    return SCRIPT_RELEASE
+    # The stamp is a PAIR, written together: without SCRIPT_COMMIT there is
+    # no stamp to fall back to, and a lone SCRIPT_RELEASE would be a release
+    # claim nothing backs -- an unstamped file says so.
+    return SCRIPT_RELEASE if SCRIPT_COMMIT else ""
 
 def _script_version_string() -> str:
     """What these bytes are: the release they are based on, whether they ARE
