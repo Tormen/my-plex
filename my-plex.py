@@ -66,15 +66,17 @@
 
 # ---------------------------------------------------------------------------
 # Version / license constants.
-# SCRIPT_VERSION is the release number.  A number that has been TAGGED is
-# never reused: once HEAD moves past a tag of this version, bump it (the
-# test suite's `version` scope refuses the reuse).
-# SCRIPT_COMMIT is the commit this file was released from, written by
-# `--stamp-version go`.  Authoritative at runtime: a deployed copy needs
-# neither git nor a checkout to say where it came from.  Empty = unstamped.
+# SCRIPT_VERSION names the release these bytes are BASED on, and only a
+# release commit sets it -- nothing bumps it in between, so the tree never
+# claims a version with no content behind it.
+# SCRIPT_COMMIT is the commit this file was released from and SCRIPT_RELEASE
+# what `git describe --tags --long` said then (<nearest tag>-<commits since
+# it>-g<short sha>), both written by `--stamp-version go`.  They answer at
+# runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
-SCRIPT_VERSION = "v2.69"
-SCRIPT_COMMIT  = "eb57c13"
+SCRIPT_VERSION = "v3"
+SCRIPT_COMMIT  = "6f5bbc8"
+SCRIPT_RELEASE = "v3-19-g6f5bbc8"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -144,11 +146,46 @@ def _script_build_id() -> str:
     except OSError:
         return 'unknown'
 
+def _script_describe() -> str:
+    """git's own `describe --tags --long` for this checkout, else the stamped
+    value.  Git first: in a checkout it is exact at every moment, while the
+    stamp is written BEFORE the release is tagged and so lags one release
+    step.  A deployed copy has no git and falls back to the stamp."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(['git', '-c', 'safe.directory=*', '-C',
+                     os.path.dirname(os.path.realpath(__file__)),
+                     'describe', '--tags', '--long'],
+                    capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, _sp.SubprocessError):
+        pass
+    return SCRIPT_RELEASE
+
 def _script_version_string() -> str:
-    """'v2.69 (build <id>, from commit <sha>)', or '..., unstamped)'.
+    """What these bytes are: the release they are based on, whether they ARE
+    it, and the id of the bytes themselves.
+
+        v3 (v3-0-ga756965: the v3 tag, build 1a2b3c4d5e6f)
+        v3+18 (v3-18-ga756965: 18 commit(s) past v3, unreleased, build ...)
+
     Comparing two installs is: run --version on each and diff the output."""
-    origin = f"from commit {SCRIPT_COMMIT}" if SCRIPT_COMMIT else "unstamped"
-    return f"{SCRIPT_VERSION} (build {_script_build_id()}, {origin})"
+    build = _script_build_id()
+    desc = _script_describe()
+    # <tag>-<n>-g<sha>, split without a regex: --version runs before the
+    # heavy imports, so it may use nothing that is not already loaded.
+    head, _sep, sha = desc.rpartition('-g')
+    tag, _sep2, count = head.rpartition('-')
+    if sha and tag and count.isdigit():
+        n = int(count)
+        if n == 0:
+            return f"{SCRIPT_VERSION} ({desc}: the {tag} tag, build {build})"
+        return (f"{SCRIPT_VERSION}+{n} ({desc}: {n} commit(s) past {tag}, "
+                f"unreleased, build {build})")
+    if SCRIPT_COMMIT:
+        return f"{SCRIPT_VERSION} (commit {SCRIPT_COMMIT}, build {build})"
+    return f"{SCRIPT_VERSION} (build {build}, unstamped)"
 
 def _print_version_and_exit():
     print(f"my-plex {_script_version_string()}")
@@ -206,7 +243,7 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
         _stamp_fail("00003", "HEAD is already pushed -- amending it would rewrite published history.\n"
                           "    commit your change first, then stamp, then push.")
 
-    stamp_re = _re.compile(r'^SCRIPT_COMMIT\s*=.*$', _re.MULTILINE)
+    stamp_re = _re.compile(r'^(SCRIPT_COMMIT|SCRIPT_RELEASE)\s*=.*$', _re.MULTILINE)
     with open(self_path, 'r') as f:
         src = f.read()
     if SCRIPT_COMMIT:
@@ -232,8 +269,13 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
         print(f"    > analyze only -- re-run with 'go' to apply:  my-plex --stamp-version go")
         sys.exit(0)
 
-    new_src, n = stamp_re.subn(f'SCRIPT_COMMIT  = "{sha}"', src, count=1)
-    if n != 1:
+    # git's own spelling, kept verbatim so it can be pasted back into git
+    desc = git('describe', '--tags', '--long').stdout.strip()
+    new_src, n = _re.subn(r'^SCRIPT_COMMIT\s*=.*$', f'SCRIPT_COMMIT  = "{sha}"',
+                          src, count=1, flags=_re.MULTILINE)
+    new_src, n2 = _re.subn(r'^SCRIPT_RELEASE\s*=.*$', f'SCRIPT_RELEASE = "{desc}"',
+                           new_src, count=1, flags=_re.MULTILINE)
+    if n != 1 or n2 != 1:
         _stamp_fail("00006", "could not find the SCRIPT_COMMIT line to stamp.")
     fd, tmp = tempfile.mkstemp(dir=here, prefix='.my-plex.stamp.')
     try:
