@@ -88,7 +88,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
@@ -682,6 +682,7 @@ _install_zsh_completions()
 
 from abc import ABC, abstractmethod
 import argparse
+from dataclasses import dataclass
 import contextlib
 import fcntl
 import functools
@@ -7179,7 +7180,7 @@ _NAMING_DIACRITIC_MAP = {
     'þ': 'th', 'Þ': 'TH', 'ð': 'd', 'Ð': 'D',
 }
 
-def _naming_strip_diacritics(value):
+def _naming_strip_diacritics(value: str) -> str:
     """ä→a ö→o é→e … via NFKD; ß→ss œ→oe æ→ae ø→o ł→l via explicit map."""
     import unicodedata
     value = ''.join(_NAMING_DIACRITIC_MAP.get(character, character) for character in value)
@@ -10233,6 +10234,18 @@ def _adapt_plex_match_to_candidate(r):
     }
 
 
+@dataclass(frozen=True)
+class _ManualSearchResult:
+    """What fixMatch() reads off a search result: a guid and a name.
+
+    Plex's own search sometimes returns nothing for an item we DO have an
+    external id for (an online candidate, or an id typed by the operator), so
+    the match is driven from one of these instead of a plexapi result.
+    """
+    guid: str
+    name: str
+
+
 def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     """v2.68: Interactive resolver for title-vs-directory MISMATCHED Series.
 
@@ -10406,11 +10419,8 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         elif o_top.get('imdb_id'):
                             guid = f"com.plexapp.agents.imdb://{o_top['imdb_id']}?lang=en"
                         if guid:
-                            class _ManualSearchResult:
-                                pass
-                            msr = _ManualSearchResult()
-                            msr.guid = guid
-                            msr.name = o_top.get('title') or _clean_q
+                            msr = _ManualSearchResult(guid=guid,
+                                                      name=o_top.get('title') or _clean_q)
                             o_top['_raw'] = msr
                             chosen = o_top
                             print(f"  ✓ AUTO-PICK [{o_top['engine']}→synth] guid={guid}  conf={o_top_score:.1f}")
@@ -10489,11 +10499,8 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                             guid = f"com.plexapp.agents.imdb://{cand['imdb_id']}?lang=en"
                         if not guid:
                             continue
-                        class _ManualSearchResult:
-                            pass
-                        msr = _ManualSearchResult()
-                        msr.guid = guid
-                        msr.name = cand.get('title') or _clean_q
+                        msr = _ManualSearchResult(guid=guid,
+                                                  name=cand.get('title') or _clean_q)
                         cand['_raw'] = msr
                         online_picker.append((cand, score))
                     if not online_picker:
@@ -10536,11 +10543,8 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     'tmdb': f"com.plexapp.agents.themoviedb://{ext_id}?lang=en",
                     'imdb': f"com.plexapp.agents.imdb://{ext_id}?lang=en",
                 }
-                class _ManualSearchResult:
-                    pass
-                msr = _ManualSearchResult()
-                msr.guid = guid_map[provider]
-                msr.name = rec.get('title') or f"manual {provider}:{ext_id}"
+                msr = _ManualSearchResult(guid=guid_map[provider],
+                                          name=rec.get('title') or f"manual {provider}:{ext_id}")
                 rec['_raw'] = msr
                 chosen = rec
                 print(f"  ✓ MANUAL pick → guid {msr.guid}")
@@ -20398,6 +20402,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     OBJ_BY_ONDISK_LABEL = {} # dict: key=label_string → list of cache_keys that have that on-disk label
 
     init_done = False
+    # Filled by the --update-cache pass, drained by the one merged save at the
+    # end of it (see the 'defer the actual pickle.dump' comment there).
+    _pending_save_extras: "dict[str, Any]" = {}
     cache_rebuild_lock = None  # Will hold the lock during cache rebuild
     items_processed = 0  # Counter for checkpoint saves during rebuild
     # Current progress tracking for checkpoint messages
@@ -34398,7 +34405,7 @@ def _parse_compound_filter(expr_or_tokens):
     if pos[0] < len(tokens):
         err("00108", f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
 
-    def _compile(node):
+    def _compile(node) -> "tuple[str, Callable[..., bool]]":
         kind = node[0]
         if kind == 'LEAF':
             atom = node[1]
@@ -37768,14 +37775,15 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
         series_level_dir = derived.get('series_dir')
         if not series_level_dir:
             continue
-        if _season_token_match(os.path.basename(series_level_dir)):
+        _token = _season_token_match(os.path.basename(series_level_dir))
+        if _token:
             wrapper_dirs.setdefault(series_level_dir,
                                     (episode_obj.get('series_key') or episode_key,
-                                     episode_obj.get('library', '')))
+                                     episode_obj.get('library', ''),
+                                     _token))
 
     candidates = []   # (series_key, library_name, wrapper_dir, dest_series_dir, dest_season_dir, moves, trashes)
-    for wrapper_dir, (series_key, library_name) in sorted(wrapper_dirs.items()):
-        token = _season_token_match(os.path.basename(wrapper_dir))
+    for wrapper_dir, (series_key, library_name, token) in sorted(wrapper_dirs.items()):
         series_name, season_number = token
         season_dir_name = f's{season_number:02d}'
         ok, file_list = my_plex_file_operation('LIST_DIR', wrapper_dir, remote_host, maxdepth=10)
@@ -37906,10 +37914,13 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
             # wrappers (Plex merged several wrappers into one series) leave
             # the series obj untouched.
             series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
-            own_dir_consolidated = (series_obj is not None
-                                    and series_obj.get('file') == wrapper_dir)
-            if own_dir_consolidated:
+            # Set when this series' OWN directory is the wrapper just drained,
+            # so its cache entry moved with it -- read again further down to
+            # decide whether the series counts as consolidated.
+            own_dir_consolidated = False
+            if series_obj is not None and series_obj.get('file') == wrapper_dir:
                 series_obj['file'] = dest_series_dir
+                own_dir_consolidated = True
             # Remove the emptied wrapper tree: the season-dir layer first,
             # then the wrapper itself (rmdir, non-recursive — empty-only).
             for empty_dir in sorted({os.path.dirname(src) for src, _ in moves} | {wrapper_dir},
@@ -38636,10 +38647,10 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 scan_dir_server = (lib_root_server if location_path == '.'
                                    else os.path.join(lib_root_server, location_path))
                 scan_dir_local = get_local_path(scan_dir_server) if root_use_local else None
-                use_local_here = root_use_local and scan_dir_local is not None and os.path.isdir(scan_dir_local)
+                # scan_dir_local is None unless root_use_local, so this is the whole test
                 bare_files_local = []
                 all_files_local = []
-                if use_local_here:
+                if scan_dir_local and os.path.isdir(scan_dir_local):
                     try:
                         for fn in os.listdir(scan_dir_local):
                             if fn.startswith('.'):
