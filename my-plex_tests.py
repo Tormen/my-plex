@@ -11630,26 +11630,31 @@ class TestArgvValueFlags(unittest.TestCase):
 
 
 class TestTypeCheck(unittest.TestCase):
-    """pyright must find no NAME error in my-plex.py.
+    """pyright must report NOTHING about my-plex.py, under pyrightconfig.json.
 
-    A name that is not defined, or that is bound on only some paths, is a
-    NameError waiting on whichever branch reaches it -- and four of them sat
-    in shipped commands until a type check was first run here: plan_movie and
-    libs_affected in cmd_bad_structure_resolve(), i in the ctrl-c handler of
-    cmd_original_languages(), _dtm in _replay_pending_move_state().  Each one
-    only fires on a failure or interrupt path, which is where the user needs
-    the command most, so none of them showed up in ordinary use.
+    What a type check is worth here, concretely: four NameErrors sat in
+    shipped commands until one was first run -- plan_movie and libs_affected
+    in cmd_bad_structure_resolve(), i in the ctrl-c handler of
+    cmd_original_languages(), _dtm in _replay_pending_move_state() -- each on
+    a failure or interrupt path, which is where the command matters most, so
+    none of them ever showed up in ordinary use.
 
-    Other pyright rules are NOT asserted here: the file does not pass them yet
-    (TODO.local.md tracks that).  These two are about names, not annotations,
-    and they are already at zero -- so they stay there."""
+    my-plex_tests.py is NOT asserted: it is not at zero yet, and neither is
+    strict mode.  TODO.local.md tracks both."""
 
-    RULES = ('reportUndefinedVariable', 'reportPossiblyUnboundVariable')
+    # The checker's environment, not the code: without my-plex's venv pyright
+    # cannot see plexapi or readchar, and says so once per import.
+    ENVIRONMENT_RULES = ('reportMissingImports', 'reportMissingModuleSource',
+                         'reportMissingTypeStubs')
 
     @unittest.skipUnless(shutil.which('pyright'), "pyright is not installed")
-    def test_no_name_errors_in_the_main_script(self):
-        r = subprocess.run([shutil.which('pyright') or 'pyright', '--outputjson', MAIN_SCRIPT],
-                           capture_output=True, text=True, timeout=300)
+    def test_main_script_is_clean(self):
+        project = os.path.dirname(os.path.realpath(MAIN_SCRIPT))
+        cmd = [shutil.which('pyright') or 'pyright', '--outputjson', '-p', project]
+        venv_python = os.path.join(os.path.expanduser('~/.python.venv/my-plex'), 'bin', 'python3')
+        if os.path.isfile(venv_python):
+            cmd += ['--pythonpath', venv_python]
+        r = subprocess.run([*cmd, MAIN_SCRIPT], capture_output=True, text=True, timeout=300)
         # pyright exits 1 whenever it reports anything, so the verdict is the
         # JSON, not the exit status; a crash prints no JSON at all.
         try:
@@ -11657,12 +11662,13 @@ class TestTypeCheck(unittest.TestCase):
         except ValueError:
             self.fail(f"pyright produced no JSON report (rc {r.returncode}):\n"
                       f"{(r.stdout + r.stderr)[-800:]}")
-        hits = [f"{d.get('rule')} at line {d.get('range', {}).get('start', {}).get('line', -1) + 1}: "
-                f"{d.get('message', '').splitlines()[0]}"
+        hits = [f"line {d.get('range', {}).get('start', {}).get('line', -1) + 1}: "
+                f"{d.get('rule') or 'error'}: {d.get('message', '').splitlines()[0]}"
                 for d in report.get('generalDiagnostics', [])
-                if d.get('rule') in self.RULES
+                if d.get('severity') == 'error'
+                and d.get('rule') not in self.ENVIRONMENT_RULES
                 and os.path.realpath(d.get('file', '')) == os.path.realpath(MAIN_SCRIPT)]
-        self.assertEqual(hits, [], "a name that may be unbound when it is read:\n  "
+        self.assertEqual(hits, [], f"pyright reports {len(hits)} finding(s) in my-plex.py:\n  "
                                    + "\n  ".join(hits))
 
 
