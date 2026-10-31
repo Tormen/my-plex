@@ -10,7 +10,9 @@ import re
 import inspect
 import pickle
 import io
+import shutil
 import subprocess
+import tempfile
 
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
@@ -11618,6 +11620,51 @@ class TestArgvValueFlags(unittest.TestCase):
         self.assertNotIn(secret, out)
 
 
+class TestDeployedCopy(unittest.TestCase):
+    """my-plex is deployed as a COPY of the tool file alone -- my-plex_tests.py
+    is not beside it.  The suite is therefore loaded on demand: every ordinary
+    command must run without it, and --test / --unittest must say in one line
+    that it is missing instead of dying in an import traceback."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._dir = tempfile.mkdtemp(prefix='my-plex-deployed-')
+        cls.copy = os.path.join(cls._dir, 'my-plex')
+        shutil.copy2(MAIN_SCRIPT, cls.copy)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._dir, ignore_errors=True)
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, '-B', self.copy, *args],
+                              capture_output=True, text=True, timeout=180)
+
+    def test_fixture_reproduces_a_deployed_copy(self):
+        """The fixture is only meaningful while the sidecar is genuinely absent."""
+        self.assertFalse(os.path.exists(os.path.join(self._dir, 'my-plex_tests.py')),
+                         "the fixture must hold the tool file alone")
+
+    def test_help_runs_without_the_test_suite(self):
+        r = self._run('--help')
+        out = r.stdout + r.stderr
+        self.assertNotIn('Traceback', out,
+                         f"a deployed copy must not die while importing:\n{out[-800:]}")
+        self.assertNotIn('my-plex_tests.py', out,
+                         "an ordinary command must not even mention the test suite")
+        self.assertEqual(r.returncode, 0, out[-800:])
+
+    def test_test_commands_report_the_missing_suite_in_one_line(self):
+        for args in (('--test', 'errcodes'), ('--unittest',)):
+            with self.subTest(args=args):
+                r = self._run(*args)
+                out = r.stdout + r.stderr
+                self.assertNotIn('Traceback', out,
+                                 f"no traceback on the user's screen:\n{out[-800:]}")
+                self.assertIn('test suite not found', out)
+                self.assertNotEqual(r.returncode, 0, "a missing test suite is a failure")
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -11678,6 +11725,7 @@ _UNITTEST_SCOPES = {
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
     'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+                   TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
                    TestShowInfoSeasonTable, TestMismatched, TestJunk,
