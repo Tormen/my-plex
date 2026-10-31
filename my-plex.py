@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "e8cc526"
-SCRIPT_RELEASE = "v3-24-ge8cc526"
+SCRIPT_COMMIT  = "5a870e2"
+SCRIPT_RELEASE = "v3-25-g5a870e2"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -9155,6 +9155,9 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print(f"\n--- SUMMARY ---")
     print(f"  flattened : {flattened}")
     print(f"  failed    : {failed}")
+    # Bound here, not inside the branch below: the resolve log at the end of
+    # this function reports it whether or not anything was flattened.
+    libs_affected: set[str] = set()
     if flattened > 0:
         update_and_save_cache({'obj_by_id': PLEX_Media.OBJ_BY_ID})
         print(f"  cache updated.")
@@ -9163,7 +9166,6 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # this Plex still points at the OLD nested paths and the next
         # --update-cache would happily overwrite our cache fixes with
         # Plex's stale view.  Same pattern cmd_unmatched_resolve uses.
-        libs_affected = set()
         # Cache was already updated in _bad_structure_update_cache; rescan
         # all objects we operated on to pick up their library names.
         for _entries in (plan_auto, plan_episode, plan_wrap):
@@ -9201,7 +9203,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             'scope':    scope,
             'summary':  {
                 'episode_moves':     len(plan_episode),
-                'movie_flattens':    len(plan_movie),
+                'movie_flattens':    len(plan_auto),
                 'conflicts':         len(plan_conflict),
             },
             'libraries_scanned':     sorted(libs_affected) if libs_affected else [],
@@ -11797,6 +11799,7 @@ def cmd_original_languages(target=None, dry_run=False):
         except Exception as _e:
             print(f"  ! Cache checkpoint save failed: {_e}")
 
+    i = 0   # reported by the ctrl-c handler: an interrupt before item 1 must not NameError
     try:
         for i, (k, o, type_str) in enumerate(work, 1):
             tmdb_id = (o.get('external_ids') or {}).get('tmdb')
@@ -36499,6 +36502,7 @@ def _replay_pending_move_state(plex, quiet=False):
     nothing to restore against.  At the end, any Plex Collection in the
     source library that we just drained to zero members is auto-deleted.
     """
+    from datetime import datetime as _dtm
     _drained_source_pairs = set()   # (old_library, collection_title)
     d = _move_state_dir()
     try:

@@ -2,6 +2,12 @@
 # To merge tests back inline, replace the test import section in '52' with the contents of this file.
 #
 # This file is imported by '52' at runtime via importlib.
+#
+# pyright: reportUndefinedVariable=false
+#   The main script injects its own functions into this module's namespace
+#   before the tests run (_EPISODE_FUNC_NAMES / _inject_episode_funcs_into_test_mod),
+#   so ~300 names used here are bound at runtime and invisible to a checker.
+#   Re-declaring them would be a second copy of that list to keep in sync.
 
 import unittest
 import os
@@ -10,6 +16,7 @@ import re
 import inspect
 import pickle
 import io
+import json
 import shutil
 import subprocess
 import tempfile
@@ -11620,6 +11627,43 @@ class TestArgvValueFlags(unittest.TestCase):
         self.assertNotIn(secret, out)
 
 
+class TestTypeCheck(unittest.TestCase):
+    """pyright must find no NAME error in my-plex.py.
+
+    A name that is not defined, or that is bound on only some paths, is a
+    NameError waiting on whichever branch reaches it -- and four of them sat
+    in shipped commands until a type check was first run here: plan_movie and
+    libs_affected in cmd_bad_structure_resolve(), i in the ctrl-c handler of
+    cmd_original_languages(), _dtm in _replay_pending_move_state().  Each one
+    only fires on a failure or interrupt path, which is where the user needs
+    the command most, so none of them showed up in ordinary use.
+
+    Other pyright rules are NOT asserted here: the file does not pass them yet
+    (TODO.local.md tracks that).  These two are about names, not annotations,
+    and they are already at zero -- so they stay there."""
+
+    RULES = ('reportUndefinedVariable', 'reportPossiblyUnboundVariable')
+
+    @unittest.skipUnless(shutil.which('pyright'), "pyright is not installed")
+    def test_no_name_errors_in_the_main_script(self):
+        r = subprocess.run([shutil.which('pyright') or 'pyright', '--outputjson', MAIN_SCRIPT],
+                           capture_output=True, text=True, timeout=300)
+        # pyright exits 1 whenever it reports anything, so the verdict is the
+        # JSON, not the exit status; a crash prints no JSON at all.
+        try:
+            report = json.loads(r.stdout)
+        except ValueError:
+            self.fail(f"pyright produced no JSON report (rc {r.returncode}):\n"
+                      f"{(r.stdout + r.stderr)[-800:]}")
+        hits = [f"{d.get('rule')} at line {d.get('range', {}).get('start', {}).get('line', -1) + 1}: "
+                f"{d.get('message', '').splitlines()[0]}"
+                for d in report.get('generalDiagnostics', [])
+                if d.get('rule') in self.RULES
+                and os.path.realpath(d.get('file', '')) == os.path.realpath(MAIN_SCRIPT)]
+        self.assertEqual(hits, [], "a name that may be unbound when it is read:\n  "
+                                   + "\n  ".join(hits))
+
+
 class TestDeployedCopy(unittest.TestCase):
     """my-plex is deployed as a COPY of the tool file alone -- my-plex_tests.py
     is not beside it.  The suite is therefore loaded on demand: every ordinary
@@ -11759,6 +11803,7 @@ _UNITTEST_SCOPES = {
     'v269':               [TestV269RetroactiveCoverage],
     'version':            [TestVersionAndStamp, TestVersionNamesItsRelease, TestRunViaSymlink],
     'errcodes':           [TestErrCodes],
+    'typecheck':          [TestTypeCheck],
 }
 
 # List of all unittest classes for run_regression_tests()

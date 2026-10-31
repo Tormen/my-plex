@@ -360,6 +360,21 @@ The suite lives in `my-plex_tests.py` beside `my-plex.py` and is loaded only by
 `--test` / `--unittest`.  A deployed copy of my-plex is the tool file alone, so
 run the tests in the source tree -- every other command works either way.
 
+### Type checking
+
+```bash
+pyright --pythonpath ~/.python.venv/my-plex/bin/python3
+```
+
+`pyrightconfig.json` configures it.  The interpreter matters: my-plex runs
+inside its own venv, and without it pyright cannot resolve `plexapi` or
+`readchar` and reports those imports as errors.
+
+`my-plex --test typecheck` runs the part of this that is already green -- no
+undefined and no possibly-unbound name in `my-plex.py` -- and is skipped when
+pyright is not installed.  The remaining findings are listed in the project's
+TODO.
+
 ## Version and release
 
 ```bash
