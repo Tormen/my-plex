@@ -11670,7 +11670,10 @@ class TestErrCodes(unittest.TestCase):
     numbered 00001.. in file order with no gap -- so a code in an error
     message greps to exactly one line."""
 
-    CALL = re.compile(r'(\b(?:err|_stamp_fail)\(\s*|_media_api_action\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
+    # [ \t]*\( -- a call written `err (1008, ...)` is a call: it escaped both this
+    # check and the renumber one-liner for as long as the pattern demanded `err(`.
+    CALL = re.compile(r'(\b(?:err|_stamp_fail)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
+    BARE = re.compile(r'\berr[ \t]*\(\s*(?!"\d{5}"|err_code\b)[^\s)]')
 
     def test_codes_are_unique_and_in_file_order(self):
         with open(MAIN_SCRIPT) as f:
@@ -11686,8 +11689,22 @@ class TestErrCodes(unittest.TestCase):
     def test_every_err_call_carries_a_code(self):
         with open(MAIN_SCRIPT) as f:
             src = f.read()
-        bare = re.findall(r'\berr\(\s*(?!"\d{5}"|err_code\b)[^\s)]', src)
-        self.assertEqual(bare, [], "an err() call without a five-digit code")
+        self.assertEqual(self.BARE.findall(src), [],
+                         "an err() call without a five-digit code")
+
+    def test_a_call_written_with_a_space_is_still_seen(self):
+        """A space before the paren must not hide a call from either check.
+
+        `err (1008, ...)` did exactly that: the renumber never reached it, so it
+        kept a four-digit code while every other call was five digits."""
+        for text in ('err ("00042", "x")', 'err("00042", "x")',
+                     '_stamp_fail ("00042", "x")',
+                     '_media_api_action (media_identifier, action, "00042")'):
+            with self.subTest(text=text):
+                self.assertEqual([m.group(2) for m in self.CALL.finditer(text)],
+                                 ['00042'], f"the pattern must see {text!r}")
+        self.assertNotEqual(self.BARE.findall('err (1008, "x")'), [],
+                            "a spaced call with no five-digit code must be reported")
 
 
 _UNITTEST_SCOPES = {
