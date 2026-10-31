@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "5a870e2"
-SCRIPT_RELEASE = "v3-25-g5a870e2"
+SCRIPT_COMMIT  = "a80a86c"
+SCRIPT_RELEASE = "v3-27-ga80a86c"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -10780,7 +10780,10 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         # Loop so operator can refine the query interactively when the
         # auto-cleaned dir-name doesn't match (German titles with English
         # tail tokens, mangled spellings, etc.).
-        tv_hits = movie_hits = None
+        # [] and not None: the search below can raise, and every reader of
+        # these does len() or [0] -- a None here was a TypeError waiting on
+        # the path where the online search failed.
+        tv_hits = movie_hits = []
         _confirmation_skip = False
         _collection_expanded = False   # set when movie_hits came from TMDB collection parts
         _collection_meta = None        # {tmdb_id, name, original_name} — used to mirror as Plex Collection
