@@ -356,6 +356,10 @@ my-plex --test rename
 my-plex --unittest -v
 ```
 
+The suite lives in `my-plex_tests.py` beside `my-plex.py` and is loaded only by
+`--test` / `--unittest`.  A deployed copy of my-plex is the tool file alone, so
+run the tests in the source tree -- every other command works either way.
+
 ## Version and release
 
 ```bash
