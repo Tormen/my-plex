@@ -9118,7 +9118,9 @@ class TestCompoundFilter(unittest.TestCase):
         """Inside compound expressions, bare library names auto-promote to library:NAME."""
         src = self._read_script()
         import re
-        m = re.search(r'def _compile\(node\):(.*?)label, fn = _compile', src, re.DOTALL)
+        # [^\n]*: -- the BODY is what this pins; the signature may carry a
+        # return annotation (it does: the compiler is recursive).
+        m = re.search(r'def _compile\(node\)[^\n]*:(.*?)label, fn = _compile', src, re.DOTALL)
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("PLEX_Media.OBJ_BY_LIBRARY", body)
