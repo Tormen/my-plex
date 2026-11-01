@@ -12324,6 +12324,133 @@ class TestErrCodes(unittest.TestCase):
                             "a spaced call with no five-digit code must be reported")
 
 
+class TestQuiet(unittest.TestCase):
+    """-Q / --quiet: nothing on stdout, errors untouched on stderr.
+
+    The honest test of a quiet flag is what a person watching the TERMINAL
+    sees, with no log capturing anything -- so every test here reads the two
+    streams of a real run.  Equal stdout line counts between a plain run and
+    a -Q run would mean the flag does nothing, which is exactly how a quiet
+    mode passes review while silencing not one line.
+    """
+
+    def _run(self, *argv, stdin=None):
+        return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
+                              text=True, timeout=120, input=stdin,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_a_command_that_prints_prints_nothing_under_Q(self):
+        """The driving case: a wrapper or crontab wants silence unless it fails."""
+        loud = self._run('--list-libraries')
+        quiet = self._run('-Q', '--list-libraries')
+        self.assertEqual(loud.returncode, 0, loud.stderr[-400:])
+        self.assertGreater(len(loud.stdout.splitlines()), 0,
+                           "the plain run printed nothing, so this proves nothing")
+        self.assertEqual(quiet.stdout, '',
+                         f"-Q left {len(quiet.stdout.splitlines())} line(s) on stdout")
+        self.assertEqual(quiet.returncode, 0, quiet.stderr[-400:])
+
+    def test_an_error_still_reaches_stderr_under_Q(self):
+        """"Quiet except errors" is the whole promise; without this half, -Q
+        makes an unattended run deaf rather than quiet."""
+        r = self._run('-Q', '--force')
+        self.assertEqual(r.stdout, '', "stdout was supposed to be silent")
+        self.assertRegex(r.stderr, r'ERROR #\d{5}',
+                         f"the error vanished along with the narration:\n{r.stderr!r}")
+        self.assertIn('--force can only be used together with --update-cache', r.stderr)
+        self.assertNotEqual(r.returncode, 0, "an error must not exit 0")
+
+    def test_verbose_beats_quiet(self):
+        """-V and -D ask for MORE output, so either overrides -Q -- decided in
+        one place, and the same rule applies to a QUIET pinned in the config."""
+        r = self._run('-Q', '-V', '--list-libraries')
+        self.assertGreater(len(r.stdout.splitlines()), 0,
+                           "-V did not override -Q")
+
+    def test_version_is_silenced_too_so_everything_means_everything(self):
+        """--version is answered at module level, above the venv bootstrap, and
+        so was printing straight past -Q.  The help page claims EVERYTHING on
+        stdout; an exception here would make that claim false."""
+        r = self._run('-Q', '--version')
+        self.assertEqual(r.stdout, '', "--version printed past -Q")
+        self.assertGreater(len(self._run('--version').stdout.splitlines()), 0)
+
+    def test_a_child_process_inheriting_fd_1_is_silenced_too(self):
+        """THE adversarial case.  22 of this tool's 67 subprocess calls inherit
+        file descriptor 1 (ssh, ffmpeg), so silencing sys.stdout would claim
+        quiet while letting a child's output through -- and every test above
+        would still pass, because they only exercise Python's own print().
+        Redirecting the descriptor is what makes the claim true, and this is
+        the test that can tell the two apart."""
+        snippet = (
+            "import sys, subprocess, os, importlib.util\n"
+            "sys.argv = ['my-plex.py', '-Q']\n"
+            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
+            "mp = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mp)\n"          # module level acts on -Q
+            "assert mp._QUIET_ACTIVE, 'the module did not go quiet'\n"
+            "subprocess.run(['/bin/echo', 'LEAKED_FROM_CHILD'])\n"
+            "os.write(2, b'child-ran\\n')\n"
+        ) % (MAIN_SCRIPT,)
+        r = subprocess.run([sys.executable, '-B', '-c', snippet],
+                           capture_output=True, text=True, timeout=120)
+        self.assertIn('child-ran', r.stderr,
+                      f"the probe itself did not run:\n{r.stderr[-700:]}")
+        self.assertNotIn('LEAKED_FROM_CHILD', r.stdout,
+                         "a child inheriting fd 1 printed past -Q")
+
+    def test_a_yes_no_question_refuses_under_Q_instead_of_waiting(self):
+        """A question written into the sink is invisible AND still blocks on
+        stdin -- a hang with nothing on screen to explain it.  Under -Q the
+        one place that asks refuses instead, and names the flags that answer
+        in advance."""
+        snippet = (
+            "import sys, importlib.util\n"
+            "sys.argv = ['my-plex.py']\n"
+            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
+            "mp = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mp)\n"
+            "mp._QUIET_ACTIVE = True\n"
+            "mp.prompt_yes_no('Trash 400 files?')\n"
+        ) % (MAIN_SCRIPT,)
+        r = subprocess.run([sys.executable, '-B', '-c', snippet],
+                           capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(r.returncode, 0, "it did not refuse")
+        self.assertIn('-Q cannot ask', r.stderr, r.stderr[-700:])
+        self.assertIn('--yes', r.stderr, "it did not name the way to answer")
+
+    def test_an_answer_given_in_advance_is_still_honoured_under_Q(self):
+        """-Y/--yes is the tool's own answer for an unattended run, so -Q must
+        not turn a pre-answered question into a refusal."""
+        snippet = (
+            "import sys, importlib.util\n"
+            "sys.argv = ['my-plex.py']\n"
+            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
+            "mp = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mp)\n"
+            "mp._QUIET_ACTIVE = True\n"
+            "mp.AUTO_YES = True\n"
+            "assert mp.prompt_yes_no('Trash 400 files?') is True\n"
+            "import os; os.write(2, b'answered\\n')\n"
+        ) % (MAIN_SCRIPT,)
+        r = subprocess.run([sys.executable, '-B', '-c', snippet],
+                           capture_output=True, text=True, timeout=120)
+        self.assertIn('answered', r.stderr, r.stderr[-700:])
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+
+    def test_the_flag_is_in_help_and_in_the_completion(self):
+        """A flag the completion does not know is a flag half-added; the
+        completion IS part of the CLI and changes in the same commit."""
+        r = self._run('--help')
+        self.assertIn('-Q, --quiet', r.stdout, "the summary does not name -Q")
+        page = self._run('--help', 'quiet')
+        self.assertIn('QUIET HELP', page.stdout, "there is no --help quiet page")
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        self.assertIn("{-Q,--quiet}", src, "the zsh completion has no -Q")
+        self.assertIn("'QUIET': False", src, "QUIET is not a config key")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -12351,6 +12478,7 @@ _UNITTEST_SCOPES = {
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
+    'quiet':      [TestQuiet],
     'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,

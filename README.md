@@ -145,6 +145,25 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Watch status** — mark watched/unwatched, set view offset
 - **Playlist management** — create, modify, delete playlists
 
+### Output control
+- **`-V` / `-VV`** — more detail for the reader; **`-D` / `-DD`** — diagnostics
+  for debugging my-plex itself. Two independent axes; `-D` implies `-V`.
+- **`-Q` / `--quiet`** — prints **nothing** on stdout: no progress, no summary,
+  and no result either, so do not pass it to a command whose output you came
+  for. Errors and warnings stay on stderr, so an unattended caller mails the
+  failure and nothing else:
+
+  ```bash
+  my-plex -Q --update-cache            # cron: silent unless it fails
+  my-plex -Q --sort-new --resolve -Y   # -Y answers the confirmation in advance
+  ```
+
+  It redirects file descriptor 1, not just Python's `sys.stdout`, so output
+  from the `ssh` and `ffmpeg` children is silenced with everything else. `-V`
+  or `-D` overrides it, including against a `QUIET` pinned in the config. A
+  command that would ask a yes/no question refuses under `-Q` rather than wait
+  on an invisible prompt — answer it with `-Y`/`--yes` or `-N`/`--no`.
+
 ### Remote Operation
 - **SSH-transparent** — reads and writes episode data on the Plex server via SSH
 - **No mount required** — works without mounted volumes (SSH fallback for all file I/O)
