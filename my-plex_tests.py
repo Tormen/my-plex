@@ -11760,18 +11760,29 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
         nobody at the screen to answer for it. Building an environment to
         answer that question is how --help comes back empty and the copy goes
         out untested. --version is already answered before the venv block;
-        --help now is too."""
+        --help now is too.
+
+        The script is run DIRECTLY, so its shebang picks the interpreter the
+        gate's run gets -- not sys.executable, which is the venv this suite
+        runs inside and has every dependency.  That distinction is the whole
+        test: under the venv's python it passed while `my-plex --help` was
+        dying on `import urllib3.exceptions`, because the venv has urllib3
+        and the shebang's python does not.  So this also stands guard over
+        every FUTURE module-level third-party import, which is why it does
+        not name the ones that exist today."""
         home = tempfile.mkdtemp(prefix='my-plex-nohome-')
         try:
-            env = dict(os.environ, HOME=home)
+            env = dict(os.environ, HOME=home, PYTHONDONTWRITEBYTECODE='1')
             env.pop('VIRTUAL_ENV', None)
-            r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--help'],
+            r = subprocess.run([MAIN_SCRIPT, '--help'],
                                capture_output=True, text=True, timeout=300, env=env)
             out = r.stdout + r.stderr
             self.assertNotIn('Creating python virtualenv', out,
                              "it built an environment in order to print help")
             self.assertFalse(os.path.isdir(os.path.join(home, '.python.venv')),
                              "a venv was created under a HOME that had none")
+            self.assertNotIn('Traceback', out,
+                             f"--help raised instead of answering:\n{out[-900:]}")
             self.assertIn('--run-tests', out,
                           f"the gate greps for this in --help:\n{out[-600:]}")
             self.assertEqual(r.returncode, 0, out[-600:])

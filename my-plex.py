@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "c9dccbe"
-SCRIPT_RELEASE = "v3-37-gc9dccbe"
+SCRIPT_COMMIT  = "eb8c81b"
+SCRIPT_RELEASE = "v3-38-geb8c81b"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -720,18 +720,28 @@ import threading
 #
 # The venv's own packages.  A print-only run skipped the venv above, so it
 # reaches this with the system interpreter and none of them installed -- and
-# needs none of them: every use of these four names is inside a function
-# body, and printing help calls none of those functions.  Any other run got
+# needs none of them: every use of these names is inside a function body,
+# and printing help calls none of those functions.  Any other run got
 # here through the venv, where the import cannot fail; if it somehow does,
 # it is raised rather than hidden.
 # HELP: https://python-plexapi.readthedocs.io/
 #
+# EVERY third-party import of this module belongs in this one block, and a
+# new one goes here rather than below it: a --help run skips the venv (see
+# _PRINT_ONLY_RUN above), so an import left outside dies under the shebang's
+# python, and the rollout gate reads that empty --help as "no suite" and
+# ships the copy untested.  Each is used only inside a function body, which
+# is what makes tolerating its absence safe here.
+#
 # The list is written twice on purpose: the checker reads the first branch
-# and so keeps the real types at all 116 uses, while the runtime takes the
-# second and tolerates their absence.  Binding them to None instead would
-# make every one of those uses Optional and cost 8 false findings.
+# and so keeps the real types at every use, while the runtime takes the
+# second and tolerates their absence.  Binding them to None in the checker's
+# view instead would make every one of those uses Optional and cost 8 false
+# findings.
 if TYPE_CHECKING:
     import readchar
+    import urllib3.exceptions
+    import requests.exceptions
     from plexapi.media import Media
     from plexapi.server import PlexServer
     from plexapi.playlist import Playlist
@@ -739,6 +749,8 @@ if TYPE_CHECKING:
 else:
     try:
         import readchar
+        import urllib3.exceptions
+        import requests.exceptions
         from plexapi.media import Media
         from plexapi.server import PlexServer
         from plexapi.playlist import Playlist
@@ -746,9 +758,8 @@ else:
     except ImportError:
         if not _PRINT_ONLY_RUN:
             raise
-        readchar = Media = PlexServer = Playlist = Collection = None
-import urllib3.exceptions
-import requests.exceptions
+        readchar = urllib3 = requests = None
+        Media = PlexServer = Playlist = Collection = None
 
 
 ###########################################################################################
