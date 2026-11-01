@@ -11754,6 +11754,30 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
         self.assertNotIn('FileNotFoundError', out, out[-1500:])
         self.assertEqual(r.returncode, 0, out[-1500:])
 
+    def test_help_answers_without_a_venv_and_does_not_build_one(self):
+        """The gate asks `--help` to find out what a tool can do, on a machine
+        that may have neither the venv nor the network to make one, with
+        nobody at the screen to answer for it. Building an environment to
+        answer that question is how --help comes back empty and the copy goes
+        out untested. --version is already answered before the venv block;
+        --help now is too."""
+        home = tempfile.mkdtemp(prefix='my-plex-nohome-')
+        try:
+            env = dict(os.environ, HOME=home)
+            env.pop('VIRTUAL_ENV', None)
+            r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--help'],
+                               capture_output=True, text=True, timeout=300, env=env)
+            out = r.stdout + r.stderr
+            self.assertNotIn('Creating python virtualenv', out,
+                             "it built an environment in order to print help")
+            self.assertFalse(os.path.isdir(os.path.join(home, '.python.venv')),
+                             "a venv was created under a HOME that had none")
+            self.assertIn('--run-tests', out,
+                          f"the gate greps for this in --help:\n{out[-600:]}")
+            self.assertEqual(r.returncode, 0, out[-600:])
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
     def test_help_names_run_tests_so_the_gate_fires(self):
         """my-rollout runs a pending copy's suite only when --help names it."""
         r = subprocess.run([sys.executable, '-B', self.copy, '--help'],
