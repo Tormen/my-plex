@@ -12765,6 +12765,151 @@ class TestReadmeFlagsExist(unittest.TestCase):
         self.assertIn("You mean '--mv-to'", r.stderr, r.stderr[-500:])
 
 
+class TestInstallFirewallRules(unittest.TestCase):
+    """--install writes one firewall rule per host my-plex connects to.
+
+    The reason it exists: on a machine with an interactive firewall, the first
+    connection to a scraped host is held behind an alert. A scheduled run has
+    nobody to answer it, so it stops talking with no error of its own. That
+    happened on a real machine with www.fernsehserien.de.
+    """
+
+    def _conf(self, cli_path):
+        """A config whose LITTLE_SNITCH_CLI points where this test wants."""
+        d = tempfile.mkdtemp(prefix='my-plex-install-')
+        c = os.path.join(d, 'my-plex.conf')
+        with open(c, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {cli_path!r}\n")
+        return d, c
+
+    def _run(self, *argv):
+        return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
+                              text=True, timeout=120,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_every_host_it_fetches_has_a_rule(self):
+        """THE test. A new scraper or API whose host is not in NETWORK_HOSTS
+        gets no rule, and the firewall holds it on the next machine -- which is
+        exactly how this came to light. So the constant is checked against the
+        URLs the code actually fetches, not against a list kept by hand.
+
+        Only FETCHED urls count: the ones built into a `url = f'https://...'`
+        for urlopen. themoviedb.org, thetvdb.com and imdb.com also appear in
+        the source, as links in --help text and in a display column, and
+        allowing those would widen the rules for nothing."""
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        # A FETCHED url is BUILT -- `url = f'https://host/...{id}'` -- because
+        # it interpolates an id or a query. A url that is a plain constant is a
+        # link for the reader: the GPL text in --version assigns
+        # "https://www.gnu.org/..." to a variable called url too, and counting
+        # it would have this test demand a firewall rule for gnu.org.
+        fetched = set(re.findall(
+            r"""url\s*=\s*f['"]https://([a-z0-9.-]+)""", src, re.IGNORECASE))
+        self.assertGreater(len(fetched), 1,
+                           "no fetched urls found -- the extraction is broken")
+        # read NETWORK_HOSTS itself, not every ('a.b', '...') pair in the file:
+        # a loose pattern also matched 'poster.jpg' and could mask a real miss
+        block = src.split('NETWORK_HOSTS = (', 1)[1].split('\n)', 1)[0]
+        listed = set(re.findall(r"\('([a-z0-9.-]+)',", block))
+        self.assertGreater(len(listed), 1, f"NETWORK_HOSTS not parsed:\n{block[:200]}")
+        missing = sorted(h for h in fetched if h not in listed)
+        self.assertEqual(missing, [],
+                         f"my-plex fetches these hosts but NETWORK_HOSTS does "
+                         f"not list them, so --install writes no rule for "
+                         f"them: {missing}")
+
+    def test_without_the_firewall_tool_it_says_so_and_writes_nothing(self):
+        """my-plex is published: on anyone else's machine the integration is
+        absent, and --install must then be a clean no-op that still tells the
+        reader which hosts to allow -- not an error."""
+        d, conf = self._conf(os.path.join('/nonexistent', 'my-little-snitch'))
+        try:
+            r = self._run('--config', conf, '--install')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn('no rules written', r.stdout, r.stdout[-500:])
+            for host, _why in (('api.themoviedb.org', 0), ('www.fernsehserien.de', 0)):
+                self.assertIn(host, r.stdout, "it must still name the hosts")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_it_refuses_without_root_and_names_the_command(self):
+        """The firewall tool is root-only even to LOOK, so --install cannot
+        show a plan as an ordinary user. It says so and gives the command,
+        rather than calling out to escalate by itself."""
+        d, conf = self._conf('/bin/echo')      # exists, so the root check is reached
+        try:
+            r = self._run('--config', conf, '--install')
+            self.assertNotEqual(r.returncode, 0, "it did not refuse")
+            self.assertIn('needs root', r.stderr, r.stderr[-500:])
+            self.assertIn('my-plex --install', r.stderr,
+                          "it must give the command to run as root")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_plain_run_and_go_are_distinguished(self):
+        """A rule-writing command is guarded by `go`: the plain run must say it
+        changed nothing, and `go` must not say that."""
+        d, conf = self._conf(os.path.join('/nonexistent', 'my-little-snitch'))
+        try:
+            plain = self._run('--config', conf, '--install')
+            self.assertIn('--install\n', plain.stdout + '\n',
+                          "the plain run must name itself without `go`")
+            self.assertNotIn('--install go', plain.stdout,
+                             "a plain run must not report itself as `go`")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_help_page_exists_and_names_the_hosts(self):
+        r = self._run('--help', 'install')
+        self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])
+        self.assertIn('www.fernsehserien.de', r.stdout,
+                      "the page must name the hosts it allows")
+
+
+class TestConfigTemplateCoversEveryKey(unittest.TestCase):
+    """Every CONFIG_DEFAULTS key must appear in the --create-config template.
+
+    A key in CONFIG_DEFAULTS but not in the template is a knob the user cannot
+    discover: `--create-config` is what they read and diff their own config
+    against, so the feature is undocumented for everyone but the author. It
+    has happened before (SORT_NEW_SCAN_LOCATIONS), and it happened again while
+    adding LITTLE_SNITCH_CLI -- because the rule "a new key lands in three
+    places" was written down but nothing executed it.
+    """
+
+    def test_every_key_is_in_the_create_config_output(self):
+        r = subprocess.run([MAIN_SCRIPT, '--create-config'],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        emitted = set(re.findall(r'^\s*#?\s*([A-Z_][A-Z_0-9]+)\s*=', r.stdout,
+                                 re.MULTILINE))
+        self.assertGreater(len(emitted), 20, "the template rendered almost nothing")
+
+        mod = sys.modules[resolve_disk_map_variables.__module__]
+        keys = set(mod.CONFIG_DEFAULTS.keys())
+        missing = sorted(keys - emitted)
+        self.assertEqual(missing, [],
+                         "in CONFIG_DEFAULTS but not in --create-config, so a "
+                         f"user cannot find them: {missing}")
+
+    def test_the_template_invents_no_key(self):
+        """The other direction: a template line naming a key that no longer
+        exists tells the user to set something the tool ignores."""
+        r = subprocess.run([MAIN_SCRIPT, '--create-config'],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        emitted = set(re.findall(r'^\s*#?\s*([A-Z_][A-Z_0-9]+)\s*=', r.stdout,
+                                 re.MULTILINE))
+        mod = sys.modules[resolve_disk_map_variables.__module__]
+        keys = set(mod.CONFIG_DEFAULTS.keys())
+        # section headers and prose can name other things; only assignments count
+        stray = sorted(e for e in emitted - keys if not e.startswith('EXAMPLE'))
+        self.assertEqual(stray, [],
+                         f"the template assigns keys the tool does not have: {stray}")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -12794,6 +12939,8 @@ _UNITTEST_SCOPES = {
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection],
+    'install':    [TestInstallFirewallRules],
+    'conf-template': [TestConfigTemplateCoversEveryKey],
     'readme':     [TestReadmeFlagsExist],
     'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
