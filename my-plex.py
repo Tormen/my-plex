@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "1836353"
-SCRIPT_RELEASE = "v3-34-g1836353"
+SCRIPT_COMMIT  = "df69bfd"
+SCRIPT_RELEASE = "v3-35-gdf69bfd"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3627,7 +3627,7 @@ def load_cache():
                             if FORCE_PLEXDATA and FORCE_CACHE_UPDATE:
                                 print()
                                 print("=" * 76)
-                                print("CACHE FORMAT WARNING: Outdated cache format detected")
+                                print("CACHE FORMAT WARNING: Outdated cache format detected", file=sys.stderr)
                                 print("=" * 76)
                                 print(f"Found {len(old_format_examples)} entries with old format.")
                                 print("Proceeding with cache rebuild (--update-cache --force)...")
@@ -3636,7 +3636,7 @@ def load_cache():
                             else:
                                 print()
                                 print("=" * 76)
-                                print("CACHE FORMAT ERROR: Outdated cache format detected")
+                                print("CACHE FORMAT ERROR: Outdated cache format detected", file=sys.stderr)
                                 print("=" * 76)
                                 print()
                                 print(f"Your cache file uses an OLD format that is no longer supported.")
@@ -6232,7 +6232,7 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
                 print(f"{log_prefix}Sibling renamed: {os.path.basename(sib)} → {sib_new_basename}")
             else:
                 errors += 1
-                print(f"{log_prefix}ERROR renaming sibling: {sib}")
+                print(f"{log_prefix}ERROR renaming sibling: {sib}", file=sys.stderr)
             continue
         else:
             continue
@@ -6251,7 +6251,7 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
             print(f"{log_prefix}Sibling renamed: {os.path.basename(sib)} → {sib_new_basename}")
         else:
             errors += 1
-            print(f"{log_prefix}ERROR renaming sibling: {sib}")
+            print(f"{log_prefix}ERROR renaming sibling: {sib}", file=sys.stderr)
     return (renamed, errors)
 
 
@@ -17270,7 +17270,7 @@ def fetch_series_from_database(library_section_id):
         print(f"{DBGPFX}fetch_series_from_database: Got {len(rows)} rows")
         print(f"{DBGPFX}First row has {len(rows[0])} fields (expected 37)")
         if len(rows[0]) != 37:
-            print(f"{DBGPFX}ERROR: Row field count mismatch!")
+            print(f"{DBGPFX}ERROR: Row field count mismatch!", file=sys.stderr)
             print(f"{DBGPFX}First row: {rows[0]}")
 
     # Fetch streams (audio/subtitle)
@@ -17980,7 +17980,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
                     failed_shows.append((series_title, 'scrape_failed', str(e)[:60], library_name))
                     write_episodes_err(series_dir, 'scrape_failed', source, str(e)[:80])
                 if VRB:
-                    print(f"{VRBPFX}  WARNING: Failed to scrape episodes.tsv for '{series_title}': {e}")
+                    print(f"{VRBPFX}  WARNING: Failed to scrape episodes.tsv for '{series_title}': {e}", file=sys.stderr)
 
         # Print progress every 10% (or every 10 shows for small libraries)
         # Skip \r-based progress in worker threads — concurrent output would stomp on it
@@ -18853,7 +18853,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Validate cache format
         if old_counts and not isinstance(old_counts, dict):
-            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex")
+            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
             err("00047", f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
 
         # For series libraries: compare series count AND episode count to detect new episodes
@@ -19674,7 +19674,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             for lib, counts in old_itemsCount_from_cache.items():
                 # Validate cache format - must be dict with type counts
                 if not isinstance(counts, dict):
-                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex")
+                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
                     err("00054", f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
                 print(f"{DBGPFX}  Library '{lib}': {count_str}")
@@ -19997,7 +19997,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             # Stop waiting if we've exceeded overall timeout
                             if time_module.time() - shutdown_start >= shutdown_timeout:
                                 print(f"Shutdown timeout reached ({shutdown_timeout}s), forcing exit...")
-                                print(f"⚠ WARNING: Checkpoint may not include all removals from workers that didn't complete")
+                                print(f"⚠ WARNING: Checkpoint may not include all removals from workers that didn't complete", file=sys.stderr)
                                 break
                     # Save checkpoint with all progress (including removals from completed workers)
                     print("Saving checkpoint...")
@@ -27404,7 +27404,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         else:
                             filepath = 'N/A'
                             size_bytes = None
-                            if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}")
+                            if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}", file=sys.stderr)
                         resolution = 'N/A'
                         codec = 'N/A'
                         if version_str:
@@ -27611,7 +27611,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                         # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
                                         multi_version_files.append((ver, file_info['filepath']))
                                     else:
-                                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}")
+                                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
                                 if DBG:
                                     print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
@@ -35126,7 +35126,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
                     print(f"{prefix}Rename: {path} → {new_name}")
             else:
                 error_count += 1
-                print(f"{prefix}ERROR renaming: {path}")
+                print(f"{prefix}ERROR renaming: {path}", file=sys.stderr)
 
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
@@ -37007,13 +37007,13 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dst_root}\""]
                 r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                 if r.returncode != 0:
-                    print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}")
+                    print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}", file=sys.stderr)
                     n_errors += 1
                     _log_op('error', cache_key, obj, src=folder_path, dest=new_path, error=f"mkdir-failed: {r.stderr.strip()}")
                     continue
             ok, actual = my_plex_file_operation('MOVE', folder_path, PLEX_DB_REMOTE_HOST, dest_path=new_path)
             if not ok:
-                print(f"  ✗ ERROR move folder: {folder_path} → {new_path}")
+                print(f"  ✗ ERROR move folder: {folder_path} → {new_path}", file=sys.stderr)
                 n_errors += 1
                 _log_op('error', cache_key, obj, src=folder_path, dest=new_path, error='folder-move-failed')
                 continue
@@ -37115,7 +37115,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         if src_root is None and src_locations:
             src_root = src_locations[0].rstrip('/')
         if not src_root:
-            print(f"  ✗ ERROR {cache_key}: cannot resolve source rootpath for library '{src_lib}'")
+            print(f"  ✗ ERROR {cache_key}: cannot resolve source rootpath for library '{src_lib}'", file=sys.stderr)
             n_errors += 1
             continue
 
@@ -37204,7 +37204,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                             # make that unrecoverable.
                             trashed, _ = my_plex_file_operation('TRASH', dst_wrapper, PLEX_DB_REMOTE_HOST)
                             if not trashed:
-                                print(f"  ✗ ERROR overwrite: failed to trash existing wrapper {dst_wrapper}")
+                                print(f"  ✗ ERROR overwrite: failed to trash existing wrapper {dst_wrapper}", file=sys.stderr)
                                 item_failed = True
                     if not item_failed:
                         # mkdir -p the dest_root on the Plex host (the wrapper itself
@@ -37214,7 +37214,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                             mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dst_root}\""]
                             r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                             if r.returncode != 0:
-                                print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}")
+                                print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}", file=sys.stderr)
                                 item_failed = True
                         if not item_failed:
                             ok, actual = my_plex_file_operation('MOVE', src_wrapper, PLEX_DB_REMOTE_HOST, dest_path=dst_wrapper)
@@ -37229,7 +37229,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                                     moved_filepaths.append((fp, new_fp))
                                 moved_as_wrapper = True
                             else:
-                                print(f"  ✗ ERROR wrapper move: {src_wrapper} → {dst_wrapper}")
+                                print(f"  ✗ ERROR wrapper move: {src_wrapper} → {dst_wrapper}", file=sys.stderr)
                                 item_failed = True
 
         # Per-file path (Episodes, and Movies that didn't qualify for wrapper-move:
@@ -37250,7 +37250,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                     if exists:
                         trashed, _ = my_plex_file_operation('TRASH', new_path, PLEX_DB_REMOTE_HOST)
                         if not trashed:
-                            print(f"  ✗ ERROR overwrite: failed to trash existing {new_path}")
+                            print(f"  ✗ ERROR overwrite: failed to trash existing {new_path}", file=sys.stderr)
                             item_failed = True
                             break
 
@@ -37260,7 +37260,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                     mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dir}\""]
                     r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                     if r.returncode != 0:
-                        print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}")
+                        print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}", file=sys.stderr)
                         print(f"    stderr: {r.stderr.strip()}")
                         item_failed = True
                         break
@@ -37268,13 +37268,13 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                     try:
                         os.makedirs(new_dir, exist_ok=True)
                     except Exception as e:
-                        print(f"  ✗ ERROR mkdir local: {new_dir} — {e}")
+                        print(f"  ✗ ERROR mkdir local: {new_dir} — {e}", file=sys.stderr)
                         item_failed = True
                         break
 
                 ok, actual = my_plex_file_operation('MOVE', fp, PLEX_DB_REMOTE_HOST, dest_path=new_path)
                 if not ok:
-                    print(f"  ✗ ERROR move: {fp} → {new_path}")
+                    print(f"  ✗ ERROR move: {fp} → {new_path}", file=sys.stderr)
                     item_failed = True
                     break
                 actual_new = actual or new_path
@@ -39324,7 +39324,7 @@ def add_label_to_item(label, plex_id):
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
         return 'added'
     except Exception as e:
-        print(f"  {obj_key}: ERROR: Failed to add label: {e}")
+        print(f"  {obj_key}: ERROR: Failed to add label: {e}", file=sys.stderr)
         return 'error'
 
 def remove_label_from_item(label, plex_id):
@@ -39358,7 +39358,7 @@ def remove_label_from_item(label, plex_id):
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
         return 'removed'
     except Exception as e:
-        print(f"  {obj_key}: ERROR: Failed to remove label: {e}")
+        print(f"  {obj_key}: ERROR: Failed to remove label: {e}", file=sys.stderr)
         return 'error'
 
 def get_library_differences(lib_name, lib_type, deep_episode_check=False):

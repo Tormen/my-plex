@@ -3930,6 +3930,36 @@ class TestErrorOutputConventions(unittest.TestCase):
         self.assertIn('Possible reasons:', body, "SSH failure paths must have 'Possible reasons' guidance")
 
 
+    def test_every_failure_marker_print_is_on_stderr(self):
+        """`✗ ERROR ...` marks a step that FAILED. Those go to stderr, or
+        `my-plex --move ... > out.txt` buries them in the file and a pipe
+        hands them to the next program as data."""
+        bad = [f"{n}: {line.strip()[:90]}"
+               for n, line in enumerate(self._read_script().splitlines(), 1)
+               if '\u2717 ERROR' in line and 'print(' in line
+               and 'file=sys.stderr' not in line]
+        self.assertEqual(bad, [], "failure markers still on stdout:\n" + "\n".join(bad))
+
+    def test_a_commands_own_findings_stay_on_stdout(self):
+        """The other half, and the one a sweep gets wrong: what a command was
+        ASKED to report is its result, not an error. `--problems` listing a
+        broken file, the confirmation banner before a destructive rebuild and
+        the examples on a --help page all belong on stdout, where a redirect
+        is meant to catch them."""
+        keep_on_stdout = [
+            'WARNING: File marked as BROKEN',        # a --problems/--info finding
+            'WARNING: FROM-SCRATCH CACHE REBUILD',   # a confirmation banner
+            '--del requires --rm',                   # an example on --help del
+        ]
+        src_lines = self._read_script().splitlines()
+        for marker in keep_on_stdout:
+            with self.subTest(marker=marker):
+                hits = [l for l in src_lines if marker in l and 'print(' in l]
+                self.assertTrue(hits, f"{marker!r} is gone -- update this test")
+                for line in hits:
+                    self.assertNotIn('file=sys.stderr', line,
+                                     f"this is the command's own output, not an error: {line.strip()[:90]}")
+
     def _run_cli(self, *args):
         return subprocess.run([sys.executable, MAIN_SCRIPT, *args],
                               capture_output=True, text=True, timeout=60)
