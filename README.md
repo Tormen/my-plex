@@ -173,7 +173,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 ```bash
 # Clone and add to PATH
 git clone https://github.com/Tormen/my-plex.git
-ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex   # or anywhere in your PATH
+ln -s "$(pwd)/my-plex/my-plex.py" /usr/local/bin/my-plex   # or anywhere in your PATH
 
 # Configure
 my-plex --create-config ~/.my-plex.conf      # Write default config to file
@@ -182,14 +182,19 @@ my-plex --create-config ~/.my-plex.conf      # Write default config to file
 # Inspect the active config any time:  my-plex --config
 ```
 
-That's it. On first run, the `my-plex` shell wrapper automatically:
-- Creates a Python virtualenv (`~/.python.venv/my-plex/`)
-- Installs all dependencies (`plexapi`, `readchar`)
-- Sets up zsh tab-completion
+That's it. There is no wrapper script and nothing to install by hand:
+`my-plex.py` is the whole tool, and on its first run it
+- creates its own virtualenv (`~/.python.venv/my-plex/`) with the stdlib
+  `venv` module and re-executes itself inside it,
+- installs its two dependencies there (`plexapi`, `readchar`),
+- writes its zsh completion to `~/.zsh/completions/_my-plex` and adds the
+  `fpath` line to `~/.zshrc` once.
+
+`--help` and `--version` answer without any of that, so they work on a machine
+with no virtualenv and no network.
 
 ### Requirements
 - Python 3.10+ (uses `match/case`)
-- `virtualenv` (for automatic venv setup)
 - SSH access to the Plex server (for database and file operations)
 - SQLite3 on the Plex server
 
