@@ -3965,12 +3965,38 @@ class TestErrorOutputConventions(unittest.TestCase):
         return subprocess.run([sys.executable, MAIN_SCRIPT, *args],
                               capture_output=True, text=True, timeout=60)
 
+    def test_an_ordinary_error_prints_the_status_it_exits_with(self):
+        """The common path: an argument error, which exits 1."""
+        r = subprocess.run([MAIN_SCRIPT, '--force'], capture_output=True,
+                           text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        m = re.search(r'ERROR (\d{5}) \[(\d+)\]:', r.stderr)
+        self.assertIsNotNone(m, f"not the house error shape:\n{r.stderr!r}")
+        assert m is not None
+        self.assertEqual(int(m.group(2)), r.returncode,
+                         f"it printed [{m.group(2)}] and exited {r.returncode}")
+        self.assertNotEqual(r.returncode, 0, "an error must not exit 0")
+
+    def test_the_code_is_greppable_back_to_its_source_line(self):
+        """The code exists for one reason: to find the line that raised it.
+        So the code a run prints must actually appear in the source."""
+        r = subprocess.run([MAIN_SCRIPT, '--force'], capture_output=True,
+                           text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        m = re.search(r'ERROR (\d{5}) ', r.stderr)
+        self.assertIsNotNone(m)
+        assert m is not None
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        self.assertIn(f'"{m.group(1)}"', src,
+                      f"code {m.group(1)} is printed but is in no err() call")
+
     def test_err_goes_to_stderr_not_stdout(self):
         """err() is fatal output: stderr only, so `my-plex ... > out` still shows it
         and `my-plex ... | next` never feeds it to the next program as data."""
         r = self._run_cli('--offline', '--plex-token')   # argparse error -> err()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn('ERROR #', r.stderr)
+        self.assertRegex(r.stderr, r'ERROR \d{5} \[\d+\]:')
         self.assertNotIn('ERROR', r.stdout)
 
     def test_error_block_goes_to_stderr_whole(self):
@@ -11408,7 +11434,7 @@ class TestPlexConnectNotRequired(unittest.TestCase):
     def test_required_is_fatal_and_redacts_token(self):
         exc, out, why, _ = self._connect(required=True)
         self.assertIsNotNone(exc, "required=True must still be fatal")
-        self.assertIn('ERROR #', out)
+        self.assertRegex(out, r'ERROR \d{5} \[\d+\]:')
         self.assertIn('Failed to connect to PLEX Server', out)
         self.assertIn(f'<redacted, {len(self.TOKEN)} chars>', out)
         self.assertNotIn(self.TOKEN, out)
@@ -12018,6 +12044,32 @@ class TestTopLevelHandlers(unittest.TestCase):
         io.open(dst, 'w', encoding='utf-8').write(src)
         return d, dst
 
+    def test_the_status_it_prints_is_the_one_it_exits_with(self):
+        """`ERROR <code> [<exit>]:` puts the exit status beside the code
+        because err() holds both while a caller sees only one -- so a message
+        claiming [1] while the process exits 70 shows up in ordinary output
+        instead of having to be debugged.
+
+        This has to be checked on a path that does NOT exit 1, or it proves
+        nothing: hard-coding "[1]" in err() passes an argument-error test
+        happily, because an argument error exits 1 anyway. The bug handler
+        exits 70 (EX_SOFTWARE), so it is the one that can tell them apart."""
+        d, copy = self._copy_with('raise RuntimeError("deliberate test defect")')
+        try:
+            r = subprocess.run([sys.executable, '-B', copy],
+                               capture_output=True, text=True, timeout=300)
+            out = r.stdout + r.stderr
+            m = re.search(r'ERROR (\d{5}) \[(\d+)\]:', out)
+            self.assertIsNotNone(m, f"not the house error shape:\n{out[-600:]}")
+            assert m is not None
+            self.assertEqual(r.returncode, 70, "the bug handler must exit 70")
+            self.assertEqual(int(m.group(2)), r.returncode,
+                             f"it printed [{m.group(2)}] and exited "
+                             f"{r.returncode} -- the status beside the code "
+                             f"is not the status")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_a_bug_gives_one_line_and_no_traceback(self):
         d, copy = self._copy_with('raise RuntimeError("deliberate test defect")')
         try:
@@ -12029,7 +12081,7 @@ class TestTopLevelHandlers(unittest.TestCase):
             # The SHAPE and the message, not the number: err codes are
             # renumbered in file order whenever one is added, so pinning the
             # digits here makes an unrelated change fail this test.
-            self.assertRegex(out, r'ERROR #\d{5}', out[-800:])
+            self.assertRegex(out, r'ERROR \d{5} \[\d+\]:', out[-800:])
             self.assertIn('stopped on a bug', out, out[-800:])
             self.assertIn('RuntimeError: deliberate test defect', out,
                           "the one line must say what happened")
@@ -12356,7 +12408,7 @@ class TestQuiet(unittest.TestCase):
         makes an unattended run deaf rather than quiet."""
         r = self._run('-Q', '--force')
         self.assertEqual(r.stdout, '', "stdout was supposed to be silent")
-        self.assertRegex(r.stderr, r'ERROR #\d{5}',
+        self.assertRegex(r.stderr, r'ERROR \d{5} \[\d+\]:',
                          f"the error vanished along with the narration:\n{r.stderr!r}")
         self.assertIn('--force can only be used together with --update-cache', r.stderr)
         self.assertNotEqual(r.returncode, 0, "an error must not exit 0")
