@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "994ebc0"
-SCRIPT_RELEASE = "v3-29-g994ebc0"
+SCRIPT_COMMIT  = "783cbcd"
+SCRIPT_RELEASE = "v3-31-g783cbcd"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -4888,7 +4888,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
     it will automatically use the existing alternative path.
 
     Args:
-        operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'REMOVE', 'LIST_DIR'
+        operation: Operation to perform - 'CHECK', 'TRASH', 'RENAME', 'MOVE', 'RMDIR', 'LIST_DIR'
         filepath: Full path to source file or directory (for LIST_DIR)
         remote_host: SSH host for remote operations, None for local
         **kwargs: Additional arguments depending on operation:
@@ -4901,7 +4901,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
     Returns:
         For CHECK: (exists: bool, resolved_filepath or None)
         For TRASH/RENAME/MOVE: (success: bool, result_path: str or None)
-        For REMOVE: (success: bool, None)
+        For RMDIR: (success: bool, None)
         For LIST_DIR: (success: bool, list_of_files: list or None)
     """
     # Resolve filepath using alternative paths (unless explicitly disabled)
@@ -5020,19 +5020,22 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                                extra_context={'source': filepath, 'destination': dest_path})
                 return (False, None)
 
-        elif operation == 'REMOVE':
-            # Remove file/dir in ONE shot: check exists && remove && echo success
-            # For directories, need to use rm -r
+        elif operation == 'RMDIR':
+            # An EMPTY directory, and nothing else.  rmdir refuses a non-empty
+            # one, and that refusal IS the guard: this function has no
+            # recursive remove, because anything a person might want back goes
+            # to TRASH instead.
             cmd = [*_ssh_args(remote_host),
-                   f"[ -e \"{escaped_src}\" ] && /bin/rm -r \"{escaped_src}\" && echo 'REMOVED:{filepath}' || echo 'FAILED'"]
+                   f"[ -d \"{escaped_src}\" ] && rmdir \"{escaped_src}\" && echo 'RMDIR:{filepath}' || echo 'FAILED'"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
-            if result.returncode == 0 and result.stdout.strip().startswith('REMOVED:'):
-                print(f"{VRBPFX}Removed on {remote_host}: {filepath}")
+            if result.returncode == 0 and result.stdout.strip().startswith('RMDIR:'):
+                print(f"{VRBPFX}Removed empty directory on {remote_host}: {filepath}")
                 return (True, None)
             else:
-                print_ssh_error(remote_host, "remove file", cmd=cmd, stderr=result.stderr,
-                               extra_context={'file': filepath})
+                print_ssh_error(remote_host, "remove empty directory", cmd=cmd, stderr=result.stderr,
+                               extra_context={'directory': filepath,
+                                              'note': 'rmdir refuses a directory that is not empty'})
                 return (False, None)
 
         elif operation == 'LIST_DIR':
@@ -5103,13 +5106,17 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
                 return (False, None)
 
-        elif operation == 'REMOVE':
+        elif operation == 'RMDIR':
             try:
-                os.remove(filepath)
-                print(f"{VRBPFX}Removed: {filepath}")
+                os.rmdir(filepath)
+                print(f"{VRBPFX}Removed empty directory: {filepath}")
                 return (True, None)
-            except Exception as e:
-                print(f"ERROR: Failed to remove file: {e}", file=sys.stderr)
+            except OSError as e:
+                # The old REMOVE was os.remove() here, which raises
+                # IsADirectoryError on every directory -- so the one thing its
+                # callers asked for could never work, and the caller only saw
+                # (False, None).  rmdir is what they meant.
+                print(f"ERROR: Failed to remove empty directory {filepath}: {e}", file=sys.stderr)
                 return (False, None)
 
         elif operation == 'LIST_DIR':
@@ -15602,7 +15609,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                                 print(f"✓ Moved all files from subdirectory '{subdir_name}' to parent directory")
 
                                 # Now remove the empty subdirectory
-                                remove_success, _ = my_plex_file_operation('REMOVE', file1_dir, remote_host)
+                                remove_success, _ = my_plex_file_operation('RMDIR', file1_dir, remote_host)
                                 if remove_success:
                                     print(f"✓ Removed empty subdirectory '{subdir_name}'")
                                     if operation_log:
@@ -37117,9 +37124,13 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                     if action == 'overwrite':
                         exists, _ = my_plex_file_operation('CHECK', dst_wrapper, PLEX_DB_REMOTE_HOST)
                         if exists:
-                            rm_ok, _ = my_plex_file_operation('REMOVE', dst_wrapper, PLEX_DB_REMOTE_HOST)
-                            if not rm_ok:
-                                print(f"  ✗ ERROR overwrite: failed to remove existing wrapper {dst_wrapper}")
+                            # TRASH, not a recursive remove: this wrapper holds
+                            # the media, subtitles and sidecars of whatever was
+                            # there before, and an overwrite is not a reason to
+                            # make that unrecoverable.
+                            trashed, _ = my_plex_file_operation('TRASH', dst_wrapper, PLEX_DB_REMOTE_HOST)
+                            if not trashed:
+                                print(f"  ✗ ERROR overwrite: failed to trash existing wrapper {dst_wrapper}")
                                 item_failed = True
                     if not item_failed:
                         # mkdir -p the dest_root on the Plex host (the wrapper itself
@@ -37163,9 +37174,9 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 if action == 'overwrite':
                     exists, _ = my_plex_file_operation('CHECK', new_path, PLEX_DB_REMOTE_HOST)
                     if exists:
-                        rm_ok, _ = my_plex_file_operation('REMOVE', new_path, PLEX_DB_REMOTE_HOST)
-                        if not rm_ok:
-                            print(f"  ✗ ERROR overwrite: failed to remove existing {new_path}")
+                        trashed, _ = my_plex_file_operation('TRASH', new_path, PLEX_DB_REMOTE_HOST)
+                        if not trashed:
+                            print(f"  ✗ ERROR overwrite: failed to trash existing {new_path}")
                             item_failed = True
                             break
 
