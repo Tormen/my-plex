@@ -11915,6 +11915,39 @@ class TestTrashNotRemove(unittest.TestCase):
                       "removing an emptied subdirectory is exactly what RMDIR is for")
 
 
+class TestAtomicPickleWrites(unittest.TestCase):
+    """Every pickle written to a FILE goes through _atomic_pickle_dump.
+
+    A plain `pickle.dump(data, open(path))` truncates the target first, so a
+    crash or a Ctrl-C part-way leaves a file that is neither the old one nor
+    the new one.  The rebuild checkpoint was written that way, which is the
+    worst place for it: it exists precisely to be read after an interrupt."""
+
+    def test_no_pickle_dump_outside_the_atomic_helper(self):
+        import ast
+        tree = ast.parse(io.open(MAIN_SCRIPT, encoding='utf-8').read())
+        offenders = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if fn.name == '_atomic_pickle_dump':
+                continue        # the one place that is allowed to do it
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'dump'
+                        and getattr(node.func.value, 'id', '') == 'pickle'):
+                    offenders.append(f"{fn.name}() at line {node.lineno}")
+        self.assertEqual(offenders, [],
+                         "pickle.dump writes a file without a temp-and-rename: "
+                         + ", ".join(offenders))
+
+    def test_the_checkpoint_uses_the_helper(self):
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertIn("_atomic_pickle_dump(partial_cache_file, checkpoint_data)", src,
+                      "the resume checkpoint must be written atomically")
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -11958,7 +11991,8 @@ class TestErrCodes(unittest.TestCase):
 
 
 _UNITTEST_SCOPES = {
-    'cache':      [TestObjTypeHandling, TestCacheResumeWithMultiVersion,
+    'cache':      [TestAtomicPickleWrites,
+                   TestObjTypeHandling, TestCacheResumeWithMultiVersion,
                    TestPlexUpdatedAtTracking, TestCacheSkipLogic,
                    TestVerifyCacheIntegrity, TestCacheFormatValidation,
                    TestCacheStructureParity, TestVerifyCacheSplit,
