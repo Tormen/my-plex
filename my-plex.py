@@ -61,7 +61,7 @@
 # numbered from 00001 in file order with no gap, so grepping a code lands on
 # the one line that raised it.  _stamp_fail() and the _media_api_action()
 # callers share the numbering.  After adding a call (any placeholder code),
-# renumber the whole file (`my-plex --test errcodes` checks the result):
+# renumber the whole file (`my-plex --run-tests errcodes` checks the result):
 #   perl -0pi -e '$n=0; s/(\b(?:err|_stamp_fail)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my-plex.py
 
 # ---------------------------------------------------------------------------
@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "a80a86c"
-SCRIPT_RELEASE = "v3-27-ga80a86c"
+SCRIPT_COMMIT  = "2048561"
+SCRIPT_RELEASE = "v3-28-g2048561"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -556,7 +556,7 @@ _my-plex() {
         '--unwatched[List unwatched media items]'
         '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
-        '--test[Run regression tests]'
+        '--run-tests[Run the test suite: FILTER is a scope or part of a test title]:filter:'
         '--version[Print version, released commit and a build id hashed from this file]'
         '--stamp-version[Record the commit this file is released from; analyze only unless go]:go:(go)'
         '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
@@ -2236,7 +2236,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #   DEFAULT_SCOPE = ''                      # No default filter (show everything)
 #
 # Applies to: --list, --filter, --duplicates, --broken, --reencode, etc.
-# Does NOT apply to: --update-cache, --problems, --info, --help, --test
+# Does NOT apply to: --update-cache, --problems, --info, --help, --run-tests
 #
 DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 
@@ -3040,7 +3040,7 @@ COMMANDS:
   --duplicates             List duplicate items
   --info [ID]              System info, or detailed info for an item / title
   --scan [LIB]             Trigger Plex filesystem scan + update cache
-  --test [CATEGORY]        Run unit tests
+  --run-tests [FILTER]     Run the test suite  (bare: all of it)
 
 PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
@@ -3287,6 +3287,13 @@ def _redact_argv(argv: list[str]) -> list[str]:
         else:
             out.append(str(_redact('', a)))
     return out
+
+# A flag this tool used to have, and the one that replaced it.  Only so that
+# the old spelling is answered with the new name instead of "invalid flag":
+# the old name does not work, it is merely recognised.
+_RENAMED_FLAGS = {
+    '--test': '--run-tests',
+}
 
 def err(err_code: str, err_msg: str = "") -> NoReturn:
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
@@ -3875,27 +3882,45 @@ from types import ModuleType
 
 _test_mod: ModuleType | None = None
 
-def _load_test_mod() -> ModuleType:
-    """The test suite, loaded on demand: only --test and --unittest need it.
+def _test_mod_paths() -> "list[str]":
+    """Where the test suite may sit, nearest first: beside this file (a
+    checkout), then ../lib/my-plex/ (deployed: bin/my-plex + lib/my-plex/).
 
-    A deployed copy of my-plex is the tool file alone, so the suite is not
-    beside it there -- loading it at import time killed every command on a
-    deployed copy.  realpath, not abspath: reached through a symlink, the
-    suite sits next to the real file, not next to the link.
+    Every symlink is followed first -- /LINKS/bin/my-plex is one -- so the
+    search starts at the real file, not at the link that reached it.
+    """
+    _self = os.path.realpath(__file__)
+    _dir = os.path.dirname(_self)
+    return [os.path.join(_dir, "my-plex_tests.py"),
+            os.path.join(os.path.dirname(_dir), "lib", "my-plex", "my-plex_tests.py")]
+
+
+def _load_test_mod() -> ModuleType:
+    """The test suite, loaded on demand: only --run-tests and --unittest need it.
+
+    Loading it at import time killed every command on a deployed copy, which
+    carries the tool file alone -- so nothing but the two test commands may
+    reach this.
     """
     global _test_mod
     if _test_mod is not None:
         return _test_mod
-    _path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "my-plex_tests.py")
-    _spec = spec_from_file_location("_tests", _path)
-    if not os.path.isfile(_path) or _spec is None or _spec.loader is None:
-        err("00013", f"test suite not found: {_path}\n"
-                     f"Possible reasons:\n"
-                     f"  - this is a deployed copy of my-plex, which carries the tool file alone;\n"
-                     f"    run the tests in the source tree (/LINKS/src/py/my-plex/my-plex.py)\n"
-                     f"  - my-plex_tests.py was moved, renamed or deleted")
+    _tried = _test_mod_paths()
+    _path = next((c for c in _tried if os.path.isfile(c)), "")
+    _spec = spec_from_file_location("_tests", _path) if _path else None
+    if _spec is None or _spec.loader is None:
+        err("00013", "test suite not found -- looked in:\n"
+                     + "".join(f"    {c}\n" for c in _tried)
+                     + "Possible reasons:\n"
+                     "  - this copy of my-plex was deployed without its suite; a copy made by\n"
+                     "    my-rollout carries it in ../lib/my-plex/\n"
+                     "  - my-plex_tests.py was moved, renamed or deleted")
     _test_mod = _mfs(_spec)
     _spec.loader.exec_module(_test_mod)
+    # Many tests read the tool's own source.  Only the tool knows which file
+    # that is: on a deployed copy it is bin/my-plex, not a my-plex.py beside
+    # the suite, so the suite's own guess would point at nothing.
+    setattr(_test_mod, "MAIN_SCRIPT", os.path.realpath(__file__))
     return _test_mod
 
 # Episode TSV functions are defined later in this file, so they are injected
@@ -28951,7 +28976,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --duplicates             List duplicate items")
             print("  --info [ID]              System info, or detailed info for an item / title")
             print("  --scan [LIB]             Trigger Plex filesystem scan + update cache")
-            print("  --test [CATEGORY]        Run unit tests")
+            print("  --run-tests [FILTER]     Run the test suite  (bare: all of it)")
             print()
             print("PROBLEM DETECTION:")
             print("  --problems [SCOPE]       All problem checks in one pass")
@@ -31850,27 +31875,29 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             sys.exit(0)
 
-        case 'test' | 'unittest':
+        case 'run-tests' | 'unittest':
             print()
             print("=" * 76)
             print("TEST HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --test                    # List available test scopes")
-            print("       my-plex --test all                # Run all tests")
-            print("       my-plex --test CATEGORY           # Run tests for a specific scope")
+            print("Usage: my-plex --run-tests               # Run the whole suite")
+            print("       my-plex --run-tests <SCOPE>       # Run one scope")
+            print("       my-plex --run-tests <TITLE-PART>  # Run the tests whose title matches")
             print()
-            print("Runs the built-in unit test suite. Tests are organized into named scopes.")
+            print("Reports TAP-style: the plan '1..N' first, then 'ok K - title' per test as")
+            print("it ends, so `my-rollout go` can gate a pending copy on this suite before")
+            print("it offers it.  Exit 0 when every test passed, 1 otherwise.")
+            print()
+            print(_load_test_mod().describe_test_scopes())
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --test                         # List available scopes")
-            print("  my-plex --test all                     # Run all tests")
-            print("  my-plex --test commands                # Run command tests")
-            print("  my-plex --test rename                  # Run rename tests")
-            print("  my-plex --test renumber                # Run renumber tests")
-            print("  my-plex --test filter                  # Run filter tests")
-            print("  my-plex --unittest -v                  # Run all with unittest verbose")
+            print("  my-plex --run-tests                       # every scope")
+            print("  my-plex --run-tests filter                # the filter scope")
+            print("  my-plex --run-tests TestFilter.test_year   # by test title")
+            print("  my-plex --run-tests inline                # the legacy inline block")
+            print("  my-plex --unittest -v                     # the same classes, unittest's own output")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -31909,7 +31936,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Example: DEFAULT_SCOPE = 'watched:no lang:de'  → unwatched German items")
             print("  Example: DEFAULT_SCOPE = ''                    → no default (show all)")
             print("  Applies to: --list, --filter, --duplicates, --broken, --reencode, etc.")
-            print("  Does NOT apply to: --update-cache, --problems, --info, --help, --test")
+            print("  Does NOT apply to: --update-cache, --problems, --info, --help, --run-tests")
             print("  Active DEFAULT_SCOPE is shown with -V.")
             print()
             print("EXAMPLES:")
@@ -41419,16 +41446,11 @@ def execute_global_commands(args, cmd_args):
         show_item_info(cmd_args.info, table_only=table_only)
         sys.exit(0)
 
-    # Handle --test command
-    if cmd_args.test is not None:
-        scope = cmd_args.test if cmd_args.test else None
-        if scope and scope.lower() == 'all':
-            run_regression_tests(scope='all')
-        elif scope:
-            run_regression_tests(scope=scope)
-        else:
-            run_regression_tests(scope=None)
-        # run_regression_tests() calls sys.exit(), so we never reach here
+    # Handle --run-tests command
+    if cmd_args.run_tests is not None:
+        # Bare --run-tests runs the whole suite; a FILTER picks a scope or
+        # matches test titles.  run_regression_tests() exits, always.
+        run_regression_tests(scope=cmd_args.run_tests or None)
 
     # Handle --missing command
     _missing_val = safe_getattr(cmd_args, 'missing', None)
@@ -42345,7 +42367,9 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
                     if cmd_args is not None and arg in unparsed:
                         # The flag wasn't recognized - it's an invalid flag
-                        err("00134", f"Invalid flag '{arg}'. Not a recognized global command flag. Use --help to see available options.")
+                        err("00134", f"Invalid flag '{arg}'. Not a recognized global command flag."
+                                     + (f"\n  You mean '{_RENAMED_FLAGS[arg]}'." if arg in _RENAMED_FLAGS
+                                        else " Use --help to see available options."))
                     if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
                         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
                         # Update remaining_args to only contain unparsed args
@@ -42458,7 +42482,7 @@ def main():
         '--unrecognized': 'unrecognized', '--alien': 'unrecognized',
         '--layout': 'layout',   # not a real flag, just enables `my-plex --help layout`
         '--plex-disk-sync': 'plex-disk-sync', '--list': 'list', '--filter': 'list', '--duplicates': 'duplicates',
-        '--info': 'info', '--test': 'test', '--rename': 'rename',
+        '--info': 'info', '--run-tests': 'run-tests', '--rename': 'rename',
         '--add-label': 'add-label', '--remove-label': 'remove-label',
         '--media': 'media', '--query': 'media',
         '--scope': 'scope',   # v2.0: dedicated universal-scope help page
@@ -42796,7 +42820,7 @@ def main():
                             '--source', '--rename',
                             '--playlist', '--add-label', '--remove-label',
                             '--list-label', '--map-to-filename', '--map-from-filename',
-                            '--test', '--unittest', '--complete',
+                            '--run-tests', '--unittest', '--complete',
                             '--plex-url', '--plex-token', '--plex-xml-url',
                             # a single value that is never a title search
                             '--audio', '--excess-versions', '--set-watched',
@@ -43197,7 +43221,7 @@ def main():
     main_parser.add_argument('--auto', action='store_true', help=argparse.SUPPRESS, default=False)
     main_parser.add_argument('--watched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
-    main_parser.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help=argparse.SUPPRESS)  # Consumed here to protect CATEGORY from CMD_OR_PLEXOBJECT
+    main_parser.add_argument('--run-tests', nargs='?', const='', default=None, metavar='FILTER', help=argparse.SUPPRESS)  # Consumed here to protect FILTER from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--all', action='store_true', help=argparse.SUPPRESS, default=False)
@@ -43351,7 +43375,7 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--rename', action='store_true', help=argparse.SUPPRESS, default=False)  # Handled by library/media parsers, not global dispatch
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
-    GLOBAL_CMD_PARSER.add_argument('--test', nargs='?', const='', default=None, metavar='CATEGORY', help="Run tests. --test: list available categories. --test <category>: run tests for that category. --test all: run all tests.")
+    GLOBAL_CMD_PARSER.add_argument('--run-tests', nargs='?', const='', default=None, metavar='FILTER', help="Run the test suite. Bare: all of it. FILTER: a scope name, or part of a test title.")
 
     add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
     add_PLEX_OBJ_TYPE( PLEX_Collection ) # Collection commands (fast: local cache lookup)
@@ -43525,11 +43549,11 @@ def main():
         remaining_args.insert(0, '--info')
         if args.info != '':  # --info with argument: re-inject the value too
             remaining_args.insert(1, args.info)
-    # Re-inject --test (consumed by main_parser to protect SCOPE from CMD_OR_PLEXOBJECT)
-    if safe_getattr(args, 'test', None) is not None:
-        remaining_args.insert(0, '--test')
-        if args.test != '':  # --test with scope: re-inject the value too
-            remaining_args.insert(1, args.test)
+    # Re-inject --run-tests (consumed by main_parser to protect FILTER from CMD_OR_PLEXOBJECT)
+    if safe_getattr(args, 'run_tests', None) is not None:
+        remaining_args.insert(0, '--run-tests')
+        if args.run_tests != '':  # --run-tests with a FILTER: re-inject it too
+            remaining_args.insert(1, args.run_tests)
     # Re-inject --excess-versions (consumed by main_parser to protect LIMIT from CMD_OR_PLEXOBJECT)
     if safe_getattr(args, 'excess_versions', None) is not None:
         remaining_args.insert(0, '--excess-versions')

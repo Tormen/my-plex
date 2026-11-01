@@ -21,6 +21,9 @@ import shutil
 import subprocess
 import tempfile
 
+# The tool overrides this when it loads the suite (_load_test_mod): only it
+# knows its own file, which on a deployed copy is bin/my-plex.  This value is
+# the fallback for running the suite straight out of a checkout.
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
 
@@ -8675,9 +8678,9 @@ class TestDiskMap(unittest.TestCase):
 
 
 # Test scopes: logical groupings of test classes by feature area
-# Usage: --test <scope>  runs only the classes in that scope
-#        --test --all    runs everything
-#        --test          lists available scopes
+# Usage: --run-tests <scope>  runs only the classes in that scope
+#        --run-tests          runs everything
+#        --run-tests <title>  runs the tests whose title matches
 class TestMove(unittest.TestCase):
     """Tests for --mv / --move: cross-library file move with cache update."""
 
@@ -11675,8 +11678,8 @@ class TestTypeCheck(unittest.TestCase):
 class TestDeployedCopy(unittest.TestCase):
     """my-plex is deployed as a COPY of the tool file alone -- my-plex_tests.py
     is not beside it.  The suite is therefore loaded on demand: every ordinary
-    command must run without it, and --test / --unittest must say in one line
-    that it is missing instead of dying in an import traceback."""
+    command must run without it, and --run-tests / --unittest must say in one
+    line that it is missing instead of dying in an import traceback."""
 
     @classmethod
     def setUpClass(cls):
@@ -11707,7 +11710,7 @@ class TestDeployedCopy(unittest.TestCase):
         self.assertEqual(r.returncode, 0, out[-800:])
 
     def test_test_commands_report_the_missing_suite_in_one_line(self):
-        for args in (('--test', 'errcodes'), ('--unittest',)):
+        for args in (('--run-tests', 'errcodes'), ('--unittest',)):
             with self.subTest(args=args):
                 r = self._run(*args)
                 out = r.stdout + r.stderr
@@ -11715,6 +11718,123 @@ class TestDeployedCopy(unittest.TestCase):
                                  f"no traceback on the user's screen:\n{out[-800:]}")
                 self.assertIn('test suite not found', out)
                 self.assertNotEqual(r.returncode, 0, "a missing test suite is a failure")
+
+
+class TestDeployedCopyWithItsSuite(unittest.TestCase):
+    """A copy made by my-rollout is bin/my-plex plus lib/my-plex/, and
+    my-rollout's gate runs the PENDING COPY's own --run-tests: the suite has
+    to be found from there, or a copy is never offered again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._dir = tempfile.mkdtemp(prefix='my-plex-deployed-lib-')
+        os.makedirs(os.path.join(cls._dir, 'bin'))
+        os.makedirs(os.path.join(cls._dir, 'lib', 'my-plex'))
+        cls.copy = os.path.join(cls._dir, 'bin', 'my-plex')
+        shutil.copy2(MAIN_SCRIPT, cls.copy)
+        shutil.copy2(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex_tests.py'),
+                     os.path.join(cls._dir, 'lib', 'my-plex', 'my-plex_tests.py'))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._dir, ignore_errors=True)
+
+    def test_fixture_has_no_suite_beside_the_tool(self):
+        """Otherwise the test would pass through the checkout path instead."""
+        self.assertFalse(os.path.exists(os.path.join(self._dir, 'bin', 'my-plex_tests.py')))
+
+    def test_the_suite_is_found_in_lib(self):
+        r = subprocess.run([sys.executable, '-B', self.copy, '--run-tests', 'errcodes'],
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        self.assertNotIn('test suite not found', out, out[-800:])
+        self.assertRegex(out, r'(?m)^1\.\.\d+$', "no TAP plan from the deployed copy")
+        # Not just "it ran": the tests that read the tool's own source must
+        # find bin/my-plex, which is what MAIN_SCRIPT is overridden for.
+        self.assertNotIn('FileNotFoundError', out, out[-1500:])
+        self.assertEqual(r.returncode, 0, out[-1500:])
+
+    def test_help_names_run_tests_so_the_gate_fires(self):
+        """my-rollout runs a pending copy's suite only when --help names it."""
+        r = subprocess.run([sys.executable, '-B', self.copy, '--help'],
+                           capture_output=True, text=True, timeout=180)
+        self.assertIn('--run-tests', r.stdout + r.stderr,
+                      "--help must name --run-tests, or my-rollout promotes my-plex untested")
+
+
+class TestRunTestsTAP(unittest.TestCase):
+    """--run-tests reports TAP-style, because `my-rollout go` reads it: the
+    plan `1..N` first, then one `ok K - title` per test as it ends."""
+
+    LINE = re.compile(r'^(ok|not ok) (\d+) - (\S+)', re.M)
+
+    @classmethod
+    def setUpClass(cls):
+        r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', 'errcodes'],
+                           capture_output=True, text=True, timeout=300)
+        cls.out, cls.rc = r.stdout + r.stderr, r.returncode
+
+    def test_the_plan_comes_before_any_result(self):
+        """A reader sizes its progress row from the plan, so no `ok` may
+        precede it.  It need not be the very first line -- a preamble that is
+        not a TAP line is no concern of the reader's."""
+        plan = re.search(r'^1\.\.\d+$', self.out, re.M)
+        self.assertIsNotNone(plan, f"no plan line at all:\n{self.out[:300]}")
+        first = self.LINE.search(self.out)
+        self.assertIsNotNone(first, "no result line at all")
+        self.assertLess(plan.start(), first.start(),
+                        f"a result came before the plan:\n{self.out[:300]}")
+
+    def test_the_plan_counts_the_tests_that_reported(self):
+        plan = int(re.search(r'^1\.\.(\d+)$', self.out, re.M).group(1))
+        self.assertEqual(plan, len(self.LINE.findall(self.out)),
+                         f"plan 1..{plan} but a different number of tests reported")
+
+    def test_every_number_from_one_to_n_appears_exactly_once(self):
+        got = sorted(int(m[1]) for m in self.LINE.findall(self.out))
+        self.assertEqual(got, list(range(1, len(got) + 1)),
+                         "a reader collects results by number, so each must appear once")
+
+    def test_a_title_names_its_class_and_method(self):
+        titles = [m[2] for m in self.LINE.findall(self.out)]
+        self.assertTrue(titles, "no TAP line at all")
+        for t in titles:
+            self.assertRegex(t, r'^Test\w+\.test_\w+$', f"unreadable title {t!r}")
+
+    def test_a_passing_scope_exits_zero(self):
+        self.assertEqual(self.rc, 0, self.out[-800:])
+
+    def test_a_filter_selects_by_test_title(self):
+        r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests',
+                            'TestRunTestsTAP.test_a_title_names'],
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        self.assertIn('1..1', out, f"one test should have matched:\n{out[-800:]}")
+
+    def test_an_unmatched_filter_prints_the_scopes_and_fails(self):
+        r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', 'no-such-thing'],
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        self.assertIn('Test scopes', out, "an unmatched FILTER must say what IS available")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_the_old_spelling_names_the_new_one(self):
+        """--test was this flag's name for years, so it will be typed out of
+        habit: a near-miss is answered with the new name, never with a bare
+        "invalid flag" that sends the reader to --help."""
+        r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--test', 'errcodes'],
+                           capture_output=True, text=True, timeout=180)
+        out = r.stdout + r.stderr
+        self.assertIn('--run-tests', out, f"the old name must point at the new one:\n{out[-400:]}")
+        self.assertNotEqual(r.returncode, 0, "the old name must not WORK, only be recognised")
+
+    def test_bare_run_tests_runs_the_whole_suite(self):
+        """Running it here would cost minutes, so this pins the dispatch: bare
+        --run-tests must reach the runner, never the scope listing."""
+        src = io.open(os.path.realpath(__file__), encoding='utf-8').read()
+        self.assertIn("if scope is None or scope.lower() == 'all':\n"
+                      "        return _run_unittest_only(_UNITTEST_CLASSES)", src,
+                      "bare --run-tests must run every class")
 
 
 class TestErrCodes(unittest.TestCase):
@@ -11812,6 +11932,7 @@ _UNITTEST_SCOPES = {
     'version':            [TestVersionAndStamp, TestVersionNamesItsRelease, TestRunViaSymlink],
     'errcodes':           [TestErrCodes],
     'typecheck':          [TestTypeCheck],
+    'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
 }
 
 # List of all unittest classes for run_regression_tests()
@@ -11821,28 +11942,129 @@ _UNITTEST_CLASSES = [cls for scope in _UNITTEST_SCOPES.values() for cls in scope
 # Inline regression tests + unittest runner
 # ---------------------------------------------------------------------------
 
-def _run_unittest_only(unittest_classes):
-    """Run only the unittest suite (no inline regression tests)."""
-    import sys
-    print("=" * 76)
-    print("UNITTEST SUITE")
-    print("=" * 76)
+class _TAPResult(unittest.TextTestResult):
+    """A unittest result that reports TAP-style: `ok K - title` per test.
+
+    K is the test's place in the suite, counted from 1, so a reader collects
+    results by number and the numbers are the same on every run.  The line is
+    written as the test ends and flushed, because a reader draws progress from
+    the stream; the failure detail is printed afterwards, in one piece.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tap_k = 0
+        self._tap_verdict = None
+
+    @staticmethod
+    def _tap_title(test):
+        return f"{test.__class__.__name__}.{test._testMethodName}"
+
+    def startTest(self, test):
+        self._tap_k += 1
+        self._tap_verdict = None
+        super().startTest(test)
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self._tap_verdict = ('ok', '')
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self._tap_verdict = ('not ok', '')
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self._tap_verdict = ('not ok', '')
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self._tap_verdict = ('ok', f' # SKIP {reason}')
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self._tap_verdict = ('ok', ' # TODO known failure')
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self._tap_verdict = ('not ok', ' # unexpected success')
+
+    def stopTest(self, test):
+        # No verdict can only mean a hook this class does not know about: say
+        # "not ok" rather than pass a test nobody judged.
+        status, note = self._tap_verdict or ('not ok', ' # no verdict recorded')
+        print(f"{status} {self._tap_k} - {self._tap_title(test)}{note}", flush=True)
+        super().stopTest(test)
+
+
+class _TAPRunner(unittest.TextTestRunner):
+    """The TAP plan `1..N` first, then _TAPResult's line per test.
+
+    verbosity 0: the per-test line IS the TAP line, so unittest must not print
+    its own beside it.  The count line and the failure detail it prints when
+    the run ends are kept -- they are what a person reads.
+    """
+
+    resultclass = _TAPResult
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault('verbosity', 0)
+        super().__init__(**kwargs)
+
+    def run(self, test):
+        print(f"1..{test.countTestCases()}", flush=True)
+        return super().run(test)
+
+
+def _tap_suite(classes_or_tests):
+    """One suite out of test CLASSES, single TESTS, or a mix of both."""
     loader = unittest.TestLoader()
-    try:
-        suite = unittest.TestSuite()
-        for cls in unittest_classes:
-            suite.addTests(loader.loadTestsFromTestCase(cls))
-        runner = unittest.TextTestRunner(verbosity=2)
-        result = runner.run(suite)
-        if result.wasSuccessful():
-            print(f"\n✓ All tests PASSED!")
-            sys.exit(0)
+    suite = unittest.TestSuite()
+    for item in classes_or_tests:
+        if isinstance(item, type):
+            suite.addTests(loader.loadTestsFromTestCase(item))
         else:
-            print(f"\n✗ Tests FAILED!")
-            sys.exit(1)
+            suite.addTest(item)
+    return suite
+
+
+def _tests_matching_title(filter_text):
+    """Every test whose `Class.method` title contains FILTER_TEXT, any case."""
+    loader = unittest.TestLoader()
+    needle = filter_text.lower()
+    return [t for cls in _UNITTEST_CLASSES
+            for t in loader.loadTestsFromTestCase(cls)
+            if needle in f"{cls.__name__}.{t._testMethodName}".lower()]
+
+
+def describe_test_scopes():
+    """The scopes and their test counts, as --help and an unmatched FILTER
+    both print them -- one owner, so the two can never disagree."""
+    loader = unittest.TestLoader()
+    rows = ["Test scopes (--run-tests <SCOPE>):", ""]
+    total = 0
+    for name, classes in _UNITTEST_SCOPES.items():
+        n = sum(loader.loadTestsFromTestCase(cls).countTestCases() for cls in classes)
+        total += n
+        rows.append(f"  {name:20s}  {n:3d} test{'' if n == 1 else 's'}  "
+                    f"({', '.join(c.__name__ for c in classes)})")
+    rows += ["",
+             f"  {'(none)':20s}  {total:3d} tests  bare --run-tests: every scope",
+             f"  {'inline':20s}      the legacy inline regression block",
+             "",
+             "Any other FILTER selects by test title, e.g. --run-tests TestFilter.test_year"]
+    return "\n".join(rows)
+
+
+def _run_unittest_only(unittest_classes):
+    """Run the unittest suite and exit: 0 when every test passed, else 1."""
+    import sys
+    try:
+        result = _TAPRunner().run(_tap_suite(unittest_classes))
     except Exception as e:
-        print(f"✗ FAIL: Could not run unittest suite: {e}")
+        print(f"✗ FAIL: Could not run unittest suite: {e}", file=sys.stderr)
         sys.exit(1)
+    sys.exit(0 if result.wasSuccessful() else 1)
 
 def run_regression_tests(main_globals, scope=None):
     """Run regression tests to verify script functionality
@@ -11854,9 +12076,9 @@ def run_regression_tests(main_globals, scope=None):
     - Show clear PASS/FAIL/SKIP status with helpful output
     - Increment passed/failed counters appropriately
 
-    Usage: my-plex.py --test          (list available scopes)
-           my-plex.py --test <scope>  (run tests for one scope)
-           my-plex.py --test all      (run all tests)
+    Usage: my-plex.py --run-tests          (run the whole suite)
+           my-plex.py --run-tests <scope>  (run tests for one scope)
+           my-plex.py --run-tests <title>  (run tests by title)
     Exit codes: 0 = all tests passed, 1 = one or more tests failed
 
     Args:
@@ -11865,47 +12087,39 @@ def run_regression_tests(main_globals, scope=None):
     """
     import sys
 
-    # --test without scope: list available scopes and exit
-    if scope is None:
-        print("Available test scopes:")
-        print()
-        for name, classes in _UNITTEST_SCOPES.items():
-            n_tests = sum(unittest.TestLoader().loadTestsFromTestCase(cls).countTestCases() for cls in classes)
-            class_names = ', '.join(c.__name__ for c in classes)
-            print(f"  {name:12s}  {n_tests:3d} tests  ({class_names})")
-        total = sum(sum(unittest.TestLoader().loadTestsFromTestCase(cls).countTestCases() for cls in classes)
-                    for classes in _UNITTEST_SCOPES.values())
-        print(f"\n  {'all':12s}  {total:3d} tests  (all scopes + inline regression tests)")
-        print(f"\nUsage: my-plex --test <scope>")
-        sys.exit(0)
+    # Bare --run-tests RUNS the whole suite -- it does not print a menu.
+    # my-rollout's `go` gates a pending copy on exactly this call, and the
+    # name is a promise: see README, "Tests".
+    if scope is None or scope.lower() == 'all':
+        return _run_unittest_only(_UNITTEST_CLASSES)
 
-    # Determine which unittest classes to run
-    if scope.lower() == 'all':
-        unittest_classes = _UNITTEST_CLASSES
-        run_inline = True
-    else:
-        scope_lower = scope.lower()
+    scope_lower = scope.lower()
+    run_inline = scope_lower == 'inline'
+
+    if not run_inline:
         matched = {k: v for k, v in _UNITTEST_SCOPES.items() if scope_lower in k.lower()}
-        if not matched:
-            print(f"ERROR: Unknown test scope '{scope}'")
-            print(f"Available scopes: {', '.join(_UNITTEST_SCOPES.keys())}")
-            sys.exit(1)
         if len(matched) > 1:
-            print(f"ERROR: Ambiguous scope '{scope}' matches: {', '.join(matched.keys())}")
+            print(f"ERROR: Ambiguous scope '{scope}' matches: {', '.join(matched.keys())}",
+                  file=sys.stderr)
             sys.exit(1)
-        scope_name = list(matched.keys())[0]
-        unittest_classes = matched[scope_name]
-        run_inline = False
-        print(f"Running test scope: {scope_name}")
-        print(f"  Classes: {', '.join(c.__name__ for c in unittest_classes)}")
-        print()
+        if matched:
+            scope_name, unittest_classes = next(iter(matched.items()))
+            print(f"scope {scope_name}: {', '.join(c.__name__ for c in unittest_classes)}")
+            return _run_unittest_only(unittest_classes)
+        # No scope of that name: take FILTER as a title substring, which is
+        # what every other tool's --run-tests FILTER means.
+        selected = _tests_matching_title(scope)
+        if selected:
+            print(f"filter {scope!r}: {len(selected)} test(s) by title")
+            return _run_unittest_only(selected)
+        print(f"ERROR: '{scope}' is neither a test scope nor part of any test title",
+              file=sys.stderr)
+        print(file=sys.stderr)
+        print(describe_test_scopes(), file=sys.stderr)
+        sys.exit(1)
 
     import pickle
     import sys
-
-    if not run_inline:
-        # Scoped run: skip inline regression tests, go straight to unittest suite
-        return _run_unittest_only(unittest_classes)
 
     # Extract globals from main script
     CACHE_FILE = main_globals['CACHE_FILE']
