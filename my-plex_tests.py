@@ -11990,7 +11990,11 @@ class TestTopLevelHandlers(unittest.TestCase):
             out = r.stdout + r.stderr
             self.assertNotIn('Traceback (most recent call last)', out,
                              f"a traceback reached the screen:\n{out[-800:]}")
-            self.assertIn('ERROR #00143', out, out[-800:])
+            # The SHAPE and the message, not the number: err codes are
+            # renumbered in file order whenever one is added, so pinning the
+            # digits here makes an unrelated change fail this test.
+            self.assertRegex(out, r'ERROR #\d{5}', out[-800:])
+            self.assertIn('stopped on a bug', out, out[-800:])
             self.assertIn('RuntimeError: deliberate test defect', out,
                           "the one line must say what happened")
             self.assertEqual(r.returncode, 70, f"EX_SOFTWARE expected:\n{out[-400:]}")
@@ -12175,6 +12179,74 @@ class TestSshOptions(unittest.TestCase):
                          + ", ".join(offenders))
 
 
+class TestSecretArgs(unittest.TestCase):
+    """A token passed as a literal is in ~/.zsh_history and in `ps auxww`.
+
+    The flag is not refused -- a script may have its reasons -- but it is
+    never silent, and `-` and `@FILE` give it somewhere safe to come from."""
+
+    def _mod(self):
+        return sys.modules[resolve_disk_map_variables.__module__]
+
+    def _resolve(self, flag, value, argv=None, stdin=None):
+        import contextlib
+        mod = self._mod()
+        err_buf = io.StringIO()
+        saved_argv, saved_stdin = sys.argv, sys.stdin
+        try:
+            sys.argv = argv if argv is not None else ['my-plex', flag, value]
+            if stdin is not None:
+                sys.stdin = io.StringIO(stdin)
+            with contextlib.redirect_stderr(err_buf):
+                out = mod._resolve_secret_arg(flag, value)
+        finally:
+            sys.argv, sys.stdin = saved_argv, saved_stdin
+        return out, err_buf.getvalue()
+
+    def test_a_literal_is_taken_but_reported(self):
+        out, warning = self._resolve('--plex-token', 'hunter2secret')
+        self.assertEqual(out, 'hunter2secret', "it must still work")
+        self.assertIn('shell history', warning)
+        self.assertIn('ps auxww', warning)
+        self.assertNotIn('hunter2secret', warning,
+                         "the warning must not reprint the secret it is warning about")
+
+    def test_a_dash_reads_standard_input(self):
+        out, warning = self._resolve('--plex-token', '-', stdin='from-stdin-token\n')
+        self.assertEqual(out, 'from-stdin-token')
+        self.assertEqual(warning, "", "nothing to warn about: it was never on the line")
+
+    def test_an_at_file_reads_the_file(self):
+        d = tempfile.mkdtemp(prefix='my-plex-secret-')
+        try:
+            path = os.path.join(d, 'token')
+            io.open(path, 'w').write('from-a-file\n')
+            out, warning = self._resolve('--plex-token', f'@{path}')
+            self.assertEqual(out, 'from-a-file')
+            self.assertEqual(warning, "")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_missing_file_is_a_clean_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            self._resolve('--plex-token', '@/nonexistent/my-plex-token')
+        self.assertEqual(caught.exception.code, 1)
+
+    def test_a_value_from_the_config_is_not_warned_about(self):
+        """The default argparse hands over comes FROM the config file, so a
+        value is only a command-line one when the flag was actually typed."""
+        out, warning = self._resolve('--plex-token', 'token-from-config',
+                                     argv=['my-plex', '--problems'])
+        self.assertEqual(out, 'token-from-config')
+        self.assertEqual(warning, "", "a config value must not be reported as a leak")
+
+    def test_the_xml_url_is_treated_as_a_secret_too(self):
+        """Its value carries X-Plex-Token=... inside it."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertIn("_resolve_secret_arg('--plex-xml-url'", src)
+        self.assertIn("_resolve_secret_arg('--plex-token'", src)
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -12244,7 +12316,7 @@ _UNITTEST_SCOPES = {
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
-    'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
+    'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
                    TestAudioLangPureVsCompleted,

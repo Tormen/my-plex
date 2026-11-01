@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "df69bfd"
-SCRIPT_RELEASE = "v3-35-gdf69bfd"
+SCRIPT_COMMIT  = "7b86bb7"
+SCRIPT_RELEASE = "v3-36-g7b86bb7"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -42517,6 +42517,50 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
 #### MAIN PROGRAM
 #############################################################################
 
+def _flag_on_command_line(flag: str) -> bool:
+    """Was FLAG actually typed?  argparse's default for these comes from the
+    config file, so a value equal to it proves nothing about where it came
+    from."""
+    return any(a == flag or a.startswith(flag + '=') for a in sys.argv[1:])
+
+
+def _resolve_secret_arg(flag: str, value):
+    """A secret passed on the command line, resolved -- and reported if it
+    was passed as a literal.
+
+        -       read it from standard input (prompted, not echoed, on a tty)
+        @FILE   read it from FILE's first line
+
+    Anything else is taken as the literal it is, and said: zsh records the
+    whole command line in ~/.zsh_history, `ps auxww` shows it to every user
+    on the machine while my-plex runs, and that history is often synced.
+    The flag is not refused -- a script may have its own reasons -- but it is
+    never silent, and the config file remains the right home for both.
+    """
+    if value is None or not _flag_on_command_line(flag):
+        return value            # it came from the config, not from a terminal
+    if value == '-':
+        if sys.stdin.isatty():
+            import getpass
+            return getpass.getpass(f"{flag} (not echoed): ").strip()
+        return sys.stdin.readline().strip()
+    if value.startswith('@'):
+        path = os.path.expanduser(value[1:])
+        try:
+            with open(path) as f:
+                return f.readline().strip()
+        except OSError as e:
+            err("00139", f"{flag} @{path}: cannot read it -- {e}")
+    print(f"\n\u26a0  WARNING: {flag} was given its value on the command line.\n"
+          f"   It is now in your shell history, and `ps auxww` showed it to every\n"
+          f"   user on this machine while my-plex ran.\n"
+          f"   Instead:  {flag} -        read it from standard input\n"
+          f"             {flag} @FILE    read it from a file\n"
+          f"   Best:     put it in the config file (my-plex --create-config)\n",
+          file=sys.stderr)
+    return value
+
+
 def main():
     global DBG, VRB, DEEPDBG, VERYVRB, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORCE_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
@@ -43201,7 +43245,7 @@ def main():
         }
         _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}"
                   for _k in _legacy_set]
-        err("00139", "Legacy config key(s) found:\n" + "\n".join(_lines) +
+        err("00140", "Legacy config key(s) found:\n" + "\n".join(_lines) +
                "\n  Delete them from ~/.my-plex.conf to continue.")
 
     # Re-derive values that are computed from config keys (not set directly by name in globals).
@@ -43282,13 +43326,13 @@ def main():
 
     main_parser = argparse.ArgumentParser( description="Plex Database Management Script", add_help=False, usage=f"{US} [ONE-OR-MORE 'options'] [ONE-OR-MORE 'positional arguments']", allow_abbrev=False, exit_on_error=False, parents=[config_parser])
     main_parser.add_argument('-O', '--offline', action='store_true', help=f"Work entirely from local cache without connecting to Plex server or SSH. Defaults to '{OFFLINE}'", default=OFFLINE)
-    main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}", default=PLEX_XML_URL)
+    main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically; the URL CONTAINS the token, so '-' and '@FILE' work here too). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}", default=PLEX_XML_URL)
     # --version / --stamp-version are handled before the venv bootstrap and exit
     # there; they are declared here only so --help lists them.
     main_parser.add_argument('--version', action='store_true', help="Print version, released commit and a build id hashed from this file itself. Comparing two installs: run it on each and diff the output.")
     main_parser.add_argument('--stamp-version', nargs='?', const='', metavar='go', help="Record the commit this file is released from, then amend that commit. Run it BEFORE pushing a release. Analyze only, unless followed by 'go'.")
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
-    main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token - defaults to {'<set>' if PLEX_TOKEN else '<not set>'}", default=PLEX_TOKEN)
+    main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token. '-' reads it from stdin, '@FILE' from a file; a literal lands in your shell history. Defaults to {'<set>' if PLEX_TOKEN else '<not set>'}", default=PLEX_TOKEN)
     # Add --type and --info to main_parser so it knows to consume their values instead of treating them as CMD_OR_PLEXOBJECT
     # This prevents 'movie' from being parsed as CMD_OR_PLEXOBJECT when using --type movie
     # and 'devil' from being parsed as CMD_OR_PLEXOBJECT when using --info devil
@@ -43473,7 +43517,7 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00140", f"{e}\nUse --help to see available options.")
+        err("00141", f"{e}\nUse --help to see available options.")
     DBG = args.debug
     DEEPDBG = args.deep_debug
     VRB = args.verbose
@@ -43497,11 +43541,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00141", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00142", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00142", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00143", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -43614,6 +43658,11 @@ def main():
     AUTO_NO = args.no
     FORMAT = args.format
     OFFLINE = args.offline
+
+    # A secret typed on the command line is resolved -- and reported -- before
+    # anything reads it.
+    args.plex_token = _resolve_secret_arg('--plex-token', args.plex_token)
+    args.plex_xml_url = _resolve_secret_arg('--plex-xml-url', args.plex_xml_url)
 
     # Handle Plex connection parameters with priority: --plex-xml-url > PLEX_XML_URL > --plex-url/--plex-token > PLEX_URL/PLEX_TOKEN
     if args.plex_xml_url:
@@ -43964,7 +44013,7 @@ if __name__ == '__main__':
     except Exception as unexpected:
         # A bug.  One line here, the trace in a file -- it is still what fixes
         # the bug, it is just not the user's screen.  70 is EX_SOFTWARE.
-        err("00143",
+        err("00144",
             f"my-plex stopped on a bug -- this is not something you did wrong.\n"
             f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
             f"  full trace:    {_write_crash_trace()}\n"
