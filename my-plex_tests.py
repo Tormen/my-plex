@@ -12,6 +12,7 @@
 import unittest
 import os
 import sys
+import ast
 import re
 import inspect
 import pickle
@@ -12560,6 +12561,114 @@ class TestVenvDetection(unittest.TestCase):
                       f"not the loop guard's error:\n{r.stderr[-900:]}")
 
 
+class TestReadmeFlagsExist(unittest.TestCase):
+    """Every flag the README names must be one the parser accepts.
+
+    A README is not executed, so it rots silently: it documented `--mv` /
+    `--move` for five versions after they became `--mv-to` / `--move-to`,
+    in four places, while a line two bullets up said they had been renamed.
+    A reader following it got "Invalid flag".
+
+    This is the class of defect, not that one instance: the flags come out of
+    the README and are checked against the option strings of every
+    add_argument() call in the tool, so the next stale flag fails here instead
+    of in someone's terminal.
+    """
+
+    @staticmethod
+    def _registered_flags():
+        """Every option string the tool's parsers accept, read from the
+        add_argument() calls themselves rather than from --help, which hides
+        the ones carrying argparse.SUPPRESS."""
+        with open(MAIN_SCRIPT) as f:
+            tree = ast.parse(f.read())
+        flags = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'add_argument'):
+                continue
+            for a in node.args:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str) \
+                        and a.value.startswith('-'):
+                    flags.add(a.value)
+        return flags
+
+    # Flags the tool recognises WITHOUT argparse, so the AST walk cannot see
+    # them.  Kept explicit and short rather than widening the walk to every
+    # "--..." string in the file, which would also match the flags my-plex
+    # passes to git and ffmpeg and so stop catching a typo.
+    HANDLED_OUTSIDE_ARGPARSE = {'--unittest'}
+
+    @staticmethod
+    def _readme_flags():
+        """The flags the README CLAIMS my-plex has.
+
+        Two things count as a claim: an inline `--flag` code span, and a flag
+        on a `my-plex ...` command line inside a fenced block.
+
+        Deliberately NOT counted: any other line of a fenced block.  It may be
+        another tool's command (`pyright --pythonpath ...`) or an ASCII diagram
+        whose labels are cut to fit the box -- the one at README.md:341 reads
+        "--plex2d" and "--update" for --plex2disk and --update-cache.  Neither
+        is a statement that my-plex has such a flag, and counting them made
+        this test report the diagram as four broken flags.
+
+        An inline span also cannot cross a newline (`[^`\n]`): a single
+        backtick pair matched across a whole fenced block is how the diagram
+        got in.
+        """
+        with open(os.path.join(os.path.dirname(MAIN_SCRIPT), 'README.md')) as f:
+            text = f.read()
+        flag_re = re.compile(r'(?<![\w-])(--[a-z][a-z0-9-]*)')
+        found = set()
+        for block in re.findall(r'```.*?\n(.*?)```', text, re.DOTALL):
+            for line in block.splitlines():
+                if re.match(r'\s*\$?\s*my-plex\b', line):
+                    found.update(flag_re.findall(line))
+        for code in re.findall(r'`([^`\n]+)`', re.sub(r'```.*?```', '', text, flags=re.DOTALL)):
+            found.update(flag_re.findall(code))
+        return found
+
+    def test_the_tool_has_every_flag_the_readme_names(self):
+        registered = self._registered_flags()
+        named = self._readme_flags()
+        self.assertGreater(len(registered), 40,
+                           "the AST walk found almost no flags -- it is broken, "
+                           "not the README")
+        self.assertGreater(len(named), 20,
+                           "no flags were extracted from the README -- the "
+                           "extraction is broken, not the README")
+        # A flag in _RENAMED_FLAGS is NOT excused here.  It does not work --
+        # it only earns a better error message -- so a README that presents it
+        # as usable is exactly the defect this test exists for.  Subtracting
+        # them is how the first version of this test passed against a README
+        # that still documented `--mv`.
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        retired = set(re.findall(r"'(--[a-z][a-z0-9-]*)':\s*'--", src))
+        missing = sorted(named - registered - self.HANDLED_OUTSIDE_ARGPARSE)
+        gone = sorted(set(missing) & retired)
+        unknown = sorted(set(missing) - retired)
+        self.assertEqual(gone, [],
+                         "the README names flags that are RETIRED -- the tool "
+                         "answers them with the replacement, it does not run "
+                         f"them: {[(g, src.split(repr(g) + ': ')[1].split(',')[0].strip() if repr(g) + ': ' in src else '?') for g in gone]}")
+        self.assertEqual(unknown, [],
+                         "the README names flags the parser does not accept "
+                         f"and that are not even known old names: {unknown}")
+
+    def test_a_renamed_flag_is_answered_with_its_new_name(self):
+        """A flag the README used to name must not come back as a bare
+        "Invalid flag": the tool says which flag replaced it.  That is what
+        lets the README drop the rename note instead of carrying history."""
+        r = subprocess.run([MAIN_SCRIPT, '--mv', 'somelib'],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertIn("You mean '--mv-to'", r.stderr, r.stderr[-500:])
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -12589,6 +12698,7 @@ _UNITTEST_SCOPES = {
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection],
+    'readme':     [TestReadmeFlagsExist],
     'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,

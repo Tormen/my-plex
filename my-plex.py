@@ -3472,6 +3472,11 @@ def _redact_argv(argv: list[str]) -> list[str]:
 # the old name does not work, it is merely recognised.
 _RENAMED_FLAGS = {
     '--test': '--run-tests',
+    '--mv': '--mv-to',          # renamed in v1.20: the destination is the FIRST
+    '--move': '--mv-to',        # argument, and '-to' is what says so
+    # retired in v3, not renamed: the backfill it did runs at the tail of
+    # every --update-cache now, which is what to run instead
+    '--original-languages': '--update-cache',
 }
 
 def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
