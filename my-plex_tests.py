@@ -12451,6 +12451,115 @@ class TestQuiet(unittest.TestCase):
         self.assertIn("'QUIET': False", src, "QUIET is not a config key")
 
 
+class TestVenvDetection(unittest.TestCase):
+    """Whether this run is already inside my-plex's own venv.
+
+    Answer it wrongly in the "yes" direction and the run continues with none
+    of the venv's site-packages: `import readchar` raises and the tool is dead
+    on that machine.  The old test compared sys.executable with VENV_PYTHON
+    through realpath(), and a venv's bin/python3 is a SYMLINK to the
+    interpreter it was built from -- so on a machine whose venv was built from
+    the python3 the shebang picks, both sides resolved to the same base
+    interpreter and the answer was "yes, inside" while being outside.
+
+    That is why these tests build the venv from the interpreter `env python3`
+    picks: it is the one arrangement under which the bug appears, and the one
+    a machine whose venv is a different python version never reaches.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shebang_python = shutil.which('python3')
+        cls.tmp = tempfile.mkdtemp(prefix='my-plex-venvdetect-')
+        cls.venv = os.path.join(cls.tmp, 'venv')
+        # No pip install: these tests ask the predicate a question, and the
+        # answer does not depend on what is installed.  So no network either.
+        r = subprocess.run([cls.shebang_python or 'python3', '-m', 'venv',
+                            '--without-pip', cls.venv],
+                           capture_output=True, text=True, timeout=180)
+        cls.venv_built = r.returncode == 0
+        cls.venv_python = os.path.join(cls.venv, 'bin', 'python3')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _ask(self, interpreter, expected):
+        """Import my-plex under `interpreter`, point it at the temp venv, and
+        have it answer _inside_our_venv().  --help in argv keeps the module's
+        own venv block from re-execing while we are asking."""
+        snippet = (
+            "import sys, os, importlib.util\n"
+            "sys.argv = ['my-plex.py', '--help']\n"
+            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
+            "mp = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mp)\n"
+            "mp.VENV_DIR = %r\n"
+            "mp.VENV_PYTHON = os.path.join(mp.VENV_DIR, 'bin', 'python3')\n"
+            "os.write(2, (b'ANSWER=' + str(mp._inside_our_venv()).encode()))\n"
+        ) % (MAIN_SCRIPT, self.venv)
+        r = subprocess.run([interpreter, '-B', '-c', snippet],
+                           capture_output=True, text=True, timeout=180)
+        self.assertIn('ANSWER=', r.stderr,
+                      f"the probe did not run under {interpreter}:\n{r.stderr[-900:]}")
+        self.assertIn(f'ANSWER={expected}', r.stderr,
+                      f"_inside_our_venv() said {not expected} under {interpreter}")
+
+    def test_the_base_interpreter_is_not_inside_the_venv_it_built(self):
+        """THE adversarial case, and ada's: the venv was built from this very
+        interpreter, so realpath(venv/bin/python3) == realpath(sys.executable)
+        and the old predicate answered "inside".  It is outside."""
+        self.assertTrue(self.venv_built, "could not build the probe venv")
+        self.assertTrue(self.shebang_python, "no python3 on PATH to build from")
+        self._ask(self.shebang_python, False)
+
+    def test_the_venvs_own_interpreter_is_inside_it(self):
+        """The other direction, so the fix cannot be "always re-exec" -- that
+        would loop for ever instead of running."""
+        self.assertTrue(self.venv_built, "could not build the probe venv")
+        self._ask(self.venv_python, True)
+
+    def test_the_loop_marker_does_not_leak_into_a_child_my_plex(self):
+        """The marker means "a re-exec is in flight", and an environment
+        variable is inherited by every child process.  Left set, a my-plex
+        started from inside a my-plex run reads a marker that was never about
+        it, refuses to re-exec, and dies on `import readchar` -- which is the
+        very failure the marker was added to prevent, moved one process along.
+        The suite spawns my-plex constantly, so this is the ordinary case.
+
+        This test inherits os.environ exactly as the other tests here do: if
+        the marker survived into this process, the child sees it and fails."""
+        r = subprocess.run([MAIN_SCRIPT, '--list-libraries'],
+                           capture_output=True, text=True, timeout=180,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertNotIn('landed outside it', r.stderr,
+                         "the marker leaked from this run into its child")
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+
+    def test_a_reexec_that_lands_outside_again_is_an_error_not_a_loop(self):
+        """If the venv's pyvenv.cfg is gone, re-execing into it lands outside
+        once more and the decision repeats.  Dying early beats spawning for
+        ever, so the second attempt refuses and names the directory."""
+        self.assertTrue(self.venv_built, "could not build the probe venv")
+        broken = os.path.join(self.tmp, 'home')
+        vdir = os.path.join(broken, '.python.venv', 'my-plex')
+        os.makedirs(os.path.join(vdir, 'bin'), exist_ok=True)
+        # a venv directory whose interpreter runs but whose config is missing,
+        # so sys.prefix never becomes vdir
+        os.symlink(self.shebang_python or '/usr/bin/python3',
+                   os.path.join(vdir, 'bin', 'python3'))
+        for dep in ('readchar', 'plexapi'):          # satisfy _venv_has_deps()
+            os.makedirs(os.path.join(vdir, 'lib', 'python3.x',
+                                     'site-packages', dep), exist_ok=True)
+        r = subprocess.run([MAIN_SCRIPT, '--list-libraries'],
+                           capture_output=True, text=True, timeout=180,
+                           env=dict(os.environ, HOME=broken,
+                                    PYTHONDONTWRITEBYTECODE='1'))
+        self.assertNotEqual(r.returncode, 0, "it did not refuse")
+        self.assertIn('landed outside it', r.stderr,
+                      f"not the loop guard's error:\n{r.stderr[-900:]}")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -12479,6 +12588,7 @@ _UNITTEST_SCOPES = {
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
+    'venv':       [TestVenvDetection],
     'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,

@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "01932ed"
-SCRIPT_RELEASE = "v3-39-g01932ed"
+SCRIPT_COMMIT  = "221e5b2"
+SCRIPT_RELEASE = "v3-40-g221e5b2"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -93,6 +93,46 @@ from typing import Any, Callable, NoReturn, TYPE_CHECKING
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
 VENV_DEPS = ["plexapi", "readchar"]
+
+# Set on the re-exec below, so a second one that lands nowhere is an error
+# rather than an endless loop.
+_VENV_REEXEC_MARK = "MY_PLEX_VENV_REEXEC"
+
+
+def _inside_our_venv():
+    """True when the interpreter running this IS the one in VENV_DIR.
+
+    sys.prefix is the venv's own directory inside a venv, and the base
+    installation's prefix outside it.  That is the only thing that answers
+    this question.
+
+    Comparing sys.executable with VENV_PYTHON does NOT answer it, which is
+    how this was wrong: a venv's bin/python3 is a symlink to the interpreter
+    the venv was built FROM, so os.path.realpath() of both sides yields that
+    same base interpreter whenever the venv was built from the python3 the
+    shebang picks.  The comparison then says "already inside", nothing
+    re-execs, and the run continues with none of the venv's site-packages --
+    a ModuleNotFoundError on the first `import readchar`.  It stayed hidden
+    because a machine whose venv is a DIFFERENT python version from its
+    python3 compares two different paths and works by accident.
+    """
+    return os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
+
+
+def _exec_in_venv():
+    """Hand this run over to the venv's interpreter, with the same arguments.
+
+    Refuses a second attempt: if we re-exec and still do not land inside,
+    something is wrong with the venv itself (a missing or unreadable
+    pyvenv.cfg), and an error naming it beats spawning for ever.
+    """
+    if os.environ.get(_VENV_REEXEC_MARK):
+        print(f"\n  ERROR: re-executed into '{VENV_DIR}' and still landed outside it.\n"
+              f"  Its pyvenv.cfg is missing or unreadable -- remove the directory\n"
+              f"  and run my-plex again to have it rebuilt.\n", file=sys.stderr)
+        sys.exit(1)
+    os.environ[_VENV_REEXEC_MARK] = "1"
+    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
 
 
 def _venv_has_deps():
@@ -132,7 +172,7 @@ def _bootstrap_venv():
     print("=" * 64, file=sys.stderr)
 
     # Re-exec with venv python, preserving all arguments
-    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+    _exec_in_venv()
 
 
 # --- Early --version / --stamp-version handling (no venv / no Plex needed) ---
@@ -377,11 +417,18 @@ if '--stamp-version' in sys.argv[1:]:
 _PRINT_ONLY_RUN = any(a in ('--help', '-h') for a in sys.argv[1:])
 
 # If we're not already running inside our venv, bootstrap it
-if not _PRINT_ONLY_RUN and os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
+if not _PRINT_ONLY_RUN and not _inside_our_venv():
     if not _venv_has_deps():
         _bootstrap_venv()
     # Venv exists and has deps — re-exec inside it
-    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+    _exec_in_venv()
+else:
+    # We are where we need to be, so no re-exec is in flight any more: drop
+    # the marker.  Left set it is INHERITED by every child process this run
+    # starts -- and one of those children is another my-plex, which would
+    # then read a marker that was never about it and refuse to re-exec at
+    # all.  That is not hypothetical: the suite spawns my-plex constantly.
+    os.environ.pop(_VENV_REEXEC_MARK, None)
 
 
 # ---------------------------------------------------------------------------
