@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "7b86bb7"
-SCRIPT_RELEASE = "v3-36-g7b86bb7"
+SCRIPT_COMMIT  = "c9dccbe"
+SCRIPT_RELEASE = "v3-37-gc9dccbe"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -88,7 +88,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, TYPE_CHECKING
 
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
@@ -324,8 +324,17 @@ if '--stamp-version' in sys.argv[1:]:
     _i = sys.argv.index('--stamp-version')
     _stamp_version_and_exit(go=sys.argv[_i + 1:_i + 2] == ['go'])
 
+# A run that only PRINTS needs nothing from the venv, and must never build
+# one.  A deployment gate asks `my-plex --help` to find out what this tool
+# can do -- on a machine that may have neither the venv nor the network to
+# make one, and with nobody at the screen to answer for it.  Building an
+# environment in order to answer that question is how `--help` comes back
+# empty and a copy goes out untested.  (--version and --stamp-version are
+# answered further up, before even this.)
+_PRINT_ONLY_RUN = any(a in ('--help', '-h') for a in sys.argv[1:])
+
 # If we're not already running inside our venv, bootstrap it
-if os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
+if not _PRINT_ONLY_RUN and os.path.realpath(sys.executable) != os.path.realpath(VENV_PYTHON):
     if not _venv_has_deps():
         _bootstrap_venv()
     # Venv exists and has deps — re-exec inside it
@@ -707,14 +716,37 @@ from datetime import datetime, timedelta
 from functools import reduce
 from pathlib import Path
 from pprint import pprint, pformat
-import readchar
 import threading
 #
+# The venv's own packages.  A print-only run skipped the venv above, so it
+# reaches this with the system interpreter and none of them installed -- and
+# needs none of them: every use of these four names is inside a function
+# body, and printing help calls none of those functions.  Any other run got
+# here through the venv, where the import cannot fail; if it somehow does,
+# it is raised rather than hidden.
 # HELP: https://python-plexapi.readthedocs.io/
-from plexapi.media import Media
-from plexapi.server import PlexServer
-from plexapi.playlist import Playlist
-from plexapi.collection import Collection
+#
+# The list is written twice on purpose: the checker reads the first branch
+# and so keeps the real types at all 116 uses, while the runtime takes the
+# second and tolerates their absence.  Binding them to None instead would
+# make every one of those uses Optional and cost 8 false findings.
+if TYPE_CHECKING:
+    import readchar
+    from plexapi.media import Media
+    from plexapi.server import PlexServer
+    from plexapi.playlist import Playlist
+    from plexapi.collection import Collection
+else:
+    try:
+        import readchar
+        from plexapi.media import Media
+        from plexapi.server import PlexServer
+        from plexapi.playlist import Playlist
+        from plexapi.collection import Collection
+    except ImportError:
+        if not _PRINT_ONLY_RUN:
+            raise
+        readchar = Media = PlexServer = Playlist = Collection = None
 import urllib3.exceptions
 import requests.exceptions
 
