@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "221e5b2"
-SCRIPT_RELEASE = "v3-40-g221e5b2"
+SCRIPT_COMMIT  = "b9daee3"
+SCRIPT_RELEASE = "v3-42-gb9daee3"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -17353,13 +17353,6 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
             PLEX_Media.OBJ_BY_MOVIE[movie_key] = {}
         for ver, file_info in movie_dict.get('files', {}).items():
             PLEX_Media.OBJ_BY_MOVIE[movie_key][ver] = file_info.get('filepath', '')
-
-        # Handle file metadata collection if FORCE_METADATA is set
-        if FORCE_METADATA and movie_dict.get('filesize'):
-            for _version, file_info in movie_dict.get('files', {}).items():
-                fp = file_info.get('filepath')
-                if fp and file_info.get('filesize'):
-                    pass  # TODO: Implement file metadata collection
 
     if VRB:
         lib_label = f"library '{display_title}'"
