@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "783cbcd"
-SCRIPT_RELEASE = "v3-31-g783cbcd"
+SCRIPT_COMMIT  = "4d13343"
+SCRIPT_RELEASE = "v3-32-g4d13343"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -21553,8 +21553,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 'library_timings': current_timings
             }
 
-            with open(partial_cache_file, 'wb') as f:
-                pickle.dump(checkpoint_data, f)
+            # The checkpoint exists so an interrupted rebuild can be
+            # resumed, so a torn one is the one thing it must never be: the
+            # cache itself has gone through _atomic_pickle_dump since v2.x,
+            # and this write was the last that had not.
+            _atomic_pickle_dump(partial_cache_file, checkpoint_data)
             # Print checkpoint progress during rebuild (unless silent)
             if not silent:
                 global MAX_PARALLEL_WORKERS
