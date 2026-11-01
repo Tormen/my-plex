@@ -18,6 +18,7 @@ import pickle
 import io
 import json
 import shutil
+import signal
 import subprocess
 import tempfile
 
@@ -11948,6 +11949,148 @@ class TestAtomicPickleWrites(unittest.TestCase):
                       "the resume checkpoint must be written atomically")
 
 
+class TestTopLevelHandlers(unittest.TestCase):
+    """No stack trace on the user's screen, ever -- and Ctrl-C is an answer.
+
+    main() had no handler of its own, so any bug and any interrupt outside the
+    twenty prompt-level ones printed a raw Python traceback and exited 1.
+    Both tests drive a COPY of the tool with a defect injected, because the
+    only honest way to test this is to make it really happen."""
+
+    @staticmethod
+    def _copy_with(first_line_of_main):
+        d = tempfile.mkdtemp(prefix='my-plex-handler-')
+        dst = os.path.join(d, 'my-plex.py')
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        assert src.count('\ndef main():\n') == 1, "main() is not where this test thinks"
+        src = src.replace('\ndef main():\n',
+                          f'\ndef main():\n    {first_line_of_main}\n', 1)
+        io.open(dst, 'w', encoding='utf-8').write(src)
+        return d, dst
+
+    def test_a_bug_gives_one_line_and_no_traceback(self):
+        d, copy = self._copy_with('raise RuntimeError("deliberate test defect")')
+        try:
+            r = subprocess.run([sys.executable, '-B', copy],
+                               capture_output=True, text=True, timeout=300)
+            out = r.stdout + r.stderr
+            self.assertNotIn('Traceback (most recent call last)', out,
+                             f"a traceback reached the screen:\n{out[-800:]}")
+            self.assertIn('ERROR #00143', out, out[-800:])
+            self.assertIn('RuntimeError: deliberate test defect', out,
+                          "the one line must say what happened")
+            self.assertEqual(r.returncode, 70, f"EX_SOFTWARE expected:\n{out[-400:]}")
+
+            # ...and the trace itself is kept, because it is what fixes the bug
+            m = re.search(r'full trace:\s+(\S+)', out)
+            self.assertIsNotNone(m, f"the line must name where the trace went:\n{out[-400:]}")
+            trace = m.group(1)
+            try:
+                self.assertTrue(os.path.isfile(trace), f"no trace file at {trace}")
+                body = io.open(trace, encoding='utf-8').read()
+                self.assertIn('Traceback (most recent call last)', body,
+                              "the trace file must hold the traceback")
+                self.assertIn('deliberate test defect', body)
+            finally:
+                if os.path.isfile(trace):
+                    os.unlink(trace)          # the test cleans up after itself
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _interrupt_with(self, signum):
+        """Send a REAL signal to a copy that has said it is running, and give
+        back (returncode, output)."""
+        d, copy = self._copy_with(
+            'print("READY-FOR-SIGNAL", flush=True); import time as _t; _t.sleep(60)')
+        try:
+            proc = subprocess.Popen([sys.executable, '-B', copy],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                for _ in range(400):                 # wait for it to really be running
+                    line = proc.stdout.readline()
+                    if not line or 'READY-FOR-SIGNAL' in line:
+                        break
+                else:
+                    self.fail("the copy never reached main()")
+                proc.send_signal(signum)
+                stdout, stderr = proc.communicate(timeout=120)
+            except Exception:
+                proc.kill()
+                raise
+            return proc.returncode, stdout + stderr
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_ctrl_c_gives_one_line_and_exit_130(self):
+        """_graceful_shutdown_handler takes SIGINT, so this exercises IT -- the
+        `except KeyboardInterrupt` is only the backstop for the window before
+        that handler is registered.  It used to exit 0 here: a wrapper that
+        checked the status was told the interrupted run had done its job."""
+        rc, out = self._interrupt_with(signal.SIGINT)
+        self.assertNotIn('Traceback (most recent call last)', out,
+                         f"Ctrl-C must not print a traceback:\n{out[-800:]}")
+        self.assertIn('SIGINT (Ctrl+C)', out, out[-800:])
+        self.assertEqual(rc, 130,
+                         f"128+SIGINT, so a caller can tell it from success:\n{out[-400:]}")
+
+    def test_sigterm_gives_143(self):
+        """128 + signum is a rule, not a constant: the same handler, a
+        different signal, a different status."""
+        rc, out = self._interrupt_with(signal.SIGTERM)
+        self.assertNotIn('Traceback (most recent call last)', out, out[-800:])
+        self.assertEqual(rc, 143, f"128+SIGTERM expected:\n{out[-400:]}")
+
+    def test_the_interrupt_message_is_on_stderr(self):
+        """`my-plex > out.txt` must still show why it stopped."""
+        d, copy = self._copy_with(
+            'print("READY-FOR-SIGNAL", flush=True); import time as _t; _t.sleep(60)')
+        try:
+            proc = subprocess.Popen([sys.executable, '-B', copy],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                for _ in range(400):
+                    line = proc.stdout.readline()
+                    if not line or 'READY-FOR-SIGNAL' in line:
+                        break
+                proc.send_signal(signal.SIGINT)
+                stdout, stderr = proc.communicate(timeout=120)
+            except Exception:
+                proc.kill()
+                raise
+            self.assertIn('SIGINT (Ctrl+C)', stderr,
+                          f"the reason it stopped belongs on stderr; stdout had: {stdout[-300:]!r}")
+            self.assertNotIn('SIGINT (Ctrl+C)', stdout)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_no_exit_path_reports_an_interrupt_as_success(self):
+        """Every os._exit() in the file sits on a shutdown path, so none may
+        pass a bare number: the status has to be 128 + the signal. The
+        read-only Ctrl-C path passed 0, and the interrupted --update-cache
+        path -- the one a long rebuild actually hits -- passed 0 as well, so a
+        wrapper that checked the status was told the run had done its job."""
+        import ast
+        tree = ast.parse(io.open(MAIN_SCRIPT, encoding='utf-8').read())
+        offenders = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == '_exit'
+                    and getattr(node.func.value, 'id', '') == 'os'):
+                arg = node.args[0] if node.args else None
+                if isinstance(arg, ast.Constant):
+                    offenders.append(f"os._exit({arg.value!r}) at line {node.lineno}")
+        self.assertEqual(offenders, [],
+                         "an interrupt must not be reported as success: " + ", ".join(offenders))
+
+    def test_err_still_exits_one_by_default(self):
+        """err() gained an exit code for the handler above; the everyday call
+        must be unchanged -- every other caller relies on 1."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertIn('def err(err_code: str, err_msg: str = "", exit_code: int = 1)', src)
+        self.assertIn('sys.exit(exit_code)', src)
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -12026,7 +12169,7 @@ _UNITTEST_SCOPES = {
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
-    'misc':       [TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+    'misc':       [TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,

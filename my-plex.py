@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "4d13343"
-SCRIPT_RELEASE = "v3-32-g4d13343"
+SCRIPT_COMMIT  = "083bded"
+SCRIPT_RELEASE = "v3-33-g083bded"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3202,36 +3202,50 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
 
 # Global shutdown flag for graceful termination
 _shutdown_requested = False
+# Which signal asked for it, so every exit below can report 128 + signum
+# rather than guessing.  0 until one arrives.
+_shutdown_signum = 0
 
 def _graceful_shutdown_handler(signum, _frame):
     """Handle SIGINT (Ctrl+C) and SIGTERM (kill) - set flag so workers exit gracefully.
     For --update-cache: first Ctrl+C saves checkpoint, second forces exit.
-    For other operations: first Ctrl+C exits immediately."""
-    global _shutdown_requested
+    For other operations: first Ctrl+C exits immediately.
+
+    Every path exits 128 + signum -- 130 for Ctrl+C, 143 for SIGTERM -- which
+    is what lets a caller tell an interrupt from a failure, and from success.
+    This used to exit 0 on the read-only path, so a wrapper that checked the
+    status was told the run had done its job.
+    """
+    global _shutdown_requested, _shutdown_signum
+    _shutdown_signum = signum
 
     # For read-only operations (not --update-cache), exit immediately on first Ctrl+C
     # since there's no state to save and we may be stuck in blocking API calls
     if not FORCE_CACHE_UPDATE:
         signal_name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else "SIGTERM"
-        print(f"\n\nReceived {signal_name}, exiting...")
-        os._exit(0)
+        print(f"\n\nReceived {signal_name}, exiting -- this command only read, "
+              f"so nothing is half-written.", file=sys.stderr)
+        os._exit(128 + signum)
 
     # For --update-cache: handle graceful shutdown with checkpoint
     # Second Ctrl+C - force immediate exit (don't wait for blocking socket calls)
     if _shutdown_requested:
-        print("\n\nSecond Ctrl+C detected - forcing immediate exit...")
+        print("\n\nSecond Ctrl+C detected - forcing immediate exit...", file=sys.stderr)
         # Try to save checkpoint before exiting
         try:
             if hasattr(PLEX_Media, 'save_checkpoint'):
                 PLEX_Media.save_checkpoint(silent=True)
-                print(f"Checkpoint saved: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects")
+                print(f"Checkpoint saved: {PLEX_Media.items_processed} media files, "
+                      f"{len(PLEX_Media.OBJ_BY_ID)} unique objects -- re-run the same "
+                      f"command to resume from it.", file=sys.stderr)
         except Exception as e:
             print(f"WARNING: Could not save checkpoint: {e}", file=sys.stderr)
-        os._exit(1)
+        os._exit(128 + signum)
 
     signal_name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else "SIGTERM"
-    print(f"\n\nReceived {signal_name}, finishing current items and shutting down...")
-    print("(Press Ctrl+C again to force immediate exit)")
+    print(f"\n\nReceived {signal_name}, finishing current items and shutting down...",
+          file=sys.stderr)
+    print("(Press Ctrl+C again to force immediate exit)", file=sys.stderr)
 
     # Set shutdown flag - workers will check this and exit gracefully
     # The main thread will save checkpoint after all workers finish
@@ -3295,10 +3309,12 @@ _RENAMED_FLAGS = {
     '--test': '--run-tests',
 }
 
-def err(err_code: str, err_msg: str = "") -> NoReturn:
+def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
+    """Report and stop.  exit_code is for the few callers that must exit with
+    something other than 1 -- the top-level bug handler exits 70."""
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
     print(f"\nERROR #{err_code}: {err_msg}\n", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(exit_code)
 
 def _build_version_string(duration_ms, width, height, video_codec, audio_codec, filesize, part_id, existing_files=None):
     """Build a version string for a media file, guaranteed unique within existing_files.
@@ -3701,6 +3717,31 @@ def load_media_cache(source):
             if 'guid' not in obj:
                 PLEX_Media._cache_missing_guid = True
             break  # only need to check one
+
+def _write_crash_trace() -> str:
+    """Write the current exception's traceback to a file and return its path.
+
+    It goes beside the logs my-plex already writes (~/.my-plex/logs/, the same
+    directory every --resolve log uses), not into a site-wide log tree: this
+    tool is published, and must land somewhere every Plex user has.
+
+    Returns the path, or a short reason the trace could not be written -- the
+    one line on the user's screen says which, and a failure to write the trace
+    must never replace the error it was reporting.
+    """
+    import traceback
+    try:
+        log_dir = os.path.join(os.path.expanduser('~'), '.my-plex', 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, f"crash_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        with open(path, 'w') as f:
+            f.write(f"my-plex {SCRIPT_VERSION} crash\n")
+            f.write(f"argv: {sys.argv!r}\n\n")
+            traceback.print_exc(file=f)
+        return path
+    except Exception as write_failure:
+        return f"(could not be written: {write_failure})"
+
 
 def _atomic_pickle_dump(path, data):
     """Write data to path atomically: write to a temp file then rename.
@@ -19943,8 +19984,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     executor.shutdown(wait=False, cancel_futures=True)
 
                     # Use os._exit() to bypass Python cleanup that might hang
-                    # This is safe here because we've already saved the checkpoint
-                    os._exit(0)
+                    # This is safe here because we've already saved the checkpoint.
+                    # 128 + signum, NOT 0: this whole block is under
+                    # `if _shutdown_requested`, so it is only ever reached
+                    # because the user interrupted a rebuild -- and a rebuild
+                    # that stopped early has not done what it was asked.
+                    os._exit(128 + _shutdown_signum)
 
             pass  # no separator after parallel processing
         else:
@@ -43869,12 +43914,36 @@ if __name__ == '__main__':
     if not _debug_mode:
         _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
 
-    if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
-        # Inject episode TSV functions into test module (defined after test import)
-        _inject_episode_funcs_into_test_mod()
-        # Load test classes into this module's namespace for unittest discovery
-        for _cls in _load_test_mod()._UNITTEST_CLASSES:
-            globals()[_cls.__name__] = _cls
-        unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
-    else:
-        main()
+    # The two handlers the user's screen is entitled to.  Neither catches
+    # SystemExit, so every sys.exit() and every err() passes straight through.
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
+            # Inject episode TSV functions into test module (defined after test import)
+            _inject_episode_funcs_into_test_mod()
+            # Load test classes into this module's namespace for unittest discovery
+            for _cls in _load_test_mod()._UNITTEST_CLASSES:
+                globals()[_cls.__name__] = _cls
+            unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
+        else:
+            main()
+    except KeyboardInterrupt:
+        # The BACKSTOP only: _graceful_shutdown_handler takes SIGINT from the
+        # moment it is registered, so this catches an interrupt in the window
+        # before that -- the venv re-exec, the config load, the completion
+        # install.  Same answer either way: no traceback, and 130.
+        print("\nmy-plex: interrupted (Ctrl-C) -- nothing after this point ran.\n"
+              "  What was already written stays, and is complete: the cache and the\n"
+              "  resume checkpoint are both written whole or not at all.", file=sys.stderr)
+        sys.exit(130)
+    except Exception as unexpected:
+        # A bug.  One line here, the trace in a file -- it is still what fixes
+        # the bug, it is just not the user's screen.  70 is EX_SOFTWARE.
+        err("00143",
+            f"my-plex stopped on a bug -- this is not something you did wrong.\n"
+            f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
+            f"  full trace:    {_write_crash_trace()}\n"
+            f"Possible reasons:\n"
+            f"  - a file or library changed under a run that was already going\n"
+            f"  - a cache written by an older version (my-plex --update-cache --force-plex)\n"
+            f"  - a genuine defect: the trace file above is what to report",
+            exit_code=70)
