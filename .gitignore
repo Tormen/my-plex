@@ -40,6 +40,10 @@ Thumbs.db
 # Project-internal (not for publishing)
 .archive/
 test-playground/
+# Scratch scripts and the resolve logs they produced: the logs carry real
+# media filenames, volume paths and library names, which have no business in
+# a public repository.  The files stay on disk and travel in the container.
+playground/
 
 # Local-only files: never published, carried between machines by
 # the container repo (see its .git.force-add-patterns).
