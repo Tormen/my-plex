@@ -12595,6 +12595,11 @@ class TestReadmeFlagsExist(unittest.TestCase):
                     flags.add(a.value)
         return flags
 
+    def _run(self, *argv):
+        return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
+                              text=True, timeout=120,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
     # Flags the tool recognises WITHOUT argparse, so the AST walk cannot see
     # them.  Kept explicit and short rather than widening the walk to every
     # "--..." string in the file, which would also match the flags my-plex
@@ -12630,6 +12635,45 @@ class TestReadmeFlagsExist(unittest.TestCase):
         for code in re.findall(r'`([^`\n]+)`', re.sub(r'```.*?```', '', text, flags=re.DOTALL)):
             found.update(flag_re.findall(code))
         return found
+
+    def test_the_two_option_pages_name_the_same_flags(self):
+        """The option lines exist twice: HELP_COMPACT's `OPTIONS:` block, which
+        bare --help prints, and the `--help option` page, which groups them
+        under GENERAL / OUTPUT CONTROL / WRITE SAFETY.
+
+        Nothing ties them together, so a flag goes into one and not the other
+        and the omission is invisible -- -Q had to be added to both by hand.
+        The two wordings differ on purpose in places ("please use with care"),
+        so this does not compare TEXT; it compares the SET OF FLAGS, which is
+        the part that must not drift.
+        """
+        summary = self._run('--help').stdout
+        page = self._run('--help', 'option').stdout
+        self.assertIn('OPTIONS:', summary, summary[:300])
+        self.assertIn('AVAILABLE OPTIONS', page, page[:300])
+
+        # the compact page also lists COMMANDS; only its OPTIONS block is an
+        # option list, so slice it out before comparing
+        block = summary.split('OPTIONS:', 1)[1].split('COMMANDS:', 1)[0]
+        flag_re = re.compile(r'(?<![\w-])(--[a-z][a-z0-9-]*)')
+        in_summary = set(flag_re.findall(block))
+        in_page = set(flag_re.findall(page))
+        self.assertGreater(len(in_summary), 5, f"the slice is wrong:\n{block[:300]}")
+
+        # Slice the option page the same way, POSITIVELY: its general options
+        # run from GENERAL: to COMMAND MODIFIERS:.  Subtracting the modifier
+        # section instead was wrong -- --try and --verbose appear both as
+        # general options AND in "--mark [--try]" and the footer examples, so
+        # subtracting removed them outright and reported them missing.
+        in_page = set(flag_re.findall(
+            page.split('GENERAL:', 1)[1].split('COMMAND MODIFIERS:', 1)[0]))
+        # -H/--help is placed differently by each page on purpose
+        in_summary.discard('--help'); in_page.discard('--help')
+
+        self.assertEqual(sorted(in_summary - in_page), [],
+                         "named by bare --help but missing from `--help option`")
+        self.assertEqual(sorted(in_page - in_summary), [],
+                         "named by `--help option` but missing from bare --help")
 
     def test_the_tool_has_every_flag_the_readme_names(self):
         registered = self._registered_flags()
