@@ -11841,6 +11841,80 @@ class TestRunTestsTAP(unittest.TestCase):
                       "bare --run-tests must run every class")
 
 
+class TestTrashNotRemove(unittest.TestCase):
+    """my-plex trashes; it does not rm.  my_plex_file_operation used to carry a
+    REMOVE that ran `/bin/rm -r` on the Plex host, and `--move --overwrite`
+    handed it the destination WRAPPER -- media, subtitles and sidecars gone
+    unrecoverably.  Locally the same operation was os.remove(), which raises
+    IsADirectoryError on every directory, so the one thing its callers asked
+    for could never work and the failure was swallowed into (False, None)."""
+
+    def _op(self):
+        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        return main_mod.my_plex_file_operation
+
+    def _body(self):
+        """The function's CODE, with comment lines dropped: a comment that
+        NAMES what was banned must not fail the check."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        m = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)',
+                      src, re.DOTALL)
+        self.assertIsNotNone(m, "my_plex_file_operation not found")
+        return "\n".join(line for line in m.group(1).splitlines()
+                         if not line.lstrip().startswith('#'))
+
+    def test_rmdir_removes_an_empty_directory(self):
+        """The old os.remove() raised IsADirectoryError here, every time."""
+        d = tempfile.mkdtemp(prefix='my-plex-rmdir-')
+        target = os.path.join(d, 'emptied-wrapper')
+        os.makedirs(target)
+        try:
+            ok, _ = self._op()('RMDIR', target, None)
+            self.assertTrue(ok, "RMDIR must remove an empty directory")
+            self.assertFalse(os.path.exists(target), "the directory is still there")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_rmdir_refuses_a_directory_that_is_not_empty(self):
+        """The refusal IS the guard: nothing in this function may delete
+        content, so a wrapper that still holds a file must survive."""
+        d = tempfile.mkdtemp(prefix='my-plex-rmdir-')
+        target = os.path.join(d, 'wrapper')
+        os.makedirs(target)
+        keeper = os.path.join(target, 'Movie.2019.mkv')
+        io.open(keeper, 'w').write('not a real film')
+        try:
+            ok, _ = self._op()('RMDIR', target, None)
+            self.assertFalse(ok, "RMDIR must refuse a directory that is not empty")
+            self.assertTrue(os.path.isfile(keeper), "it deleted content -- the whole point is that it cannot")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_no_recursive_delete_survives_in_the_file_operation(self):
+        body = self._body()
+        self.assertNotIn('rm -r', body,
+                         "a recursive remove is back in my_plex_file_operation")
+        self.assertNotIn('os.remove(', body,
+                         "os.remove is back: it cannot remove a directory, and what a "
+                         "person may want back belongs in TRASH")
+        self.assertNotIn("'REMOVE'", body, "the REMOVE operation is back")
+
+    def test_an_overwrite_trashes_what_it_replaces(self):
+        """Both --move --overwrite paths: the wrapper, and the bare file."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertIn("my_plex_file_operation('TRASH', dst_wrapper", src,
+                      "an overwrite must trash the destination wrapper")
+        self.assertIn("my_plex_file_operation('TRASH', new_path", src,
+                      "an overwrite must trash the destination file")
+        self.assertNotIn("my_plex_file_operation('REMOVE'", src,
+                         "no caller may ask for a plain remove any more")
+
+    def test_the_emptied_subdirectory_is_an_rmdir(self):
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertIn("my_plex_file_operation('RMDIR', file1_dir", src,
+                      "removing an emptied subdirectory is exactly what RMDIR is for")
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -11906,6 +11980,7 @@ _UNITTEST_SCOPES = {
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename, TestRenameShared],
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
+                   TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
