@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "083bded"
-SCRIPT_RELEASE = "v3-33-g083bded"
+SCRIPT_COMMIT  = "1836353"
+SCRIPT_RELEASE = "v3-34-g1836353"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -1062,6 +1062,9 @@ CONFIG_DEFAULTS = {
     'LIBRARY_START_DELAY': 0.0,
     'PLEX_RETRY_DELAYS': [5, 30, 60, 120, 240, 480],
     'SSH_RETRY_DELAYS': [0.5, 2, 10],
+    # Seconds to wait for an SSH connection to be established (not for the
+    # command to finish).  Every ssh my-plex starts carries it.
+    'SSH_CONNECT_TIMEOUT': 5,
 
     # Broken File Detection Configuration
     'TRUNCATION_THRESHOLD_PCT': 0.5,  # Flag files as potentially truncated if container duration is >0.5% shorter than Plex duration
@@ -2530,6 +2533,13 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # Default:
 # SSH_RETRY_DELAYS = {CONFIG_DEFAULTS['SSH_RETRY_DELAYS']!r}
 
+# Seconds to wait for an SSH connection to be ESTABLISHED (not for the command
+# to finish).  A host that is off or unreachable then fails after this long
+# instead of hanging the run.
+#
+# Default:
+# SSH_CONNECT_TIMEOUT = {CONFIG_DEFAULTS['SSH_CONNECT_TIMEOUT']!r}
+
 # Where the per-run cache-update log is written (JSON).
 #
 # Default:
@@ -2976,6 +2986,7 @@ LIBRARY_START_DELAY = CONFIG_DEFAULTS['LIBRARY_START_DELAY']
 # Current: [5, 30, 60, 120, 240, 480] = 7 attempts, max ~15min total wait
 PLEX_RETRY_DELAYS = CONFIG_DEFAULTS['PLEX_RETRY_DELAYS']  # Exponential: 5s, 30s, 1m, 2m, 4m, 8m
 SSH_RETRY_DELAYS = CONFIG_DEFAULTS['SSH_RETRY_DELAYS']    # Retry lost files after SSH connection drops: 0.5s, 2s, 10s
+SSH_CONNECT_TIMEOUT = CONFIG_DEFAULTS['SSH_CONNECT_TIMEOUT']  # Connect, not command, timeout
 
 # Checkpoint configuration for cache rebuilds
 # Saves cache periodically during rebuild to prevent total loss on failure
@@ -4744,7 +4755,7 @@ def get_trash_dir(remote_host=None, file_path=None):
         os.makedirs(trash_dir, exist_ok=True)
         return trash_dir
 
-def _ssh_opts() -> list[str]:
+def _ssh_opts(multiplex: bool = True) -> list[str]:
     """The options EVERY ssh my-plex starts carries -- the one source for them.
 
     ControlMaster multiplexing, so subsequent SSH calls reuse a single TCP
@@ -4767,17 +4778,31 @@ def _ssh_opts() -> list[str]:
     as long as it lives -- nor fail loudly because the user's session already
     has them ("bind [127.0.0.1]:5900: Address already in use").
     """
+    # These two go on EVERY connection, multiplexed or not:
+    #   BatchMode     -- a key or password prompt would wait for somebody who
+    #                    is not there; my-plex is often run from a wrapper.
+    #   ConnectTimeout -- a host that is off must fail, not hang the run.
+    opts = ['-o', 'BatchMode=yes',
+            '-o', f'ConnectTimeout={SSH_CONNECT_TIMEOUT}',
+            '-o', 'ClearAllForwardings=yes']
+    if not multiplex:
+        # ControlMaster=no: may not even USE a shared connection.  For the
+        # parallel metadata workers, which each stream thousands of paths and
+        # their ffprobe output: sharing one TCP connection would serialise
+        # them at the transport, and with MAX_PARALLEL_WORKERS above sshd's
+        # MaxSessions (10 by default) the later ones would be refused.
+        return [*opts, '-o', 'ControlMaster=no']
     ssh_dir = os.path.expanduser('~/.ssh')
     os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
-    return ['-o', 'ControlMaster=auto',
+    return [*opts,
+            '-o', 'ControlMaster=auto',
             '-o', f'ControlPath={ssh_dir}/my-plex-%C',
-            '-o', 'ControlPersist=60s',
-            '-o', 'ClearAllForwardings=yes']
+            '-o', 'ControlPersist=60s']
 
 
-def _ssh_args(host: str) -> list[str]:
+def _ssh_args(host: str, multiplex: bool = True) -> list[str]:
     """v2.5: ['ssh', <_ssh_opts()>, host] -- see _ssh_opts."""
-    return ['ssh', *_ssh_opts(), host]
+    return ['ssh', *_ssh_opts(multiplex=multiplex), host]
 
 
 def escape_path_for_ssh(filepath):
@@ -16645,7 +16670,8 @@ for line in sys.stdin:
         filepaths_input = f"{w_prefix} {partition_size}\n"
         filepaths_input += '\n'.join(partition) + '\n'
         if remote_host:
-            cmd = ['ssh', '-o', 'ControlMaster=no', remote_host, f'python3 -c {shlex.quote(collector_script)}']
+            cmd = [*_ssh_args(remote_host, multiplex=False),
+                   f'python3 -c {shlex.quote(collector_script)}']
         else:
             cmd = [sys.executable, '-c', collector_script]
 
@@ -39583,7 +39609,7 @@ def show_system_info():
         if PLEX_DB_REMOTE_HOST:
             try:
                 result = subprocess.run(
-                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', *_ssh_opts(), PLEX_DB_REMOTE_HOST, 'echo ok'],
+                    [*_ssh_args(PLEX_DB_REMOTE_HOST), 'echo ok'],
                     capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
