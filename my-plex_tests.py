@@ -58,6 +58,25 @@ def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
     return best_name
 
 
+def _pick_any_series_key():
+    """A Series cache key that exists on THIS machine, or None.
+
+    Never hard-coded: `Series:5191` is one id in one person's cache, and
+    everywhere else --renumber answers "Invalid parameter 'Series:5191'"
+    (ada, 2026-11-01). Rows start with the cache key, so the first Series row
+    of the most populated Series library is one that is really there."""
+    import subprocess, re
+    libs = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
+                          capture_output=True, text=True, timeout=30)
+    lib = _pick_most_populated_library(libs.stdout, lib_type='Series')
+    if not lib:
+        return None
+    rows = subprocess.run([sys.executable, MAIN_SCRIPT, lib, '--list'],
+                          capture_output=True, text=True, timeout=120)
+    m = re.search(r'^(Series:\d+)', rows.stdout, re.MULTILINE)
+    return m.group(1) if m else None
+
+
 def _registry_entry_block(content, category):
     """Return the source block of ONE PROBLEM_CATEGORIES_REGISTRY entry.
 
@@ -3573,7 +3592,21 @@ class TestDefaultScope(unittest.TestCase):
         cls._any_lib = _pick_most_populated_library(libs_result.stdout)
 
     def _run(self, *args):
+        """Run my-plex with these arguments.
+
+        A None argument means setUpClass found no library -- which is what
+        every machine looks like before its first --update-cache. Passing it
+        on gives `TypeError: expected str, bytes or os.PathLike object, not
+        NoneType` from deep inside subprocess, a traceback that names nothing
+        about the cause; and since my-rollout offers no copy whose suite
+        fails, the whole tool then stops being deployable on that machine
+        (ada, 2026-11-01: eight errors and one failure, all of them this).
+        So the guard sits HERE, once, instead of in every test that takes a
+        scope -- including the ones not written yet."""
         import subprocess
+        if any(a is None for a in args):
+            self.skipTest("no library in this machine's cache for a scoped "
+                          "test -- run `my-plex --update-cache` here")
         return subprocess.run([sys.executable, MAIN_SCRIPT] + list(args),
                               capture_output=True, text=True, timeout=30)
 
@@ -3584,6 +3617,16 @@ class TestDefaultScope(unittest.TestCase):
     def _skip_if_no_lib(self):
         if not getattr(self, '_any_lib', None):
             self.skipTest("No library available in cache for scoped test")
+
+    def test_a_missing_library_skips_instead_of_crashing(self):
+        """The guard itself, proven on ANY machine -- including this one, where
+        the cache is there and the scoped tests below never take the None path.
+
+        Without the guard, None reaches subprocess and the test dies with
+        `TypeError: expected str, bytes or os.PathLike object, not NoneType`,
+        which says nothing about a missing cache."""
+        with self.assertRaises(unittest.SkipTest):
+            self._run(None, '--list')
 
     def test_default_scope_in_config_defaults(self):
         """DEFAULT_SCOPE must exist in CONFIG_DEFAULTS."""
@@ -6903,9 +6946,28 @@ class TestAbsEpIdx(unittest.TestCase):
 class TestRenumber(unittest.TestCase):
     """Test --renumber command: detection, command registration, help page."""
 
+    @classmethod
+    def setUpClass(cls):
+        """One lookup for the whole class: the scoped E2E tests need a series
+        that exists here, and asking my-plex twice costs a second run."""
+        cls._series_key = _pick_any_series_key()
+
+    def _skip_if_no_series(self):
+        if not getattr(self, '_series_key', None):
+            self.skipTest("no series in this machine's cache for a scoped "
+                          "test -- run `my-plex --update-cache` here")
+
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
+
+    def test_a_missing_series_skips_instead_of_failing(self):
+        """Same guard, same reason: with no series here, the scoped E2E tests
+        must skip. They used to name `Series:5191` -- one id in one person's
+        cache -- and failed with "Invalid parameter" everywhere else."""
+        self._series_key = None
+        with self.assertRaises(unittest.SkipTest):
+            self._skip_if_no_series()
 
     def test_list_renumber_candidates_method_exists(self):
         """_list_renumber_candidates must exist as a static method on PLEX_Media."""
@@ -7089,8 +7151,9 @@ class TestRenumber(unittest.TestCase):
 
     def test_renumber_scoped_e2e(self):
         """<SHOW> --renumber runs without error (E2E)."""
+        self._skip_if_no_series()
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, 'Series:5191', '--renumber'],
+            [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber'],
             capture_output=True, text=True, timeout=60
         )
         self.assertEqual(result.returncode, 0, f"Scoped --renumber failed: {result.stderr}")
@@ -7103,8 +7166,9 @@ class TestRenumber(unittest.TestCase):
 
     def test_renumber_fix_dry_run_e2e(self):
         """<SHOW> --renumber --fix --try runs without error (E2E, scoped to one show)."""
+        self._skip_if_no_series()
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, 'Series:5191', '--renumber', '--fix', '--try'],
+            [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber', '--fix', '--try'],
             capture_output=True, text=True, timeout=60
         )
         self.assertEqual(result.returncode, 0, f"--renumber --fix --try failed: {result.stderr}")
@@ -12127,6 +12191,47 @@ class TestTopLevelHandlers(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_ctrl_c_during_the_venv_bootstrap_gives_one_line_and_130(self):
+        """The window BEFORE _graceful_shutdown_handler is installed, which on
+        ada printed nine frames of subprocess internals when a held `pip
+        install` was interrupted.
+
+        Run for real, with a real SIGINT: a copy whose bootstrap sleeps
+        instead of calling pip, so the interrupt lands exactly where it did
+        then. Nothing else is changed."""
+        import signal, tempfile, shutil, time
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        d = tempfile.mkdtemp(prefix='my-plex-bootstrap-int-')
+        try:
+            copy = os.path.join(d, 'my-plex.py')
+            with open(copy, 'w') as f:
+                f.write(src
+                        .replace('def _bootstrap_venv():',
+                                 'def _bootstrap_venv():\n'
+                                 '    import time; time.sleep(30)', 1)
+                        .replace('def _inside_our_venv():',
+                                 'def _inside_our_venv():\n'
+                                 '    return False', 1)
+                        .replace('def _venv_has_deps():',
+                                 'def _venv_has_deps():\n'
+                                 '    return False', 1))
+            os.chmod(copy, 0o755)
+            p = subprocess.Popen([sys.executable, copy, '--list-libraries'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True,
+                                 env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            time.sleep(2.0)
+            p.send_signal(signal.SIGINT)
+            out, errtext = p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 130,
+                             f"128+SIGINT, not {p.returncode}:\n{errtext[-400:]}")
+            self.assertNotIn('Traceback', errtext,
+                             f"a stack trace reached the screen:\n{errtext[-600:]}")
+            self.assertIn('interrupted (Ctrl-C)', errtext, errtext[-400:])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_ctrl_c_gives_one_line_and_exit_130(self):
         """_graceful_shutdown_handler takes SIGINT, so this exercises IT -- the
         `except KeyboardInterrupt` is only the backstop for the window before
@@ -12833,30 +12938,42 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_it_refuses_without_root_and_names_the_command(self):
-        """The firewall tool is root-only even to LOOK, so --install cannot
-        show a plan as an ordinary user. It says so and gives the command,
-        rather than calling out to escalate by itself."""
-        d, conf = self._conf('/bin/echo')      # exists, so the root check is reached
+    def test_it_never_runs_the_firewall_tool_itself(self):
+        """THE test for the shape: writing a rule is root's, and my-plex does
+        not run as root, so --install PRINTS the commands and calls nothing.
+
+        Adversarial by construction: LITTLE_SNITCH_CLI points at a script
+        that leaves a file behind if it is ever executed. The earlier shape
+        (`--install go`, which called the tool) leaves that file."""
+        d, conf = self._conf('/bin/true')       # replaced just below
+        sentinel = os.path.join(d, 'it-was-run')
+        stub = os.path.join(d, 'my-little-snitch')
+        with open(stub, 'w') as f:
+            f.write(f'#!/bin/dash\ntouch {sentinel!r}\n')
+        os.chmod(stub, 0o755)
+        with open(conf, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
         try:
             r = self._run('--config', conf, '--install')
-            self.assertNotEqual(r.returncode, 0, "it did not refuse")
-            self.assertIn('needs root', r.stderr, r.stderr[-500:])
-            self.assertIn('my-plex --install', r.stderr,
-                          "it must give the command to run as root")
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertFalse(os.path.exists(sentinel),
+                             "--install executed the firewall tool -- it must only print")
+            self.assertIn('AS ROOT', r.stdout, r.stdout[-600:])
+            for host, _why in (('api.themoviedb.org', 0), ('www.fernsehserien.de', 0)):
+                self.assertIn(f'{stub} allow go ', r.stdout,
+                              "the printed line must be the paste-ready command")
+                self.assertIn(host, r.stdout, "...one per host")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_the_plain_run_and_go_are_distinguished(self):
-        """A rule-writing command is guarded by `go`: the plain run must say it
-        changed nothing, and `go` must not say that."""
+    def test_go_is_answered_rather_than_passed_through(self):
+        """`--install go` was the earlier shape. Someone who types it gets told
+        what changed, not argparse's `Invalid parameter`."""
         d, conf = self._conf(os.path.join('/nonexistent', 'my-little-snitch'))
         try:
-            plain = self._run('--config', conf, '--install')
-            self.assertIn('--install\n', plain.stdout + '\n',
-                          "the plain run must name itself without `go`")
-            self.assertNotIn('--install go', plain.stdout,
-                             "a plain run must not report itself as `go`")
+            r = self._run('--config', conf, '--install', 'go')
+            self.assertNotEqual(r.returncode, 0, "`--install go` was accepted")
+            self.assertIn('There is no `go`', r.stderr, r.stderr[-600:])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -12865,6 +12982,58 @@ class TestInstallFirewallRules(unittest.TestCase):
         self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])
         self.assertIn('www.fernsehserien.de', r.stdout,
                       "the page must name the hosts it allows")
+
+
+class TestNeverRunsAsRoot(unittest.TestCase):
+    """my-plex refuses euid 0, for every command, before anything else runs.
+
+    As root it would be wrong in two directions at once: the venv, the cache,
+    the config and the completion all land in /var/root instead of the user's
+    home, and anything it reports about "the Python that runs my-plex" names
+    root's interpreter -- a process that never runs. A root run on ada built
+    /var/root/.python.venv/my-plex before it did anything else, which is what
+    brought this in.
+    """
+
+    def test_the_refusal_comes_before_the_venv_bootstrap(self):
+        """Order is the whole point: a refusal after the bootstrap has already
+        created /var/root/.python.venv is too late to be one."""
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        refusal = src.find('if os.geteuid() == 0:')
+        self.assertGreater(refusal, -1, "the root refusal is gone")
+        bootstrap = src.find('_bootstrap_venv()\n')
+        self.assertGreater(bootstrap, -1, "the venv bootstrap call is gone")
+        self.assertLess(refusal, bootstrap,
+                        "the root refusal must come BEFORE the venv bootstrap")
+
+    def test_it_refuses_with_the_house_error_and_says_what_to_do(self):
+        """Run for real -- the suite is not root, so the one token that decides
+        it is forced true in a copy that differs in nothing else."""
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        self.assertEqual(src.count('if os.geteuid() == 0:'), 1,
+                         "more than one root check: this test neuters the wrong one")
+        d = tempfile.mkdtemp(prefix='my-plex-asroot-')
+        try:
+            copy = os.path.join(d, 'my-plex.py')
+            with open(copy, 'w') as f:
+                f.write(src.replace('if os.geteuid() == 0:', 'if True:', 1))
+            os.chmod(copy, 0o755)
+            home = os.path.join(d, 'home')
+            os.makedirs(home)
+            r = subprocess.run([sys.executable, copy, '--list-libraries'],
+                               capture_output=True, text=True, timeout=60,
+                               env=dict(os.environ, HOME=home,
+                                        PYTHONDONTWRITEBYTECODE='1'))
+            self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertRegex(r.stderr, r'ERROR 00001 \[1\]:',
+                             f"not the house error shape:\n{r.stderr!r}")
+            self.assertIn('does not run as root', r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(home, '.python.venv')),
+                             "it got as far as building a venv before refusing")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestConfigTemplateCoversEveryKey(unittest.TestCase):
@@ -12969,6 +13138,7 @@ _UNITTEST_SCOPES = {
     'v269':               [TestV269RetroactiveCoverage],
     'version':            [TestVersionAndStamp, TestVersionNamesItsRelease, TestRunViaSymlink],
     'errcodes':           [TestErrCodes],
+    'root':               [TestNeverRunsAsRoot],
     'typecheck':          [TestTypeCheck],
     'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
 }

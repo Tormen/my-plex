@@ -149,13 +149,17 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   `www.fernsehserien.de`. Behind an interactive firewall the first connection
   to each is held behind an alert — and a scheduled run has nobody to answer
   it, so it stops talking with no error of its own.
-- **`--install`** shows the rules it would write, **`--install go`** writes
-  them (needs root). The rule names the Python that runs my-plex, because the
-  fetches use `urllib.request` and the interpreter is what opens the socket;
-  one consequence is that it also covers other scripts run by that same
-  Python, and there is no narrower form for a Python script.
-- Without the firewall tool it writes nothing and just names the hosts, so it
-  is safe to run anywhere. See `my-plex --help install`.
+- **`--install`** prints the root commands that write them, and writes
+  nothing itself: `littlesnitch` refuses anyone but root, even to list, and
+  my-plex does not run as root. Same shape as `--create-config`, which prints
+  a config for you to place. Run them in a root shell, or let a rollout step
+  do it.
+- The rule names the Python that runs my-plex, because the fetches use
+  `urllib.request` and the interpreter is what opens the socket; one
+  consequence is that it also covers other scripts run by that same Python,
+  and there is no narrower form for a Python script.
+- Without the firewall tool it prints no commands and just names the hosts,
+  so it is safe to run anywhere. See `my-plex --help install`.
 
 ### Output control
 - **`-V` / `-VV`** — more detail for the reader; **`-D` / `-DD`** — diagnostics
@@ -194,6 +198,10 @@ my-plex --create-config ~/.my-plex.conf      # Write default config to file
 # Edit ~/.my-plex.conf with your Plex DB path and SSH host
 # Inspect the active config any time:  my-plex --config
 ```
+
+my-plex refuses to run as root, for every command. As root its venv, cache,
+config and zsh completion would all land in `/var/root` instead of your home,
+and nothing it does needs privilege.
 
 That's it. There is no wrapper script and nothing to install by hand:
 `my-plex.py` is the whole tool, and on its first run it
