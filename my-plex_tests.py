@@ -11721,19 +11721,23 @@ class TestDeployedCopy(unittest.TestCase):
 
 
 class TestDeployedCopyWithItsSuite(unittest.TestCase):
-    """A copy made by my-rollout is bin/my-plex plus lib/my-plex/, and
-    my-rollout's gate runs the PENDING COPY's own --run-tests: the suite has
-    to be found from there, or a copy is never offered again."""
+    """A copy made by my-rollout is bin/my-plex plus lib/my-plex_tests.py,
+    and my-rollout's gate runs the PENDING COPY's own --run-tests: the suite
+    has to be found from there, or a copy is never offered again.
+
+    Flat and tool-prefixed, because my-rollout places a file but does not
+    create its parent: a request naming lib/my-plex/ fails with ERROR 00031.
+    It is also what global/lib already holds (my-rollout_steps-lib.sh)."""
 
     @classmethod
     def setUpClass(cls):
         cls._dir = tempfile.mkdtemp(prefix='my-plex-deployed-lib-')
         os.makedirs(os.path.join(cls._dir, 'bin'))
-        os.makedirs(os.path.join(cls._dir, 'lib', 'my-plex'))
+        os.makedirs(os.path.join(cls._dir, 'lib'))
         cls.copy = os.path.join(cls._dir, 'bin', 'my-plex')
         shutil.copy2(MAIN_SCRIPT, cls.copy)
         shutil.copy2(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex_tests.py'),
-                     os.path.join(cls._dir, 'lib', 'my-plex', 'my-plex_tests.py'))
+                     os.path.join(cls._dir, 'lib', 'my-plex_tests.py'))
 
     @classmethod
     def tearDownClass(cls):

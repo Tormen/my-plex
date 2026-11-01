@@ -368,8 +368,10 @@ so a copy that fails its tests is never promoted.
 The suite lives in `my-plex_tests.py` and is loaded only by `--run-tests` /
 `--unittest` -- never at import time, which is what once killed every command
 on a deployed copy. It is looked for beside the tool file (a checkout), then in
-`../lib/my-plex/` (deployed: `bin/my-plex` + `lib/my-plex/my-plex_tests.py`,
-which is how `.my-rollout.local` requests it). The tool tells the suite its own
+`../lib/` (deployed: `bin/my-plex` + `lib/my-plex_tests.py`, which is how
+`.my-rollout.local` requests it -- flat and tool-prefixed, like the
+`my-rollout_steps-lib.sh` already sitting there, because my-rollout places a
+file but does not create its parent directory). The tool tells the suite its own
 path as it loads it, because a third of the tests read the tool's source and on
 a deployed copy that file is `bin/my-plex`.
 

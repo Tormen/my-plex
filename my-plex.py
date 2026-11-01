@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "2048561"
-SCRIPT_RELEASE = "v3-28-g2048561"
+SCRIPT_COMMIT  = "994ebc0"
+SCRIPT_RELEASE = "v3-29-g994ebc0"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3884,7 +3884,9 @@ _test_mod: ModuleType | None = None
 
 def _test_mod_paths() -> "list[str]":
     """Where the test suite may sit, nearest first: beside this file (a
-    checkout), then ../lib/my-plex/ (deployed: bin/my-plex + lib/my-plex/).
+    checkout), then ../lib/ (deployed: bin/my-plex + lib/my-plex_tests.py,
+    which is where a tool's companion files go -- flat and tool-prefixed,
+    like my-rollout_steps-lib.sh beside it).
 
     Every symlink is followed first -- /LINKS/bin/my-plex is one -- so the
     search starts at the real file, not at the link that reached it.
@@ -3892,7 +3894,7 @@ def _test_mod_paths() -> "list[str]":
     _self = os.path.realpath(__file__)
     _dir = os.path.dirname(_self)
     return [os.path.join(_dir, "my-plex_tests.py"),
-            os.path.join(os.path.dirname(_dir), "lib", "my-plex", "my-plex_tests.py")]
+            os.path.join(os.path.dirname(_dir), "lib", "my-plex_tests.py")]
 
 
 def _load_test_mod() -> ModuleType:
@@ -3913,7 +3915,7 @@ def _load_test_mod() -> ModuleType:
                      + "".join(f"    {c}\n" for c in _tried)
                      + "Possible reasons:\n"
                      "  - this copy of my-plex was deployed without its suite; a copy made by\n"
-                     "    my-rollout carries it in ../lib/my-plex/\n"
+                     "    my-rollout carries it in ../lib/\n"
                      "  - my-plex_tests.py was moved, renamed or deleted")
     _test_mod = _mfs(_spec)
     _spec.loader.exec_module(_test_mod)
