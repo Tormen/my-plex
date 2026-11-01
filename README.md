@@ -144,6 +144,19 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Watch status** — mark watched/unwatched, set view offset
 - **Playlist management** — create, modify, delete playlists
 
+### Firewall rules (`--install`)
+- my-plex fetches from `api.themoviedb.org`, `api4.thetvdb.com` and
+  `www.fernsehserien.de`. Behind an interactive firewall the first connection
+  to each is held behind an alert — and a scheduled run has nobody to answer
+  it, so it stops talking with no error of its own.
+- **`--install`** shows the rules it would write, **`--install go`** writes
+  them (needs root). The rule names the Python that runs my-plex, because the
+  fetches use `urllib.request` and the interpreter is what opens the socket;
+  one consequence is that it also covers other scripts run by that same
+  Python, and there is no narrower form for a Python script.
+- Without the firewall tool it writes nothing and just names the hosts, so it
+  is safe to run anywhere. See `my-plex --help install`.
+
 ### Output control
 - **`-V` / `-VV`** — more detail for the reader; **`-D` / `-DD`** — diagnostics
   for debugging my-plex itself. Two independent axes; `-D` implies `-V`.
