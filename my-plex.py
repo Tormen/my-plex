@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "b9daee3"
-SCRIPT_RELEASE = "v3-42-gb9daee3"
+SCRIPT_COMMIT  = "c952a4e"
+SCRIPT_RELEASE = "v3-45-gc952a4e"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -260,8 +260,9 @@ def _print_version_and_exit():
     sys.exit(0)
 
 def _stamp_fail(code: str, msg: str) -> NoReturn:
-    # err() is defined further down; this runs before the venv bootstrap.
-    print(f"\nERROR #{code}: --stamp-version: {msg}\n", file=sys.stderr)
+    # err() is defined further down; this runs before the venv bootstrap, so
+    # the shape is repeated here rather than shared -- same format, same reason.
+    print(f"\nERROR {code} [1]: --stamp-version: {msg}\n", file=sys.stderr)
     sys.exit(1)
 
 def _stamp_version_and_exit(go: bool) -> NoReturn:
@@ -3481,9 +3482,17 @@ _RENAMED_FLAGS = {
 
 def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
     """Report and stop.  exit_code is for the few callers that must exit with
-    something other than 1 -- the top-level bug handler exits 70."""
+    something other than 1 -- the top-level bug handler exits 70.
+
+    `ERROR <code> [<exit>]: <text>` is the house shape.  The CODE is there to
+    be grepped for: it identifies the source line that raised this, and
+    nothing else in the message does.  The EXIT STATUS is printed beside it
+    because the code holds both and a caller sees only one of them -- so a
+    message claiming [1] while the process exits 70 is visible in ordinary
+    output instead of having to be debugged.
+    """
     if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
-    print(f"\nERROR #{err_code}: {err_msg}\n", file=sys.stderr)
+    print(f"\nERROR {err_code} [{exit_code}]: {err_msg}\n", file=sys.stderr)
     sys.exit(exit_code)
 
 def _build_version_string(duration_ms, width, height, video_codec, audio_codec, filesize, part_id, existing_files=None):
