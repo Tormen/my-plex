@@ -339,26 +339,39 @@ Use `my-plex --help <topic>` for detailed help on any command.
 ## Testing
 
 ```bash
-# List available test scopes
-my-plex --test
+# Run the whole suite
+my-plex --run-tests
 
-# Run all tests
-my-plex --test all
+# Run one scope
+my-plex --run-tests disk-map
+my-plex --run-tests commands
+my-plex --run-tests duplicates
 
-# Run tests for a specific scope
-my-plex --test disk-map
-my-plex --test commands
-my-plex --test duplicates
-my-plex --test renumber
-my-plex --test rename
+# Run the tests whose title matches -- what a change touches, in seconds
+my-plex --run-tests TestRename.test_siblings
 
-# Or with unittest flags
+# The legacy inline regression block, and unittest's own output
+my-plex --run-tests inline
 my-plex --unittest -v
 ```
 
-The suite lives in `my-plex_tests.py` beside `my-plex.py` and is loaded only by
-`--test` / `--unittest`.  A deployed copy of my-plex is the tool file alone, so
-run the tests in the source tree -- every other command works either way.
+A FILTER is a scope name if one matches, otherwise part of a test title; a
+FILTER that matches neither prints the scopes with their test counts. Exit 0
+when every test passed, 1 otherwise.
+
+It reports **TAP-style** -- the plan `1..N` first, then `ok K - title` /
+`not ok K - title` per test as it ends, flushed, so a reader can draw progress
+from the stream. `my-rollout go` reads exactly this: a pending copy whose
+`--help` names `--run-tests` has its own suite run before the copy is offered,
+so a copy that fails its tests is never promoted.
+
+The suite lives in `my-plex_tests.py` and is loaded only by `--run-tests` /
+`--unittest` -- never at import time, which is what once killed every command
+on a deployed copy. It is looked for beside the tool file (a checkout), then in
+`../lib/my-plex/` (deployed: `bin/my-plex` + `lib/my-plex/my-plex_tests.py`,
+which is how `.my-rollout.local` requests it). The tool tells the suite its own
+path as it loads it, because a third of the tests read the tool's source and on
+a deployed copy that file is `bin/my-plex`.
 
 ### Type checking
 
@@ -370,7 +383,7 @@ pyright --pythonpath ~/.python.venv/my-plex/bin/python3
 inside its own venv, and without it pyright cannot resolve `plexapi` or
 `readchar` and reports those imports as errors.
 
-`my-plex --test typecheck` runs the part of this that is already green -- no
+`my-plex --run-tests typecheck` runs the part of this that is already green -- no
 undefined and no possibly-unbound name in `my-plex.py` -- and is skipped when
 pyright is not installed.  The remaining findings are listed in the project's
 TODO.
@@ -391,7 +404,7 @@ my-plex --stamp-version go     # record HEAD in SCRIPT_COMMIT, amend HEAD
   commit that is already pushed, anything staged, or uncommitted edits to
   `my-plex.py` itself.
 - A tagged version number is never reused: once HEAD has moved past the tag
-  for `SCRIPT_VERSION`, bump it (`my-plex --test version` enforces this).
+  for `SCRIPT_VERSION`, bump it (`my-plex --run-tests version` enforces this).
 
 ## Contributing
 
