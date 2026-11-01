@@ -671,41 +671,6 @@ class TestRunToolOnPLEXServer(unittest.TestCase):
         with open(path, encoding='utf-8') as f:
             return f.read().splitlines()
 
-    def test_every_ssh_goes_through_the_options_helper(self):
-        """No ssh my-plex starts may become a FOREGROUND connection master.
-
-        With 'ControlMaster auto' and no ControlPersist in the user's ssh
-        config, a bare `ssh host` becomes the master and cannot exit while
-        another session rides on it -- the user's own later ssh to the Plex
-        server would keep my-plex waiting. _ssh_opts() carries ControlPersist,
-        so every call built from it is safe; a call that states ControlMaster
-        itself is its own decision. Anything else is the bug.
-        """
-        bad = []
-        for n, line in enumerate(self._script_lines(), 1):
-            code = line.split('#', 1)[0]
-            if 'NEVER use' in line:          # the docstrings that forbid it
-                continue
-            if "['ssh'," in code or "run_tool_locally('ssh'" in code:
-                if '_ssh_opts()' not in code and 'ControlMaster' not in code:
-                    bad.append(f"{n}: {line.strip()}")
-        self.assertEqual(bad, [], "ssh calls that bypass _ssh_opts():\n" + "\n".join(bad))
-
-    def test_ssh_opts_multiplex_safely_and_privately(self):
-        """_ssh_opts: auto only WITH ControlPersist, and the socket not in /tmp."""
-        text = "\n".join(self._script_lines())
-        import re
-        m = re.search(r"def _ssh_opts\(\).*?\n(?=\ndef )", text, re.DOTALL)
-        self.assertIsNotNone(m, "_ssh_opts() not found")
-        body = m.group(0)
-        self.assertIn("ControlMaster=auto", body)
-        self.assertIn("ControlPersist=", body,
-            "ControlMaster=auto without ControlPersist makes a foreground master")
-        self.assertNotIn("ControlPath=/tmp", body,
-            "the control socket belongs in a private directory, not the shared /tmp")
-        self.assertIn("ClearAllForwardings=yes", body,
-            "a tool's ssh must not set up the user's port forwards (VNC 5900 etc.)")
-
     def test_server_tool_not_found_locally(self):
         """shutil.which returns None for non-existent server tool."""
         import shutil
@@ -11833,6 +11798,25 @@ class TestRunTestsTAP(unittest.TestCase):
         self.assertIn('--run-tests', out, f"the old name must point at the new one:\n{out[-400:]}")
         self.assertNotEqual(r.returncode, 0, "the old name must not WORK, only be recognised")
 
+    def test_a_failed_subtest_reports_not_ok_on_its_own(self):
+        """A failed subTest never reaches addFailure -- unittest reports it
+        through addSubTest and calls stopTest once for the whole test.  The
+        line must be a plain `not ok`, because a reader collects the failures
+        by that word and shows the title beside it."""
+        import contextlib
+        result = _TAPResult(io.StringIO(), True, 0)
+        case = TestRunTestsTAP('test_a_passing_scope_exits_zero')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result.startTest(case)
+            result.addSubTest(case, case,
+                              (AssertionError, AssertionError('deliberate'), None))
+            result.stopTest(case)
+        line = buf.getvalue().strip()
+        self.assertTrue(line.startswith('not ok 1 - '), f"got {line!r}")
+        self.assertNotIn('no verdict', line,
+                         "the verdict must come from the subTest, not from its absence")
+
     def test_bare_run_tests_runs_the_whole_suite(self):
         """Running it here would cost minutes, so this pins the dispatch: bare
         --run-tests must reach the runner, never the scope listing."""
@@ -12091,6 +12075,76 @@ class TestTopLevelHandlers(unittest.TestCase):
         self.assertIn('sys.exit(exit_code)', src)
 
 
+class TestSshOptions(unittest.TestCase):
+    """One owner for the options every ssh my-plex starts carries.
+
+    The dangerous combination is `ControlMaster=auto` WITHOUT `ControlPersist`:
+    the first ssh then becomes the connection master and stays in the
+    FOREGROUND, and a master cannot exit while another session rides on it --
+    so a later interactive login of the user's keeps my-plex waiting long
+    after the remote has answered."""
+
+    def _opts(self, **kw):
+        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        return main_mod._ssh_opts(**kw)
+
+    def _joined(self, **kw):
+        return " ".join(self._opts(**kw))
+
+    def test_every_connection_can_fail_instead_of_waiting(self):
+        """BatchMode and ConnectTimeout, multiplexed or not: nobody is at the
+        keyboard to answer a key prompt, and a host that is off must fail."""
+        for kw in ({}, {'multiplex': False}):
+            with self.subTest(**kw):
+                joined = self._joined(**kw)
+                self.assertIn('BatchMode=yes', joined)
+                self.assertIn('ConnectTimeout=', joined)
+
+    def test_auto_is_never_used_without_controlpersist(self):
+        joined = self._joined()
+        if 'ControlMaster=auto' in joined:
+            self.assertIn('ControlPersist=', joined,
+                          "auto without ControlPersist leaves a FOREGROUND master")
+            self.assertIn('ControlPath=', joined,
+                          "a private ControlPath, not the shared default")
+            self.assertNotIn('ControlPath=/tmp', joined,
+                             "the control socket belongs in a private directory")
+
+    def test_the_user_s_port_forwards_are_not_set_up(self):
+        """A tool's connection must neither grab the user's VNC/SOCKS ports
+        nor fail because their own session already has them."""
+        for kw in ({}, {'multiplex': False}):
+            with self.subTest(**kw):
+                self.assertIn('ClearAllForwardings=yes', self._joined(**kw))
+
+    def test_the_parallel_workers_do_not_multiplex(self):
+        """They stream thousands of paths each; sharing one TCP connection
+        would serialise them, and past sshd's MaxSessions be refused."""
+        joined = self._joined(multiplex=False)
+        self.assertIn('ControlMaster=no', joined)
+        self.assertNotIn('ControlPersist=', joined)
+        self.assertNotIn('ControlPath=', joined)
+
+    def test_the_timeout_comes_from_the_config(self):
+        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        self.assertIn('SSH_CONNECT_TIMEOUT', main_mod.CONFIG_DEFAULTS,
+                      "a tunable belongs in the config file, not in the body")
+        self.assertIn(f"ConnectTimeout={main_mod.SSH_CONNECT_TIMEOUT}", self._joined())
+
+    def test_nothing_builds_an_ssh_command_line_by_hand(self):
+        """_ssh_args is the only place -- the function's own docstring has said
+        so for a while, and two callers were ignoring it."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        offenders = [f"line {n}" for n, line in enumerate(src.splitlines(), 1)
+                     if "['ssh'," in line.replace(" ", "")
+                     and '_ssh_opts(' not in line
+                     and not line.lstrip().startswith(('#', '"""', 'NEVER'))
+                     and 'NEVER use' not in line]
+        self.assertEqual(offenders, [],
+                         "an ssh built outside _ssh_args carries none of these options: "
+                         + ", ".join(offenders))
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -12159,7 +12213,7 @@ _UNITTEST_SCOPES = {
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
-    'tools':      [TestRunToolLocally, TestRunToolOnPLEXServer],
+    'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'config':     [TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
@@ -12223,7 +12277,17 @@ class _TAPResult(unittest.TextTestResult):
 
     def addSuccess(self, test):
         super().addSuccess(test)
-        self._tap_verdict = ('ok', '')
+        if self._tap_verdict is None:   # never overwrite a failed subTest
+            self._tap_verdict = ('ok', '')
+
+    def addSubTest(self, test, subtest, outcome):
+        # A failed subTest never reaches addFailure -- unittest reports it
+        # here and then calls stopTest once for the whole test.  Without this
+        # the line read "not ok ... # no verdict recorded", which is the right
+        # verdict for the wrong reason.
+        super().addSubTest(test, subtest, outcome)
+        if outcome is not None:
+            self._tap_verdict = ('not ok', '')
 
     def addFailure(self, test, err):
         super().addFailure(test, err)
