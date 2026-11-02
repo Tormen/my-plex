@@ -77,6 +77,29 @@ def _pick_any_series_key():
     return m.group(1) if m else None
 
 
+def _pick_any_title_word(lib):
+    """A word from the title of an item that exists in LIB here, or None.
+
+    `tagesschau` is one title in one person's library: on a machine without
+    it the search is correctly empty and the TEST is wrong, not the code
+    (ada, 2026-11-02, the last of that family). The key comes from a scoped
+    listing, so the item is one the same default scope lets through, and a
+    search for a word of its title therefore has something to return."""
+    import subprocess, re
+    rows = subprocess.run([sys.executable, MAIN_SCRIPT, lib, '--list'],
+                          capture_output=True, text=True, timeout=120)
+    m = re.search(r'^((?:Movie|Series|Season|Episode):\d+)', rows.stdout, re.MULTILINE)
+    if not m:
+        return None
+    info = subprocess.run([sys.executable, MAIN_SCRIPT, '--info', m.group(1)],
+                          capture_output=True, text=True, timeout=60)
+    t = re.search(r'^Title:\s*(.+)$', info.stdout, re.MULTILINE)
+    if not t:
+        return None
+    words = [w for w in re.findall(r'[A-Za-z]{4,}', t.group(1))]
+    return max(words, key=len).lower() if words else None
+
+
 def _registry_entry_block(content, category):
     """Return the source block of ONE PROBLEM_CATEGORIES_REGISTRY entry.
 
@@ -3590,6 +3613,7 @@ class TestDefaultScope(unittest.TestCase):
         libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
                                      capture_output=True, text=True, timeout=30)
         cls._any_lib = _pick_most_populated_library(libs_result.stdout)
+        cls._any_title_word = _pick_any_title_word(cls._any_lib) if cls._any_lib else None
 
     def _run(self, *args):
         """Run my-plex with these arguments.
@@ -3752,10 +3776,25 @@ class TestDefaultScope(unittest.TestCase):
         self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_cat_d_title_search_results(self):
-        """Title search must return items whose title matches the search term."""
-        result = self._run('tagesschau', '-V')
+        """Title search must return items whose title matches the search term.
+
+        The TERM is taken from a title in this install, never hard-coded.
+        What is NOT asserted, though the test name invites it: that every row
+        returned has the term in its own TITLE column. A search for a word of
+        a series title returns that series' EPISODES, whose titles do not
+        contain it -- `creatures` returns 187 episodes of a series listed in
+        German. The claim the output actually makes is the filter line, and
+        that is what the test beside this one checks.
+
+        No skip guard here on purpose: with no cache the term is None and
+        _run skips for every test in this class at once. A second guard in
+        this one test was written first and proved redundant."""
+        term = getattr(self, '_any_title_word', None)
+        result = self._run(term, '-V')
         lines = [l for l in result.stdout.splitlines() if l.startswith(('Movie:', 'Series:', 'Episode:', 'Season:'))]
-        self.assertTrue(len(lines) > 0, "Title search 'tagesschau' must return at least one result")
+        self.assertTrue(len(lines) > 0,
+                        f"Title search {term!r} -- a word from a title in this "
+                        f"install -- returned nothing")
 
     def test_cat_d_skips_help_topic(self):
         """--help <topic> must NOT treat the topic as a Cat-D title search."""
