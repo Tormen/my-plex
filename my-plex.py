@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "564ab9f"
-SCRIPT_RELEASE = "v3-51-g564ab9f"
+SCRIPT_COMMIT  = "cf7256f"
+SCRIPT_RELEASE = "v3-52-gcf7256f"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -111,26 +111,6 @@ def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
     print(f"\nERROR {err_code} [{exit_code}]: {err_msg}\n", file=sys.stderr)
     sys.exit(exit_code)
 
-
-# my-plex runs as the user whose Plex and whose media files these are, and as
-# nobody else.  ROOT is refused for every command, before anything else
-# happens at all, because as root this tool is wrong in two directions at
-# once: everything it keeps -- the venv it builds on first use, the cache,
-# the config it reads, the zsh completion it installs -- lands in /var/root
-# instead of that user's home, and everything it says about "the Python that
-# runs my-plex" (the firewall rule --install names) would name root's
-# interpreter, a process that never runs.  Nothing here needs privilege:
-# where a step genuinely does, --install prints the command for a root shell
-# and this tool writes nothing itself.
-if os.geteuid() == 0:
-    err("00001",
-        "my-plex does not run as root -- run it as the user whose Plex this is.\n"
-        f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
-        "Possible reasons:\n"
-        "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
-        "  - a rollout step: give it `# user: <that user>` instead of root\n"
-        "  - the firewall rules: run `my-plex --install` as that user -- it\n"
-        "    prints the root commands that write them, and writes none itself")
 
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
@@ -463,20 +443,54 @@ if any(a == '--install' or a.startswith('--install=') for a in _argv_rest):
                  f"  - `--install go` was the earlier shape -- drop the `go`\n"
                  f"  - a scope or a value was meant for another option")
 
-if any(a in ('--version', '-version') for a in sys.argv[1:]):
-    _print_version_and_exit()
-if '--stamp-version' in sys.argv[1:]:
-    _i = sys.argv.index('--stamp-version')
-    _stamp_version_and_exit(go=sys.argv[_i + 1:_i + 2] == ['go'])
-
 # A run that only PRINTS needs nothing from the venv, and must never build
 # one.  A deployment gate asks `my-plex --help` to find out what this tool
 # can do -- on a machine that may have neither the venv nor the network to
 # make one, and with nobody at the screen to answer for it.  Building an
 # environment in order to answer that question is how `--help` comes back
-# empty and a copy goes out untested.  (--version and --stamp-version are
-# answered further up, before even this.)
-_PRINT_ONLY_RUN = any(a in ('--help', '-h') for a in sys.argv[1:])
+# empty and a copy goes out untested.  The bare run is one of these: it
+# prints the usage, so it must not build an environment to do it either.
+#
+# The ROOT rule below reads the same predicate, because it is the same
+# question asked twice: does this run need anything of the user's?  A run
+# that only prints needs nothing -- not the venv, not the cache, not the
+# config -- so there is nothing for root to put in the wrong home, and
+# refusing it would only hide the help from whoever is in a root shell.
+_VERSION_ASKED = any(a in ('--version', '-version') for a in sys.argv[1:])
+_PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
+                   or any(a in ('--help', '-h') for a in sys.argv[1:]))
+
+if _VERSION_ASKED:
+    _print_version_and_exit()
+
+# my-plex runs as the user whose Plex and whose media files these are, and as
+# nobody else.  ROOT is refused for every command that DOES anything, because
+# as root this tool is wrong in two directions at once: everything it keeps
+# -- the venv it builds on first use, the cache, the config it reads, the zsh
+# completion it installs -- lands in /var/root instead of that user's home,
+# and everything it says about "the Python that runs my-plex" (the firewall
+# rule --install names) would name root's interpreter, a process that never
+# runs.  Nothing here needs privilege: where a step genuinely does, --install
+# prints the command for a root shell and this tool writes nothing itself.
+#
+# It comes BEFORE the venv bootstrap below -- a refusal that fires after
+# /var/root/.python.venv exists is too late to be one -- and AFTER the runs
+# that only print, which is what _PRINT_ONLY_RUN above is for.
+if os.geteuid() == 0 and not _PRINT_ONLY_RUN:
+    err("00001",
+        "my-plex does not run as root -- run it as the user whose Plex this is.\n"
+        f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
+        "Possible reasons:\n"
+        "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
+        "  - a rollout step: give it `# user: <that user>` instead of root\n"
+        "  - the firewall rules: run `my-plex --install` as that user -- it\n"
+        "    prints the root commands that write them, and writes none itself\n"
+        "  - only READING what this tool is: `my-plex`, `--help` and\n"
+        "    `--version` print and touch nothing, so they work as root")
+
+if '--stamp-version' in sys.argv[1:]:
+    _i = sys.argv.index('--stamp-version')
+    _stamp_version_and_exit(go=sys.argv[_i + 1:_i + 2] == ['go'])
 
 # If we're not already running inside our venv, bootstrap it.
 #
@@ -3636,8 +3650,9 @@ def cmd_install() -> NoReturn:
     """--install -- the firewall rules my-plex needs, as root commands.
 
     WRITING a rule needs root: littlesnitch refuses anyone else, even to
-    list.  my-plex does not run as root (see the refusal at the top of this
-    file), so it prints the exact commands and writes nothing -- the same
+    list.  my-plex does not run as root (see the refusal beside
+    _PRINT_ONLY_RUN in this file), so it prints the exact commands and writes
+    nothing -- the same
     shape as --create-config, which prints a config for the user to place.
     A rollout step as root is what runs them.
 

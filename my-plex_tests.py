@@ -13127,7 +13127,8 @@ class TestInstallFirewallRules(unittest.TestCase):
 
 
 class TestNeverRunsAsRoot(unittest.TestCase):
-    """my-plex refuses euid 0, for every command, before anything else runs.
+    """my-plex refuses euid 0 for every command that DOES anything, before
+    that command gets anywhere -- and answers the ones that only PRINT.
 
     As root it would be wrong in two directions at once: the venv, the cache,
     the config and the completion all land in /var/root instead of the user's
@@ -13142,7 +13143,7 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         created /var/root/.python.venv is too late to be one."""
         with open(MAIN_SCRIPT) as f:
             src = f.read()
-        refusal = src.find('if os.geteuid() == 0:')
+        refusal = src.find('if os.geteuid() == 0 and not _PRINT_ONLY_RUN:')
         self.assertGreater(refusal, -1, "the root refusal is gone")
         bootstrap = src.find('_bootstrap_venv()\n')
         self.assertGreater(bootstrap, -1, "the venv bootstrap call is gone")
@@ -13154,13 +13155,13 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         it is forced true in a copy that differs in nothing else."""
         with open(MAIN_SCRIPT) as f:
             src = f.read()
-        self.assertEqual(src.count('if os.geteuid() == 0:'), 1,
+        self.assertEqual(src.count('os.geteuid() == 0'), 1,
                          "more than one root check: this test neuters the wrong one")
         d = tempfile.mkdtemp(prefix='my-plex-asroot-')
         try:
             copy = os.path.join(d, 'my-plex.py')
             with open(copy, 'w') as f:
-                f.write(src.replace('if os.geteuid() == 0:', 'if True:', 1))
+                f.write(src.replace('os.geteuid() == 0', 'True', 1))
             os.chmod(copy, 0o755)
             home = os.path.join(d, 'home')
             os.makedirs(home)
@@ -13174,6 +13175,44 @@ class TestNeverRunsAsRoot(unittest.TestCase):
             self.assertIn('does not run as root', r.stderr)
             self.assertFalse(os.path.exists(os.path.join(home, '.python.venv')),
                              "it got as far as building a venv before refusing")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_as_root_the_runs_that_only_print_are_answered(self):
+        """Reading what a tool is, is not using it.  A root shell asking
+        `my-plex --help` -- or a deployment gate doing it -- gets the help,
+        because a run that only prints needs nothing of the user's: no venv,
+        no cache, no config, so there is nothing to land in /var/root.
+
+        Adversarial: the assertion is not that the three exit 0 (they do as
+        any user), but that they do so with the euid forced to 0, and WITHOUT
+        a venv appearing in that HOME.  Put the refusal back above them and
+        all three come back as ERROR 00001.
+        """
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        d = tempfile.mkdtemp(prefix='my-plex-rootprint-')
+        try:
+            copy = os.path.join(d, 'my-plex.py')
+            with open(copy, 'w') as f:
+                f.write(src.replace('os.geteuid() == 0', 'True', 1))
+            os.chmod(copy, 0o755)
+            for argv, what in (([], 'the bare run'), (['--help'], '--help'),
+                               (['--version'], '--version')):
+                home = os.path.join(d, 'home' + (argv[0] if argv else 'bare'))
+                os.makedirs(home)
+                r = subprocess.run([sys.executable, copy, *argv],
+                                   capture_output=True, text=True, timeout=60,
+                                   env=dict(os.environ, HOME=home,
+                                            PYTHONDONTWRITEBYTECODE='1'))
+                self.assertEqual(r.returncode, 0,
+                                 f"{what} as root: exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertNotIn('00001', r.stderr,
+                                 f"{what} as root was refused:\n{r.stderr!r}")
+                self.assertIn('my-plex', r.stdout,
+                              f"{what} as root printed nothing of its own:\n{r.stdout[:200]!r}")
+                self.assertFalse(os.path.exists(os.path.join(home, '.python.venv')),
+                                 f"{what} built a venv just to print")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
