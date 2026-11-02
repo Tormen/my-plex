@@ -75,8 +75,8 @@
 # runtime on a machine with no git and no checkout.  Empty = unstamped.
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION = "v3"
-SCRIPT_COMMIT  = "5027be8"
-SCRIPT_RELEASE = "v3-47-g5027be8"
+SCRIPT_COMMIT  = "564ab9f"
+SCRIPT_RELEASE = "v3-51-g564ab9f"
 SCRIPT_COPYRIGHT = "Copyright (C) 2026 Tormen <tormen@mail.ch>"
 SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
@@ -3588,6 +3588,19 @@ _RENAMED_FLAGS = {
     '--original-languages': '--update-cache',
 }
 
+def _little_snitch_owner() -> str:
+    """Whose rule: this user, whose Python the rule names.
+
+    Named explicitly rather than left to the firewall tool's own configured
+    default, because --install prints commands that run AS ROOT -- so the
+    default is read in root's context, not here.  One machine's default named
+    a user that does not exist there, and every call failed with "no such
+    user" (2026-11-02); the user running my-plex is never a guess.
+    """
+    import pwd  # POSIX-only, as is the firewall tool -- not at import time
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
 def _little_snitch_rules():
     """The rule my-plex needs per host, as my-little-snitch argument lists.
 
@@ -3607,13 +3620,16 @@ def _little_snitch_rules():
     Python script, so the breadth is inherent, not a choice made here -- and
     --install prints it rather than leaving it to be discovered.
 
-    NOT PROVEN: this path is a venv's bin/python3, which is a SYMLINK to the
-    interpreter the venv was built from, so the binary the kernel executes is
-    that base one.  Whether the firewall stores the venv path as given or the
-    one it resolves to has not been observed -- a rollout step looks at what
-    it actually recorded before any rule is relied on.
+    OBSERVED (2026-11-02, by the rollout step that wrote these rules): this
+    path is a venv's bin/python3, a SYMLINK to the interpreter the venv was
+    built from, and that base one is what the firewall stores -- with its
+    version folder made a '*', so a patch upgrade keeps the rule.  It does
+    name the Python MINOR version, so the next minor needs its own rules.
+    A rule naming a path that does not exist is refused outright.
     """
-    return [([sys.executable, host], why) for host, why in NETWORK_HOSTS]
+    owner = _little_snitch_owner()
+    return [([sys.executable, host, "--owner", owner], why)
+            for host, why in NETWORK_HOSTS]
 
 
 def cmd_install() -> NoReturn:
@@ -3636,6 +3652,9 @@ def cmd_install() -> NoReturn:
     print(f"    > process: {sys.executable}")
     print(f"    > (the Python that runs my-plex -- it opens the socket, so the")
     print(f"       rule also covers other scripts run by this same Python)")
+    print(f"    > owner:   {_little_snitch_owner()} -- whose rule it is")
+    print(f"    > (named in the command: it runs as ROOT, so the firewall")
+    print(f"       tool would otherwise take ITS default owner, not this user)")
     print()
 
     if not os.path.isfile(cli):
@@ -32462,6 +32481,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("rule would name root's Python, a process that never runs. So")
             print("--install prints the commands and writes nothing; run them in a")
             print("root shell, or let a rollout step do it.")
+            print()
+            print("Each command names the rule's OWNER -- this user, whose")
+            print("Python the rule is about. It has to be named: the command")
+            print("runs as root, so an unnamed owner is whatever the firewall")
+            print("tool's own configuration says there.")
             print()
             print("Without my-little-snitch installed, --install prints no commands")
             print("and just names the hosts to allow in whatever firewall you run.")

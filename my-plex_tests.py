@@ -13078,6 +13078,36 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_the_printed_command_names_the_owner(self):
+        """A rule has an owner, and the printed command runs as ROOT -- so an
+        unnamed owner is read in root's context, from the firewall tool's own
+        configured default.  One machine's default named a user that does not
+        exist there, and all three calls failed with "no such user"
+        (2026-11-02).  The owner is this user, whose Python the rule names.
+
+        Adversarial: the assertion is not that `--owner` appears, but that it
+        carries THIS user -- a hard-coded name passes the first and fails
+        this."""
+        import pwd
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        d, conf = self._conf('/bin/true')
+        stub = os.path.join(d, 'my-little-snitch')
+        with open(stub, 'w') as f:
+            f.write('#!/bin/dash\nexit 0\n')
+        os.chmod(stub, 0o755)
+        with open(conf, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+        try:
+            r = self._run('--config', conf, '--install')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            lines = [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
+            self.assertTrue(lines, f"no printed command:\n{r.stdout[-600:]}")
+            for ln in lines:
+                self.assertIn(f'--owner {me}', ln,
+                              f"the command leaves the owner to root's default: {ln}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_go_is_answered_rather_than_passed_through(self):
         """`--install go` was the earlier shape. Someone who types it gets told
         what changed, not argparse's `Invalid parameter`."""
