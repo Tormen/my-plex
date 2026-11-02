@@ -5512,7 +5512,30 @@ class TestShowInfoSeasonTable(unittest.TestCase):
 
 
 class TestEpisodesErr(unittest.TestCase):
-    """Test episodes.err read/write/clear functions and --problems TSV integration."""
+    """episodes.err read/write/clear, and the --problems TSV that reads it.
+
+    Every test here asserts a LOCAL file, so each one covers the FALLBACK
+    path: write_episodes_err writes on the Plex SERVER over ssh and writes
+    locally only when that fails. Which means these tests passed exactly
+    where the ssh was broken -- and failed on horse in a full run, where an
+    earlier test had already opened the shared connection, so the ssh
+    SUCCEEDED and the file landed on the server (2026-11-02). Nothing about
+    the test was wrong except what it depended on.
+
+    So the ssh is made to fail deterministically, on every machine, instead
+    of being left to chance. What happens against a REACHABLE server is not
+    covered here, and a test for that needs a stub transport, not a host."""
+
+    def setUp(self):
+        """Point the server alias at a name that cannot resolve. `.invalid`
+        never does (RFC 2606), and _ssh_opts already carries BatchMode and
+        ConnectTimeout, so the attempt fails at once rather than waiting."""
+        self._main = sys.modules[write_episodes_err.__module__]
+        self._saved_host = self._main.PLEX_DB_REMOTE_HOST
+        self._main.PLEX_DB_REMOTE_HOST = 'my-plex-tests-no-such-host.invalid'
+
+    def tearDown(self):
+        self._main.PLEX_DB_REMOTE_HOST = self._saved_host
 
     def test_write_read_roundtrip(self):
         """Write episodes.err and read it back, verify data integrity."""
