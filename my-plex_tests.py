@@ -3322,24 +3322,38 @@ class TestFilter(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Skip all filter tests when the cache has no media (run --update-cache first).
-        Also discover a library name to use for scoped tests — picked dynamically
-        from --list-libraries so the test suite stays agnostic of the user's
-        actual library names: every install names them differently."""
+        """Discover, once, whether this machine has media to filter and which
+        library to use -- picked from --list-libraries, never hard-coded,
+        since every install names its libraries differently.
+
+        It records the answer; it does NOT raise SkipTest. A class-level skip
+        reports ONE line for the whole class while the TAP plan has already
+        announced every test in it, so 26 tests here were announced and never
+        reported -- which is exactly the 1176-vs-1150 gap my-rollout's gate
+        saw on ada (2026-11-02). The plan must equal what reports, so the
+        decision belongs in each test, where it prints its own `# SKIP`."""
         import subprocess
         result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list'],
                                 capture_output=True, text=True, timeout=30)
-        if 'No items match' in result.stdout or not result.stdout.strip():
-            raise unittest.SkipTest(
-                "Cache is empty — run 'my-plex --update-cache' to populate it first")
-        # Pick first cached library name for scoped tests
-        libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
-                                     capture_output=True, text=True, timeout=30)
+        cls._has_media = not ('No items match' in result.stdout
+                              or not result.stdout.strip())
         cls._any_lib = None
-        cls._any_lib = _pick_most_populated_library(libs_result.stdout)
+        if cls._has_media:
+            libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
+                                         capture_output=True, text=True, timeout=30)
+            cls._any_lib = _pick_most_populated_library(libs_result.stdout)
+
+    def setUp(self):
+        """Per-test, so each announced test reports a line of its own."""
+        if not getattr(self, '_has_media', False):
+            self.skipTest("this machine's cache has no media to filter "
+                          "-- run `my-plex --update-cache` here")
 
     def _run(self, *args):
         import subprocess
+        if any(a is None for a in args):
+            self.skipTest("no library in this machine's cache for a scoped "
+                          "test -- run `my-plex --update-cache` here")
         return subprocess.run([sys.executable, MAIN_SCRIPT] + list(args),
                               capture_output=True, text=True, timeout=30)
 
@@ -11949,6 +11963,42 @@ class TestRunTestsTAP(unittest.TestCase):
         self.assertIsNotNone(first, "no result line at all")
         self.assertLess(plan.start(), first.start(),
                         f"a result came before the plan:\n{self.out[:300]}")
+
+    def test_no_class_skips_in_setUpClass(self):
+        """A class-level skip breaks the plan, and no filtered run shows it.
+
+        `raise SkipTest` in setUpClass makes unittest report ONE skip for the
+        class, while the plan -- taken from the suite before anything runs --
+        has already announced every test in it. On ada that was 26 tests
+        announced and never reported (1176 vs 1150), and my-rollout's gate
+        was right to read it as 26 missing. The skip has to be per test, in
+        setUp or in the test, so each announced test prints its own line."""
+        import inspect, textwrap
+        offenders = []
+        for cls in _UNITTEST_CLASSES:
+            f = cls.__dict__.get('setUpClass')
+            if f is None:
+                continue
+            try:
+                tree = ast.parse(textwrap.dedent(inspect.getsource(f)))
+            except (OSError, SyntaxError):
+                continue
+            # the CODE, not the text: a first version grepped the source and
+            # was fooled by a docstring that said "does NOT raise SkipTest"
+            skips = any(
+                (isinstance(node, ast.Raise) and node.exc is not None
+                 and 'SkipTest' in ast.dump(node.exc))
+                or (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'skipTest')
+                for node in ast.walk(tree))
+            if skips:
+                n = unittest.TestLoader().loadTestsFromTestCase(cls).countTestCases()
+                offenders.append(f"{cls.__name__} ({n} test(s))")
+        self.assertEqual(offenders, [],
+                         "these classes skip in setUpClass, so their tests are "
+                         "announced by the plan and never reported: "
+                         + ", ".join(offenders))
 
     def test_the_plan_counts_the_tests_that_reported(self):
         plan = int(re.search(r'^1\.\.(\d+)$', self.out, re.M).group(1))
