@@ -22,11 +22,69 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import importlib.machinery
+import importlib.util
 
 # The tool overrides this when it loads the suite (_load_test_mod): only it
 # knows its own file, which on a deployed copy is bin/my-plex.  This value is
 # the fallback for running the suite straight out of a checkout.
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
+
+
+def _import_tool(module_name='mp', argv=None, path=None):
+    """Import my-plex itself as a module, whatever its file is CALLED.
+
+    spec_from_file_location() chooses a loader from the FILE NAME and answers
+    None for a name it cannot place.  The deployed copy is `bin/my-plex` with
+    no extension, so it answered None there and module_from_spec() raised
+    AttributeError on it: `my-plex --run-tests` failed in seven scopes on
+    every machine while every gate run stayed green, because the gate tests a
+    pending copy still called my-plex.py.  Naming the loader is what makes
+    the file name irrelevant.
+
+    The file is MAIN_SCRIPT -- which the tool overrides to its own realpath
+    -- and never a path rebuilt from THIS file's directory: beside the
+    deployed suite in global/lib there is no my-plex.py to find.
+
+    `argv` is what the module body sees while it runs, restored afterwards:
+    the body acts on argv (-Q, --version, the venv re-exec), and the default
+    is a bare run, the quietest import there is.  A SystemExit from the body
+    is the script answering that argv, not a failure to import.
+    """
+    path = path or MAIN_SCRIPT
+    spec = importlib.util.spec_from_file_location(
+        module_name, path,
+        loader=importlib.machinery.SourceFileLoader(module_name, path))
+    assert spec is not None and spec.loader is not None  # the loader is named
+    mod = importlib.util.module_from_spec(spec)
+    saved_argv = sys.argv[:]
+    sys.argv = list(argv) if argv is not None else [sys.argv[0]]
+    try:
+        spec.loader.exec_module(mod)
+    except SystemExit:
+        pass
+    finally:
+        sys.argv = saved_argv
+    return mod
+
+
+def _tool_import_snippet(argv, path=None):
+    """The same import, written out for the probes that run in a CHILD
+    interpreter: it binds `mp`, with sys.argv set before the module body runs.
+
+    A child cannot call _import_tool, so the two lines that make an
+    extensionless file loadable are spelled out once here -- two forms of one
+    rule, rather than nine copies of it.
+    """
+    return (
+        "import sys, os, importlib.util, importlib.machinery\n"
+        "sys.argv = %r\n"
+        "_p = %r\n"
+        "_spec = importlib.util.spec_from_file_location('mp', _p,\n"
+        "    loader=importlib.machinery.SourceFileLoader('mp', _p))\n"
+        "mp = importlib.util.module_from_spec(_spec)\n"
+        "_spec.loader.exec_module(mp)\n"
+    ) % (list(argv), path or MAIN_SCRIPT)
 
 
 def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
@@ -710,7 +768,7 @@ class TestRunToolOnPLEXServer(unittest.TestCase):
     """Tests for run_tool_on_PLEX_server() concept."""
 
     def _script_lines(self):
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'my-plex.py')
+        path = MAIN_SCRIPT
         with open(path, encoding='utf-8') as f:
             return f.read().splitlines()
 
@@ -5438,7 +5496,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_rename_single_episode_uses_shared_primitive(self):
         """_rename_single_episode should delegate to _rename_episode_file (code structure check)."""
-        src_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
+        src_path = MAIN_SCRIPT
         with open(src_path, 'r') as f:
             src = f.read()
         # Find _rename_single_episode body and verify it calls _rename_episode_file
@@ -5450,7 +5508,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_sort_new_uses_build_sxex_filename(self):
         """cmd_sort_new should use _build_sxex_filename instead of hardcoded f-strings."""
-        src_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
+        src_path = MAIN_SCRIPT
         with open(src_path, 'r') as f:
             src = f.read()
         # Find cmd_sort_new and verify no hardcoded S{season:02d}E{ep_num:02d} in new_name assignments
@@ -5805,11 +5863,7 @@ class TestSortNewScanLocations(unittest.TestCase):
     """v2.58: SORT_NEW_SCAN_LOCATIONS config + _parse_sort_new_locations()."""
 
     def _import_main(self):
-        import importlib.util, os
-        spec = importlib.util.spec_from_file_location('mp', MAIN_SCRIPT)
-        mp = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mp)
-        return mp
+        return _import_tool()
 
     def test_default_locations(self):
         """Default must include '.' plus 's0x' and ',new' subdir scans."""
@@ -6387,11 +6441,9 @@ class TestMismatched(unittest.TestCase):
 
     def test_detect_multi_version_count(self):
         """_detect_multi_version_mismatch must flag count > limit."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("my_plex_mod", MAIN_SCRIPT)
-        mod = importlib.util.module_from_spec(spec)
-        # Don't execute (heavy); just inspect _detect_multi_version_mismatch via AST patterns.
-        # Instead, integration-test the logic via the script content:
+        # The tool is not imported here -- the asserts below read its SOURCE,
+        # which is cheaper.  The spec that used to be built and never used is
+        # what made this test fail on a copy called my-plex, not my-plex.py.
         content = self._read_script()
         self.assertIn("len(files) > limit", content)
         self.assertIn("duration spread", content)
@@ -9662,20 +9714,7 @@ class TestUnmatchedResolve(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import importlib.util, sys as _sys, os as _os
-        here = _os.path.dirname(_os.path.realpath(__file__))
-        spec = importlib.util.spec_from_file_location('_myplex_under_test',
-            _os.path.join(here, 'my-plex.py'))
-        cls.m = importlib.util.module_from_spec(spec)
-        # Stub argv so the script doesn't try to parse args during import
-        _saved_argv = _sys.argv[:]
-        _sys.argv = [_sys.argv[0]]
-        try:
-            spec.loader.exec_module(cls.m)
-        except SystemExit:
-            pass  # argparse exit during import is expected for this script
-        finally:
-            _sys.argv = _saved_argv
+        cls.m = _import_tool('_myplex_under_test')
 
     # ------- _slugify_title_for_wrapper -------
 
@@ -9915,9 +9954,7 @@ class TestAudioLangPureVsCompleted(unittest.TestCase):
     """
 
     def _read_script(self):
-        import os
-        here = os.path.dirname(os.path.realpath(__file__))
-        with open(os.path.join(here, 'my-plex.py'), 'r') as f:
+        with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
     def test_pure_plex_view_assigned_in_cache_build(self):
@@ -9990,9 +10027,7 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
     Plex's metadata is empty or 'unknown'."""
 
     def _read_script(self):
-        import os
-        here = os.path.dirname(os.path.realpath(__file__))
-        with open(os.path.join(here, 'my-plex.py'), 'r') as f:
+        with open(MAIN_SCRIPT, 'r') as f:
             return f.read()
 
     def test_fallback_called_during_cache_build(self):
@@ -10112,19 +10147,7 @@ class TestSyncDispatchAndDoubleMarkerFix(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _load_main_mod(self):
-        import importlib.util, sys as _sys, os as _os
-        here = _os.path.dirname(_os.path.realpath(__file__))
-        spec = importlib.util.spec_from_file_location('_myplex_marker', _os.path.join(here, 'my-plex.py'))
-        m = importlib.util.module_from_spec(spec)
-        saved_argv = _sys.argv[:]
-        _sys.argv = [_sys.argv[0]]
-        try:
-            spec.loader.exec_module(m)
-        except SystemExit:
-            pass
-        finally:
-            _sys.argv = saved_argv
-        return m
+        return _import_tool('_myplex_marker')
 
     def test_apply_markers_rejects_raw_True_string(self):
         """WATCHED='True' (str) must NOT produce a [True] marker."""
@@ -10164,18 +10187,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import importlib.util, sys as _sys, os as _os
-        here = _os.path.dirname(_os.path.realpath(__file__))
-        spec = importlib.util.spec_from_file_location('_myplex_v269', _os.path.join(here, 'my-plex.py'))
-        cls.m = importlib.util.module_from_spec(spec)
-        saved_argv = _sys.argv[:]
-        _sys.argv = [_sys.argv[0]]
-        try:
-            spec.loader.exec_module(cls.m)
-        except SystemExit:
-            pass
-        finally:
-            _sys.argv = saved_argv
+        cls.m = _import_tool('_myplex_v269')
 
     def _read_script(self):
         with open(MAIN_SCRIPT, 'r') as f:
@@ -11921,6 +11933,59 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
         self.assertNotIn('FileNotFoundError', out, out[-1500:])
         self.assertEqual(r.returncode, 0, out[-1500:])
 
+    def test_the_copy_imports_itself_although_its_file_has_no_py(self):
+        """THE adversarial case, and the one the gate cannot see.
+
+        Seven scopes import my-plex as a module.  The gate runs a pending
+        copy whose file is still called my-plex.py, so they pass there; a
+        DEPLOYED copy is `bin/my-plex`, and spec_from_file_location() answers
+        None for a name with no extension.  Measured on horse 2026-11-03,
+        the same bytes both times: 4 ok as my-plex.py, 2 of 4 not ok as
+        my-plex.
+
+        So the probe runs against THIS fixture's extensionless copy, through
+        the one helper all nine sites now use -- take the explicit loader out
+        of it and this test is the first thing that says so.
+        """
+        snippet = _tool_import_snippet(['my-plex', '--help'], path=self.copy) + (
+            "os.write(2, b'IMPORTED ' + mp.__file__.encode())\n"
+        )
+        r = subprocess.run([sys.executable, '-B', '-c', snippet],
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout + r.stderr
+        self.assertNotIn("has no attribute 'loader'", out,
+                         "spec_from_file_location() answered None for "
+                         f"{self.copy}:\n{out[-900:]}")
+        self.assertIn('IMPORTED', r.stderr,
+                      f"the copy did not import:\n{out[-1200:]}")
+        self.assertIn(self.copy, r.stderr,
+                      "it imported something other than the copy")
+        self.assertEqual(r.returncode, 0, out[-900:])
+
+    def test_only_main_script_knows_where_the_tool_is(self):
+        """MAIN_SCRIPT is the one owner of "where is the tool", because only
+        the tool can answer it: it overrides MAIN_SCRIPT with its own realpath
+        when it loads this suite.  A site that rebuilds the path from THIS
+        file's directory instead gets <tests dir>/my-plex.py -- right in a
+        checkout by accident, and absent beside the deployed suite in
+        global/lib, where there is no my-plex.py at all.
+
+        Five sites had leaked that way (two _read_script copies against ~70
+        correct ones, and three inline), so the convention is now grepped
+        rather than remembered.  Fixture paths like os.path.join(d,
+        'my-plex.py') are a COPY this suite makes, not a guess at where the
+        tool lives, so they are not matched.
+        """
+        tool_file = 'my-plex' + '.py'   # split, so this test cannot match itself
+        with open(os.path.realpath(__file__)) as f:
+            lines = f.read().splitlines()
+        leaks = [f"{n}: {l.strip()}" for n, l in enumerate(lines, 1)
+                 if '__file__' in l and tool_file in l
+                 and not l.startswith('MAIN_SCRIPT =')]
+        self.assertEqual(leaks, [],
+                         "these derive the tool's path from this file instead "
+                         "of using MAIN_SCRIPT:\n  " + "\n  ".join(leaks))
+
     def test_help_answers_without_a_venv_and_does_not_build_one(self):
         """The gate asks `--help` to find out what a tool can do, on a machine
         that may have neither the venv nor the network to make one, with
@@ -12652,16 +12717,12 @@ class TestQuiet(unittest.TestCase):
         would still pass, because they only exercise Python's own print().
         Redirecting the descriptor is what makes the claim true, and this is
         the test that can tell the two apart."""
-        snippet = (
-            "import sys, subprocess, os, importlib.util\n"
-            "sys.argv = ['my-plex.py', '-Q']\n"
-            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
-            "mp = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(mp)\n"          # module level acts on -Q
+        snippet = _tool_import_snippet(['my-plex.py', '-Q']) + (   # -Q acts at module level
+            "import subprocess\n"
             "assert mp._QUIET_ACTIVE, 'the module did not go quiet'\n"
             "subprocess.run(['/bin/echo', 'LEAKED_FROM_CHILD'])\n"
             "os.write(2, b'child-ran\\n')\n"
-        ) % (MAIN_SCRIPT,)
+        )
         r = subprocess.run([sys.executable, '-B', '-c', snippet],
                            capture_output=True, text=True, timeout=120)
         self.assertIn('child-ran', r.stderr,
@@ -12674,15 +12735,10 @@ class TestQuiet(unittest.TestCase):
         stdin -- a hang with nothing on screen to explain it.  Under -Q the
         one place that asks refuses instead, and names the flags that answer
         in advance."""
-        snippet = (
-            "import sys, importlib.util\n"
-            "sys.argv = ['my-plex.py']\n"
-            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
-            "mp = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(mp)\n"
+        snippet = _tool_import_snippet(['my-plex.py']) + (
             "mp._QUIET_ACTIVE = True\n"
             "mp.prompt_yes_no('Trash 400 files?')\n"
-        ) % (MAIN_SCRIPT,)
+        )
         r = subprocess.run([sys.executable, '-B', '-c', snippet],
                            capture_output=True, text=True, timeout=120)
         self.assertNotEqual(r.returncode, 0, "it did not refuse")
@@ -12692,17 +12748,12 @@ class TestQuiet(unittest.TestCase):
     def test_an_answer_given_in_advance_is_still_honoured_under_Q(self):
         """-Y/--yes is the tool's own answer for an unattended run, so -Q must
         not turn a pre-answered question into a refusal."""
-        snippet = (
-            "import sys, importlib.util\n"
-            "sys.argv = ['my-plex.py']\n"
-            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
-            "mp = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(mp)\n"
+        snippet = _tool_import_snippet(['my-plex.py']) + (
             "mp._QUIET_ACTIVE = True\n"
             "mp.AUTO_YES = True\n"
             "assert mp.prompt_yes_no('Trash 400 files?') is True\n"
-            "import os; os.write(2, b'answered\\n')\n"
-        ) % (MAIN_SCRIPT,)
+            "os.write(2, b'answered\\n')\n"
+        )
         r = subprocess.run([sys.executable, '-B', '-c', snippet],
                            capture_output=True, text=True, timeout=120)
         self.assertIn('answered', r.stderr, r.stderr[-700:])
@@ -12758,16 +12809,11 @@ class TestVenvDetection(unittest.TestCase):
         """Import my-plex under `interpreter`, point it at the temp venv, and
         have it answer _inside_our_venv().  --help in argv keeps the module's
         own venv block from re-execing while we are asking."""
-        snippet = (
-            "import sys, os, importlib.util\n"
-            "sys.argv = ['my-plex.py', '--help']\n"
-            "spec = importlib.util.spec_from_file_location('mp', %r)\n"
-            "mp = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(mp)\n"
+        snippet = _tool_import_snippet(['my-plex.py', '--help']) + (
             "mp.VENV_DIR = %r\n"
             "mp.VENV_PYTHON = os.path.join(mp.VENV_DIR, 'bin', 'python3')\n"
             "os.write(2, (b'ANSWER=' + str(mp._inside_our_venv()).encode()))\n"
-        ) % (MAIN_SCRIPT, self.venv)
+        ) % (self.venv,)
         r = subprocess.run([interpreter, '-B', '-c', snippet],
                            capture_output=True, text=True, timeout=180)
         self.assertIn('ANSWER=', r.stderr,
