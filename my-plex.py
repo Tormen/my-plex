@@ -3087,10 +3087,16 @@ PLEX_DB_PATH = CONFIG_DEFAULTS['PLEX_DB_PATH']
 PLEX_DB_REMOTE_HOST = CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST']
 LITTLE_SNITCH_CLI = CONFIG_DEFAULTS['LITTLE_SNITCH_CLI']
 
-# Every host this tool connects to, and what for.  ONE owner: --install names
-# a firewall rule per entry, and a new scraper or API adds its host HERE.  Each
-# is fetched with urllib.request from this Python -- no curl, no ssh -- so a
+# Every host this tool FETCHES from, and what for.  A new scraper or API adds
+# its host HERE.  Each is fetched with urllib.request from this Python, so a
 # firewall sees the Python interpreter connecting, not my-plex.
+#
+# NOT the whole set of remotes, and the comment here used to say it was ("no
+# curl, no ssh"), which was false on both counts for the firewall's purposes:
+# my-plex also talks to the Plex server's API (_plex_remote), to that server
+# over SSH (_ssh_remote -- nine call sites run ssh), and to pypi.org when it
+# builds its own venv (BOOTSTRAP_HOSTS).  _little_snitch_remotes() is the one
+# owner of the full list; --install writes a rule per entry of THAT.
 #
 # NOT listed, deliberately: themoviedb.org, thetvdb.com and imdb.com appear in
 # --help text and in a display column as links for the reader, and are never
@@ -3099,6 +3105,16 @@ NETWORK_HOSTS = (
     ('api.themoviedb.org',   'TMDB API: original-language backfill, --unmatched --resolve'),
     ('api4.thetvdb.com',     'TVDB API: episode data for --missing'),
     ('www.fernsehserien.de', 'episode data for German libraries (scraped; no API key)'),
+)
+
+# What my-plex's own SETUP fetches: the pip that builds its venv on a first
+# run.  A separate list because it is not my-plex's data -- it is how my-plex
+# comes to exist -- and a machine whose venv is already there never touches
+# them.  The 2026-11-03 python@3.15 step had to write these two by hand,
+# which is the gap this closes.
+BOOTSTRAP_HOSTS = (
+    ('pypi.org',               'pip, building the venv on a first run'),
+    ('files.pythonhosted.org', 'pip again: where the wheels themselves come from'),
 )
 
 # Here we will list all duplicates that were found during scanning of library
@@ -3691,6 +3707,54 @@ def _little_snitch_owner() -> str:
     return pwd.getpwuid(os.geteuid()).pw_name
 
 
+def _remote_kind(host):
+    """'address' for a literal IP, 'host' for a name.  One owner: the Plex
+    server and the SSH endpoint both have to answer it, and my-little-snitch
+    takes a different flag for each."""
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+        return 'address'
+    except ValueError:
+        return 'host'
+
+
+def _ssh_remote():
+    """The Plex server's SSH endpoint, as a rule needs it: (remote, kind, port).
+
+    my-plex runs ssh for every direct DB read and every file operation on the
+    server, so a firewall sees `<parent> via ssh`.  PLEX_DB_REMOTE_HOST is
+    normally an ssh ALIAS, which no firewall can resolve, so `ssh -G` is
+    asked what it stands for: that reads ~/.ssh/config and connects to
+    nothing.
+
+    None when nothing is configured, or when ssh cannot be asked -- my-plex
+    is published, and a machine without ssh is a machine with no rule to
+    write here.
+    """
+    import subprocess
+    alias = (PLEX_DB_REMOTE_HOST or '').strip()
+    if not alias or alias.startswith('<'):
+        return None
+    try:
+        out = subprocess.run(['ssh', '-G', alias], capture_output=True,
+                             text=True, timeout=10).stdout
+    except Exception:
+        return None
+    host, port = '', 22
+    for line in out.splitlines():
+        if line.startswith('hostname '):
+            host = line.split(None, 1)[1].strip()
+        elif line.startswith('port '):
+            try:
+                port = int(line.split(None, 1)[1].strip())
+            except ValueError:
+                pass
+    if not host:
+        return None
+    return (host, _remote_kind(host), port)
+
+
 def _plex_remote():
     """The Plex SERVER as a firewall rule needs it: (remote, kind, port).
 
@@ -3716,7 +3780,6 @@ def _plex_remote():
     None when no Plex server is configured: a published tool meets that, and
     --install then says so rather than inventing a rule.
     """
-    import ipaddress
     from urllib.parse import urlparse
 
     def _configured(value):
@@ -3735,11 +3798,8 @@ def _plex_remote():
     if not host:
         return None
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-    try:
-        ipaddress.ip_address(host)
+    if _remote_kind(host) == 'address':
         return (host, 'address', port)
-    except ValueError:
-        pass
     if host == 'plex.direct' or host.endswith('.plex.direct'):
         return ('plex.direct', 'domain', port)
     return (host, 'host', port)
@@ -3773,7 +3833,7 @@ def _little_snitch_rules():
     """
     owner = _little_snitch_owner()
     rules = []
-    for tail, why in _little_snitch_remotes():
+    for program, tail, why in _little_snitch_remotes():
         # TWO rules per remote, because one of them does not match a real
         # run.  Little Snitch attributes a connection to the app ABOVE
         # Python and calls Python the VIA program: every alert the user
@@ -3788,36 +3848,54 @@ def _little_snitch_rules():
         # the pile of special cases that never ends.  `any via <program>` is
         # the shape this house already writes -- my-system-update's rules
         # read "any via /opt/homebrew/Cellar/curl/*/bin/curl allow brew.sh".
-        rules.append(([sys.executable, *tail, "--owner", owner],
-                      f"{why}  [Python itself connects]"))
-        rules.append((["any", *tail, "--via", sys.executable, "--owner", owner],
-                      f"{why}  [whatever RUNS that Python -- a shell, a session, a job]"))
+        what = "Python" if program == sys.executable else program
+        rules.append(([program, *tail, "--owner", owner],
+                      f"{why}  [{what} itself connects]"))
+        rules.append((["any", *tail, "--via", program, "--owner", owner],
+                      f"{why}  [whatever RUNS {what} -- a shell, a session, a job]"))
     return rules
 
 
 def _little_snitch_remotes():
-    """Every remote my-plex connects to: (argv tail, why).
+    """Every remote my-plex connects to: (program, argv tail, why).
 
-    The TAIL is the remote and the flags that describe it -- all a rule needs
-    except which program it is about -- so a remote is described once and
-    both rule forms are built from it.
+    PROGRAM is what opens the socket, which is what a firewall names: this
+    Python for everything fetched with urllib.request and for pip, `ssh` for
+    the server.  The TAIL is the remote and the flags that say what kind it
+    is -- all a rule needs except the program -- so each remote is described
+    once and both rule forms are built from it.
+
+    THE ONE OWNER of "what does my-plex connect to".  NETWORK_HOSTS alone was
+    read as that list for a while, and it is only the fetched hosts: the Plex
+    API, the SSH endpoint and pip were all missing from --install while
+    --help promised "one per host it connects to".
     """
-    remotes = [([host], why) for host, why in NETWORK_HOSTS]
-    plex = _plex_remote()
-    if plex:
-        remote, kind, port = plex
+    def _kinded(remote, kind, port):
         tail = [remote]
         if kind == 'address':
             tail.append('--address')
         elif kind == 'host':
             tail.append('--host')
-        # --port always: the Plex server answers on 32400, and only 443 is
-        # tcp's default in a rule.
-        tail += ['--port', str(port)]
-        why = "the PLEX SERVER -- every API call, every --update-cache"
+        # --port always, for anything that is not 443: it is the only port a
+        # rule assumes.
+        return tail + ['--port', str(port)]
+
+    py = sys.executable
+    remotes = [(py, [host], why) for host, why in NETWORK_HOSTS]
+    remotes += [(py, [host], why) for host, why in BOOTSTRAP_HOSTS]
+    plex = _plex_remote()
+    if plex:
+        remote, kind, port = plex
+        why = "the PLEX SERVER's API -- every call, every --update-cache"
         if kind == 'domain':
             why += " (a DOMAIN rule: the host name carries the server's IP)"
-        remotes.append((tail, why))
+        remotes.append((py, _kinded(remote, kind, port), why))
+    ssh = _ssh_remote()
+    if ssh:
+        remote, kind, port = ssh
+        remotes.append(('ssh', _kinded(remote, kind, port),
+                        f"the Plex server over SSH ({PLEX_DB_REMOTE_HOST}) -- "
+                        f"every direct DB read and every file operation"))
     return remotes
 
 
@@ -3842,6 +3920,9 @@ def cmd_install() -> NoReturn:
     print(f"    > process: {sys.executable}")
     print(f"    > (the Python that runs my-plex -- it opens the socket, so the")
     print(f"       rule also covers other scripts run by this same Python)")
+    if any(p != sys.executable for p, _t, _w in _little_snitch_remotes()):
+        print(f"    > and `ssh`, for the Plex server: my-plex reads its DB and")
+        print(f"      moves its files over ssh, so there the firewall names ssh")
     print(f"    > owner:   {_little_snitch_owner()} -- whose rule it is")
     print(f"    > (named in the command: it runs as ROOT, so the firewall")
     print(f"       tool would otherwise take ITS default owner, not this user)")
@@ -32670,17 +32751,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --install                Print the root commands that write the")
             print("                           firewall rules my-plex needs")
             print()
-            print("my-plex connects to your Plex server, and fetches episode")
-            print("and metadata from three hosts:")
+            print("Everything my-plex connects to, from the one list --install")
+            print("writes the rules from:")
             print()
-            for _h, _why in NETWORK_HOSTS:
-                print(f"   > {_h:24s} {_why}")
-            _plex = _plex_remote()
-            if _plex:
-                print(f"   > {_plex[0]:24s} your Plex server, from the config "
-                      f"({_plex[1]} rule, port {_plex[2]})")
-            else:
-                print("   > (no Plex server configured, so no rule for one)")
+            for _prog, _tail, _why in _little_snitch_remotes():
+                print(f"   > {_tail[0]:24s} {_why}")
+            print()
+            print("The last two come from YOUR config, not from a constant in")
+            print("the tool: the Plex server is yours, and an ssh alias is")
+            print("resolved with `ssh -G` (which reads ~/.ssh/config and")
+            print("connects to nothing). With neither configured, neither gets")
+            print("a rule and nothing is invented.")
             print()
             print("On a machine with an interactive firewall (Little Snitch), the")
             print("first connection to each is held behind an alert. A scheduled or")

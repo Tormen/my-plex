@@ -145,11 +145,18 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Playlist management** — create, modify, delete playlists
 
 ### Firewall rules (`--install`)
-- my-plex connects to your **Plex server** and fetches from
-  `api.themoviedb.org`, `api4.thetvdb.com` and `www.fernsehserien.de`. Behind
-  an interactive firewall the first connection to each is held behind an
-  alert — and a scheduled run has nobody to answer it, so it stops talking
-  with no error of its own.
+- my-plex connects to your **Plex server** (its API, and over **ssh** for
+  direct DB reads and file operations), fetches from `api.themoviedb.org`,
+  `api4.thetvdb.com` and `www.fernsehserien.de`, and reaches `pypi.org` /
+  `files.pythonhosted.org` the first time it builds its venv. Behind an
+  interactive firewall the first connection to each is held behind an alert —
+  and a scheduled run has nobody to answer it, so it stops talking with no
+  error of its own. `my-plex --help install` lists the whole set, which is
+  also the list the rules are generated from.
+- The **ssh** endpoint's rule names `ssh` as the program, not Python, and is
+  resolved from your ssh alias with `ssh -G` (which reads `~/.ssh/config` and
+  connects to nothing), because an alias is not something a firewall can
+  resolve.
 - The **Plex server's** rule comes from your config (`PLEX_URL`, or the host
   in `PLEX_XML_URL`) and carries its port, because 32400 is not the default
   a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
