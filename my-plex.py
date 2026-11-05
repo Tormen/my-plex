@@ -3831,6 +3831,14 @@ def _little_snitch_deny_clears():
         # slash would end it.  'Python.app' identifies the stored process on
         # its own -- every Python rule my-little-snitch writes names it.
         pat = r'Python\.app' if program == sys.executable else program
+        if program == 'ssh':
+            # The ssh remote is the Plex server's ADDRESS, and that one
+            # machine answers BOTH: ssh on its port, and the API that the
+            # plex.direct name resolves to.  So a deny there may name either
+            # program, and both are my-plex's to clear.  horse held exactly
+            # that on 2026-11-05 -- Python.app deny for 192.168.192.252, any
+            # port -- and a pattern of 'ssh' alone walked past it.
+            pat = r'Python\.app|ssh'
         out.append((tail[0],
                     f"{cli} list {tail[0]} | awk -F '\\t' "
                     f"'$2 ~ / deny / && ($2 ~ /{pat}/ || $2 ~ /^any  /) "
