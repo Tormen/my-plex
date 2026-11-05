@@ -40,6 +40,21 @@ MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex
 _NO_README = ("no README.md beside the tool or the suite -- a deployed copy; "
               "the README claims are a source-tree check")
 
+# How long a whole my-plex command may take against the REAL library before a
+# test calls it hung.  It is a SAFETY NET, not a performance budget -- the
+# house default for a rollout step that names no timeout is 5 minutes, for
+# exactly this reason -- and it has ONE owner because the same decision sat in
+# three places at three values (60, 60, 120).
+#
+# 60s was not a bound on anything: it measured the machine.  On horse,
+# 2026-11-05, against a 40 MB cache: --problems 83s, --info 49s,
+# --verify-cache 6s, --mismatched 2s.  So `--run-tests episodes` failed here
+# and my-rollout's gate would not offer the copy ("no passing --run-tests for
+# these bytes") -- a test bound, not the tool, stopping a deployment.
+# What these tests SHOULD do instead is read a fixture cache; TODO.local.md
+# carries that, and this constant goes when they do.
+E2E_REAL_LIBRARY_TIMEOUT = 300
+
 
 def _readme_path() -> str | None:
     """The project's README.md, or None where there is none."""
@@ -3086,7 +3101,8 @@ class TestEndToEnd(unittest.TestCase):
     def _run_cmd(self, *extra_args):
         import subprocess
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=E2E_REAL_LIBRARY_TIMEOUT)
         return result
 
     # --- Help commands ---
@@ -3286,6 +3302,22 @@ class TestEndToEnd(unittest.TestCase):
         """my-plex --excess-versions without a number must produce an error."""
         result = self._run_cmd('--excess-versions')
         self.assertNotEqual(result.returncode, 0, "--excess-versions without value must error")
+
+    def test_the_excess_versions_help_does_not_offer_the_value_as_optional(self):
+        """The CLAIM beside the behaviour above, which is the half that rotted.
+
+        Two compact help lines read `--excess-versions [N] ... (default: 3)`,
+        so a reader who followed them got `expected one argument` -- while the
+        detailed page (`--excess-versions LIMIT`), the parser's own help and
+        the zsh completion (`:limit:`) all said the value is required. The
+        test above pins the behaviour; nothing pinned the sentence."""
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        self.assertNotIn('--excess-versions [N]', src,
+                         "a compact help line still shows the value as optional")
+        stale = [ln.strip() for ln in src.splitlines()
+                 if 'excess-versions' in ln and 'default: 3' in ln]
+        self.assertEqual(stale, [],
+                         f"a help line promises a default the parser refuses: {stale}")
 
     # --- Output format ---
 
@@ -4299,7 +4331,8 @@ class TestScan(unittest.TestCase):
 
     def _run_cmd(self, *extra_args):
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=E2E_REAL_LIBRARY_TIMEOUT)
         return result
 
     def test_scan_in_main_parser(self):
@@ -5800,7 +5833,7 @@ class TestEpisodesErr(unittest.TestCase):
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--problems'],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=E2E_REAL_LIBRARY_TIMEOUT)
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
         self.assertIn('PROBLEM DETECTION', result.stdout)
         self.assertIn('Episode Data', result.stdout)
@@ -6493,7 +6526,7 @@ class TestMismatched(unittest.TestCase):
         """--mismatched must run without error."""
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, '--mismatched'],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=E2E_REAL_LIBRARY_TIMEOUT)
         self.assertEqual(result.returncode, 0, f"--mismatched failed: {result.stderr}")
 
     def test_re_injection(self):
