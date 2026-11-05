@@ -11702,15 +11702,49 @@ class TestPlexConnectNotRequired(unittest.TestCase):
         cls._httpd.shutdown(); cls._httpd.server_close()
 
     def test_info_reports_rejected_token_instead_of_exiting(self):
-        """my-plex --info with a rejected token exits 0 and names the reason."""
-        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--info',
-                            '--plex-url', self.url, '--plex-token', self.TOKEN],
-                           capture_output=True, text=True, timeout=180)
-        out = r.stdout + r.stderr
-        self.assertEqual(r.returncode, 0, f"--info must not die on a failed connect:\n{out[-800:]}")
-        self.assertIn('configured but not connected (', r.stdout)
-        self.assertIn('401', r.stdout)
-        self.assertNotIn(self.TOKEN, out)
+        """my-plex --info with a rejected token exits 0 and names the reason.
+
+        With a config of its own, and that is not tidiness: a BARE --info
+        prints an API STATUS block whose four probes each run if their config
+        value is set, so with the user's real config this test logged in to
+        api4.thetvdb.com, called api.themoviedb.org and ssh'd to the Plex
+        host -- from the deployment gate, unattended, which is how it ends up
+        behind a firewall alert that hangs rather than fails. Found by the
+        my-rollout session's survey, 2026-11-05, after I had claimed the only
+        fetching tests were the seven scraper ones.
+
+        The Plex probe still runs, against the loopback server above, because
+        that is what this test is about."""
+        d = tempfile.mkdtemp(prefix='my-plex-infoiso-')
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            # blank: each probe is gated on its own value, so "" means the
+            # block says "not configured" instead of reaching out
+            f.write("TVDB_API_KEY = ''\n")
+            f.write("TMDB_API_KEY = ''\n")
+            f.write("PLEX_DB_REMOTE_HOST = ''\n")
+            f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
+            f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+        try:
+            r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', conf,
+                                '--info', '--plex-url', self.url,
+                                '--plex-token', self.TOKEN],
+                               capture_output=True, text=True, timeout=180)
+            out = r.stdout + r.stderr
+            self.assertEqual(r.returncode, 0,
+                             f"--info must not die on a failed connect:\n{out[-800:]}")
+            self.assertIn('configured but not connected (', r.stdout)
+            self.assertIn('401', r.stdout)
+            self.assertNotIn(self.TOKEN, out)
+            # ...and it reached nothing else. Without this a later edit can
+            # drop the config and the probes come back silently.
+            for probe in ('TVDB API', 'TMDB API', 'Plex DB (SSH)'):
+                line = [ln for ln in r.stdout.splitlines() if probe in ln]
+                self.assertTrue(line, f"no {probe} line at all:\n{r.stdout[-600:]}")
+                self.assertIn('not configured', line[0],
+                              f"{probe} was probed for real: {line[0]}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def _connect(self, required):
         """Call connect_to_plex in-process; returns (SystemExit or None, stdout, PLEX_CONNECT_ERROR)."""
@@ -13783,13 +13817,63 @@ class TestInstallPlexRule(unittest.TestCase):
         self.assertIn('--address', own[0], own[0])
         self.assertIn('--port 32400', own[0], own[0])
 
+    def test_the_ssh_endpoint_gets_both_forms_with_its_port(self):
+        """my-plex runs ssh for every direct DB read and every file operation
+        on the server, and --install wrote no rule for it -- while the comment
+        above NETWORK_HOSTS said "no curl, no ssh" and --help promised "one
+        per host it connects to". Both claims were false (survey, 2026-11-05).
+
+        The remote is resolved from the ssh ALIAS with `ssh -G`, because an
+        alias is not something a firewall can resolve. Port 22 has to be in
+        the rule: 443 is the only port one assumes."""
+        lines = self._install(PLEX_DB_REMOTE_HOST='localhost')
+        ssh = [ln for ln in lines if ' ssh ' in ln or ln.rstrip().endswith(' ssh')
+               or '--via ssh' in ln]
+        self.assertTrue(ssh, f"no rule for the SSH endpoint:\n" + "\n".join(lines))
+        self.assertEqual(len(ssh), 2,
+                         f"expected the process form and the via form: {ssh}")
+        for ln in ssh:
+            self.assertIn('--port 22', ln, f"no port in the ssh rule: {ln}")
+        self.assertTrue([ln for ln in ssh if '--via ssh' in ln],
+                        f"no VIA rule for ssh:\n" + "\n".join(ssh))
+
+    def test_the_pip_hosts_get_rules_too(self):
+        """The venv bootstrap fetches from pypi.org, and the 2026-11-03
+        python@3.15 step had to write those two rules by hand because
+        --install did not. DESIGN.local.md had them as BOOTSTRAP_HOSTS and
+        nothing built it."""
+        lines = self._install()
+        for host in ('pypi.org', 'files.pythonhosted.org'):
+            for_host = [ln for ln in lines if host in ln]
+            self.assertEqual(len(for_host), 2,
+                             f"{host}: expected both forms, got:\n"
+                             + "\n".join(for_host))
+
+    def test_nothing_is_invented_for_an_unconfigured_ssh_host(self):
+        """ADVERSARIAL to the ssh test: a rule hard-coded for the user's own
+        server would pass that one. With no host there must be no ssh rule at
+        all -- my-plex is published.
+
+        The host is blanked EXPLICITLY, and that is the finding this test
+        made: CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST'] is 'my-plex', one
+        particular machine's ssh alias, in a tool published for anyone. So
+        "not configured" is not a state my-plex has by default, and on a
+        stranger's machine that alias resolves to whatever their ssh config
+        says -- or to the literal name. TODO.local.md carries it; the default
+        cannot simply be emptied, because the user's own config relies on
+        it."""
+        lines = self._install(PLEX_DB_REMOTE_HOST='')
+        self.assertFalse([ln for ln in lines if '--via ssh' in ln],
+                         f"an ssh rule appeared with no host configured:\n"
+                         + "\n".join(lines))
+
     def test_no_plex_configured_still_installs_the_rest(self):
         """my-plex is published: on a machine with no Plex configured yet,
         --install must write the scraper rules and invent nothing."""
         lines = self._install()
         self.assertTrue([ln for ln in lines if 'api.themoviedb.org' in ln],
                         f"the scraper rules went missing too:\n" + "\n".join(lines))
-        self.assertFalse([ln for ln in lines if 'plex.direct' in ln or '--port' in ln],
+        self.assertFalse([ln for ln in lines if 'plex.direct' in ln],
                          f"a Plex rule was invented with nothing configured:\n"
                          + "\n".join(lines))
 
