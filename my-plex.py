@@ -3384,7 +3384,7 @@ PROBLEM DETECTION:
   --problems [SCOPE]       All problem checks in one pass  (add -V for details)
   MOVIES & SERIES:
   --broken [SCOPE]         Broken / truncated files
-  --excess-versions [N]    Entries with N+ file versions (default: 3)
+  --excess-versions N      Entries with N or more file versions (e.g. 3)
   --unmatched [SCOPE]      Items not matched by Plex (local:// guid)
   --no-audio-language      Items with missing audio language metadata
   --mismatched [SCOPE]     Mismatches: title vs directory + multi-version Plex grouping
@@ -29494,7 +29494,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --problems [SCOPE]       All problem checks in one pass")
             print("  MOVIES & SERIES:")
             print("  --broken [SCOPE]         Broken / truncated files")
-            print("  --excess-versions [N]    Entries with N+ file versions (default: 3)")
+            print("  --excess-versions N      Entries with N or more file versions (e.g. 3)")
             print("  --unmatched [SCOPE]      Items not matched by Plex")
             print("  --no-audio-language      Items with missing audio language metadata")
             print("  --mismatched [SCOPE]     Mismatches: title vs directory + multi-version Plex grouping")
