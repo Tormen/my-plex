@@ -299,11 +299,18 @@ my-plex --disk2plex --dry-run
 Configuration file (Python syntax, loaded via `exec()`). Searched in order,
 first hit wins:
 
-1. `/LINKS/default/my-plex.conf` — primary system-wide location
-2. `~/.my-plex/my-plex.conf`
-3. `~/.my-plex.conf` — legacy, still honoured
-4. `/etc/my-plex.conf`
-5. `/usr/local/etc/my-plex.conf`
+1. `$MY_PLEX_CONFIG` — a config for ONE run: a test, a CI job, a one-off
+2. `--config FILE` / `-C FILE` — replaces the default locations below
+3. `/LINKS/default/my-plex.conf` (or `/LINKS/default/my-plex`) — primary system-wide location
+4. `~/.my-plex/my-plex.conf`
+5. `~/.my-plex.conf` — legacy, still honoured
+6. `/etc/my-plex.conf`
+7. `/usr/local/etc/my-plex.conf`
+
+A path named by `$MY_PLEX_CONFIG` or `--config` that is not there is an
+**error**: my-plex does not fall back to the default locations, so a run
+pointed at its own config can never silently read another one. `my-plex
+--help config` prints this order from the same code that searches it.
 
 ```python
 # Required: SSH host for Plex server

@@ -964,8 +964,11 @@ else:
 #      - PLEX_DB_PATH must be configured for direct database access
 #
 #   2. CONFIG_FILE (medium priority)
-#      - Loaded from /LINKS/default/my-plex.conf, ~/.my-plex/my-plex.conf,
-#        ~/.my-plex.conf, /etc/my-plex.conf, or /usr/local/etc/my-plex.conf
+#      - $MY_PLEX_CONFIG first (a config for one run: tests, CI, a one-off),
+#        then --config FILE, then /LINKS/default/my-plex.conf,
+#        ~/.my-plex/my-plex.conf, ~/.my-plex.conf, /etc/my-plex.conf, or
+#        /usr/local/etc/my-plex.conf -- see config_search_paths(), which owns
+#        this order, and --help config, which prints it
 #      - Values in config file override CONFIG_DEFAULTS
 #      - Use --config-file | -C to specify a custom config file path
 #      - Use --create with --config-file to generate a config file with default values
@@ -1005,6 +1008,66 @@ CONFIG_FILE_PATHS = [
     '/etc/my-plex.conf',
     '/usr/local/etc/my-plex.conf'
 ]
+
+# The environment variable that names a config file, FIRST in the search
+# order.  It is the escape hatch: a test, a CI run or a one-off can point
+# my-plex at a config of its own without threading an argument through every
+# child it spawns -- which is exactly what was missing when the suite needed
+# to run against a cache that does not exist.
+CONFIG_ENV = 'MY_PLEX_CONFIG'
+
+
+def config_resolve(config_file=None):
+    """The paths to try, in order -- after refusing any that was NAMED and is
+    not there.  Every caller that needs a path goes through here, because the
+    refusal is part of resolving: bare --config does its own lookup and exits
+    before load_config_file() runs, so a check that sat in the loader alone
+    left that path unguarded.
+    """
+    candidates = config_search_paths(config_file)
+    for source, path in candidates:
+        # A default location that is absent is ordinary -- most never exist.
+        # A path someone NAMED and that is not there is a mistake, and the
+        # silent fallback is the worst answer to it: a run pointed at its own
+        # config would read another one and report on the wrong cache, with
+        # nothing in the output saying so.  A run that only PRINTS reads no
+        # config at all, so it is not stopped -- the tool answers that same
+        # question once, in _PRINT_ONLY_RUN.
+        if source and not _PRINT_ONLY_RUN and not os.path.exists(path):
+            err("00151", f"{source} names a config file that is not there:\n"
+                         f"  {path}\n"
+                         f"  my-plex does NOT fall back to the default locations here.\n"
+                         f"Possible reasons:\n"
+                         f"  - a typo in the path\n"
+                         f"  - it was never written -- my-plex --create-config {path}\n"
+                         f"  - {CONFIG_ENV} is left over from an earlier shell -- unset {CONFIG_ENV}")
+    return [path for _source, path in candidates]
+
+
+def config_search_paths(config_file=None):
+    """Every place a config can come from, first existing one wins.
+
+    Returns (source, path) pairs.  SOURCE names who asked for that path --
+    '$MY_PLEX_CONFIG' or '--config' -- and is None for the default locations,
+    which nobody asked for.  The refusal in load_config_file() and the search
+    order --help prints both read this, so the order cannot drift from what
+    the tool says about itself.
+
+    config_file (from --config / --config-file) REPLACES the default
+    locations, but not $MY_PLEX_CONFIG, which stays ahead of it: a hatch a
+    flag can close is not a hatch.
+    """
+    paths = []
+    env_path = os.environ.get(CONFIG_ENV, '').strip()
+    if env_path:
+        paths.append((f'${CONFIG_ENV}', os.path.expanduser(env_path)))
+    if config_file:
+        paths.append(('--config', os.path.expanduser(config_file)))
+    else:
+        # CONFIG_FILE_PATHS already has tilde expansion, but double-check
+        paths.extend((None, os.path.expanduser(c)) for c in CONFIG_FILE_PATHS)
+    return paths
+
 
 # Default configuration values
 CONFIG_DEFAULTS = {
@@ -2827,12 +2890,7 @@ def load_config_file(config_file=None):
     config = {}
 
     # Determine which config file to use
-    if config_file:
-        # Expand tilde and resolve symlinks for user-provided path
-        config_paths = [os.path.expanduser(config_file)]
-    else:
-        # CONFIG_FILE_PATHS already has tilde expansion, but double-check
-        config_paths = [os.path.expanduser(p) for p in CONFIG_FILE_PATHS]
+    config_paths = config_resolve(config_file)
 
     # Find first existing config file (os.path.exists follows symlinks by default)
     config_file_used = None
@@ -3300,7 +3358,7 @@ PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_T
 # additional explanation needed as we do a partial_parse and then detect object and then parse the rest
 HELP_COMPACT="""
 OPTIONS:
-  -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)
+  -C, --config-file FILE   Config file path  (search order: --help config)
   --config [FILE]          Print current config (no arg) or use FILE (with arg)
   --create-config [FILE]   Print default config to stdout (no arg) or write to FILE
   -O, --offline            Cache-only mode — skip SSH / PLEX DB / PLEX API access (see --help offline)
@@ -3863,7 +3921,7 @@ class CacheLock:
                     f.write(message)
                     f.flush()
                     os.fsync(f.fileno())
-            except:
+            except OSError:
                 pass  # Silently ignore write errors
 
     @staticmethod
@@ -3873,7 +3931,7 @@ class CacheLock:
             progress_file = lock_file + ".progress"
             with open(progress_file, 'r') as f:
                 return f.read().strip()
-        except:
+        except OSError:
             return "Initializing..."
 
     def __enter__(self):
@@ -3945,12 +4003,12 @@ class CacheLock:
             self.lock_fd.close()
             try:
                 os.remove(self.lock_file)
-            except:
+            except OSError:
                 pass
             try:
                 progress_file = self.lock_file + ".progress"
                 os.remove(progress_file)
-            except:
+            except OSError:
                 pass
         return False
 
@@ -14889,7 +14947,7 @@ def undo_operation(operation_log, remote_host=None):
                             try:
                                 media.removeLabel(label)
                                 print(f"  ✓ Removed label '{label}'")
-                            except:
+                            except Exception:
                                 print(f"  ⚠ Could not remove label '{label}'")
 
                     # Restore rating
@@ -14904,7 +14962,7 @@ def undo_operation(operation_log, remote_host=None):
                             try:
                                 media.rate(0)
                                 print(f"  ✓ Cleared rating")
-                            except:
+                            except Exception:
                                 pass
                 else:
                     print(f"  ⚠ Could not find Plex media object with ID {plex_id}")
@@ -18915,7 +18973,7 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
             media = library.get(media_identifier)
             if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND 1 matching media by title!")
             return [media]
-        except:
+        except Exception:
             if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> Did NOT find media by title in library '{library_name}'!")
 
     # Search across all libraries
@@ -18926,7 +18984,7 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
         mediae = plex.library.search(media_identifier) if plex else []
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND {len(mediae)} media(s) by search in library!")
         return mediae
-    except:
+    except Exception:
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT found media by search in library!")
         return []
 
@@ -19976,7 +20034,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         try:
             old_library_stats = CACHE['library_stats']
             if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): Loaded library_stats from cache")
-        except:
+        except KeyError:
             old_library_stats = EMPTY_LIBRARY_STATS
             if DBG: print(f"{DBGPFX}PLEX_Library.update_cache(): No library_stats in cache, using EMPTY template")
 
@@ -20007,7 +20065,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if VRB: print(f"{VRBPFX}Rebuild mode: skipping old library_object_counts cache")
         else:
             try:    old_itemsCount_from_cache = CACHE.get('library_object_counts', {})
-            except: old_itemsCount_from_cache = {}
+            except AttributeError: old_itemsCount_from_cache = {}
 
         # If cache doesn't have it, rebuild it from OBJ_BY_ID
         # IMPORTANT: For series libraries, we need to track shows, seasons, AND episodes separately
@@ -20232,7 +20290,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             # Not a large Show/Movie library or too small - keep as-is
                             # Use None for partition info to indicate no partitioning
                             partitioned_libraries.append((title, library, None, None, None, None))
-                    except:
+                    except Exception:
                         # If anything fails, just keep library as-is
                         partitioned_libraries.append((title, library, None, None, None, None))
 
@@ -20258,7 +20316,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             return library.totalSize * 100  # Multiply to prioritize shows
                         else:
                             return library.totalSize
-                    except:
+                    except Exception:
                         return 0  # Unknown size, process last
 
                 sorted_libraries = sorted(libraries_to_process,
@@ -20468,7 +20526,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             else:
                                 # Not a large library - process as a whole
                                 partitioned_libraries.append((title, library, None, None, None, None))
-                        except:
+                        except Exception:
                             # If anything fails, process as a whole
                             partitioned_libraries.append((title, library, None, None, None, None))
 
@@ -20833,7 +20891,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
         plex = ensure_plex_api()
         try:
             collection = plex.library.collection(collection_name)
-        except:
+        except Exception:
             err("00066", f"Collection with name '{collection_name}' not found.")
 
         for identifier in media_identifiers:
@@ -24665,8 +24723,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not resolve:
                 break  # preview = single round
             if dry_run:
-                print(f"\n  --try: would trash {len(files)+len(sidecars)} file(s),"
-                      f" rmdir {len(dirs)} dir(s).  No changes applied.")
+                # The three verbs are the three things that happen, and the
+                # confirmation prompt below already says them that way: media
+                # files are TRASHED, my-plex's own sidecars are os.remove()d,
+                # empty dirs are rmdir'd.  Counting the sidecars as "trashed"
+                # promised a recoverable delete that the real run does not do.
+                print(f"\n  --try: would trash {len(files)} file(s), remove "
+                      f"{len(sidecars)} sidecar(s), rmdir {len(dirs)} empty "
+                      f"dir(s).  No changes applied.")
                 break
             if not yes:
                 try:
@@ -26834,7 +26898,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         def _fmt_ts(ts):
             if not ts: return '-'
             try: return _dt_mod.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
-            except: return '-'
+            except (ValueError, TypeError, OSError, OverflowError): return '-'
         def _fmt_dur(ms):
             if not ms: return '-'
             h, rem = divmod(int(ms) // 1000, 3600)
@@ -29467,7 +29531,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("=" * 76)
             print()
             print("GENERAL:")
-            print("  -C, --config-file FILE   Config file path  (default: ~/.my-plex/my-plex.conf)")
+            print("  -C, --config-file FILE   Config file path  (search order: --help config)")
             print("  --config [FILE]          Print current config (no arg) or use FILE (with arg)")
             print("  --create-config [FILE]   Print default config to stdout (no arg) or write to FILE")
             print("  -O, --offline            Cache-only mode — skip SSH / PLEX DB / PLEX API access (see --help offline)")
@@ -32366,7 +32430,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --config-file FILE --create  # Legacy: same as --create-config FILE")
             print()
             print("Config file: Python syntax, loaded via exec().")
-            print("Default location: ~/.my-plex/my-plex.conf")
+            print()
+            print("SEARCH ORDER (first existing wins):")
+            print(f"  1. ${CONFIG_ENV}             a config for ONE run: a test, CI, a one-off")
+            print( "  2. --config FILE | -C FILE   replaces the default locations below")
+            print( "  3. the default locations:")
+            for _p in [_p for _src, _p in config_search_paths() if _src is None]:
+                print(f"       {_p}")
+            print()
+            print(f"  A path named by ${CONFIG_ENV} or --config that is not there is")
+            print( "  an ERROR: my-plex does not fall back to the defaults, so a run")
+            print( "  pointed at its own config can never silently read another one.")
             print()
             print("KEY SETTINGS:")
             print("  PLEX_DB_REMOTE_HOST          SSH host for Plex server")
@@ -33050,6 +33124,11 @@ def write_episodes_err(series_dir, error_type, source, message):
         error_type: machine-readable type (no_external_ids, source_not_found, etc.)
         source: data source that failed (tmdb, tvdb, fernsehserien.de, etc.)
         message: human-readable description
+
+    Returns:
+        bool: True when the note was written (on the server, or -- with a
+        warning -- locally); False when neither write worked, which is the
+        case nothing used to report.
     """
     import os, subprocess
     from datetime import date
@@ -33068,14 +33147,34 @@ def write_episodes_err(series_dir, error_type, source, message):
         [*_ssh_args(PLEX_DB_REMOTE_HOST), f'mkdir -p "{escaped_dir}" && cat > "{escaped_err}"'],
         input=content, capture_output=True, text=True, timeout=10
     )
-    if result.returncode != 0:
-        # Fallback: try local write
-        try:
-            os.makedirs(series_dir, exist_ok=True)
-            with open(os.path.join(series_dir, EPISODES_ERR_FILENAME), 'w', encoding='utf-8') as f:
-                f.write(content)
-        except Exception:
-            pass  # Best effort
+    if result.returncode == 0:
+        return True
+
+    # The remote write failed.  Fall back to a LOCAL write -- and SAY so,
+    # both ways.  This is the error-recording path, so a failure here is the
+    # one an operator cannot recover from: the error it exists to record is
+    # then nowhere, and `except Exception: pass` left not a line about it.
+    _why = (result.stderr or result.stdout or '').strip().splitlines()
+    ssh_why = _why[-1][:160] if _why else f"no output, exit {result.returncode}"
+    local_err = os.path.join(series_dir, EPISODES_ERR_FILENAME)
+    try:
+        os.makedirs(series_dir, exist_ok=True)
+        with open(local_err, 'w', encoding='utf-8') as f:
+            f.write(content)
+    except Exception as e:
+        # NOT fatal: a note that cannot be written must not take down the run
+        # it is a note ABOUT.  A WARNING on stderr instead -- which -Q does
+        # not silence and an unattended run does deliver.
+        print(f"  > WARNING: could not record '{error_type}' for {series_dir}: "
+              f"not on the server ({ssh_why}) and not locally ({e})",
+              file=sys.stderr)
+        return False
+    if VRB:
+        # Succeeded, but not where the caller asked: Plex reads the server's
+        # copy, and that one is now absent or stale.
+        print(f"{VRBPFX}episodes.err written LOCALLY ({local_err}) -- the "
+              f"server write failed: {ssh_why}", file=sys.stderr)
+    return True
 
 
 def read_episodes_err(series_dir):
@@ -43550,7 +43649,7 @@ def main():
     _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
     _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
     config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: search {', '.join(CONFIG_FILE_PATHS)}). Use with --create to generate a new config file with default values.")
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path (default: ${CONFIG_ENV}, then search {', '.join(CONFIG_FILE_PATHS)}). Use with --create to generate a new config file with default values.")
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print current config (path + contents) and exit. With FILE: use that config file (same as --config-file).")
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
@@ -43619,7 +43718,7 @@ def main():
     # Handle bare --config: print current (active) config file path + contents and exit
     if _print_current_config and not _asking_help:
         # Resolve which config file would be loaded
-        search = [os.path.expanduser(config_args.config_file)] if config_args.config_file else [os.path.expanduser(p) for p in CONFIG_FILE_PATHS]
+        search = config_resolve(config_args.config_file)
         active = None
         for _p in search:
             if os.path.exists(_p) and os.path.isfile(os.path.realpath(_p)):

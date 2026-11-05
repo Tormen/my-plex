@@ -30,6 +30,26 @@ import importlib.util
 # the fallback for running the suite straight out of a checkout.
 MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
 
+# No README beside a DEPLOYED copy: that is bin/my-plex, and the suite beside
+# it is lib/my-plex_tests.py.  "Absent" is therefore a real answer -- but it
+# was given twice, differently, by the two tests that read the README: one
+# opened it outright (so it ERRORED on a copy) and one caught the
+# FileNotFoundError and skipped (so it asserted nothing there, quietly).  One
+# owner answers it once, and TestReadmeIsFound keeps the skip honest by
+# failing if a CHECKOUT ever stops finding its own README.
+_NO_README = ("no README.md beside the tool or the suite -- a deployed copy; "
+              "the README claims are a source-tree check")
+
+
+def _readme_path() -> str | None:
+    """The project's README.md, or None where there is none."""
+    for _d in (os.path.dirname(MAIN_SCRIPT),
+               os.path.dirname(os.path.realpath(__file__))):
+        _p = os.path.join(_d, 'README.md')
+        if os.path.isfile(_p):
+            return _p
+    return None
+
 
 def _import_tool(module_name='mp', argv=None, path=None):
     """Import my-plex itself as a module, whatever its file is CALLED.
@@ -5582,7 +5602,11 @@ class TestEpisodesErr(unittest.TestCase):
 
     So the ssh is made to fail deterministically, on every machine, instead
     of being left to chance. What happens against a REACHABLE server is not
-    covered here, and a test for that needs a stub transport, not a host."""
+    covered here, and a test for that needs a stub transport, not a host.
+
+    The silent `except Exception: pass` in the fallback is gone too, so a
+    recurrence of that 2026-11-02 failure now leaves the ssh's own reason
+    on stderr instead of nothing."""
 
     def setUp(self):
         """Point the server alias at a name that cannot resolve. `.invalid`
@@ -5610,6 +5634,66 @@ class TestEpisodesErr(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(series_dir)
+
+    def test_when_neither_write_works_it_says_so(self):
+        """THE case the silent `except Exception: pass` hid: both writes fail,
+        so the error this function exists to RECORD is nowhere at all.
+
+        Adversarial on purpose: a swallow passes every OTHER test in this
+        class, because each of them asserts the file the FALLBACK wrote. Only
+        a target that cannot be written tells the two apart.
+
+        Not fatal, deliberately -- a note that cannot be written must not take
+        down the run it is a note ABOUT. So the evidence is a warning on
+        stderr and a False return, not an exit."""
+        import contextlib
+        if os.geteuid() == 0:
+            self.skipTest("root can write into a 0500 directory, so the "
+                          "unwritable target would not be unwritable")
+        parent = tempfile.mkdtemp(prefix='my-plex-errwrite-')
+        locked = os.path.join(parent, 'locked')
+        series_dir = os.path.join(locked, 'Some Series')
+        os.makedirs(locked)
+        os.chmod(locked, 0o500)          # readable, NOT writable
+        try:
+            cap = io.StringIO()
+            with contextlib.redirect_stderr(cap):
+                ok = write_episodes_err(series_dir, 'scrape_failed', 'tvdb',
+                                        'timeout')
+            out = cap.getvalue()
+            self.assertFalse(ok, "reported success with nothing written")
+            self.assertIn('WARNING', out, f"nothing on stderr:\n{out!r}")
+            self.assertIn('scrape_failed', out,
+                          f"the warning does not say WHAT went unrecorded:\n{out}")
+            self.assertIn(series_dir, out,
+                          f"the warning does not say WHERE:\n{out}")
+            self.assertFalse(os.path.exists(series_dir), "it wrote after all")
+        finally:
+            os.chmod(locked, 0o700)
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_a_local_fallback_says_the_server_copy_did_not_happen(self):
+        """The fallback SUCCEEDS -- which every other test here leans on --
+        but the file is then where Plex cannot see it, and that difference
+        used to be invisible. Under -V it is said, with the ssh's own reason
+        beside it."""
+        import contextlib
+        series_dir = tempfile.mkdtemp(prefix='my-plex-errfallback-')
+        saved_vrb = self._main.VRB
+        setattr(self._main, 'VRB', True)
+        try:
+            cap = io.StringIO()
+            with contextlib.redirect_stderr(cap):
+                ok = write_episodes_err(series_dir, 'no_external_ids', 'tmdb',
+                                        'no id')
+            out = cap.getvalue()
+            self.assertTrue(ok, f"the local write failed: {out}")
+            self.assertTrue(os.path.isfile(get_episodes_err_path(series_dir)))
+            self.assertIn('LOCALLY', out,
+                          f"-V does not say the server copy is missing:\n{out!r}")
+        finally:
+            setattr(self._main, 'VRB', saved_vrb)
+            shutil.rmtree(series_dir, ignore_errors=True)
 
     def test_read_nonexistent(self):
         """Reading from directory without episodes.err returns None."""
@@ -6253,7 +6337,7 @@ if series_id:
         req = urllib.request.Request(url, headers={{'User-Agent': 'Mozilla/5.0'}})
         try:
             html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
-        except:
+        except Exception:
             consecutive_empty += 1; s += 1; continue
         ep_sections = re.split(r'itemprop="episode"', html)[1:]
         if not ep_sections:
@@ -6272,7 +6356,7 @@ else:
         req = urllib.request.Request(url, headers={{'User-Agent': 'Mozilla/5.0'}})
         try:
             html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
-        except:
+        except Exception:
             break
         pairs = re.findall(r'role=rowgroup\\s+href="/' + re.escape(slug) + r'/folgen/(\\d+)-([^\\"]*)".*?datetime="(\\d{{4}}-\\d{{2}}-\\d{{2}})T', html, re.DOTALL)
         for ep_str, _, _ in pairs:
@@ -11163,11 +11247,10 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         # Zsh --help <topic> completion list
         self.assertRegex(src, r"'orphaned:Orphan sidecars")
         # README documents --orphaned
-        readme_path = os.path.join(os.path.dirname(MAIN_SCRIPT), 'README.md')
-        try:
-            readme = open(readme_path, 'r', encoding='utf-8').read()
-        except FileNotFoundError:
-            self.skipTest(f"README.md not found at {readme_path}")
+        readme_path = _readme_path()
+        if readme_path is None:
+            self.skipTest(_NO_README)
+        readme = open(readme_path, 'r', encoding='utf-8').read()
         self.assertIn('--orphaned', readme)
         self.assertIn('--orphaned --files', readme)
         self.assertIn('--orphaned --dirs', readme)
@@ -12181,6 +12264,33 @@ class TestTrashNotRemove(unittest.TestCase):
         return "\n".join(line for line in m.group(1).splitlines()
                          if not line.lstrip().startswith('#'))
 
+    def test_the_orphaned_preview_promises_what_the_run_really_does(self):
+        """--try is a PROMISE about the run that would follow it.
+
+        The --orphaned preview said "would trash N file(s)" with N counting
+        the my-plex sidecars too -- and the real run os.remove()s those. So
+        it promised a recoverable delete for the one thing in the list that
+        is not recoverable. The confirmation prompt two lines further down
+        had the three verbs right all along; it is the analogue this copies.
+        """
+        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        # Two commands print a "--try: would trash" line; the orphaned one is
+        # the one that also rmdirs.
+        preview = ''
+        for m in re.finditer(r'--try: would trash', src):
+            window = src[m.start():m.start() + 320]
+            if 'rmdir' in window:
+                preview = window
+                break
+        self.assertTrue(preview,
+                        "the --orphaned --try preview was not found")
+        self.assertNotIn('len(files)+len(sidecars)', preview,
+                         f"the preview still counts os.remove()d sidecars as "
+                         f"trashed:\n{preview!r}")
+        for verb in ('trash', 'remove', 'rmdir'):
+            self.assertIn(verb, preview,
+                          f"the preview does not say {verb!r}:\n{preview!r}")
+
     def test_rmdir_removes_an_empty_directory(self):
         """The old os.remove() raised IsADirectoryError here, every time."""
         d = tempfile.mkdtemp(prefix='my-plex-rmdir-')
@@ -12939,7 +13049,10 @@ class TestReadmeFlagsExist(unittest.TestCase):
         backtick pair matched across a whole fenced block is how the diagram
         got in.
         """
-        with open(os.path.join(os.path.dirname(MAIN_SCRIPT), 'README.md')) as f:
+        _rp = _readme_path()
+        if _rp is None:
+            raise unittest.SkipTest(_NO_README)
+        with open(_rp) as f:
             text = f.read()
         flag_re = re.compile(r'(?<![\w-])(--[a-z][a-z0-9-]*)')
         found = set()
@@ -13165,6 +13278,27 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_any_stray_word_is_refused_not_only_go(self):
+        """ADVERSARIAL to the test above: a guard that recognised the literal
+        `go` would pass that one and go on swallowing every other word, which
+        is how `--install yes-please` ran as a plain --install. --install takes
+        NO argument, so any word after it is a mistake -- and the refusal has
+        to NAME the word, or the reader cannot see what was ignored."""
+        d, conf = self._conf(os.path.join('/nonexistent', 'my-little-snitch'))
+        try:
+            for word in ('yes-please', 'all', 'Movie:13086'):
+                r = self._run('--config', conf, '--install', word)
+                self.assertNotEqual(r.returncode, 0,
+                                    f"`--install {word}` was accepted")
+                self.assertIn(word, r.stderr,
+                              f"the refusal does not name {word!r}:\n{r.stderr[-400:]}")
+            # ...and the bare form still works: a guard that refuses everything
+            # would pass every assertion above.
+            r = self._run('--config', conf, '--install')
+            self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_the_help_page_exists_and_names_the_hosts(self):
         r = self._run('--help', 'install')
         self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])
@@ -13306,6 +13440,125 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
                          f"the template assigns keys the tool does not have: {stray}")
 
 
+class TestConfigEnvVar(unittest.TestCase):
+    """$MY_PLEX_CONFIG: a config for ONE run, first in the search order.
+
+    Why it exists: the suite had no way to point a SPAWNED my-plex at another
+    config -- every test that wanted one had to pass --config to every child,
+    and a test that forgot read the user's own 40 MB cache instead.
+    """
+
+    def _conf(self, marker):
+        """A config file whose PLEX_DB_REMOTE_HOST says which file it is."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgenv-')
+        c = os.path.join(d, 'my-plex.conf')
+        with open(c, 'w') as f:
+            f.write(f"PLEX_DB_REMOTE_HOST = {marker!r}\n")
+        return d, c
+
+    def _run(self, *argv, **env):
+        e = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+        e.pop('MY_PLEX_CONFIG', None)
+        e.update({k: v for k, v in env.items() if v is not None})
+        return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
+                              text=True, timeout=120, env=e)
+
+    def test_the_variable_names_the_config_that_is_read(self):
+        """Observed through bare --config, which prints the active file AND its
+        contents -- so the marker inside it is the evidence, not a path that
+        /var symlinks would rewrite anyway."""
+        d, conf = self._conf('fixture-host-A')
+        try:
+            r = self._run('--config', MY_PLEX_CONFIG=conf)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn('fixture-host-A', r.stdout, r.stdout[-400:])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_variable_wins_over_an_explicit_config_flag(self):
+        """ADVERSARIAL: a test that only checks "the variable is read when no
+        flag is given" passes just as well when the flag wins. The house
+        convention puts the variable FIRST, so this is the case that tells the
+        two implementations apart -- and it is the one that matters, because a
+        hatch a flag can close is not a hatch."""
+        da, ca = self._conf('fixture-host-ENV')
+        db, cb = self._conf('fixture-host-FLAG')
+        try:
+            # -C names the file and bare --config prints whichever one won:
+            # `--config FILE` alone sets the file and then prints the usage,
+            # which says nothing about what was read.
+            r = self._run('-C', cb, '--config', MY_PLEX_CONFIG=ca)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn('fixture-host-ENV', r.stdout, r.stdout[-400:])
+            self.assertNotIn('fixture-host-FLAG', r.stdout,
+                             "--config won over $MY_PLEX_CONFIG")
+        finally:
+            shutil.rmtree(da, ignore_errors=True)
+            shutil.rmtree(db, ignore_errors=True)
+
+    def test_a_named_config_that_is_absent_is_refused_not_replaced(self):
+        """THE dangerous case, and the reason the fallback is not silent: a run
+        pointed at a fixture that is not there would read the user's own config
+        and report on the wrong cache, with nothing in the output saying so.
+        Both namings are the same rule, so both are checked -- and the control
+        at the end fails any guard that simply refuses everything."""
+        for source, argv, env in (('$MY_PLEX_CONFIG', ('--config',),
+                                   {'MY_PLEX_CONFIG': '/nonexistent/nope.conf'}),
+                                  ('--config', ('--config', '/nonexistent/nope.conf'),
+                                   {})):
+            r = self._run(*argv, **env)
+            self.assertNotEqual(r.returncode, 0,
+                                f"{source} naming an absent file was accepted")
+            self.assertIn('/nonexistent/nope.conf', r.stderr,
+                          f"{source}: the refusal does not name the path:"
+                          f"\n{r.stderr[-400:]}")
+        d, conf = self._conf('fixture-host-REAL')
+        try:
+            r = self._run('--config', MY_PLEX_CONFIG=conf)
+            self.assertEqual(r.returncode, 0,
+                             f"a config that IS there was refused: {r.stderr[-400:]}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_run_that_only_prints_is_not_stopped_by_a_bad_variable(self):
+        """--help reads no config, so a stale variable must not hide the help.
+        The tool already answers this question once, in _PRINT_ONLY_RUN, and a
+        deployment gate asks `my-plex --help` to find out what this tool can
+        do."""
+        r = self._run('--help', 'config', MY_PLEX_CONFIG='/nonexistent/nope.conf')
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertIn('CONFIG HELP', r.stdout, r.stdout[:300])
+
+    def test_the_help_page_prints_the_order_it_really_searches(self):
+        """Every line of --help is a CLAIM. This page is generated from
+        config_search_paths(), so the claim and the search cannot drift: the
+        page must name the variable and the primary location."""
+        r = self._run('--help', 'config')
+        self.assertIn('MY_PLEX_CONFIG', r.stdout,
+                      "the page does not name the first thing it searches")
+        self.assertIn('/LINKS/default/my-plex.conf', r.stdout, r.stdout[-600:])
+
+
+class TestReadmeIsFound(unittest.TestCase):
+    """The README claims may only go quiet where there IS no README.
+
+    Both tests that read it skip when _readme_path() answers None, so a
+    change that stopped it finding the file in a CHECKOUT would turn those
+    assertions off everywhere and nothing would say so -- a passing suite
+    that checks nothing. This is the test that notices.
+    """
+
+    def test_a_checkout_finds_its_own_readme(self):
+        beside_suite = os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), 'README.md')
+        if not os.path.isfile(beside_suite):
+            self.skipTest("not a checkout: no README.md beside the suite")
+        found = _readme_path() or ''
+        self.assertTrue(found, "a checkout has a README and it was not found")
+        self.assertEqual(os.path.realpath(found), os.path.realpath(beside_suite),
+                         "found a different README than the checkout's own")
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -13337,8 +13590,8 @@ _UNITTEST_SCOPES = {
     'venv':       [TestVenvDetection],
     'install':    [TestInstallFirewallRules],
     'conf-template': [TestConfigTemplateCoversEveryKey],
-    'readme':     [TestReadmeFlagsExist],
-    'config':     [TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
+    'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
+    'config':     [TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
                    TestAudioLangPureVsCompleted,
@@ -13648,7 +13901,7 @@ def run_regression_tests(main_globals, scope=None):
             else:
                 print(f"✗ FAIL: --d was incorrectly expanded to a known argument")
                 failed += 1
-        except:
+        except Exception:
             print(f"✗ FAIL: Parser raised exception (should return --d in unknown args)")
             failed += 1
     except Exception as e:
