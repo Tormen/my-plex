@@ -423,7 +423,18 @@ my-plex --run-tests TestRename.test_siblings
 # The legacy inline regression block, and unittest's own output
 my-plex --run-tests inline
 my-plex --unittest -v
+
+# The tests that really FETCH -- off unless you ask for them
+MY_PLEX_TEST_NETWORK=1 my-plex --run-tests TestTsvScrapersE2E
 ```
+
+**A default run reaches no network.** Seven scraper tests fetch
+api.themoviedb.org and www.fernsehserien.de for real; they skip unless
+`MY_PLEX_TEST_NETWORK` is set, and each says so in its own skip line. Behind
+an interactive firewall an unapproved connection does not fail — it **hangs**,
+and a suite run under `my-rollout go` was killed at its 600s cap because of
+it, so the copy was never offered. Nothing is deleted: set the variable and
+they run exactly as before.
 
 A FILTER is a scope name if one matches, otherwise part of a test title; a
 FILTER that matches neither prints the scopes with their test counts. Exit 0
