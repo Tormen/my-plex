@@ -12752,11 +12752,19 @@ class TestSshOptions(unittest.TestCase):
 
     def test_nothing_builds_an_ssh_command_line_by_hand(self):
         """_ssh_args is the only place -- the function's own docstring has said
-        so for a while, and two callers were ignoring it."""
+        so for a while, and two callers were ignoring it.
+
+        `ssh -G` is exempt, and the exemption is narrow on purpose: -G prints
+        the effective configuration and OPENS NO CONNECTION, so every option
+        this guard exists for -- BatchMode, ConnectTimeout, ControlMaster=no
+        -- has nothing to act on. _ssh_remote() asks it what an ssh alias
+        stands for, which is config reading, not talking to a host. Any ssh
+        that could connect is still an offender."""
         src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
         offenders = [f"line {n}" for n, line in enumerate(src.splitlines(), 1)
                      if "['ssh'," in line.replace(" ", "")
                      and '_ssh_opts(' not in line
+                     and "'-G'" not in line.replace(" ", "")
                      and not line.lstrip().startswith(('#', '"""', 'NEVER'))
                      and 'NEVER use' not in line]
         self.assertEqual(offenders, [],
