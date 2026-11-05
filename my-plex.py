@@ -3772,24 +3772,53 @@ def _little_snitch_rules():
     A rule naming a path that does not exist is refused outright.
     """
     owner = _little_snitch_owner()
-    rules = [([sys.executable, host, "--owner", owner], why)
-             for host, why in NETWORK_HOSTS]
+    rules = []
+    for tail, why in _little_snitch_remotes():
+        # TWO rules per remote, because one of them does not match a real
+        # run.  Little Snitch attributes a connection to the app ABOVE
+        # Python and calls Python the VIA program: every alert the user
+        # answered read "<Terminal|claude> via Python", with "an existing
+        # rule for any via-process was not applied to Python" -- while rules
+        # naming Python as the PROCESS had been stored on all three machines
+        # since 2026-11-01.  Stored is not matching, and this is what that
+        # distinction looks like in practice.
+        #
+        # The via rule's process is `any`, not a list of apps: my-plex is run
+        # from a shell, from a session, from a job, and enumerating those is
+        # the pile of special cases that never ends.  `any via <program>` is
+        # the shape this house already writes -- my-system-update's rules
+        # read "any via /opt/homebrew/Cellar/curl/*/bin/curl allow brew.sh".
+        rules.append(([sys.executable, *tail, "--owner", owner],
+                      f"{why}  [Python itself connects]"))
+        rules.append((["any", *tail, "--via", sys.executable, "--owner", owner],
+                      f"{why}  [whatever RUNS that Python -- a shell, a session, a job]"))
+    return rules
+
+
+def _little_snitch_remotes():
+    """Every remote my-plex connects to: (argv tail, why).
+
+    The TAIL is the remote and the flags that describe it -- all a rule needs
+    except which program it is about -- so a remote is described once and
+    both rule forms are built from it.
+    """
+    remotes = [([host], why) for host, why in NETWORK_HOSTS]
     plex = _plex_remote()
     if plex:
         remote, kind, port = plex
-        argv = [sys.executable, remote]
+        tail = [remote]
         if kind == 'address':
-            argv.append('--address')
+            tail.append('--address')
         elif kind == 'host':
-            argv.append('--host')
+            tail.append('--host')
         # --port always: the Plex server answers on 32400, and only 443 is
         # tcp's default in a rule.
-        argv += ['--port', str(port), '--owner', owner]
+        tail += ['--port', str(port)]
         why = "the PLEX SERVER -- every API call, every --update-cache"
         if kind == 'domain':
             why += " (a DOMAIN rule: the host name carries the server's IP)"
-        rules.append((argv, why))
-    return rules
+        remotes.append((tail, why))
+    return remotes
 
 
 def cmd_install() -> NoReturn:
@@ -3829,6 +3858,12 @@ def cmd_install() -> NoReturn:
         print(f"    > LITTLE_SNITCH_CLI in the config points at it elsewhere")
         sys.exit(0)
 
+    print(f" >>> TWO rules per remote: Little Snitch attributes a connection")
+    print(f"     to the app ABOVE Python and calls Python the VIA program, so a")
+    print(f"     rule naming Python as the process does not match a run started")
+    print(f"     from a shell, a session or a job -- the alerts read \"Terminal")
+    print(f"     via Python\" while those rules were already stored.")
+    print()
     print(f" >>> run these AS ROOT -- my-plex writes no rule itself:")
     for (args, why) in rules:
         print(f"   > {cli} allow go {' '.join(args)}")
@@ -32653,11 +32688,23 @@ def main_print_help(args, remaining_args, main_parser):
             print("with no error of its own -- which is why the rules are written")
             print("ahead of time rather than left to the alert.")
             print()
-            print("The rule names the PYTHON that runs my-plex, not my-plex: the")
+            print("The rules name the PYTHON that runs my-plex, not my-plex: the")
             print("fetches use urllib.request, so the interpreter opens the socket")
             print("and is what the firewall sees. One consequence worth knowing:")
             print("the rule also lets other scripts run by that Python reach these")
             print("hosts. There is no narrower form for a Python script.")
+            print()
+            print("EACH REMOTE GETS TWO RULES, and the second is the one that was")
+            print("missing. Little Snitch attributes a connection to the app ABOVE")
+            print("Python and calls Python the VIA program, so a rule naming Python")
+            print("as the process does not match a run started from a shell, a")
+            print("session or a job: the alerts read \"Terminal via Python\" and")
+            print("\"claude via Python\", with \"an existing rule for any via-process")
+            print("was not applied to Python\", while those process rules were")
+            print("already stored. So beside each one there is an `any ... --via")
+            print("<that Python>` rule. Its process is `any` rather than a list of")
+            print("apps, because my-plex is run from all of them and enumerating")
+            print("them never ends.")
             print()
             print("WRITING a rule needs root: littlesnitch refuses anyone else,")
             print("even to list. my-plex does not run as root -- as root its venv,")
