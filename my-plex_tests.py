@@ -13184,11 +13184,17 @@ class TestInstallFirewallRules(unittest.TestCase):
     """
 
     def _conf(self, cli_path):
-        """A config whose LITTLE_SNITCH_CLI points where this test wants."""
+        """A config whose LITTLE_SNITCH_CLI points where this test wants.
+
+        CACHE_FILE and LOCK_FILE are its own: --install takes the cache lock
+        although it reads no cache, so against the real one it waits for any
+        --update-cache that happens to be running (seen 2026-11-05)."""
         d = tempfile.mkdtemp(prefix='my-plex-install-')
         c = os.path.join(d, 'my-plex.conf')
         with open(c, 'w') as f:
             f.write(f"LITTLE_SNITCH_CLI = {cli_path!r}\n")
+            f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
+            f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
         return d, c
 
     def _run(self, *argv):
@@ -13227,6 +13233,55 @@ class TestInstallFirewallRules(unittest.TestCase):
                          f"my-plex fetches these hosts but NETWORK_HOSTS does "
                          f"not list them, so --install writes no rule for "
                          f"them: {missing}")
+
+    def test_every_remote_gets_BOTH_rule_forms(self):
+        """A rule naming Python as the PROCESS does not match a real run.
+
+        Little Snitch attributes the connection to the app ABOVE Python and
+        calls Python the VIA program. The user's alerts read "Terminal via
+        Python" and "claude via Python", with "an existing rule for any
+        via-process was not applied to Python" -- while process rules for all
+        three scraper hosts had been stored on every machine since
+        2026-11-01. Stored is not matching, and four popups are what the
+        difference cost.
+
+        So each remote needs the via form beside the process form, and this
+        is what stops a later edit quietly dropping one of them. The hosts
+        come from NETWORK_HOSTS in the source, not from the output, or the
+        test would only check that the output agrees with itself."""
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        block = src.split('NETWORK_HOSTS = (', 1)[1].split('\n)', 1)[0]
+        hosts = re.findall(r"\('([a-z0-9.-]+)',", block)
+        self.assertGreater(len(hosts), 1, f"NETWORK_HOSTS not parsed:\n{block[:200]}")
+
+        d, conf = self._conf('/bin/true')
+        stub = os.path.join(d, 'my-little-snitch')
+        with open(stub, 'w') as f:
+            f.write('#!/bin/dash\nexit 0\n')
+        os.chmod(stub, 0o755)
+        with open(conf, 'a') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+        try:
+            r = self._run('--config', conf, '--install')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            lines = [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
+            for host in hosts:
+                for_host = [ln for ln in lines if f' {host} ' in ln or ln.rstrip().endswith(f' {host}')]
+                process_form = [ln for ln in for_host if ' allow go /' in ln
+                                and '--via' not in ln]
+                via_form = [ln for ln in for_host if ' allow go any ' in ln
+                            and '--via' in ln]
+                self.assertTrue(process_form,
+                                f"{host}: no rule for the Python as the process:"
+                                f"\n" + "\n".join(for_host))
+                self.assertTrue(via_form,
+                                f"{host}: no VIA rule -- the form the alerts "
+                                f"showed is the one that was missing:\n"
+                                + "\n".join(for_host))
+                self.assertIn('--owner', via_form[0], via_form[0])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_without_the_firewall_tool_it_says_so_and_writes_nothing(self):
         """my-plex is published: on anyone else's machine the integration is
@@ -13655,13 +13710,17 @@ class TestInstallPlexRule(unittest.TestCase):
                          '/library/metadata/1?X-Plex-Token=nope')
         plex = [ln for ln in lines if 'plex.direct' in ln]
         self.assertTrue(plex, f"no rule for the Plex server:\n" + "\n".join(lines))
-        self.assertEqual(len(plex), 1, f"more than one Plex rule: {plex}")
+        self.assertEqual(len(plex), 2,
+                         f"expected the process form and the via form: {plex}")
         self.assertIn('--port 32400', plex[0],
                       f"the rule does not carry the port, and 32400 is not "
                       f"tcp's default: {plex[0]}")
         self.assertNotIn('192-168-192-252', plex[0],
                          f"the rule names the per-server host, which carries "
                          f"the IP: {plex[0]}")
+        self.assertTrue([ln for ln in plex if ' allow go any ' in ln and '--via' in ln],
+                        f"no VIA rule for the Plex server -- the form the "
+                        f"alerts showed:\n" + "\n".join(plex))
 
     def test_the_remote_comes_from_the_CONFIG_not_from_a_list(self):
         """ADVERSARIAL, and the one that matters: a test that only looked for

@@ -162,10 +162,19 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   my-plex does not run as root. Same shape as `--create-config`, which prints
   a config for you to place. Run them in a root shell, or let a rollout step
   do it.
-- The rule names the Python that runs my-plex, because the fetches use
+- The rules name the Python that runs my-plex, because the fetches use
   `urllib.request` and the interpreter is what opens the socket; one
-  consequence is that it also covers other scripts run by that same Python,
+  consequence is that they also cover other scripts run by that same Python,
   and there is no narrower form for a Python script.
+- **Each remote gets two rules.** Little Snitch attributes a connection to
+  the app *above* Python and calls Python the **via** program, so a rule
+  naming Python as the process does not match a run started from a shell, a
+  session or a job — the alerts read `Terminal via Python` with *"an existing
+  rule for any via-process was not applied to Python"*, while those process
+  rules were already stored. So each remote also gets a second rule, for
+  `any` process connecting *via* that Python — `any` rather than a list of
+  apps, because my-plex is run from all of them and enumerating them never
+  ends. `my-plex --help install` prints both commands in full.
 - Without the firewall tool it prints no commands and just names the hosts,
   so it is safe to run anywhere. See `my-plex --help install`.
 
