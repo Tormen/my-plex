@@ -3805,6 +3805,39 @@ def _plex_remote():
     return (host, 'host', port)
 
 
+def _little_snitch_deny_clears():
+    """The command that clears a DENY standing in the way, per remote.
+
+    A deny beats an allow, so writing the rules below while one is stored
+    changes nothing: on horse, 2026-11-05, two denies the user had answered
+    "forever" cut my-plex off from its Plex server altogether -- the API by
+    name and every ssh by address.  The user's instruction is that --install
+    removes them.
+
+    Scoped twice, because a deny is somebody's decision and only the ones
+    about my-plex are my-plex's business:
+      - PER REMOTE: `list <remote>` only ever shows rules for a host my-plex
+        needs, so a deny for anything else is never even looked at.  (Tested
+        against horse's real listing: the same filter over ALL rules would
+        also have matched a deny for no-panic.eu.)
+      - PER PROGRAM: the deny must name the program my-plex connects with --
+        its Python, or `ssh` -- or `any`.  Firefox's own deny for the same
+        host stays.
+    """
+    cli = LITTLE_SNITCH_CLI
+    out = []
+    for program, tail, _why in _little_snitch_remotes():
+        # No '/' in the pattern: it goes inside an awk /regex/, where a
+        # slash would end it.  'Python.app' identifies the stored process on
+        # its own -- every Python rule my-little-snitch writes names it.
+        pat = r'Python\.app' if program == sys.executable else program
+        out.append((tail[0],
+                    f"{cli} list {tail[0]} | awk -F '\\t' "
+                    f"'$2 ~ / deny / && ($2 ~ /{pat}/ || $2 ~ /^any  /) "
+                    f"{{ print $1 }}' | {cli} remove go"))
+    return out
+
+
 def _little_snitch_rules():
     """The rule my-plex needs per host, as my-little-snitch argument lists.
 
@@ -3945,7 +3978,15 @@ def cmd_install() -> NoReturn:
     print(f"     from a shell, a session or a job -- the alerts read \"Terminal")
     print(f"     via Python\" while those rules were already stored.")
     print()
-    print(f" >>> run these AS ROOT -- my-plex writes no rule itself:")
+    print(f" >>> FIRST, clear any DENY that covers these remotes -- a deny")
+    print(f"     beats an allow, so the rules below would change nothing while")
+    print(f"     one stands. Each line looks at ONE remote and removes only a")
+    print(f"     deny naming my-plex's own program (or `any`); a deny for some")
+    print(f"     other program to the same host is left alone:")
+    for _remote, _cmd in _little_snitch_deny_clears():
+        print(f"   > {_cmd}")
+    print()
+    print(f" >>> then run these AS ROOT -- my-plex writes no rule itself:")
     for (args, why) in rules:
         print(f"   > {cli} allow go {' '.join(args)}")
         print(f"       {why}")
