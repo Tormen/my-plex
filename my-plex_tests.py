@@ -13562,6 +13562,35 @@ class TestConfigEnvVar(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[-400:])
         self.assertIn('CONFIG HELP', r.stdout, r.stdout[:300])
 
+    def test_a_test_run_ignores_a_stray_variable(self):
+        """A stray variable must not steer the SUITE.
+
+        The hazard this hatch created: left in a shell, $MY_PLEX_CONFIG would
+        point every test -- and the hundred-odd my-plex runs the suite spawns
+        -- at a real config of someone else's choosing, and nothing would say
+        so. A nonexistent path is caught by the refusal above; a path that
+        EXISTS is the silent case, so that is the one tested.
+
+        With the control after it: a run without the variable must NOT print
+        the line, or the message is unconditional and says nothing."""
+        d, conf = self._conf('fixture-host-STRAY')
+        inner = 'test_the_venvs_own_interpreter_is_inside_it'
+        try:
+            r = self._run('--run-tests', inner, MY_PLEX_CONFIG=conf)
+            self.assertEqual(r.returncode, 0,
+                             f"a stray variable broke the test run:\n{r.stderr[-400:]}")
+            self.assertIn('ignored for this test run', r.stderr,
+                          f"the variable was used, or the run did not say it "
+                          f"was dropped:\n{r.stderr[-400:]}")
+            self.assertNotIn('fixture-host-STRAY', r.stdout + r.stderr,
+                             "the stray config reached the run")
+            control = self._run('--run-tests', inner)
+            self.assertEqual(control.returncode, 0, control.stderr[-400:])
+            self.assertNotIn('ignored for this test run', control.stderr,
+                             "the line is printed even with no variable set")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_the_help_page_prints_the_order_it_really_searches(self):
         """Every line of --help is a CLAIM. This page is generated from
         config_search_paths(), so the claim and the search cannot drift: the

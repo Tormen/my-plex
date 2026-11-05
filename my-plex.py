@@ -1017,6 +1017,21 @@ CONFIG_FILE_PATHS = [
 CONFIG_ENV = 'MY_PLEX_CONFIG'
 
 
+# A TEST RUN takes no config from the environment.  $MY_PLEX_CONFIG is the
+# hatch for ONE run, and a stray one left in a shell would otherwise point the
+# suite -- and every my-plex the suite spawns, 100-odd of them -- at a real
+# config of someone else's choosing, with nothing saying so.  Clearing it HERE
+# covers all of them at once, because the children inherit this environment.
+# Answered from argv, before any config is read.  (my-git guards its own suite
+# the same way; its runner unsets $MY_GIT_CONFIG.)
+_TEST_RUN = any(a == '--run-tests' or a.startswith('--run-tests=')
+                or a in ('--unittest', '--test') for a in sys.argv[1:])
+if _TEST_RUN and os.environ.pop(CONFIG_ENV, None) is not None:
+    # An action nobody asked for says what it did and why.
+    print(f" >>> ${CONFIG_ENV} ignored for this test run -- it would point the "
+          f"suite at another config", file=sys.stderr)
+
+
 def config_resolve(config_file=None):
     """The paths to try, in order -- after refusing any that was NAMED and is
     not there.  Every caller that needs a path goes through here, because the
