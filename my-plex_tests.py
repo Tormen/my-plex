@@ -13572,6 +13572,101 @@ class TestConfigEnvVar(unittest.TestCase):
         self.assertIn('/LINKS/default/my-plex.conf', r.stdout, r.stdout[-600:])
 
 
+class TestInstallPlexRule(unittest.TestCase):
+    """--install must write a rule for the PLEX SERVER too.
+
+    It did not, and the user hit the consequence: a Little Snitch alert for
+    192-168-192-252.<hash>.plex.direct on tcp/32400 -- which is exactly the
+    host in my-plex's own PLEX_XML_URL. my-plex reaches the server through
+    plexapi, so the tool builds no https url for it, and
+    test_every_host_it_fetches_has_a_rule reads only the urls it BUILDS: the
+    gap was invisible to the test that exists to catch gaps.
+
+    An alert is the worst outcome available: an unattended run -- a job, or
+    the deployment gate running the suite -- has nobody at the screen, so
+    my-plex just stops talking with no error of its own.
+    """
+
+    def _conf(self, **keys):
+        """A config with a firewall stub, a cache of its own, and whatever
+        Plex URL the test wants. The cache paths matter: without them
+        --install waits on the REAL cache lock, which another process can
+        hold for minutes."""
+        d = tempfile.mkdtemp(prefix='my-plex-plexrule-')
+        stub = os.path.join(d, 'my-little-snitch')
+        with open(stub, 'w') as f:
+            f.write('#!/bin/dash\nexit 0\n')
+        os.chmod(stub, 0o755)
+        c = os.path.join(d, 'my-plex.conf')
+        with open(c, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+            f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
+            f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+            for k, v in keys.items():
+                f.write(f"{k} = {v!r}\n")
+        return d, c
+
+    def _install(self, **keys):
+        d, c = self._conf(**keys)
+        try:
+            r = subprocess.run([MAIN_SCRIPT, '--config', c, '--install'],
+                               capture_output=True, text=True, timeout=180,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            return [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_plex_direct_server_gets_a_domain_rule_with_its_port(self):
+        """THE missing rule. A domain, not the host: the per-server label
+        carries the server's LAN IP, so a host rule would break -- back into
+        an alert -- the next time that IP changes."""
+        lines = self._install(
+            PLEX_XML_URL='https://192-168-192-252.abc123.plex.direct:32400'
+                         '/library/metadata/1?X-Plex-Token=nope')
+        plex = [ln for ln in lines if 'plex.direct' in ln]
+        self.assertTrue(plex, f"no rule for the Plex server:\n" + "\n".join(lines))
+        self.assertEqual(len(plex), 1, f"more than one Plex rule: {plex}")
+        self.assertIn('--port 32400', plex[0],
+                      f"the rule does not carry the port, and 32400 is not "
+                      f"tcp's default: {plex[0]}")
+        self.assertNotIn('192-168-192-252', plex[0],
+                         f"the rule names the per-server host, which carries "
+                         f"the IP: {plex[0]}")
+
+    def test_the_remote_comes_from_the_CONFIG_not_from_a_list(self):
+        """ADVERSARIAL, and the one that matters: a test that only looked for
+        'plex.direct' would pass just as well if someone put plex.direct in
+        NETWORK_HOSTS. Another server must give another remote."""
+        lines = self._install(PLEX_URL='https://plex.example.net:32400')
+        own = [ln for ln in lines if 'plex.example.net' in ln]
+        self.assertTrue(own, f"the configured server got no rule:\n" + "\n".join(lines))
+        self.assertIn('--host', own[0],
+                      f"a name that is not plex.direct is one HOST, not a "
+                      f"domain to be guessed at: {own[0]}")
+        self.assertIn('--port 32400', own[0], own[0])
+        self.assertFalse([ln for ln in lines if 'plex.direct' in ln],
+                         "plex.direct appears for a server that is not one")
+
+    def test_a_bare_address_is_an_address_rule(self):
+        """An IP is not a domain and not a host name; the firewall tool has a
+        third form for it, and says so."""
+        lines = self._install(PLEX_URL='http://192.168.1.5:32400')
+        own = [ln for ln in lines if '192.168.1.5' in ln]
+        self.assertTrue(own, f"no rule for the configured address:\n" + "\n".join(lines))
+        self.assertIn('--address', own[0], own[0])
+        self.assertIn('--port 32400', own[0], own[0])
+
+    def test_no_plex_configured_still_installs_the_rest(self):
+        """my-plex is published: on a machine with no Plex configured yet,
+        --install must write the scraper rules and invent nothing."""
+        lines = self._install()
+        self.assertTrue([ln for ln in lines if 'api.themoviedb.org' in ln],
+                        f"the scraper rules went missing too:\n" + "\n".join(lines))
+        self.assertFalse([ln for ln in lines if 'plex.direct' in ln or '--port' in ln],
+                         f"a Plex rule was invented with nothing configured:\n"
+                         + "\n".join(lines))
+
 class TestReadmeIsFound(unittest.TestCase):
     """The README claims may only go quiet where there IS no README.
 
@@ -13621,7 +13716,7 @@ _UNITTEST_SCOPES = {
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection],
-    'install':    [TestInstallFirewallRules],
+    'install':    [TestInstallFirewallRules, TestInstallPlexRule],
     'conf-template': [TestConfigTemplateCoversEveryKey],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
     'config':     [TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,

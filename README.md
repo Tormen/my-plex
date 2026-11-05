@@ -145,10 +145,18 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Playlist management** — create, modify, delete playlists
 
 ### Firewall rules (`--install`)
-- my-plex fetches from `api.themoviedb.org`, `api4.thetvdb.com` and
-  `www.fernsehserien.de`. Behind an interactive firewall the first connection
-  to each is held behind an alert — and a scheduled run has nobody to answer
-  it, so it stops talking with no error of its own.
+- my-plex connects to your **Plex server** and fetches from
+  `api.themoviedb.org`, `api4.thetvdb.com` and `www.fernsehserien.de`. Behind
+  an interactive firewall the first connection to each is held behind an
+  alert — and a scheduled run has nobody to answer it, so it stops talking
+  with no error of its own.
+- The **Plex server's** rule comes from your config (`PLEX_URL`, or the host
+  in `PLEX_XML_URL`) and carries its port, because 32400 is not the default
+  a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
+  that host name carries the server's own LAN IP, so a rule naming the host
+  would stop matching — back into an alert — the next time that IP changes.
+  A bare IP becomes an address rule, any other name a host rule. With no Plex
+  server configured, no rule is invented for one.
 - **`--install`** prints the root commands that write them, and writes
   nothing itself: `littlesnitch` refuses anyone but root, even to list, and
   my-plex does not run as root. Same shape as `--create-config`, which prints
