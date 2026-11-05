@@ -3676,6 +3676,60 @@ def _little_snitch_owner() -> str:
     return pwd.getpwuid(os.geteuid()).pw_name
 
 
+def _plex_remote():
+    """The Plex SERVER as a firewall rule needs it: (remote, kind, port).
+
+    It comes from the CONFIG and cannot come from NETWORK_HOSTS: the server
+    is the user's own, and a plex.direct name carries that server's LAN IP
+    and a per-server hash, so a published tool has no constant to put there.
+    my-plex reaches it through plexapi, so this file builds no https url for
+    it at all -- which is exactly why the rule was missing, and why the test
+    that guards the host list could not see the gap: that test reads the urls
+    this file BUILDS, and this connection is not one of them.  (It read this
+    very docstring as a fetched host when the sentence above spelled the
+    pattern out, which is a fair demonstration that it is not vacuous.)
+
+    KIND is what my-little-snitch is told the remote is:
+      'address'  a bare IP -- that is what it is
+      'domain'   a *.plex.direct name: the rule names the DOMAIN, because the
+                 per-server label carries the server's IP, so a rule naming
+                 the host would break the next time that IP changes --
+                 silently, and back into an alert nobody is there to answer.
+                 It is also what Little Snitch itself suggests for these.
+      'host'     anything else: the name as configured, nothing guessed.
+
+    None when no Plex server is configured: a published tool meets that, and
+    --install then says so rather than inventing a rule.
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    def _configured(value):
+        value = (value or '').strip()
+        # the '< PLEASE CONFIGURE ... >' placeholders are not a URL
+        return '' if value.startswith('<') else value
+
+    url = _configured(PLEX_URL)
+    if not url:
+        xml = _configured(PLEX_XML_URL)
+        if not xml:
+            return None
+        url = xml                      # host and port are all this needs
+    parsed = urlparse(url if '//' in url else f'//{url}')
+    host = parsed.hostname
+    if not host:
+        return None
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    try:
+        ipaddress.ip_address(host)
+        return (host, 'address', port)
+    except ValueError:
+        pass
+    if host == 'plex.direct' or host.endswith('.plex.direct'):
+        return ('plex.direct', 'domain', port)
+    return (host, 'host', port)
+
+
 def _little_snitch_rules():
     """The rule my-plex needs per host, as my-little-snitch argument lists.
 
@@ -3703,8 +3757,24 @@ def _little_snitch_rules():
     A rule naming a path that does not exist is refused outright.
     """
     owner = _little_snitch_owner()
-    return [([sys.executable, host, "--owner", owner], why)
-            for host, why in NETWORK_HOSTS]
+    rules = [([sys.executable, host, "--owner", owner], why)
+             for host, why in NETWORK_HOSTS]
+    plex = _plex_remote()
+    if plex:
+        remote, kind, port = plex
+        argv = [sys.executable, remote]
+        if kind == 'address':
+            argv.append('--address')
+        elif kind == 'host':
+            argv.append('--host')
+        # --port always: the Plex server answers on 32400, and only 443 is
+        # tcp's default in a rule.
+        argv += ['--port', str(port), '--owner', owner]
+        why = "the PLEX SERVER -- every API call, every --update-cache"
+        if kind == 'domain':
+            why += " (a DOMAIN rule: the host name carries the server's IP)"
+        rules.append((argv, why))
+    return rules
 
 
 def cmd_install() -> NoReturn:
@@ -3738,8 +3808,8 @@ def cmd_install() -> NoReturn:
         print(f"    > That is normal: writing them is an integration with one")
         print(f"      specific firewall tool. Allow these hosts for the Python")
         print(f"      above in whatever firewall you run:")
-        for host, why in NETWORK_HOSTS:
-            print(f"   > {host:24s} {why}")
+        for (args, why) in rules:
+            print(f"   > {args[1]:24s} {why}")
         print()
         print(f"    > LITTLE_SNITCH_CLI in the config points at it elsewhere")
         sys.exit(0)
@@ -32550,10 +32620,17 @@ def main_print_help(args, remaining_args, main_parser):
             print("  --install                Print the root commands that write the")
             print("                           firewall rules my-plex needs")
             print()
-            print("my-plex fetches episode and metadata from three hosts:")
+            print("my-plex connects to your Plex server, and fetches episode")
+            print("and metadata from three hosts:")
             print()
             for _h, _why in NETWORK_HOSTS:
                 print(f"   > {_h:24s} {_why}")
+            _plex = _plex_remote()
+            if _plex:
+                print(f"   > {_plex[0]:24s} your Plex server, from the config "
+                      f"({_plex[1]} rule, port {_plex[2]})")
+            else:
+                print("   > (no Plex server configured, so no rule for one)")
             print()
             print("On a machine with an interactive firewall (Little Snitch), the")
             print("first connection to each is held behind an alert. A scheduled or")
@@ -32573,6 +32650,15 @@ def main_print_help(args, remaining_args, main_parser):
             print("rule would name root's Python, a process that never runs. So")
             print("--install prints the commands and writes nothing; run them in a")
             print("root shell, or let a rollout step do it.")
+            print()
+            print("The PLEX SERVER's rule comes from the config (PLEX_URL, or the")
+            print("host in PLEX_XML_URL) and carries its port: 32400 is not the")
+            print("default a rule assumes. For a *.plex.direct server the rule")
+            print("names the DOMAIN -- that host name carries the server's own LAN")
+            print("IP, so a rule naming the host would stop matching, back into an")
+            print("alert, the next time that IP changes. A bare IP becomes an")
+            print("address rule, any other name a host rule, and with no Plex")
+            print("server configured no rule is invented for one.")
             print()
             print("Each command names the rule's OWNER -- this user, whose")
             print("Python the rule is about. It has to be named: the command")
