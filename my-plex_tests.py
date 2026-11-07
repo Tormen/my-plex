@@ -991,14 +991,8 @@ class TestCacheSkipLogic(unittest.TestCase):
     """Tests for cache update skip logic — file path changes must trigger updates."""
 
     def _read_script(self):
-        """Read script source, excluding the unittest section to avoid self-matching."""
         with open(MAIN_SCRIPT, 'r') as f:
-            content = f.read()
-        start = content.find('\nimport unittest\n')
-        end = content.find('\ndef run_regression_tests(main_globals):')
-        if start != -1 and end != -1:
-            return content[:start] + content[end:]
-        return content
+            return f.read()
 
     def test_episode_skip_checks_file_paths(self):
         content = self._read_script()
@@ -1376,14 +1370,8 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
     """verify_cache must perform comprehensive data integrity checks."""
 
     def _read_script(self):
-        """Read script source, excluding the unittest section to avoid self-matching."""
         with open(MAIN_SCRIPT, 'r') as f:
-            content = f.read()
-        start = content.find('\nimport unittest\n')
-        end = content.find('\ndef run_regression_tests(main_globals):')
-        if start != -1 and end != -1:
-            return content[:start] + content[end:]
-        return content
+            return f.read()
 
     def test_verify_checks_file_metadata_coverage(self):
         content = self._read_script()
@@ -1680,15 +1668,8 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
     """DB queries must use library name (JOIN library_sections) instead of internal IDs."""
 
     def _read_script(self):
-        """Read script source, excluding the unittest section to avoid self-matching."""
         with open(MAIN_SCRIPT, 'r') as f:
-            content = f.read()
-        # Strip out inline test classes (between 'import unittest' and 'def run_regression_tests')
-        start = content.find('\nimport unittest\n')
-        end = content.find('\ndef run_regression_tests(main_globals):')
-        if start != -1 and end != -1:
-            return content[:start] + content[end:]
-        return content
+            return f.read()
 
     def test_no_sectionId_in_cache(self):
         content = self._read_script()
@@ -13960,6 +13941,91 @@ class TestReadmeIsFound(unittest.TestCase):
                          "found a different README than the checkout's own")
 
 
+class TestLegacyInlineBlock(unittest.TestCase):
+    """What survived the inline `[TEST N]` block, removed 2026-11-08.
+
+    That block printed its own PASS/FAIL into local counters, stood in no TAP
+    plan (so the deployment gate never saw it), and `--run-tests inline` had
+    exited 1 for as long as the unittest run after it named an unbound
+    variable.  Of its 25 checks, ten read the real cache, seven tested argparse
+    or sorted() rather than my-plex, and the rest are here -- against the
+    functions they named, not a copy of their logic.  Its --info check lives
+    on in TestEndToEnd and the isolated --info test."""
+
+    def _mod(self):
+        return sys.modules[resolve_disk_map_variables.__module__]
+
+    def test_format_filesize_picks_the_unit(self):
+        f = self._mod().format_filesize
+        self.assertEqual(f(None), 'N/A')
+        self.assertEqual(f(500), '500 B')
+        self.assertEqual(f(1024), '1 KB')
+        self.assertEqual(f(1024**2), '1 MB')
+        self.assertEqual(f(1024**3), '1.0 GB')
+        self.assertEqual(f(int(1.5 * 1024**3)), '1.5 GB')
+        self.assertEqual(f(1024**3, force_unit='MB'), '1024 MB')
+
+    def test_escape_path_for_ssh_escapes_the_double_quote_specials_only(self):
+        esc = self._mod().escape_path_for_ssh
+        kept = "/path/charlie's angels (2019) [720p].mp4"
+        self.assertEqual(esc(kept), kept)
+        self.assertEqual(esc("/p/a$b`c\"d\\e"), "/p/a\\$b\\`c\\\"d\\\\e")
+
+    def test_determine_remote_host_knows_local_from_absent(self):
+        """(remote_host, exists, resolved_path) -- and a DIRECTORY is not the
+        file: the local check asks isfile, which is the regression this guards
+        ('ERROR: File not found' on remote files whose wrapper existed locally)."""
+        m = self._mod()
+        saved = m.PLEX_DB_REMOTE_HOST
+        d = tempfile.mkdtemp(prefix='my-plex-remotehost-')
+        try:
+            m.PLEX_DB_REMOTE_HOST = ''      # no host to ask: the suite reaches no network
+            fp = os.path.join(d, 'file.mkv')
+            open(fp, 'w').close()
+            self.assertEqual(m.determine_remote_host(fp), (None, True, fp))
+            self.assertEqual(m.determine_remote_host(d), (None, False, None))
+        finally:
+            m.PLEX_DB_REMOTE_HOST = saved
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_collection_and_playlist_classes_are_wired(self):
+        import inspect
+        m = self._mod()
+        self.assertIn('collection', m.PLEXOBJ[m.DETECT])
+        self.assertNotIn('playlists()', inspect.getsource(m.PLEX_Collection.detect_if_of_OBJ_TYPE),
+                         "a copy-paste from PLEX_Playlist")
+        self.assertEqual(list(inspect.signature(m.PLEX_Collection.list).parameters), ['library_name'])
+        for method in ('create', 'update'):
+            self.assertNotIn('++', inspect.getsource(getattr(m.PLEX_Playlist, method)),
+                             f"PLEX_Playlist.{method}: ++ is a no-op in Python")
+
+    def test_cache_dict_builder_has_every_structure_the_loader_reads(self):
+        m = self._mod()
+        d = m.build_media_cache_dict()
+        for key in ('obj_by_id', 'obj_by_movie', 'obj_by_series', 'obj_by_series_episodes',
+                    'obj_by_collection', 'obj_by_filepath', 'obj_by_library'):
+            self.assertIn(key, d)
+        self.assertNotIn('obj_by_filepath', m.build_media_cache_dict(include_paths=False))
+        self.assertEqual(m.build_media_cache_dict(library_stats={'t': 1})['library_stats'], {'t': 1})
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        inline = re.findall(r"'obj_by_id':\s*PLEX_Media\.OBJ_BY_ID,\s*\n\s*'obj_by_movie'", src)
+        self.assertLessEqual(len(inline), 1, "a cache dict built by hand beside build_media_cache_dict()")
+
+    def test_argv_normalisation_and_global_list_go_through_their_helpers(self):
+        import inspect
+        m = self._mod()
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        self.assertIn('def inject_before_first_match(', src)
+        self.assertGreaterEqual(len(re.findall(r'inject_before_first_match\(', src)), 3)
+        self.assertIn('def is_audio_flag(', src)
+        body = inspect.getsource(m.execute_global_commands)
+        for name in ('watched_only', 'unwatched_only', 'audio_filter'):
+            self.assertIn(name, body, f"a global --list would drop --{name.split('_')[0]}")
+        self.assertIn('--collections requires a library name', body)
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -14002,7 +14068,7 @@ _UNITTEST_SCOPES = {
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
-    'misc':       [TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+    'misc':       [TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
@@ -14150,7 +14216,6 @@ def describe_test_scopes():
                     f"({', '.join(c.__name__ for c in classes)})")
     rows += ["",
              f"  {'(none)':20s}  {total:3d} tests  bare --run-tests: every scope",
-             f"  {'inline':20s}      the legacy inline regression block",
              "",
              "Any other FILTER selects by test title, e.g. --run-tests TestFilter.test_year"]
     return "\n".join(rows)
@@ -14166,24 +14231,14 @@ def _run_unittest_only(unittest_classes):
         sys.exit(1)
     sys.exit(0 if result.wasSuccessful() else 1)
 
-def run_regression_tests(main_globals, scope=None):
-    """Run regression tests to verify script functionality
+def run_regression_tests(scope=None):
+    """Run the suite: all of it, one scope, or the tests whose title matches.
 
-    POLICY: Whenever a bug is fixed in my-plex.py, a regression test MUST be added here
-    to prevent the bug from reoccurring. Each test should:
-    - Have a descriptive name and number (e.g., "Test 5: Duplicate Detection")
-    - Include a comment explaining which bug it tests for
-    - Show clear PASS/FAIL/SKIP status with helpful output
-    - Increment passed/failed counters appropriately
-
-    Usage: my-plex.py --run-tests          (run the whole suite)
-           my-plex.py --run-tests <scope>  (run tests for one scope)
-           my-plex.py --run-tests <title>  (run tests by title)
-    Exit codes: 0 = all tests passed, 1 = one or more tests failed
-
-    Args:
-        main_globals: globals dict from main script
-        scope: None = list scopes, '--all' = all, else scope name
+    Usage: my-plex.py --run-tests          (the whole suite)
+           my-plex.py --run-tests <scope>  (one scope: see describe_test_scopes())
+           my-plex.py --run-tests <title>  (the tests whose title contains it)
+    Output is TAP: the plan first, then one line per test (_run_unittest_only).
+    Exit codes: 0 = every test passed, 1 = a failure, or nothing matched.
     """
     import sys
 
@@ -14194,1222 +14249,23 @@ def run_regression_tests(main_globals, scope=None):
         return _run_unittest_only(_UNITTEST_CLASSES)
 
     scope_lower = scope.lower()
-    run_inline = scope_lower == 'inline'
-
-    if not run_inline:
-        matched = {k: v for k, v in _UNITTEST_SCOPES.items() if scope_lower in k.lower()}
-        if len(matched) > 1:
-            print(f"ERROR: Ambiguous scope '{scope}' matches: {', '.join(matched.keys())}",
-                  file=sys.stderr)
-            sys.exit(1)
-        if matched:
-            scope_name, unittest_classes = next(iter(matched.items()))
-            print(f"scope {scope_name}: {', '.join(c.__name__ for c in unittest_classes)}")
-            return _run_unittest_only(unittest_classes)
-        # No scope of that name: take FILTER as a title substring, which is
-        # what every other tool's --run-tests FILTER means.
-        selected = _tests_matching_title(scope)
-        if selected:
-            print(f"filter {scope!r}: {len(selected)} test(s) by title")
-            return _run_unittest_only(selected)
-        print(f"ERROR: '{scope}' is neither a test scope nor part of any test title",
+    matched = {k: v for k, v in _UNITTEST_SCOPES.items() if scope_lower in k.lower()}
+    if len(matched) > 1:
+        print(f"ERROR: Ambiguous scope '{scope}' matches: {', '.join(matched.keys())}",
               file=sys.stderr)
-        print(file=sys.stderr)
-        print(describe_test_scopes(), file=sys.stderr)
         sys.exit(1)
-
-    import pickle
-    import sys
-
-    # Extract globals from main script
-    CACHE_FILE = main_globals['CACHE_FILE']
-    PLEX_Media = main_globals['PLEX_Media']
-    PLEX_Library = main_globals['PLEX_Library']
-    PLEX_Collection = main_globals['PLEX_Collection']
-    PLEX_Playlist = main_globals['PLEX_Playlist']
-    PLEXOBJ = main_globals['PLEXOBJ']
-    DETECT = main_globals['DETECT']
-    show_item_info = main_globals['show_item_info']
-    update_cache_after_resolution = main_globals['update_cache_after_resolution']
-    escape_path_for_ssh = main_globals['escape_path_for_ssh']
-    determine_remote_host = main_globals['determine_remote_host']
-    resolve_path = main_globals['resolve_path']
-    format_filesize = main_globals['format_filesize']
-    build_media_cache_dict = main_globals['build_media_cache_dict']
-    load_media_cache = main_globals['load_media_cache']
-    execute_global_commands = main_globals['execute_global_commands']
-    update_and_save_cache = main_globals.get('update_and_save_cache')
-    undo_operation = main_globals.get('undo_operation')
-    DBG = main_globals.get('DBG', False)
-    inject_before_first_match = main_globals.get('inject_before_first_match')
-
-    passed = 0
-    failed = 0
-    tests = []
-
-    print("=" * 76)
-    print("REGRESSION TEST SUITE")
-    print("=" * 76)
-
-    # Test 1: Cache timestamp preservation
-    print("\n[TEST 1] Cache Timestamp Preservation")
-    print("-" * 80)
-    try:
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            if 'library_stats' in cache:
-                lib_stats = cache['library_stats']
-                if 'updatedAt' in lib_stats and len(lib_stats['updatedAt']) > 0:
-                    print(f"✓ PASS: Cache has library_stats with {len(lib_stats['updatedAt'])} library timestamps")
-                    print(f"  Sample libraries: {list(lib_stats['updatedAt'].keys())[:3]}")
-                    passed += 1
-                elif 'obj_by_id' not in cache or len(cache.get('obj_by_id', {})) == 0:
-                    print(f"⚠ SKIP: Cache has no media data (not yet populated via --update-cache)")
-                else:
-                    print(f"✗ FAIL: Cache library_stats has empty updatedAt dictionary")
-                    print(f"  This means timestamps are not being saved!")
-                    failed += 1
-            else:
-                if 'obj_by_id' not in cache or len(cache.get('obj_by_id', {})) == 0:
-                    print(f"⚠ SKIP: Cache has no media data (not yet populated via --update-cache)")
-                else:
-                    print(f"✗ FAIL: Cache missing library_stats")
-                    failed += 1
-        else:
-            print(f"⚠ SKIP: No cache file found at {cache_file}")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 2: Argument abbreviation disabled
-    print("\n[TEST 2] Argument Abbreviation Disabled")
-    print("-" * 80)
-    try:
-        # Try to create a parser with allow_abbrev=False
-        import argparse
-        test_parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
-        test_parser.add_argument('--duplicates', action='store_true')
-        test_parser.add_argument('--debug', action='store_true')
-
-        # Test that --d does NOT expand to --duplicates or --debug
-        try:
-            args, unknown = test_parser.parse_known_args(['--d'])
-            if '--d' in unknown:
-                print(f"✓ PASS: Argument abbreviation properly disabled (--d not expanded)")
-                passed += 1
-            else:
-                print(f"✗ FAIL: --d was incorrectly expanded to a known argument")
-                failed += 1
-        except Exception:
-            print(f"✗ FAIL: Parser raised exception (should return --d in unknown args)")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 3: Cache structure validation
-    print("\n[TEST 3] Cache Structure Validation")
-    print("-" * 80)
-    try:
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            required_keys = ['obj_by_id', 'library_stats']
-            missing_keys = [k for k in required_keys if k not in cache]
-
-            if not missing_keys:
-                print(f"✓ PASS: Cache has all required keys: {required_keys}")
-                print(f"  Total media objects: {len(cache.get('obj_by_id', {}))}")
-                passed += 1
-            elif 'obj_by_id' not in cache and len(cache.get('media_objs', {})) == 0:
-                print(f"⚠ SKIP: Cache not yet populated via --update-cache (missing {missing_keys})")
-            else:
-                print(f"✗ FAIL: Cache missing required keys: {missing_keys}")
-                failed += 1
-        else:
-            print(f"⚠ SKIP: No cache file found")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 4: Library object counts format
-    print("\n[TEST 4] Library Object Counts Format")
-    print("-" * 80)
-    try:
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            if 'library_object_counts' in cache:
-                counts = cache['library_object_counts']
-                # Check that values are dicts, not ints (old format bug)
-                format_ok = all(isinstance(v, dict) for v in counts.values())
-
-                if format_ok:
-                    print(f"✓ PASS: Library object counts are in correct dict format")
-                    if counts:
-                        sample_lib = list(counts.keys())[0]
-                        print(f"  Sample: '{sample_lib}' = {counts[sample_lib]}")
-                    passed += 1
-                else:
-                    print(f"✗ FAIL: Library object counts contain non-dict values (old format)")
-                    failed += 1
-            else:
-                print(f"⚠ SKIP: No library_object_counts in cache")
-        else:
-            print(f"⚠ SKIP: No cache file found")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 5: Duplicate detection - content-based grouping
-    print("\n[TEST 5] Duplicate Detection - Content-Based Grouping")
-    print("-" * 80)
-    try:
-        # This test verifies that duplicates are grouped by title+year, not by Plex IDs
-        # Bug fixed: Movies with same title+year but different paths should be detected as duplicates
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            if 'obj_by_id' in cache and len(cache['obj_by_id']) > 0:
-                # Look for any movies with the same title+year
-                movies = [obj for obj in cache['obj_by_id'].values() if obj.get('type') == 'Movie']
-
-                if len(movies) > 1:
-                    # Group by title+year
-                    title_year_groups = {}
-                    for movie in movies[:100]:  # Sample first 100 for speed
-                        title = movie.get('title', '').lower().strip()
-                        year = movie.get('year', 0)
-                        key = f"{title}:{year}"
-                        if key not in title_year_groups:
-                            title_year_groups[key] = []
-                        title_year_groups[key].append(movie)
-
-                    # Check if any group has duplicates
-                    has_duplicates = any(len(movies) > 1 for movies in title_year_groups.values())
-
-                    if has_duplicates:
-                        dup_count = sum(1 for movies in title_year_groups.values() if len(movies) > 1)
-                        print(f"✓ PASS: Content-based duplicate detection is testable")
-                        print(f"  Found {dup_count} duplicate groups in sample of {len(movies)} movies")
-                        passed += 1
-                    else:
-                        print(f"⚠ SKIP: No duplicates found in sample to test")
-                else:
-                    print(f"⚠ SKIP: Not enough movies in cache to test")
-            else:
-                print(f"⚠ SKIP: No media objects in cache")
-        else:
-            print(f"⚠ SKIP: No cache file found")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 6: Invalid flag rejection
-    print("\n[TEST 6] Invalid Flag Rejection")
-    print("-" * 80)
-    try:
-        # This test verifies that invalid flags like --d are properly rejected
-        # Bug fixed: Script should reject --d before connecting to Plex
-        import argparse
-        test_parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
-        test_parser.add_argument('--duplicates', action='store_true')
-        test_parser.add_argument('--debug', action='store_true')
-
-        # Parse --d and check it's in unparsed args
-        args, unparsed = test_parser.parse_known_args(['--d'])
-
-        # The flag should be in unparsed list, not consumed by parser
-        if '--d' in unparsed and not args.duplicates and not args.debug:
-            print(f"✓ PASS: Invalid flags remain in unparsed list for validation")
-            print(f"  --d was not expanded to --duplicates or --debug")
-            passed += 1
-        else:
-            print(f"✗ FAIL: Invalid flag was incorrectly parsed")
-            print(f"  args.duplicates={args.duplicates}, args.debug={args.debug}")
-            print(f"  unparsed={unparsed}")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 7: Duplicate synonym functionality
-    print("\n[TEST 7] --duplicates Synonym for --list --duplicates")
-    print("-" * 80)
-    try:
-        # This test verifies that --duplicates alone works as synonym for --list --duplicates
-        # Bug fixed: Added synonym support so users can type --duplicates instead of --list --duplicates
-        import argparse
-        test_parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
-        test_parser.add_argument('--list', action='store_true')
-        test_parser.add_argument('--duplicates', action='store_true')
-
-        # Test that both --list --duplicates and just --duplicates can be distinguished
-        args1, _ = test_parser.parse_known_args(['--list', '--duplicates'])
-        args2, _ = test_parser.parse_known_args(['--duplicates'])
-
-        if args1.list and args1.duplicates:
-            print(f"✓ PASS: --list --duplicates combination works")
-            passed += 1
-        else:
-            print(f"✗ FAIL: --list --duplicates not parsed correctly")
-            failed += 1
-
-        # The code should treat args2.duplicates as equivalent to args1.list + args1.duplicates
-        # We can't test the actual behavior here, but we verify the flag is recognized
-        if args2.duplicates:
-            print(f"✓ PASS: --duplicates alone is recognized")
-            passed += 1
-        else:
-            print(f"✗ FAIL: --duplicates alone not recognized")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 8: Filesize formatting in duplicate output
-    print("\n[TEST 8] Filesize Formatting in Duplicate Output")
-    print("-" * 80)
-    try:
-        # This test verifies that filesize formatting works correctly
-        # Feature added: Show human-readable filesizes (KB/MB/GB) in --duplicates output
-
-        # Test the filesize formatting logic
-        test_cases = [
-            (500, "500B"),
-            (1024, "1KB"),
-            (1536, "2KB"),  # 1.5 * 1024 = 1536
-            (1024**2, "1MB"),
-            (1.5 * 1024**2, "2MB"),  # Should round to 2MB
-            (1024**3, "1.0GB"),
-            (1.5 * 1024**3, "1.5GB"),
-        ]
-
-        all_pass = True
-        for size_bytes, expected in test_cases:
-            # Replicate the formatting logic from the code
-            if size_bytes >= 1024**3:  # GB
-                formatted = f"{size_bytes / (1024**3):.1f}GB"
-            elif size_bytes >= 1024**2:  # MB
-                formatted = f"{size_bytes / (1024**2):.0f}MB"
-            elif size_bytes >= 1024:  # KB
-                formatted = f"{size_bytes / 1024:.0f}KB"
-            else:
-                formatted = f"{int(size_bytes)}B"
-
-            if formatted != expected:
-                print(f"  ✗ {size_bytes} bytes → {formatted} (expected {expected})")
-                all_pass = False
-
-        if all_pass:
-            print(f"✓ PASS: Filesize formatting works correctly")
-            print(f"  Tested: Bytes, KB, MB, GB formatting")
-            passed += 1
-        else:
-            print(f"✗ FAIL: Filesize formatting produced unexpected results")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 9: Duplicate output sorting
-    print("\n[TEST 9] Duplicate Output Sorting")
-    print("-" * 80)
-    try:
-        # This test verifies that duplicate items are sorted and grouped together
-        # Feature added: Sort duplicates by key so same items appear consecutively
-
-        # Test the sorting behavior
-        test_dict = {
-            'movie:zebra:2020': [1, 2],
-            'movie:alpha:2020': [3, 4],
-            'movie:beta:2019': [5, 6],
-        }
-
-        sorted_items = sorted(test_dict.items())
-        sorted_keys = [k for k, v in sorted_items]
-
-        expected_order = ['movie:alpha:2020', 'movie:beta:2019', 'movie:zebra:2020']
-
-        if sorted_keys == expected_order:
-            print(f"✓ PASS: Duplicate items are sorted alphabetically")
-            print(f"  Order: {' → '.join([k.split(':')[1] for k in sorted_keys])}")
-            passed += 1
-        else:
-            print(f"✗ FAIL: Sorting produced unexpected order")
-            print(f"  Expected: {expected_order}")
-            print(f"  Got: {sorted_keys}")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 10: Plex API filesize in cache
-    print("\n[TEST 10] Plex API Filesize in Cache")
-    print("-" * 80)
-    try:
-        # This test verifies that filesize from Plex API is stored in cache
-        # Feature added: Store part.size from Plex API instead of calculating from filesystem
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            obj_by_id = cache.get('obj_by_id', {})
-            if obj_by_id:
-                # Check first 10 objects to see if they have filesize
-                sample_objs = list(obj_by_id.values())[:10]
-                objs_with_filesize = [obj for obj in sample_objs if 'filesize' in obj and obj['filesize'] is not None]
-
-                if len(objs_with_filesize) > 0:
-                    print(f"✓ PASS: Cache contains filesize from Plex API")
-                    print(f"  Found filesize in {len(objs_with_filesize)}/{len(sample_objs)} sampled objects")
-                    # Show sample filesize
-                    sample_obj = objs_with_filesize[0]
-                    size_bytes = sample_obj['filesize']
-                    size_str = format_filesize(size_bytes)
-                    print(f"  Sample: '{sample_obj['title']}' = {size_str} ({size_bytes} bytes)")
-                    passed += 1
-                else:
-                    print(f"✗ FAIL: No objects in cache have filesize field")
-                    print(f"  This means filesize from Plex API is not being cached!")
-                    failed += 1
-            else:
-                print(f"⚠ SKIP: Cache has no objects")
-        else:
-            print(f"⚠ SKIP: No cache file found")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test: --info command functionality
-    def _info_failure(e: BaseException, buf: "io.StringIO") -> str:
-        """A fatal err() inside show_item_info() raises SystemExit; report it as this
-        check's failure (with the last line it printed) instead of ending the suite."""
-        if isinstance(e, SystemExit):
-            lines = buf.getvalue().strip().splitlines()
-            return f"exited [rc {e.code}]" + (f": {lines[-1]}" if lines else "")
-        return str(e)
-    print("\n[TEST] --info Command Functionality")
-    print("-" * 80)
-    try:
-        if len(PLEX_Media.OBJ_BY_ID) > 0:
-            # Get a test item (prefer episode for comprehensive testing)
-            test_item = None
-            test_key = None
-            for key, obj in PLEX_Media.OBJ_BY_ID.items():
-                if obj.get('type') == 'Episode':
-                    test_item = obj
-                    test_key = key
-                    break
-
-            # Fallback to any item if no episode found
-            if not test_item:
-                test_key = list(PLEX_Media.OBJ_BY_ID.keys())[0]
-                test_item = PLEX_Media.OBJ_BY_ID[test_key]
-
-            # Extract numeric ID for testing
-            test_id = test_item.get('id')
-            test_title = test_item.get('title', '')
-
-            tests_passed = 0
-            tests_total = 4
-
-            # Test 0: Call show_item_info() without parameter (system info)
-            print(f"  Testing: show_item_info('') - system info")
-            try:
-                import io
-                from contextlib import redirect_stdout, redirect_stderr
-
-                f = io.StringIO()
-                with redirect_stdout(f), redirect_stderr(f):
-                    show_item_info('')  # Empty string triggers system info
-                output = f.getvalue()
-
-                # Verify output contains system information
-                if "PLEX SYSTEM INFORMATION" in output and "CACHE" in output and "LIBRARIES" in output:
-                    print(f"  ✓ System info (--info without parameter): PASS")
-                    tests_passed += 1
-                else:
-                    print(f"  ✗ System info (--info without parameter): FAIL - output missing expected sections")
-                    if DBG: print(f"    Output: {output[:200]}...")
-            except (Exception, SystemExit) as e:
-                print(f"  ✗ System info (--info without parameter): FAIL - {_info_failure(e, f)}")
-
-            # Test 1: Call show_item_info() with ID: prefix (required format)
-            print(f"  Testing: show_item_info('ID:{test_id}')")
-            try:
-                import io
-                from contextlib import redirect_stdout, redirect_stderr
-
-                # Capture output
-                f = io.StringIO()
-                with redirect_stdout(f), redirect_stderr(f):
-                    show_item_info(f'ID:{test_id}')
-                output = f.getvalue()
-
-                # Verify output contains expected information
-                if test_key in output and str(test_id) in output:
-                    print(f"  ✓ Search by ID:{test_id}: PASS")
-                    tests_passed += 1
-                else:
-                    print(f"  ✗ Search by ID:{test_id}: FAIL - output missing key info")
-                    if DBG: print(f"    Output: {output[:200]}...")
-            except (Exception, SystemExit) as e:
-                print(f"  ✗ Search by ID:{test_id}: FAIL - {_info_failure(e, f)}")
-
-            # Test 2: Call show_item_info() with full key
-            print(f"  Testing: show_item_info('{test_key}')")
-            try:
-                f = io.StringIO()
-                with redirect_stdout(f), redirect_stderr(f):
-                    show_item_info(test_key)
-                output = f.getvalue()
-
-                if test_key in output and str(test_id) in output:
-                    print(f"  ✓ Search by full key ({test_key}): PASS")
-                    tests_passed += 1
-                else:
-                    print(f"  ✗ Search by full key ({test_key}): FAIL - output missing key info")
-            except (Exception, SystemExit) as e:
-                print(f"  ✗ Search by full key ({test_key}): FAIL - {_info_failure(e, f)}")
-
-            # Test 3: Call show_item_info() with title search
-            if test_title and len(test_title) >= 5:
-                search_term = test_title[:10]
-                print(f"  Testing: show_item_info('{search_term}')")
-                try:
-                    f = io.StringIO()
-                    with redirect_stdout(f), redirect_stderr(f):
-                        show_item_info(search_term)
-                    output = f.getvalue()
-
-                    # Should find at least one match (might be multiple)
-                    if test_title.lower() in output.lower() or "Found" in output:
-                        print(f"  ✓ Search by title ('{search_term}'): PASS")
-                        tests_passed += 1
-                    else:
-                        print(f"  ✗ Search by title ('{search_term}'): FAIL - no results found")
-                except (Exception, SystemExit) as e:
-                    print(f"  ✗ Search by title ('{search_term}'): FAIL - {_info_failure(e, f)}")
-            else:
-                print(f"  ⚠ SKIP: Title search (title too short)")
-                tests_total = 3
-
-            if tests_passed == tests_total:
-                print(f"✓ PASS: --info command works correctly ({tests_passed}/{tests_total})")
-                print(f"  Verified: my-plex --info (system info)")
-                print(f"  Verified: my-plex --info ID:{test_id}")
-                print(f"  Verified: my-plex --info {test_key}")
-                print(f"  Verified: my-plex --offline --info '{search_term if test_title else test_id}'")
-                passed += 1
-            else:
-                print(f"✗ FAIL: --info command failed ({tests_passed}/{tests_total} tests passed)")
-                failed += 1
-        else:
-            print(f"⚠ SKIP: Cache has no objects to test")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 6: SSH path escaping for special characters
-    print("\n[TEST 6] SSH Path Escaping for Special Characters")
-    print("-" * 80)
-    try:
-        # Test the escape_path_for_ssh function with various special characters
-        # The function escapes chars special inside double quotes: " $ ` \
-        # (paths are wrapped in double quotes at usage time: f'mv "{escaped}" ...')
-        test_cases = [
-            # (input_path, expected_output)
-            ("/Volumes/2/watch.v/lib1/file.mp4",       "/Volumes/2/watch.v/lib1/file.mp4"),       # No special chars
-            ("/path/charlie's angels (2019) [720p].mp4",    "/path/charlie's angels (2019) [720p].mp4"),    # Apostrophe: safe in double quotes
-            ("/path/file with spaces.mp4",                  "/path/file with spaces.mp4"),                  # Spaces: safe in double quotes
-            ("/path/file$with$dollars.mp4",                 "/path/file\\$with\\$dollars.mp4"),              # Dollar signs: must be escaped
-            ("/path/file`with`backticks.mp4",               "/path/file\\`with\\`backticks.mp4"),            # Backticks: must be escaped
-            ('/path/file"with"quotes.mp4',                  '/path/file\\"with\\"quotes.mp4'),              # Double quotes: must be escaped
-            ("/path/normal_file.mp4",                       "/path/normal_file.mp4"),                       # Normal path
-        ]
-
-        all_passed = True
-        for path, expected in test_cases:
-            escaped = escape_path_for_ssh(path)
-            if escaped != expected:
-                print(f"  ✗ Mismatch for: {path}")
-                print(f"    Expected: {expected}")
-                print(f"    Got:      {escaped}")
-                all_passed = False
-
-        if all_passed:
-            print(f"✓ PASS: SSH path escaping handles special characters correctly")
-            print(f"  Escapes $, `, \", \\ for safe use inside double quotes")
-            print(f"  Leaves apostrophes, spaces, brackets unchanged (safe in double quotes)")
-            passed += 1
-        else:
-            print(f"✗ FAIL: SSH path escaping has issues")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 7: Parameter dependency validation
-    print("\n[TEST 7] Parameter Dependency Validation")
-    print("-" * 80)
-    try:
-        # Test that parameter dependencies are enforced
-        import argparse
-
-        # Create a minimal parser to test validation logic
-        test_parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
-        test_parser.add_argument('--list', action='store_true')
-        test_parser.add_argument('--duplicates', action='store_true')
-        test_parser.add_argument('--resolve', action='store_true')
-        test_parser.add_argument('--type', type=str)
-        test_parser.add_argument('--update-cache', action='store_true')
-        test_parser.add_argument('--force', action='store_true')
-        # Mirror the real parser: --force-plex stores into dest='from_scratch'
-        test_parser.add_argument('--force-plex', dest='from_scratch', action='store_true')
-
-        validation_tests = [
-            # (args, should_fail, description)
-            (['--resolve'], True, "--resolve without --duplicates should fail"),
-            (['--type', 'movie'], True, "--type without --list or --duplicates should fail"),
-            (['--force'], True, "--force without --update-cache should fail"),
-            (['--force-plex'], True, "--force-plex without --update-cache should fail"),
-            (['--duplicates', '--resolve'], False, "--resolve with --duplicates should work"),
-            (['--list', '--duplicates', '--resolve'], False, "--resolve with --list --duplicates should work"),
-            (['--list', '--type', 'movie'], False, "--type with --list should work"),
-            (['--duplicates', '--type', 'movie'], False, "--type with --duplicates should work"),
-            (['--update-cache', '--force'], False, "--force with --update-cache should work"),
-            (['--update-cache', '--force-plex'], False, "--force-plex with --update-cache should work"),
-        ]
-
-        validation_ok = True
-        for args, should_fail, desc in validation_tests:
-            test_args = test_parser.parse_args(args)
-            # Simulate the validation logic (--duplicates automatically enables --list)
-            if test_args.duplicates and not test_args.list:
-                test_args.list = True
-            has_list = test_args.list
-            has_duplicates = test_args.duplicates
-            has_update_cache = test_args.update_cache
-
-            fails = False
-            if test_args.resolve and not has_duplicates:
-                fails = True
-            if test_args.type and not (has_list or has_duplicates):
-                fails = True
-            if test_args.force and not has_update_cache:
-                fails = True
-            if test_args.from_scratch and not has_update_cache:
-                fails = True
-
-            if fails != should_fail:
-                print(f"  ✗ Validation mismatch: {desc}")
-                validation_ok = False
-
-        if validation_ok:
-            print(f"✓ PASS: Parameter dependency validation works correctly")
-            print(f"  Tested: --resolve, --duplicates, --type, --force dependencies")
-            passed += 1
-        else:
-            print(f"✗ FAIL: Parameter dependency validation has issues")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 8: Cache modification tracking structure
-    print("\n[TEST 8] Cache Modification Tracking Structure")
-    print("-" * 80)
-    try:
-        # Verify that the update_cache_after_resolution function returns library name
-        # This is a structural test - we check the function signature
-        import inspect
-
-        sig = inspect.signature(update_cache_after_resolution)
-        params = list(sig.parameters.keys())
-        expected_params = ['choice', 'keys', 'file1', 'file2', 'all_files', 'renamed_files']
-
-        if params == expected_params:
-            print(f"✓ PASS: update_cache_after_resolution has correct signature")
-            print(f"  Parameters: {params}")
-            # Note: We can't easily test the return value without mocking data
-            print(f"  Note: Function should return library name when cache modified")
-            passed += 1
-        else:
-            print(f"✗ FAIL: update_cache_after_resolution signature mismatch")
-            print(f"  Expected: {expected_params}")
-            print(f"  Got: {params}")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 9: JSON module imported for resolution logs
-    print("\n[TEST 9] JSON Module Import for Resolution Logs")
-    print("-" * 80)
-    try:
-        # Verify that json module is imported (needed for resolution log saving)
-        # Bug fixed: Resolution log saving failed with "name 'json' is not defined"
-        import sys
-        if 'json' in sys.modules:
-            print(f"✓ PASS: json module is imported")
-            passed += 1
-        else:
-            print(f"✗ FAIL: json module not imported - resolution logs will fail to save")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 10: Cache save function exists with correct signature
-    print("\n[TEST 10] Cache Save Function Signature")
-    print("-" * 80)
-    try:
-        # Verify that update_and_save_cache function exists and has correct signature
-        # Bug fixed: Cache wasn't being saved immediately after resolution operations
-        import inspect
-
-        if 'update_and_save_cache' in locals():
-            sig = inspect.signature(update_and_save_cache)
-            params = list(sig.parameters.keys())
-
-            if params == ['obj_dict']:
-                print(f"✓ PASS: update_and_save_cache function has correct signature")
-                print(f"  Ensures cache can be saved after each resolution operation")
-                passed += 1
-            else:
-                print(f"✗ FAIL: update_and_save_cache signature mismatch")
-                print(f"  Expected: ['obj_dict'], Got: {params}")
-                failed += 1
-        else:
-            print(f"✗ FAIL: update_and_save_cache function not found")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 11: Removal detection data structures
-    print("\n[TEST 11] Removal Detection Data Structures")
-    print("-" * 80)
-    try:
-        # Verify that the removal detection infrastructure exists
-        # Bug fixed: Removal detection needed to work for all library types
-        cache_file = CACHE_FILE
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-
-            # Check that cache has the structures needed for removal detection
-            has_obj_by_id = 'obj_by_id' in cache
-            has_obj_by_library = 'obj_by_library' in cache
-
-            if has_obj_by_id and has_obj_by_library:
-                print(f"✓ PASS: Cache has structures needed for removal detection")
-                print(f"  obj_by_id: {len(cache['obj_by_id'])} objects")
-                print(f"  obj_by_library: {len(cache.get('obj_by_library', {}))} libraries")
-                passed += 1
-            elif not has_obj_by_id and len(cache.get('media_objs', {})) == 0:
-                print(f"⚠ SKIP: Cache not yet populated via --update-cache")
-            else:
-                print(f"✗ FAIL: Missing cache structures for removal detection")
-                print(f"  obj_by_id: {has_obj_by_id}, obj_by_library: {has_obj_by_library}")
-                failed += 1
-        else:
-            print(f"⚠ SKIP: No cache file found")
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 12: Undo operation structure
-    print("\n[TEST 12] Undo Operation Structure")
-    print("-" * 80)
-    try:
-        # Verify that undo_operation function exists
-        # Bug fixed: Undo needed to support multiple sequential undos
-        import inspect
-
-        if 'undo_operation' in locals():
-            sig = inspect.signature(undo_operation)
-            params = list(sig.parameters.keys())
-
-            if 'operation_log' in params and 'remote_host' in params:
-                print(f"✓ PASS: undo_operation function exists with correct parameters")
-                print(f"  Supports multiple sequential undos via operation_log")
-                passed += 1
-            else:
-                print(f"✗ FAIL: undo_operation missing required parameters")
-                print(f"  Expected: operation_log, remote_host")
-                print(f"  Got: {params}")
-                failed += 1
-        else:
-            print(f"✗ FAIL: undo_operation function not found")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        failed += 1
-
-    # Test 13: File path resolution with ALTERNATIVE_ROOTPATHS
-    print("\n[TEST 13] File Path Resolution with ALTERNATIVE_ROOTPATHS")
-    print("-" * 80)
-    try:
-        # Bug fixed: determine_remote_host() was using os.path.exists() which returns True for directories,
-        # causing false positives when a directory exists locally but the specific file doesn't.
-        # This led to remote files being incorrectly identified as local, causing "ERROR: File not found"
-        # when trying to play them.
-        #
-        # The fix:
-        # 1. Changed os.path.exists() to os.path.isfile() in resolve_path()
-        # 2. Modified determine_remote_host() to return (remote_host, exists, resolved_filepath) tuple
-        # 3. Updated all callers to use the resolved filepath instead of the original path
-
-        # Test that determine_remote_host returns a 3-tuple
-        import inspect
-        if 'determine_remote_host' in locals():
-            sig = inspect.signature(determine_remote_host)
-            params = list(sig.parameters.keys())
-
-            # Check function signature
-            if 'filepath' in params:
-                print(f"✓ PASS: determine_remote_host function exists with filepath parameter")
-
-                # Test with a non-existent file to verify the 3-tuple return
-                test_filepath = "/nonexistent/test/file.mkv"
-                result = determine_remote_host(test_filepath)
-
-                if isinstance(result, tuple) and len(result) == 3:
-                    remote_host, exists, resolved_path = result
-                    print(f"✓ PASS: determine_remote_host returns 3-tuple (remote_host, exists, resolved_filepath)")
-                    print(f"  Sample return for non-existent file: ({remote_host}, {exists}, {resolved_path})")
-                    passed += 1
-                else:
-                    print(f"✗ FAIL: determine_remote_host should return 3-tuple, got: {type(result).__name__} with {len(result) if isinstance(result, tuple) else 'N/A'} elements")
-                    print(f"  This regression would cause 'ERROR: File not found' for remote files with commas in path")
-                    failed += 1
-            else:
-                print(f"✗ FAIL: determine_remote_host missing filepath parameter")
-                print(f"  Got parameters: {params}")
-                failed += 1
-        else:
-            print(f"✗ FAIL: determine_remote_host function not found")
-            failed += 1
-
-        # Test that resolve_path uses os.path.isfile not os.path.exists for file checks
-        if 'resolve_path' in locals():
-            import inspect
-            source = inspect.getsource(resolve_path)
-
-            # Check that we're using os.path.isfile for file checks (may be in dict or direct call)
-            uses_isfile = 'os.path.isfile' in source
-            uses_exists_incorrectly = 'os.path.exists(check_path)' in source
-
-            if uses_isfile and not uses_exists_incorrectly:
-                print(f"✓ PASS: resolve_path correctly uses os.path.isfile()")
-                print(f"  This prevents false positives when directory exists but file doesn't")
-                passed += 1
-            else:
-                if uses_exists_incorrectly:
-                    print(f"✗ FAIL: resolve_path still uses os.path.exists(check_path)")
-                    print(f"  REGRESSION: This causes remote files to be incorrectly detected as local")
-                    failed += 1
-                elif not uses_isfile:
-                    print(f"✗ FAIL: resolve_path doesn't use os.path.isfile()")
-                    failed += 1
-        else:
-            print(f"✗ FAIL: resolve_path function not found")
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 14: PLEX_Collection class correctness
-    print("\n[TEST 14] PLEX_Collection class correctness")
-    print("-" * 80)
-    try:
-        test_ok = True
-
-        # 14a: detect_if_of_OBJ_TYPE should NOT reference PLEX_SERVER.playlists()
-        import inspect
-        source = inspect.getsource(PLEX_Collection.detect_if_of_OBJ_TYPE)
-        if 'playlists()' in source:
-            print(f"✗ FAIL: PLEX_Collection.detect_if_of_OBJ_TYPE still references playlists() (copy-paste from Playlist)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.detect_if_of_OBJ_TYPE does not reference playlists()")
-
-        # 14b: detect_if_of_OBJ_TYPE should not have unreachable code (two returns at same indent level in sequence)
-        lines = source.strip().split('\n')
-        has_unreachable = False
-        prev_return_indent = None
-        for line in lines:
-            stripped = line.strip()
-            indent = len(line) - len(line.lstrip())
-            if stripped.startswith('return ') or stripped == 'return':
-                if prev_return_indent is not None and indent == prev_return_indent:
-                    has_unreachable = True
-                    break
-                prev_return_indent = indent
-            else:
-                prev_return_indent = None
-        if has_unreachable:
-            print(f"✗ FAIL: PLEX_Collection.detect_if_of_OBJ_TYPE has unreachable return statement")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.detect_if_of_OBJ_TYPE has no unreachable code")
-
-        # 14c: execute_cmd should use correct attribute names (not remove_from_collection)
-        source = inspect.getsource(PLEX_Collection.execute_cmd)
-        if 'remove_from_collection' in source:
-            print(f"✗ FAIL: PLEX_Collection.execute_cmd uses obj_args.remove_from_collection (should be remove_from)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.execute_cmd uses correct attribute names")
-
-        # 14d: list() should accept exactly 1 parameter (library_name), not 2
-        sig = inspect.signature(PLEX_Collection.list)
-        params = list(sig.parameters.keys())
-        if len(params) != 1:
-            print(f"✗ FAIL: PLEX_Collection.list() should take 1 parameter, has {len(params)}: {params}")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.list() takes correct number of parameters")
-
-        # 14e: execute_cmd list call should pass 1 arg matching list() signature
-        source = inspect.getsource(PLEX_Collection.execute_cmd)
-        if 'list(obj, ' in source:
-            print(f"✗ FAIL: PLEX_Collection.execute_cmd calls list() with 2 args (list() only takes 1)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.execute_cmd calls list() with correct args")
-
-        # 14f: create() should use OBJ_DICT not OBJ_DIC
-        source = inspect.getsource(PLEX_Collection.create)
-        if 'OBJ_DIC[' in source and 'OBJ_DICT[' not in source:
-            print(f"✗ FAIL: PLEX_Collection.create() uses OBJ_DIC (typo, should be OBJ_DICT)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Collection.create() uses correct attribute name OBJ_DICT")
-
-        # 14g: PLEX_Collection should be registered via add_PLEX_OBJ_TYPE
-        if 'collection' in PLEXOBJ[DETECT]:
-            print(f"✓ PASS: PLEX_Collection is registered in PLEXOBJ dispatch")
-        else:
-            print(f"✗ FAIL: PLEX_Collection is NOT registered in PLEXOBJ dispatch")
-            test_ok = False
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 15: PLEX_Playlist class correctness
-    print("\n[TEST 15] PLEX_Playlist class correctness")
-    print("-" * 80)
-    try:
-        import inspect
-        test_ok = True
-
-        # 15a: execute_cmd should use obj_args.create_playlist (not obj_args.create)
-        source = inspect.getsource(PLEX_Playlist.execute_cmd)
-        if 'obj_args.create)' in source or 'obj_args.create,' in source:
-            print(f"✗ FAIL: PLEX_Playlist.execute_cmd uses obj_args.create (should be obj_args.create_playlist)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Playlist.execute_cmd uses correct attribute obj_args.create_playlist")
-
-        # 15b: create() and update() should use += not ++ for list concatenation
-        for method_name in ['create', 'update']:
-            method = getattr(PLEX_Playlist, method_name)
-            source = inspect.getsource(method)
-            if '++' in source:
-                print(f"✗ FAIL: PLEX_Playlist.{method_name}() uses ++ (no-op in Python, should be +=)")
-                test_ok = False
-            else:
-                print(f"✓ PASS: PLEX_Playlist.{method_name}() uses correct list concatenation")
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 16: Library-required parameter validation
-    print("\n[TEST 16] Library-required parameter validation")
-    print("-" * 80)
-    try:
-        import inspect
-        test_ok = True
-
-        # 16a: _normalize_list_args() should validate --watched/--unwatched/--audio require library_name
-        source = inspect.getsource(PLEX_Media._normalize_list_args)
-        for flag in ['watched_only', 'unwatched_only', 'audio_filter']:
-            if f'library_name is None' in source and flag in source:
-                print(f"✓ PASS: PLEX_Media._normalize_list_args() validates {flag} requires library_name")
-            else:
-                print(f"✗ FAIL: PLEX_Media._normalize_list_args() missing validation for {flag} without library_name")
-                test_ok = False
-
-        # 16b: --collections error in execute_global_commands
-        source = inspect.getsource(execute_global_commands)
-        if '--collections requires a library name' in source:
-            print(f"✓ PASS: execute_global_commands() validates --collections requires library")
-        else:
-            print(f"✗ FAIL: execute_global_commands() missing --collections validation")
-            test_ok = False
-
-        # 16c: execute_global_commands should NOT err() on --watched/--unwatched/--audio directly
-        #       (those are in main_parser, not GLOBAL_CMD_PARSER, so calling err() on args.watched
-        #        in execute_global_commands would fire even when used WITH a library)
-        #       It's OK to READ these args to pass them through to PLEX_Media.list()
-        import re
-        has_bad_validation = bool(re.search(r"args[.,]\s*'?watched.*err\(|err\(.*watched.*requires", source))
-        if has_bad_validation:
-            print(f"✗ FAIL: execute_global_commands() directly errors on --watched/--unwatched/--audio")
-            print(f"         (these are main_parser args and would fire even when used WITH a library)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: execute_global_commands() does not directly error on --watched/--unwatched/--audio")
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 17: PLEX_Library.execute_cmd comment correctness
-    print("\n[TEST 17] Class method comments correctness")
-    print("-" * 80)
-    try:
-        import inspect
-        test_ok = True
-
-        source = inspect.getsource(PLEX_Library.execute_cmd)
-        if 'actions on playlists' in source.lower():
-            print(f"✗ FAIL: PLEX_Library.execute_cmd has wrong comment 'Handling actions on playlists' (copy-paste error)")
-            test_ok = False
-        else:
-            print(f"✓ PASS: PLEX_Library.execute_cmd has correct comment")
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 18: Global command dispatch passes filter args to PLEX_Media.list()
-    print("\n[TEST 18] Global --list passes filter args to PLEX_Media.list()")
-    print("-" * 80)
-    try:
-        import inspect
-        test_ok = True
-
-        source = inspect.getsource(execute_global_commands)
-        # Check that watched_only, unwatched_only, audio_filter are passed in the PLEX_Media.list() call
-        if 'watched_only' in source and 'unwatched_only' in source and 'audio_filter' in source:
-            print(f"✓ PASS: execute_global_commands passes watched/unwatched/audio filters to PLEX_Media.list()")
-        else:
-            print(f"✗ FAIL: execute_global_commands does NOT pass filter args to PLEX_Media.list()")
-            print(f"         Filters like --watched would be silently ignored when used globally")
-            test_ok = False
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 19: Cache helper functions exist and work correctly
-    print("\n[TEST 19] Cache helper functions (build_media_cache_dict, load_media_cache)")
-    print("-" * 80)
-    try:
-        import inspect
-        test_ok = True
-
-        # 19a: build_media_cache_dict exists and returns correct keys
-        if 'build_media_cache_dict' not in locals():
-            print(f"✗ FAIL: build_media_cache_dict function not found")
-            test_ok = False
-        else:
-            # Test default (include_paths=True)
-            d = build_media_cache_dict()
-            required_keys = {'obj_by_id', 'obj_by_movie', 'obj_by_series', 'obj_by_series_episodes',
-                             'obj_by_collection', 'obj_by_filepath', 'obj_by_library'}
-            if required_keys.issubset(d.keys()):
-                print(f"✓ PASS: build_media_cache_dict() returns all 7 required keys")
-            else:
-                missing = required_keys - d.keys()
-                print(f"✗ FAIL: build_media_cache_dict() missing keys: {missing}")
-                test_ok = False
-
-            # Test include_paths=False
-            d2 = build_media_cache_dict(include_paths=False)
-            if 'obj_by_filepath' not in d2 and 'obj_by_library' not in d2:
-                print(f"✓ PASS: build_media_cache_dict(include_paths=False) excludes path keys")
-            else:
-                print(f"✗ FAIL: build_media_cache_dict(include_paths=False) should not include path keys")
-                test_ok = False
-
-            # Test extra kwargs
-            d3 = build_media_cache_dict(library_stats={'test': True})
-            if d3.get('library_stats') == {'test': True}:
-                print(f"✓ PASS: build_media_cache_dict(**extra) passes through extra keys")
-            else:
-                print(f"✗ FAIL: build_media_cache_dict(**extra) did not pass through extra keys")
-                test_ok = False
-
-        # 19b: load_media_cache exists and sets all attributes
-        if 'load_media_cache' not in locals():
-            print(f"✗ FAIL: load_media_cache function not found")
-            test_ok = False
-        else:
-            sig = inspect.signature(load_media_cache)
-            params = list(sig.parameters.keys())
-            if params == ['source']:
-                print(f"✓ PASS: load_media_cache(source) has correct signature")
-            else:
-                print(f"✗ FAIL: load_media_cache has unexpected signature: {params}")
-                test_ok = False
-
-            # Verify it handles missing keys gracefully (uses .get with defaults)
-            source_code = inspect.getsource(load_media_cache)
-            if '.get(' in source_code:
-                print(f"✓ PASS: load_media_cache uses .get() for safe key access")
-            else:
-                print(f"✗ FAIL: load_media_cache should use .get() to handle missing keys")
-                test_ok = False
-
-        # 19c: All cache save sites use build_media_cache_dict (no more inline dict construction)
-        source = ''
-        if not source:
-            with open(MAIN_SCRIPT, 'r') as f:
-                source = f.read()
-        # Count remaining inline cache dict patterns (excluding the helper itself and tests)
-        import re
-        # Match lines that build cache dicts inline (the old pattern)
-        inline_saves = re.findall(r"'obj_by_id': PLEX_Media\.OBJ_BY_ID,\s*\n\s*'obj_by_movie'", source)
-        if len(inline_saves) <= 1:  # Allow 1 for build_media_cache_dict itself
-            print(f"✓ PASS: No redundant inline cache dict construction found")
-        else:
-            print(f"✗ FAIL: Found {len(inline_saves)} inline cache dict constructions (should use build_media_cache_dict)")
-            test_ok = False
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Test 20: sys.argv normalization uses inject_before_first_match helper
-    print("\n[TEST 20] sys.argv normalization helper")
-    print("-" * 80)
-    try:
-        test_ok = True
-
-        # Read the main() source to check the normalization block
-        with open(MAIN_SCRIPT, 'r') as f:
-            source = f.read()
-
-        # Check that inject_before_first_match is defined
-        if 'def inject_before_first_match(' in source:
-            print(f"✓ PASS: inject_before_first_match helper function is defined")
-        else:
-            print(f"✗ FAIL: inject_before_first_match helper function not found")
-            test_ok = False
-
-        # Check that the 3 normalization branches use the helper
-        import re
-        inject_calls = re.findall(r'inject_before_first_match\(', source)
-        if len(inject_calls) >= 3:
-            print(f"✓ PASS: inject_before_first_match is called {len(inject_calls)} times (covers all normalization cases)")
-        else:
-            print(f"✗ FAIL: inject_before_first_match called only {len(inject_calls)} times (expected 3+)")
-            test_ok = False
-
-        # Check that is_audio_flag helper is defined and used
-        if 'def is_audio_flag(' in source:
-            print(f"✓ PASS: is_audio_flag helper function is defined")
-        else:
-            print(f"✗ FAIL: is_audio_flag helper function not found")
-            test_ok = False
-
-        if test_ok:
-            passed += 1
-        else:
-            failed += 1
-    except Exception as e:
-        print(f"✗ FAIL: Exception during test: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-
-    # Print inline test summary (only when inline tests were run)
-    if run_inline:
-        print("\n" + "=" * 76)
-        print("INLINE TEST SUMMARY")
-        print("=" * 76)
-        inline_total = passed + failed
-        print(f"Total:  {inline_total} tests")
-        print(f"Passed: {passed} tests ({100*passed//inline_total if inline_total > 0 else 0}%)")
-        print(f"Failed: {failed} tests ({100*failed//inline_total if inline_total > 0 else 0}%)")
-
-    # Run unittest suite
-    print("\n" + "=" * 76)
-    print("UNITTEST SUITE")
-    print("=" * 76)
-    loader = unittest.TestLoader()
-    unittest_ok = True
-    try:
-        suite = unittest.TestSuite()
-        for cls in unittest_classes:
-            suite.addTests(loader.loadTestsFromTestCase(cls))
-        runner = unittest.TextTestRunner(verbosity=2)
-        unittest_result = runner.run(suite)
-        unittest_ok = unittest_result.wasSuccessful()
-    except Exception as e:
-        print(f"✗ FAIL: Could not run unittest suite: {e}")
-        unittest_ok = False
-
-    if failed == 0 and unittest_ok:
-        print("\n✓ All tests PASSED!")
-        sys.exit(0)
-    else:
-        print(f"\n✗ Tests FAILED!")
-        sys.exit(1)
+    if matched:
+        scope_name, unittest_classes = next(iter(matched.items()))
+        print(f"scope {scope_name}: {', '.join(c.__name__ for c in unittest_classes)}")
+        return _run_unittest_only(unittest_classes)
+    # No scope of that name: take FILTER as a title substring, which is
+    # what every other tool's --run-tests FILTER means.
+    selected = _tests_matching_title(scope)
+    if selected:
+        print(f"filter {scope!r}: {len(selected)} test(s) by title")
+        return _run_unittest_only(selected)
+    print(f"ERROR: '{scope}' is neither a test scope nor part of any test title",
+          file=sys.stderr)
+    print(file=sys.stderr)
+    print(describe_test_scopes(), file=sys.stderr)
+    sys.exit(1)

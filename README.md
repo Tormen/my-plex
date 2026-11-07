@@ -427,8 +427,7 @@ my-plex --run-tests duplicates
 # Run the tests whose title matches -- what a change touches, in seconds
 my-plex --run-tests TestRename.test_siblings
 
-# The legacy inline regression block, and unittest's own output
-my-plex --run-tests inline
+# unittest's own output
 my-plex --unittest -v
 
 # The tests that really FETCH -- off unless you ask for them

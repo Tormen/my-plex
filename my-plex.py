@@ -4705,7 +4705,7 @@ def _inject_episode_funcs_into_test_mod():
             setattr(_mod, _name, globals()[_name])
 def run_regression_tests(scope=None):
     _inject_episode_funcs_into_test_mod()
-    _load_test_mod().run_regression_tests(globals(), scope=scope)
+    _load_test_mod().run_regression_tests(scope=scope)
 
 
 ############################################################
@@ -32668,7 +32668,6 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --run-tests                       # every scope")
             print("  my-plex --run-tests filter                # the filter scope")
             print("  my-plex --run-tests TestFilter.test_year   # by test title")
-            print("  my-plex --run-tests inline                # the legacy inline block")
             print("  my-plex --unittest -v                     # the same classes, unittest's own output")
             print()
             print("=" * 76)
