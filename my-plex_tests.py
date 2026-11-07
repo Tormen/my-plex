@@ -9879,17 +9879,17 @@ class TestUnmatchedResolve(unittest.TestCase):
     # ------- _add_year_to_wrapper -------
 
     def test_add_year_when_missing(self):
-        out = self.m._add_year_to_wrapper("/lib/movies.en/up.bdrip.xvid", 2009)
-        self.assertEqual(out, "/lib/movies.en/up.bdrip.xvid.(2009)")
+        out = self.m._add_year_to_wrapper("/lib/library1/up.bdrip.xvid", 2009)
+        self.assertEqual(out, "/lib/library1/up.bdrip.xvid.(2009)")
 
     def test_add_year_preserves_trailing_tag(self):
         # `_[crime]` / `,suffix` tail is kept; year inserts BEFORE it.
-        out = self.m._add_year_to_wrapper("/lib/movies.fr/balthazar_[crime]", 2018)
-        self.assertEqual(out, "/lib/movies.fr/balthazar.(2018)_[crime]")
+        out = self.m._add_year_to_wrapper("/lib/library2/balthazar_[crime]", 2018)
+        self.assertEqual(out, "/lib/library2/balthazar.(2018)_[crime]")
 
     def test_add_year_idempotent_when_already_has_year(self):
         # Without canonical_title, wrapper that already has a year is returned unchanged.
-        wp = "/lib/movies.en/inception.(2010)"
+        wp = "/lib/library1/inception.(2010)"
         out = self.m._add_year_to_wrapper(wp, 2010)
         self.assertEqual(out, wp)
 
@@ -9898,14 +9898,14 @@ class TestUnmatchedResolve(unittest.TestCase):
         # the original wrapper already carries a year.  This is the v2.14
         # path for items unmatched DESPITE having a year.
         out = self.m._add_year_to_wrapper(
-            "/lib/movies.en/the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]",
+            "/lib/library1/the.queen.s.corgi.2019.720p.bluray.x264-[yts.am]",
             2019, canonical_title="The Queen's Corgi")
         # tail `_[yts.am]`? No — that's bracketed but inside the year run.
         # The function preserves `_[tag]` / `,tag` from the original; everything
         # else after the title is dropped.  Just check the head is canonical
         # and the year is present.
         self.assertTrue(out.endswith(".(2019)") or "the.queens.corgi.(2019)" in out)
-        self.assertIn("/lib/movies.en/", out)
+        self.assertIn("/lib/library1/", out)
         self.assertIn("the.queens.corgi", out)
         self.assertNotIn("queen.s", out)  # the orphan-S form is gone
 
@@ -10192,7 +10192,7 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
             r"obj\['audio_languages'\]\s*==\s*\[_AUDIO_LANG_UNKNOWN\]\s*\)")
 
 
-# v2.69 bugfix coverage — both bugs were caught while syncing series.de
+# v2.69 bugfix coverage — both bugs were caught while syncing a series library,
 # wer.wird.millionaer S26 (152 disk [vu@] markers vs 2 Plex viewCount>0):
 #   1. `--sync` silent-no-op (main_parser ate the flag → cmd_args.sync=None)
 #   2. `--plex2disk` produced double [vu@D1] [vu@D2] when the existing on-disk
@@ -10357,8 +10357,8 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             try:
                 state = {
                     'version': 1, 'status': 'snapshotted', 'old_rk': 99001,
-                    'old_library': ',unsorted', 'old_filepath': '/tmp/old.mkv',
-                    'dest_library': 'movies.fr',
+                    'old_library': 'inbox', 'old_filepath': '/tmp/old.mkv',
+                    'dest_library': 'library2',
                     'title': 'TestMovie', 'year': 2024, 'guid': 'plex://movie/abc',
                     'type': 'Movie',
                     'snapshot': {'labels': ['favourite'], 'collections': ['SomeColl'],
@@ -10425,7 +10425,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             try:
                 self.m._move_state_write({
                     'version': 1, 'status': 'moved', 'old_rk': 12345,
-                    'new_filepath': None, 'snapshot': {}, 'dest_library': 'movies.fr',
+                    'new_filepath': None, 'snapshot': {}, 'dest_library': 'library2',
                 })
                 # Should not raise even when Plex is unavailable.
                 n_r, n_f = self.m._replay_pending_move_state(plex=None, quiet=True)
@@ -10465,9 +10465,9 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             @property
             def library(self): return self._Library(self)
         coll = FakeItem('Test Collection', members=['some_member'])  # still has members
-        plex = FakePlex({'movies.en': [coll]})
+        plex = FakePlex({'library1': [coll]})
         n = self.m._cleanup_emptied_source_collections(
-            plex, {('movies.en', 'Test Collection')}, quiet=True)
+            plex, {('library1', 'Test Collection')}, quiet=True)
         self.assertEqual(n, 0)
         self.assertFalse(coll.deleted)
 
@@ -10488,9 +10488,9 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             @property
             def library(self): return self._Library(self)
         coll = FakeItem('Test Collection')
-        plex = FakePlex({',unsorted': [coll]})
+        plex = FakePlex({'inbox': [coll]})
         n = self.m._cleanup_emptied_source_collections(
-            plex, {(',unsorted', 'Test Collection')}, quiet=True)
+            plex, {('inbox', 'Test Collection')}, quiet=True)
         self.assertEqual(n, 1)
         self.assertTrue(coll.deleted)
 
@@ -10688,7 +10688,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
     # ------------------------------------------------------------------
     # Bug #1 (this turn): DPM_LIBRARY_SUPPRESS — library-context
     # suppression of redundant markers (e.g. don't write [de] inside
-    # series.de / movies.de).  Demonstrated visually in S26 [de] rename.
+    # a German-only library).  Demonstrated visually in S26 [de] rename.
     # ------------------------------------------------------------------
 
     def test_dpm_library_suppress_default_empty(self):
@@ -10703,7 +10703,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         saved_dpm_lib = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
         saved_disk_plex_map = getattr(m, 'DISK_PLEX_MAP', {})
         try:
-            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            m.DPM_LIBRARY_SUPPRESS = {'LIB_DE': {'AUDIO_LANG': 'de'}}
             # Need at least one promoted plex_var so the bottom_up path runs.
             m.DISK_PLEX_MAP = {
                 'AUDIO_LANG': {
@@ -10714,7 +10714,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             }
             obj = {
                 'type': 'Episode', 'type_str': 'Episode',
-                'library': 'series.de',
+                'library': 'LIB_DE',
                 'audio_languages': ['de'], 'audio_languages_plex': ['de'],
             }
             var = m.resolve_disk_map_variables(obj, cache_key='Episode:1')
@@ -10731,7 +10731,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         saved = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
         saved_dpm = getattr(m, 'DISK_PLEX_MAP', {})
         try:
-            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            m.DPM_LIBRARY_SUPPRESS = {'LIB_DE': {'AUDIO_LANG': 'de'}}
             m.DISK_PLEX_MAP = {
                 'AUDIO_LANG': {
                     'scope': ['file'],
@@ -10741,7 +10741,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             }
             obj = {
                 'type': 'Episode', 'type_str': 'Episode',
-                'library': 'series.fr',   # different library
+                'library': 'LIB_FR',   # different library
                 'audio_languages': ['de'], 'audio_languages_plex': ['de'],
             }
             var = m.resolve_disk_map_variables(obj, cache_key='Episode:2')
@@ -10754,12 +10754,12 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
     def test_dpm_library_suppress_different_value_passes_through(self):
         """When the var resolved to a value DIFFERENT from the
         suppress-value, leave it alone (e.g. a French dub of a movie
-        sitting in series.de still gets [fr])."""
+        sitting in a German-only library still gets [fr])."""
         m = self.m
         saved = getattr(m, 'DPM_LIBRARY_SUPPRESS', {})
         saved_dpm = getattr(m, 'DISK_PLEX_MAP', {})
         try:
-            m.DPM_LIBRARY_SUPPRESS = {'series.de': {'AUDIO_LANG': 'de'}}
+            m.DPM_LIBRARY_SUPPRESS = {'LIB_DE': {'AUDIO_LANG': 'de'}}
             m.DISK_PLEX_MAP = {
                 'AUDIO_LANG': {
                     'scope': ['file'],
@@ -10770,7 +10770,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             }
             obj = {
                 'type': 'Episode', 'type_str': 'Episode',
-                'library': 'series.de',
+                'library': 'LIB_DE',
                 'audio_languages': ['fr'], 'audio_languages_plex': ['fr'],
             }
             var = m.resolve_disk_map_variables(obj, cache_key='Episode:3')
@@ -10834,7 +10834,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         m = self.m
         # 1. Calling the handler is a no-op (returns None).
         out = m._push_audio_lang_dpm(
-            obj={'title': 't', 'file': '/x.mp4', 'library': 'series.de'},
+            obj={'title': 't', 'file': '/x.mp4', 'library': 'LIB_DE'},
             change={'disk_val': 'de', 'cache_key': 'Episode:1'},
             dry_run=False)
         self.assertIsNone(out)
@@ -10927,7 +10927,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         try:
             obj = {
                 'type': 'Series', 'type_str': 'Series',
-                'library': 'series.de',
+                'library': 'LIB_DE',
                 'file': '/tmp/_tst_series',
                 'WATCHED_uniform': None,    # Plex says NOT fully watched
                 'AUDIO_LANG_uniform': None,

@@ -1171,9 +1171,9 @@ CONFIG_DEFAULTS = {
     #   {'from': 'SRC_LIB', 'when': '<filter-expression>', 'to': 'DST_LIB'}
     # `when` is the same grammar used by --list / --remux / etc.
     # Examples (live in YOUR ~/.my-plex.conf, NOT in this default):
-    #   {'from': ',unsorted', 'when': 'original_lang:de OR lang:de', 'to': 'movies.de'},
-    #   {'from': ',unsorted', 'when': 'original_lang:fr OR lang:fr', 'to': 'movies.fr'},
-    #   {'from': ',unsorted', 'when': '*',                           'to': 'movies.en'},
+    #   {'from': 'INBOX_LIB', 'when': 'original_lang:de OR lang:de', 'to': 'LIB_DE'},
+    #   {'from': 'INBOX_LIB', 'when': 'original_lang:fr OR lang:fr', 'to': 'LIB_FR'},
+    #   {'from': 'INBOX_LIB', 'when': '*',                           'to': 'LIB_EN'},
     # Empty default keeps my-plex GENERIC — user's library names live only
     # in their config, never in the script.
     'SORT_NEW_MOVIE_ROUTES': [],
@@ -1541,8 +1541,8 @@ CONFIG_DEFAULTS = {
     'UNCOLLECTED_IGNORED_COLLECTION_IDS': [],
 
     # UNCOLLECTED_ALLOW_CROSS_LIBRARY — when a TMDB collection has movies
-    # spread across multiple libraries (e.g. 'Zoomania' in movies.de and
-    # 'Zootropolis' in movies.en), should `--uncollected --resolve` create
+    # spread across multiple libraries (e.g. 'Zoomania' in a German library
+    # and 'Zootropolis' in an English one), should `--uncollected --resolve` create
     # a matching-named Plex Collection PER library (one per library that
     # has members)?  A single Plex Collection cannot span libraries, so
     # the "cross-library" form is really per-library siblings sharing
@@ -1555,14 +1555,12 @@ CONFIG_DEFAULTS = {
 
     # DPM_LIBRARY_SUPPRESS — when a plex2disk marker value would be
     # redundant given the LIBRARY the item lives in, suppress it.  E.g.
-    # writing `[de]` to every file in 'series.de' is noise — the
+    # writing `[de]` to every file in a German-only library is noise — the
     # library name already encodes the language.
     #
     # Map: {library_name: {plex_var: value_to_suppress}}
-    # Example: {'series.de': {'AUDIO_LANG': 'de'},
-    #          'movies.de':  {'AUDIO_LANG': 'de'},
-    #          'series.fr':  {'AUDIO_LANG': 'fr'},
-    #          'movies.fr':  {'AUDIO_LANG': 'fr'}}
+    # Example: {'LIB_DE': {'AUDIO_LANG': 'de'},
+    #          'LIB_FR': {'AUDIO_LANG': 'fr'}}
     #
     # Default empty = library does not affect markers.
     'DPM_LIBRARY_SUPPRESS': {},
@@ -2285,8 +2283,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 ###############################################################################
 
 # UNCOLLECTED_ALLOW_CROSS_LIBRARY — when a TMDB collection's movies span
-# multiple libraries (e.g. 'Zoomania' in movies.de + 'Zootropolis' in
-# movies.en), Plex itself cannot host one Collection across libraries.
+# multiple libraries (e.g. 'Zoomania' in a German library, 'Zootropolis' in
+# an English one), Plex itself cannot host one Collection across libraries.
 # my-plex's solution is to create a matching-named Plex Collection PER
 # library that has members (per-library siblings sharing the same name).
 #
@@ -2304,7 +2302,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # DPM_LIBRARY_SUPPRESS — when a plex2disk marker value would be
 # redundant given the LIBRARY the item lives in, suppress it.  E.g.
-# writing `[de]` to every file in 'series.de' is noise — the library
+# writing `[de]` to every file in a German-only library is noise — the library
 # name already encodes the language.
 #
 # Map: {{library_name: {{plex_var: value_to_suppress}}}}
@@ -2313,12 +2311,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Example (uncomment + customize to use):
 # DPM_LIBRARY_SUPPRESS = {{
-#     'movies.de':  {{'AUDIO_LANG': 'de'}},
-#     'movies.en':  {{'AUDIO_LANG': 'en'}},
-#     'movies.fr':  {{'AUDIO_LANG': 'fr'}},
-#     'series.de':  {{'AUDIO_LANG': 'de'}},
-#     'series.en':  {{'AUDIO_LANG': 'en'}},
-#     'series.fr':  {{'AUDIO_LANG': 'fr'}},
+#     'LIB_DE':  {{'AUDIO_LANG': 'de'}},
+#     'LIB_EN':  {{'AUDIO_LANG': 'en'}},
+#     'LIB_FR':  {{'AUDIO_LANG': 'fr'}},
 # }}
 
 ###############################################################################
@@ -2649,9 +2644,9 @@ DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 # Default: {CONFIG_DEFAULTS['SORT_NEW_MOVIE_ROUTES']!r}  (empty → movies stay where they land; no cross-library routing)
 # Example — uncomment + adjust to YOUR library names to opt in:
 # SORT_NEW_MOVIE_ROUTES = [
-#     {{'from': ',unsorted', 'when': 'original_lang:de OR lang:de', 'to': 'movies.de'}},
-#     {{'from': ',unsorted', 'when': 'original_lang:fr OR lang:fr', 'to': 'movies.fr'}},
-#     {{'from': ',unsorted', 'when': '*',                           'to': 'movies.en'}},
+#     {{'from': 'INBOX_LIB', 'when': 'original_lang:de OR lang:de', 'to': 'LIB_DE'}},
+#     {{'from': 'INBOX_LIB', 'when': 'original_lang:fr OR lang:fr', 'to': 'LIB_FR'}},
+#     {{'from': 'INBOX_LIB', 'when': '*',                           'to': 'LIB_EN'}},
 # ]
 
 ###############################################################################
@@ -7403,7 +7398,7 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     if not _bottom_up_pass:
         _apply_bottom_up_promotion(obj, type_str, var)
         # v2.69: library-context suppression.  When the library name implies
-        # the value (e.g. 'series.de' implies AUDIO_LANG=de), suppress that
+        # the value (e.g. a German-only library implies AUDIO_LANG=de), suppress that
         # marker entirely — writing it everywhere is redundant noise.
         _lib = obj.get('library', '')
         _lib_suppress = (DPM_LIBRARY_SUPPRESS or {}).get(_lib, {})
@@ -17095,7 +17090,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
         # version key for the SAME physical file.  Without this guard, the
         # old entry stays as an orphan and the new entry has no file_metadata
         # → gets re-queued for ffmpeg probe.  Bulk --scan made this explode
-        # to ~9600 redundant probes on series.de.
+        # to ~9600 redundant probes on one series library.
         #
         # If any existing entry shares this filepath + filesize, drop the
         # stale version key and carry its file_metadata over to the new key.
@@ -23910,7 +23905,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
           A. AUDIO MISMATCH — Plex's audio_languages_plex carries a real
              language Y ≠ expected X.  Typical: a TVOON_DE recording
-             sitting in `movies.en`.
+             sitting in an English library.
 
           B. ORIGINAL-LANGUAGE MISMATCH (audio unknown) — Plex couldn't
              read the audio language (TAG:title vs TAG:language gotcha
@@ -23919,7 +23914,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
              backfilled by --update-cache via fetch_tmdb_movie_basics);
              flags when that language ≠ expected X.  Typical: a French
              film file with `TAG:title=Russian/French` audio tracks
-             landing in `movies.de`.
+             landing in a German library.
 
         For each flagged item the 'GOT' column carries a trailing 'p' to
         indicate the language came from Plex audio (path A) or 'o' for
@@ -26348,7 +26343,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             _needle_words = {w for w in re.split(r'[\s._\-]+', needle) if w}
             # v2.69: also engage path-fallback for a single needle word as long
             # as it's specific enough (>=4 chars) — catches `my-plex edelstein`
-            # finding `movies.de/Edelstein Trilogy/…` even though no individual
+            # finding `LIB/Edelstein Trilogy/…` even though no individual
             # movie title contains "edelstein".  Short words ("the", "a", "der")
             # stay title-only to avoid noise.
             _path_fallback = (len(_needle_words) >= 2) or (
@@ -30710,7 +30705,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --problems -V           # Run all checks with full details")
             print("  my-plex --problems --tsv        # Only TSV-relevant categories")
             print("  my-plex --problems --resolve    # Chain every auto-resolve category in a loop")
-            print("  my-plex --problems series.de    # Scoped to one library")
+            print("  my-plex --problems LIB          # Scoped to one library")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -30904,8 +30899,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("   Tune thresholds in ~/.my-plex.conf — see --create-config output.")
             print()
-            print("   Example (Castle S04 grouped as one Plex episode):")
-            print("     Episode:5194  Episode  13   series.en       Heroes & Villains   ")
+            print("   Example (Tagesschau S04 grouped as one Plex episode):")
+            print("     Episode:5194  Episode  13   LIB_DE          Tagesschau 2024-04-13")
             print("                     version count 13 > 2; spread 1.84%")
             print()
             print("TO FIX:")
@@ -31181,7 +31176,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Lists Movies/Episodes whose audio language disagrees with the")
             print("CONFIGURED language of the library they live in.  Typical case:")
-            print("a German recording (filename ...TVOON_DE...) sitting in movies.en.")
+            print("a German recording (filename ...TVOON_DE...) sitting in an English library.")
             print()
             print("DETECTION:")
             print("  - Per-library expected language comes from")
@@ -31194,12 +31189,12 @@ def main_print_help(args, remaining_args, main_parser):
             print("  - Flag when primary track ≠ library's configured language.")
             print()
             print("EXAMPLES OF MISMATCHES:")
-            print("  Movie:19864  movies.en  audio=de  Emmanuelle 2 Garten Der Liebe")
-            print("    /Volumes/2/watch.v/movies.en/emmanuelle_2_garten_der_liebe...TVOON_DE.avi")
+            print("  Movie:19864  LIB_EN     audio=de  Some German Recording")
+            print("    /lib/LIB_EN/some_german_recording...TVOON_DE.avi")
             print()
             print("HOW TO FIX:")
             print("  Move the item to the matching-language library:")
-            print("    my-plex Movie:19864 --mv-to movies.de")
+            print("    my-plex Movie:19864 --mv-to DEST_LIB")
             print("  (The wrapper directory moves as a UNIT — all artifacts stay together.)")
             print()
             print("EXAMPLES:")
@@ -31241,7 +31236,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Each row reports:")
             print("  KEY            TYPE     LIBRARY         DEPTH  PATH")
-            print("  Movie:12345    Movie    movies.en        2>1   /…/lib/wrapper/sub/file.mp4")
+            print("  Movie:12345    Movie    LIB_EN           2>1   /…/lib/wrapper/sub/file.mp4")
             print()
             print("Why this matters:")
             print("  - Plex's matcher and scanner work best when the file sits directly")
@@ -31313,7 +31308,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --uncollected                  # all movie libraries")
-            print("  my-plex --uncollected movies.en        # one library")
+            print("  my-plex --uncollected LIB              # one library")
             print("  my-plex --uncollected --resolve --auto # create/extend Plex Collections, no prompts")
             print()
             print("=" * 76)
@@ -31360,7 +31355,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("EXAMPLES:")
             print()
             print("  my-plex --misplaced                  # All libraries")
-            print("  my-plex series.de --misplaced        # One library")
+            print("  my-plex LIB --misplaced              # One library")
             print("  my-plex --misplaced --resolve --try  # Dry-run the disk moves")
             print("  my-plex --problems                   # Includes this count")
             print()
@@ -31382,14 +31377,13 @@ def main_print_help(args, remaining_args, main_parser):
             print("operation gets confused.")
             print()
             print("EXAMPLES OF MULTI-MOVIE FOLDERS:")
-            print("  short.circuit.1&2.xvid/      → Short Circuit (1986) + Short Circuit 2 (1988)")
-            print("  hoodwinked/                  → Hoodwinked! (2005) + Hoodwinked Too! (2011)")
-            print("  nanny.mcphee.1.+.2/          → Nanny McPhee (2005) + Nanny McPhee Returns (2010)")
+            print("  some.movie.1&2.xvid/         → Some Movie (1986) + Some Movie 2 (1988)")
+            print("  another.movie.1.+.2/         → Another Movie (2005) + Another Movie Returns (2010)")
             print()
             print("Each row reports:")
             print("  WRAPPER                            ITEMS  TITLES")
-            print("  movies.en/short.circuit.1&2.xvid/      2  Movie:12051: Short Circuit 2 (1988) /")
-            print("                                            Movie:12053: Short Circuit (1986)")
+            print("  LIB_EN/some.movie.1&2.xvid/            2  Movie:12051: Some Movie 2 (1988) /")
+            print("                                            Movie:12053: Some Movie (1986)")
             print()
             print("WHY THIS MATTERS:")
             print("  - Plex's metadata agent matches the FOLDER, not individual files.")
@@ -35532,8 +35526,8 @@ def _get_universal_scope(scope_tokens):
 
     # v2.2: `layout:` tokens describe ON-DISK shape — including folders
     # Plex never catalogued.  Per-token set-intersection only sees cached
-    # cache keys, so a query like `,unsorted layout:series` would miss the
-    # uncatalogued series-shaped wrappers in ,unsorted.  Route the WHOLE
+    # cache keys, so a query like `INBOX_LIB layout:series` would miss the
+    # uncatalogued series-shaped wrappers in that library.  Route the WHOLE
     # token list through the compound filter pipeline (which natively
     # surfaces uncatalogued folders when layout: is present).
     if any(re.match(r'^layout[:=]', t, re.IGNORECASE) for t in real_tokens):
