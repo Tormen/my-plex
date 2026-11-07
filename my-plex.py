@@ -20314,8 +20314,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             old_itemsCount_from_cache = {}  # Start fresh when rebuilding
             if VRB: print(f"{VRBPFX}Rebuild mode: skipping old library_object_counts cache")
         else:
-            try:    old_itemsCount_from_cache = CACHE.get('library_object_counts', {})
-            except AttributeError: old_itemsCount_from_cache = {}
+            old_itemsCount_from_cache = CACHE.get('library_object_counts', {})
 
         # If cache doesn't have it, rebuild it from OBJ_BY_ID
         # IMPORTANT: For series libraries, we need to track shows, seasons, AND episodes separately
