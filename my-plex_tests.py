@@ -12761,12 +12761,23 @@ class TestSshOptions(unittest.TestCase):
         stands for, which is config reading, not talking to a host. Any ssh
         that could connect is still an offender."""
         src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
-        offenders = [f"line {n}" for n, line in enumerate(src.splitlines(), 1)
+        lines = src.splitlines()
+        offenders = [f"line {n}" for n, line in enumerate(lines, 1)
                      if "['ssh'," in line.replace(" ", "")
                      and '_ssh_opts(' not in line
                      and "'-G'" not in line.replace(" ", "")
                      and not line.lstrip().startswith(('#', '"""', 'NEVER'))
                      and 'NEVER use' not in line]
+        # The other way to build one by hand: a STRING -- `cmd = f"ssh {host} ..."`
+        # -- handed to a shell.  Nine of those hid from the list check above
+        # until 2026-11-05.  A string that is only printed (an error hint, a
+        # debug line) is not an offender; one that reaches `shell=True` is, so
+        # the check pairs the assignment with the run that follows it.
+        shell_runs = [n for n, line in enumerate(lines, 1) if 'shell=True' in line]
+        for n in shell_runs:
+            window = lines[max(0, n - 7):n]
+            if any(re.search(r"""=\s*f?["']ssh\s""", w) for w in window):
+                offenders.append(f"line {n} (an ssh string run through a shell)")
         self.assertEqual(offenders, [],
                          "an ssh built outside _ssh_args carries none of these options: "
                          + ", ".join(offenders))

@@ -4981,8 +4981,8 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
             if check_path is None:
                 continue
             escaped_path = escape_path_for_ssh(check_path)
-            cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_path}\\\" ] && echo EXISTS || echo NOTFOUND\""
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cmd = [*_ssh_args(remote_host), f'[ -e "{escaped_path}" ] && echo EXISTS || echo NOTFOUND']
+            result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0 and result.stdout.strip() == 'EXISTS':
                 if DEEPDBG: print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
                 return (check_path, True)
@@ -5365,8 +5365,8 @@ def get_trash_dir(remote_host=None, file_path=None):
             if len(path_parts) >= 3 and path_parts[1] == 'Volumes':
                 # Get the UID on the remote server and create .Trashes/<uid> directory
                 # This follows macOS convention for volume-specific trash
-                cmd = f"ssh {remote_host} 'id -u'"
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                cmd = [*_ssh_args(remote_host), 'id -u']
+                result = subprocess.run(cmd, capture_output=True, text=True)
 
                 if result.returncode == 0:
                     uid = result.stdout.strip()
@@ -5387,8 +5387,9 @@ def get_trash_dir(remote_host=None, file_path=None):
                             print(f"{DBGPFX}Failed to create volume trash {volume_trash}, stderr: {result.stderr}")
 
         # Fall back to home directory trash
-        cmd = f"ssh {remote_host} 'if [ -d ~/.Trash ]; then echo ~/.Trash; elif [ -d ~/.local/share/Trash ]; then echo ~/.local/share/Trash; else echo NONE; fi'"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        cmd = [*_ssh_args(remote_host),
+               'if [ -d ~/.Trash ]; then echo ~/.Trash; elif [ -d ~/.local/share/Trash ]; then echo ~/.local/share/Trash; else echo NONE; fi']
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             print_ssh_error(remote_host, "check for trash directory", cmd=cmd, stderr=result.stderr)
@@ -5399,8 +5400,8 @@ def get_trash_dir(remote_host=None, file_path=None):
         if trash_path == 'NONE' or not trash_path:
             # Create .Trash on remote
             trash_path = '~/.Trash'
-            cmd = f"ssh {remote_host} 'mkdir -p {trash_path}'"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cmd = [*_ssh_args(remote_host), f'mkdir -p {trash_path}']
+            result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print_ssh_error(remote_host, "create trash directory", cmd=cmd, stderr=result.stderr,
                                extra_context={'trash_path': trash_path})
@@ -5670,8 +5671,8 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
         if operation == 'CHECK':
             # Check if file or directory exists (use -e for both)
-            cmd = f"ssh {remote_host} \"[ -e \\\"{escaped_src}\\\" ] && echo EXISTS || echo NOTFOUND\""
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cmd = [*_ssh_args(remote_host), f'[ -e "{escaped_src}" ] && echo EXISTS || echo NOTFOUND']
+            result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print_ssh_error(remote_host, "check file existence", cmd=cmd, stderr=result.stderr,
                                extra_context={'file': filepath})
@@ -8374,8 +8375,8 @@ def move_file(src_path, dst_dir, remote_host=None):
             escaped_dir = escape_path_for_ssh(dst_dir)
             escaped_src = escape_path_for_ssh(src_path)
             escaped_dst = escape_path_for_ssh(dst_path)
-            cmd = f"ssh {remote_host} \"mkdir -p \\\"{escaped_dir}\\\" && mv \\\"{escaped_src}\\\" \\\"{escaped_dst}\\\"\""
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cmd = [*_ssh_args(remote_host), f'mkdir -p -- "{escaped_dir}" && mv -- "{escaped_src}" "{escaped_dst}"']
+            result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 print(f"{VRBPFX}Moved on {remote_host}: {src_path} -> {dst_path}")
                 return True
@@ -13326,8 +13327,11 @@ def play_media_file(filepath, remote_host=None):
             print(f"{DBGPFX}  Original filepath: {filepath}")
             print(f"{DBGPFX}  Escaped filepath:  {escaped_path}")
 
-        # Use double quotes for the path since we're escaping for double quotes
-        cmd = f'ssh {remote_host} "cat \\"{escaped_path}\\"" | {mpv_path} --force-seekable=yes --title="{os.path.basename(filepath)}" -'
+        # Two processes joined by a pipe, no shell: the ssh carries every option
+        # _ssh_args() gives it, and the path is quoted for the REMOTE shell only.
+        ssh_cmd = [*_ssh_args(remote_host), f'cat "{escaped_path}"']
+        mpv_cmd = [mpv_path, '--force-seekable=yes', f'--title={os.path.basename(filepath)}', '-']
+        cmd = f"{shlex.join(ssh_cmd)} | {shlex.join(mpv_cmd)}"
 
         if DEEPDBG:
             print(f"{DBGPFX}  Full command to execute:")
@@ -13338,8 +13342,13 @@ def play_media_file(filepath, remote_host=None):
             if not DEEPDBG:
                 # Only print the command if not already printed by DEEPDBG
                 print(f"Executing: {cmd}")
-            # Don't suppress stderr so we can see mpv errors
-            subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL)
+            # Don't suppress stderr so we can see mpv errors.  The ssh gets no
+            # stdin (the terminal is mpv's), and the parent drops its end of the
+            # pipe so ssh ends with SIGPIPE when mpv quits.
+            ssh_proc = subprocess.Popen(ssh_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+            assert ssh_proc.stdout is not None
+            subprocess.Popen(mpv_cmd, stdin=ssh_proc.stdout, stdout=subprocess.DEVNULL)
+            ssh_proc.stdout.close()
             print("✓ mpv command launched (check terminal for any mpv error messages)")
             return True
         except Exception as e:
@@ -14920,8 +14929,9 @@ def undo_operation(operation_log, remote_host=None):
                 original_path = instruction.get("original_path")
 
                 if remote_host:
-                    cmd = f"ssh {remote_host} 'mv \"{trash_path}\" \"{original_path}\"'"
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    cmd = [*_ssh_args(remote_host),
+                           f'mv "{escape_path_for_ssh(trash_path)}" "{escape_path_for_ssh(original_path)}"']
+                    result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode != 0:
                         print(f"  ✗ Failed to restore from trash: {result.stderr}")
                         return False
@@ -29361,9 +29371,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if not filepath:
                     continue
                 # Check if file exists before attempting trash (avoids ERROR for already-gone files)
-                check_cmd = f'ssh {shlex.quote(remote_host)} [ -e {shlex.quote(filepath)} ] && echo EXISTS || echo GONE'
+                check_cmd = [*_ssh_args(remote_host), f'[ -e {shlex.quote(filepath)} ] && echo EXISTS || echo GONE']
                 try:
-                    check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
                     file_exists = 'EXISTS' in check_result.stdout
                 except Exception:
                     file_exists = True  # Assume exists if check fails, let move_to_trash handle it
