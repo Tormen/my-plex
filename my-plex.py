@@ -5406,7 +5406,7 @@ def get_trash_dir(remote_host=None, file_path=None):
                 print_ssh_error(remote_host, "create trash directory", cmd=cmd, stderr=result.stderr,
                                extra_context={'trash_path': trash_path})
                 raise Exception(f"Failed to create remote trash directory")
-            print(f"{VRBPFX}Created remote trash directory: {trash_path} on {remote_host}")
+            if VRB: print(f"{VRBPFX}Created remote trash directory: {trash_path} on {remote_host}")
 
         return trash_path
     else:
@@ -5712,7 +5712,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 # v2.5: we no longer embed the path in the echo (apostrophes
                 # in paths broke the single-quoted literal).  Caller knows
                 # the destination path; just confirm success.
-                print(f"{VRBPFX}Moved to trash on {remote_host}: {trash_path}")
+                if VRB: print(f"{VRBPFX}Moved to trash on {remote_host}: {trash_path}")
                 return (True, trash_path)
             else:
                 print_ssh_error(remote_host, "move file to trash", cmd=cmd, stderr=result.stderr,
@@ -5737,7 +5737,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
             if result.returncode == 0 and result.stdout.strip().startswith('RENAMED:'):
                 actual_dst_path = result.stdout.strip().split(':', 1)[1]
-                print(f"{VRBPFX}Renamed on {remote_host}: {os.path.basename(filepath)} -> {new_filename}")
+                if VRB: print(f"{VRBPFX}Renamed on {remote_host}: {os.path.basename(filepath)} -> {new_filename}")
                 return (True, actual_dst_path)
             else:
                 print_ssh_error(remote_host, "rename file", cmd=cmd, stderr=result.stderr,
@@ -5760,7 +5760,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             if result.returncode == 0 and result.stdout.strip() == 'MOVED':
                 # v2.5: path no longer echoed (apostrophes broke the single-
                 # quote literal); we already know dest_path from the caller.
-                print(f"{VRBPFX}Moved on {remote_host}: {filepath} -> {dest_path}")
+                if VRB: print(f"{VRBPFX}Moved on {remote_host}: {filepath} -> {dest_path}")
                 return (True, dest_path)
             else:
                 print_ssh_error(remote_host, "move file", cmd=cmd, stderr=result.stderr,
@@ -5777,7 +5777,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0 and result.stdout.strip().startswith('RMDIR:'):
-                print(f"{VRBPFX}Removed empty directory on {remote_host}: {filepath}")
+                if VRB: print(f"{VRBPFX}Removed empty directory on {remote_host}: {filepath}")
                 return (True, None)
             else:
                 print_ssh_error(remote_host, "remove empty directory", cmd=cmd, stderr=result.stderr,
@@ -5822,7 +5822,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
             try:
                 shutil.move(filepath, trash_path)
-                print(f"{VRBPFX}Moved to trash: {trash_path}")
+                if VRB: print(f"{VRBPFX}Moved to trash: {trash_path}")
                 return (True, trash_path)
             except Exception as e:
                 print(f"ERROR: Failed to move file to trash: {e}", file=sys.stderr)
@@ -5836,7 +5836,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
             try:
                 shutil.move(filepath, dst_path)
-                print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
+                if VRB: print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
                 return (True, dst_path)
             except Exception as e:
                 print(f"ERROR: Failed to rename file: {e}", file=sys.stderr)
@@ -5847,7 +5847,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             if not dest_path: err("00031", "MOVE operation requires kwargs['dest_path']")
             try:
                 shutil.move(filepath, dest_path)
-                print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
+                if VRB: print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
                 return (True, dest_path)
             except Exception as e:
                 print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
@@ -5856,7 +5856,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         elif operation == 'RMDIR':
             try:
                 os.rmdir(filepath)
-                print(f"{VRBPFX}Removed empty directory: {filepath}")
+                if VRB: print(f"{VRBPFX}Removed empty directory: {filepath}")
                 return (True, None)
             except OSError as e:
                 # The old REMOVE was os.remove() here, which raises
@@ -8378,7 +8378,7 @@ def move_file(src_path, dst_dir, remote_host=None):
             cmd = [*_ssh_args(remote_host), f'mkdir -p -- "{escaped_dir}" && mv -- "{escaped_src}" "{escaped_dst}"']
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
-                print(f"{VRBPFX}Moved on {remote_host}: {src_path} -> {dst_path}")
+                if VRB: print(f"{VRBPFX}Moved on {remote_host}: {src_path} -> {dst_path}")
                 return True
             else:
                 print_ssh_error(remote_host, "move file", cmd=cmd, stderr=result.stderr,
@@ -8391,7 +8391,7 @@ def move_file(src_path, dst_dir, remote_host=None):
         else:
             os.makedirs(dst_dir, exist_ok=True)
             shutil.move(src_path, dst_path)
-            print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
+            if VRB: print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
             return True
     except Exception as e:
         print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
@@ -18800,7 +18800,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
                 parts.append(f"{title_count} titles filled from scraped data")
             if numbering_issues:
                 parts.append(f"{len(numbering_issues)} numbering issues")
-            print(f"{VRBPFX}'{series_title}': {', '.join(parts)}")
+            if VRB: print(f"{VRBPFX}'{series_title}': {', '.join(parts)}")
 
     # Summary
     if not _get_worker_prefix():
@@ -19536,7 +19536,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
         # Validate cache format
         if old_counts and not isinstance(old_counts, dict):
-            print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
+            print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
             err("00054", f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
 
         # For series libraries: compare series count AND episode count to detect new episodes
@@ -20356,7 +20356,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             for lib, counts in old_itemsCount_from_cache.items():
                 # Validate cache format - must be dict with type counts
                 if not isinstance(counts, dict):
-                    print(f"{VRBPFX}ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
+                    print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
                     err("00061", f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
                 print(f"{DBGPFX}  Library '{lib}': {count_str}")
