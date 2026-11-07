@@ -13961,6 +13961,47 @@ class TestReadmeIsFound(unittest.TestCase):
                          "found a different README than the checkout's own")
 
 
+class TestBadStructureResolve(unittest.TestCase):
+    """cmd_bad_structure_resolve() had no test, and its resolve log raised
+    NameError (plan_movie) for as long as it existed: the except around the
+    log call turned it into "(resolve log skipped: ...)" and nothing noticed.
+
+    A conflict-only run reaches the log without touching a disk: a Movie two
+    levels too deep is a conflict before any ssh, and --auto skips the prompt."""
+
+    def _mod(self):
+        return sys.modules[resolve_disk_map_variables.__module__]
+
+    def test_a_conflict_only_run_writes_its_log_and_swallows_nothing(self):
+        import contextlib
+        m = self._mod()
+        saved = (m.PLEX_Media.OBJ_BY_ID, m.CACHE, m._write_resolve_log)
+        written = []
+        m._write_resolve_log = lambda name, payload: written.append((name, payload))
+        try:
+            m.PLEX_Media.OBJ_BY_ID = {
+                'Movie:1': {'type': 'Movie', 'title': 'Some Movie', 'library': 'library1',
+                            'files': {'v1': {'filepath':
+                                             '/lib/library1/wrapper/deeper/deepest/some.movie.mkv'}}},
+            }
+            m.CACHE = {'library_stats': {'locations': {'library1': ['/lib/library1']}}}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.cmd_bad_structure_resolve(scope=None, auto=True, dry_run=False, yes=True)
+            out = buf.getvalue()
+        finally:
+            m.PLEX_Media.OBJ_BY_ID, m.CACHE, m._write_resolve_log = saved
+        self.assertIn('CONFLICTS:                1', out, out[-800:])
+        self.assertNotIn('resolve log skipped', out, out[-800:])
+        self.assertEqual(len(written), 1, "the resolve log is written once, conflicts or not")
+        name, payload = written[0]
+        self.assertEqual(name, 'bad_structure_resolve')
+        self.assertEqual(payload['summary'],
+                         {'episode_moves': 0, 'movie_flattens': 0, 'conflicts': 1})
+        self.assertEqual(payload['libraries_scanned'], [])
+        self.assertFalse(payload['dry_run'])
+
+
 class TestLegacyInlineBlock(unittest.TestCase):
     """What survived the inline `[TEST N]` block, removed 2026-11-08.
 
@@ -14088,7 +14129,7 @@ _UNITTEST_SCOPES = {
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
-    'misc':       [TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+    'misc':       [TestBadStructureResolve, TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
