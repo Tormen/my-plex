@@ -13274,6 +13274,26 @@ class TestInstallFirewallRules(unittest.TestCase):
                               text=True, timeout=120,
                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
 
+    def test_install_does_not_wait_for_the_cache_lock(self):
+        """--install reads the config and nothing else, so an --update-cache
+        running elsewhere must not hold it.  Seen 2026-11-05: it printed
+        "CACHE IS CURRENTLY LOCKED" and sat until the other run finished.
+        Here the test itself HOLDS the lock for the whole call."""
+        import fcntl
+        d, c = self._conf('/nonexistent/my-little-snitch')
+        with open(os.path.join(d, 'cache.lock'), 'w') as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            try:
+                r = subprocess.run([MAIN_SCRIPT, '--config', c, '--install'],
+                                   capture_output=True, text=True, timeout=60,
+                                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            except subprocess.TimeoutExpired:
+                self.fail("--install waited for the cache lock it has no use for")
+            finally:
+                fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+        self.assertNotIn('CACHE IS CURRENTLY LOCKED', r.stdout)
+        self.assertIn('my-plex --install', r.stdout, r.stdout[-600:] + r.stderr[-600:])
+
     def test_every_host_it_fetches_has_a_rule(self):
         """THE test. A new scraper or API whose host is not in NETWORK_HOSTS
         gets no rule, and the firewall holds it on the next machine -- which is

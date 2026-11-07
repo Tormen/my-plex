@@ -42364,9 +42364,6 @@ def execute_global_commands(args, cmd_args):
         # matches test titles.  run_regression_tests() exits, always.
         run_regression_tests(scope=cmd_args.run_tests or None)
 
-    if safe_getattr(cmd_args, 'install', False):
-        cmd_install()      # exits, always
-
     # Handle --missing command
     _missing_val = safe_getattr(cmd_args, 'missing', None)
     if _missing_val is not None:
@@ -44607,6 +44604,12 @@ def main():
         else:
             print(f"\nPlease check your configuration file or command-line arguments.", file=sys.stderr)
         sys.exit(1)
+
+    # --install reads the config and nothing else, so it runs before init():
+    # init() takes the cache lock, and an --update-cache running elsewhere
+    # would hold a run that only prints a few commands until it finished.
+    if '--install' in remaining_args:
+        cmd_install()      # exits, always
 
     init(args)
 
