@@ -435,7 +435,7 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
 # is decided HERE, once, and main() applies the same rule to the config value.
 _QUIET_ARGV = (any(a in ('-Q', '--quiet') for a in sys.argv[1:])
                and not any(a in ('-V', '--verbose', '-VV', '--very-verbose',
-                                 '-D', '--debug', '-DD', '--deep-debug')
+                                 '-D', '--debug', '-DD', '--deepdebug')
                            for a in sys.argv[1:]))
 _QUIET_ACTIVE = False
 
@@ -764,8 +764,8 @@ _my-plex() {
         '(- -V -VV --verbose --very-verbose)'{-V,--verbose}'[Verbose output]'
         '(- -V -VV --verbose --very-verbose)'{-VV,--very-verbose}'[Very verbose output]'
         '(-Q --quiet)'{-Q,--quiet}'[Print nothing on stdout; errors still go to stderr]'
-        '(- -D -DD --debug --deep-debug)'{-D,--debug}'[Debug mode]'
-        '(- -D -DD --debug --deep-debug)'{-DD,--deep-debug}'[Deep debug mode]'
+        '(- -D -DD --debug --deepdebug)'{-D,--debug}'[Debug mode]'
+        '(- -D -DD --debug --deepdebug)'{-DD,--deepdebug}'[Deep debug mode]'
         '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatched[Mismatches: title vs directory + multi-version Plex grouping]'
@@ -32781,7 +32781,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  -V, --verbose            Show more detail in output")
             print("  -VV, --very-verbose      Show even more detail (e.g. all episodes)")
             print("  -D, --debug              Debug output (implies -V)")
-            print("  -DD, --deep-debug        Deep debug output (implies -VV)")
+            print("  -DD, --deepdebug         Deep debug output (implies -VV)")
             print()
             print("Verbosity and debug are independent axes:")
             print("  -V/-VV controls how much detail the user sees")
@@ -43400,10 +43400,10 @@ def main():
         if arg in ['-D', '--debug']:
             DBG = True
             VRB = True  # debug implies verbose
-        elif arg in ['-DD', '--deep-debug']:
+        elif arg in ['-DD', '--deepdebug']:
             DEEPDBG = True
-            DBG = True  # deep-debug implies debug
-            VERYVRB = True  # deep-debug implies very-verbose
+            DBG = True  # deepdebug implies debug
+            VERYVRB = True  # deepdebug implies very-verbose
             VRB = True  # …and therefore also verbose
         elif arg in ['-V', '--verbose']:
             VRB = True
@@ -44241,7 +44241,7 @@ def main():
     main_parser.add_argument('-Y', '--yes', action='store_true', help="Automatically answer 'yes' to all prompts (cache update, --force-plex, --force confirmations). Use uppercase -Y to reduce accidental triggering.", default=False)
     main_parser.add_argument('-N', '--no', action='store_true', help="Automatically answer 'no' to all prompts (skips cache updates and cancels confirmations). Use uppercase -N to reduce accidental triggering.", default=False)
     main_parser.add_argument('-D', '--debug', action='store_true', help=f"Turn on debugging - defaults to '{DBG}'", default=DBG)
-    main_parser.add_argument('-DD', '--deep-debug', action='store_true', help=f"Turn on deep debugging - defaults to '{DEEPDBG}'", default=DEEPDBG)
+    main_parser.add_argument('-DD', '--deepdebug', action='store_true', help=f"Turn on deep debugging - defaults to '{DEEPDBG}'", default=DEEPDBG)
     main_parser.add_argument('-V', '--verbose', action='store_true', help=f"Turn on verbose output - defaults to '{VRB}'", default=VRB)
     main_parser.add_argument('-VV', '--very-verbose', action='store_true', help=f"Turn on very verbose output - defaults to '{VERYVRB}'", default=VERYVRB)
     main_parser.add_argument('-Q', '--quiet', action='store_true', help=f"Print nothing on stdout - errors and warnings still go to stderr. For unattended callers. -V/-D override it - defaults to '{QUIET}'", default=QUIET)
@@ -44350,7 +44350,7 @@ def main():
     except (argparse.ArgumentError, SystemExit) as e:
         err("00148", f"{e}\nUse --help to see available options.")
     DBG = args.debug
-    DEEPDBG = args.deep_debug
+    DEEPDBG = args.deepdebug
     VRB = args.verbose
     VERYVRB = args.very_verbose
     AUTO_YES = args.yes
@@ -44827,7 +44827,7 @@ if __name__ == '__main__':
     # In -D / --debug mode: keep Python's default SIGPIPE handling so BrokenPipeError
     # surfaces with full traceback — useful for diagnosing pipe-related issues.
     import signal as _signal
-    _debug_mode = any(a in ('-D', '--debug', '-DD', '--deep-debug') for a in sys.argv)
+    _debug_mode = any(a in ('-D', '--debug', '-DD', '--deepdebug') for a in sys.argv)
     if not _debug_mode:
         _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
 
