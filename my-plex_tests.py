@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 import importlib.machinery
 import importlib.util
+from typing import Any
 
 # The tool overrides this when it loads the suite (_load_test_mod): only it
 # knows its own file, which on a deployed copy is bin/my-plex.  This value is
@@ -83,8 +84,25 @@ def _readme_path() -> str | None:
     return None
 
 
-def _import_tool(module_name='mp', argv=None, path=None):
+def _main_module() -> Any:
+    """The tool, as the module this suite was loaded from.
+
+    Typed Any on purpose: my-plex.py is a script, not an importable module
+    with a type of its own, and the tests set its globals (CACHE,
+    DISK_PLEX_MAP, PLEX_DB_REMOTE_HOST, ...), which a ModuleType does not
+    declare."""
+    return sys.modules[resolve_disk_map_variables.__module__]
+
+
+def _must(match: 're.Match[str] | None', what: str) -> 're.Match[str]':
+    """The match a test counts on: a None here IS the test's failure."""
+    assert match is not None, f"{what}: the pattern did not match"
+    return match
+
+
+def _import_tool(module_name='mp', argv=None, path=None) -> Any:
     """Import my-plex itself as a module, whatever its file is CALLED.
+    (Any for the same reason as _main_module: the tests set its globals.)
 
     spec_from_file_location() chooses a loader from the FILE NAME and answers
     None for a name it cannot place.  The deployed copy is `bin/my-plex` with
@@ -215,13 +233,13 @@ def _registry_entry_block(content, category):
 
     Scoped to the registry dict so same-named keys elsewhere (e.g.
     PROBLEMS2DISK['reencode']) can never shadow the lookup.
-    Returns the entry body string, or None when not found."""
-    registry = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL)
-    if not registry:
-        return None
-    entry = re.search(r"'%s': \{\n(.*?)\n    \}," % re.escape(category),
-                      registry.group(1), re.DOTALL)
-    return entry.group(1) if entry else None
+    A missing registry or entry is the calling test's failure (the asserts)."""
+    registry = _must(re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL),
+                     'PROBLEM_CATEGORIES_REGISTRY')
+    entry = _must(re.search(r"'%s': \{\n(.*?)\n    \}," % re.escape(category),
+                            registry.group(1), re.DOTALL),
+                  f"the '{category}' entry of PROBLEM_CATEGORIES_REGISTRY")
+    return entry.group(1)
 
 
 ############################################################
@@ -920,6 +938,7 @@ class TestResolveNoAudioLanguage(unittest.TestCase):
         tool_name = 'mp4box'
         filepath = '/path/to/Tenet.mp4'
         lang = 'eng'
+        args: list[str] = []
         if tool_name == 'mp4box':
             args = ['-lang', f'all={lang}', filepath]
         self.assertEqual(args, ['-lang', 'all=eng', '/path/to/Tenet.mp4'])
@@ -928,6 +947,7 @@ class TestResolveNoAudioLanguage(unittest.TestCase):
         tool_name = 'mkvpropedit'
         filepath = '/path/to/Tenet.mkv'
         lang = 'deu'
+        args: list[str] = []
         if tool_name == 'mkvpropedit':
             args = [filepath, '--edit', 'track:a1', '--set', f'language={lang}']
         self.assertEqual(args, ['/path/to/Tenet.mkv', '--edit', 'track:a1', '--set', 'language=deu'])
@@ -1011,6 +1031,7 @@ class TestCacheSkipLogic(unittest.TestCase):
             "get_library_stats must query database for item counts")
         import re
         match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("plex_retry_operation", func_body,
@@ -1140,6 +1161,7 @@ Summary must report metadata probing separately from library changes (added/remo
         self.assertIn("def _collect_missing_file_metadata(", content)
         import re
         match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "_collect_missing_file_metadata function must exist")
         func_body = match.group(1)
         self.assertIn("_metadata_batch_queue.append(", func_body,
@@ -1154,6 +1176,7 @@ Summary must report metadata probing separately from library changes (added/remo
         self.assertIn("def _run_batch_metadata_collection(", content)
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("_metadata_batch_queue", func_body,
@@ -1168,6 +1191,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("ffprobe_error", func_body,
@@ -1196,6 +1220,7 @@ Summary must report metadata probing separately from library changes (added/remo
         # Find the sweep block — it's between re-attachment and batch collection
         sweep_pattern = r'already_queued.*?additional files missing metadata'
         match = re.search(sweep_pattern, content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must have sweep block between re-attachment and batch collection")
         sweep_block = match.group(0)
         self.assertIn("_metadata_batch_queue.append(", sweep_block,
@@ -1208,6 +1233,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("json.loads(line)", func_body,
@@ -1222,6 +1248,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         import re
         match = re.search(r'(def add_media_obj_via_PLEX_API\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "add_media_obj_via_PLEX_API function must exist")
         func_body = match.group(1)
         self.assertNotIn("getattr(library, 'remote_host'", func_body,
@@ -1234,6 +1261,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         import re
         match = re.search(r'(def get_video_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("run_tool_on_PLEX_server('ffmpeg'", func_body,
@@ -1274,6 +1302,7 @@ Summary must report metadata probing separately from library changes (added/remo
         content = self._read_script()
         import re
         match = re.search(r'(def _collect_missing_file_metadata\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         # Must skip entries with valid (non-broken) metadata
@@ -1297,6 +1326,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def update_movie_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("plex_get_all_items", func_body,
@@ -1307,6 +1337,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def update_series_library_objs\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("plex_get_all_items", func_body,
@@ -1317,6 +1348,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("totalSize", func_body,
@@ -1334,6 +1366,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertNotIn("fetchItem", func_body,
@@ -1352,6 +1385,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         import re
         # Find the list method - it should contain query_plex_database
         match = re.search(r'class PLEX_Playlist.*?def list\(playlist_name\):\n(.*?)(?=\n    @staticmethod|\n    def )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("query_plex_database", func_body,
@@ -1414,6 +1448,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("not_found_count", func_body,
@@ -1428,6 +1463,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("PLEX_DB_REMOTE_HOST", func_body,
@@ -1438,10 +1474,12 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         # Extract the inline collector script portion (between collector_script = and closing ''')
         script_match = re.search(r"collector_script = f'''(.*?)'''", func_body, re.DOTALL)
+        assert script_match is not None, "the pattern above did not match"
         self.assertIsNotNone(script_match, "Must find collector_script in function")
         collector = script_match.group(1)
         # Collector script must NOT sys.exit on failure
@@ -1463,6 +1501,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(# Check 2: OBJ_BY_FILEPATH.*?)(?=# Check 3:)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must have Check 2: OBJ_BY_FILEPATH section")
         check2 = match.group(1)
         self.assertIn("('Series', 'Season')", check2,
@@ -1473,6 +1512,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(# Check 7: library_stats.*?)(?=# Summary)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must have Check 7: library_stats section")
         check7 = match.group(1)
         self.assertIn("primary_type_per_lib", check7,
@@ -1488,6 +1528,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         if match is None:
             # Fall back: search the file metadata section in verify_cache
             match = re.search(r'(needs_update = missing_metadata.*?)(?=# Check 2:)', content, re.DOTALL)
+            assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must have file metadata check section")
         check1 = match.group(1)
         self.assertNotIn("integrity_issues.append", check1.split("broken_metadata")[1] if "broken_metadata" in check1 else "",
@@ -1495,6 +1536,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         # Verify broken is reported as info/warning outside of integrity_issues
         # Use a more specific anchor: the Summary section in verify_cache_integrity uses total_broken
         summary_match = re.search(r'(# Summary\n\s*total_broken = broken_metadata.*?)(?=\n\ndef )', content, re.DOTALL)
+        assert summary_match is not None, "the pattern above did not match"
         self.assertIsNotNone(summary_match, "Must have Summary section in verify_cache_integrity")
         summary = summary_match.group(1)
         self.assertIn("broken_metadata", summary,
@@ -1505,6 +1547,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def process_single_library\(.*?\):\n.*?)(?=\n    def update_cache)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find process_single_library function")
         func_body = match.group(1)
         self.assertIn("current_episode_count", func_body,
@@ -1517,6 +1560,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find get_library_stats function")
         func_body = match.group(1)
         self.assertIn("episodesCount", func_body,
@@ -1542,6 +1586,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
         # Must NOT break after first broken file per object
@@ -1556,6 +1601,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
         # Must NOT skip objects with no plex duration (they may have PROBE ERR / NOT FOUND files)
@@ -1687,6 +1733,7 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def query_plex_database\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("os.path.exists(local_db_path)", func_body,
@@ -1699,6 +1746,7 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def query_plex_database\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("_ssh_args(PLEX_DB_REMOTE_HOST)", func_body,
@@ -1719,6 +1767,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("startswith('ID:')", func_body,
@@ -1734,6 +1783,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def resolve_plex_media_obj\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         # Must wrap in list: [PLEX_Media.OBJ_BY_ID[...]]
@@ -1751,6 +1801,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def resolve_cache_items\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "resolve_cache_items function must exist")
         func_body = match.group(1)
         self.assertIn("startswith('ID:')", func_body,
@@ -1761,6 +1812,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def show_item_info\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("resolve_cache_items(", func_body,
@@ -1771,6 +1823,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def resolve_series_for_episodes\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("resolve_cache_items(", func_body,
@@ -1813,6 +1866,7 @@ class TestRefactoredMethodNames(unittest.TestCase):
         import re
         # Find PLEX_Media.execute_cmd
         match = re.search(r'(class PLEX_Media.*?def execute_cmd.*?)(?=\n    #+\n)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find PLEX_Media.execute_cmd")
         cmd_block = match.group(1)
         self.assertIn(".set_watched(", cmd_block)
@@ -1861,6 +1915,7 @@ class TestMediaApiActionConsolidation(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _media_api_action\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("except Exception", body)
@@ -1875,6 +1930,7 @@ class TestMediaApiActionConsolidation(unittest.TestCase):
             import re
             pattern = rf'def {method}\(.*?\n(.*?)(?=\n    @staticmethod|\n    #+)'
             match = re.search(pattern, content, re.DOTALL)
+            assert match is not None, "the pattern above did not match"
             self.assertIsNotNone(match, f"{method} must exist")
             body = match.group(1)
             self.assertIn("_media_api_action(", body,
@@ -1887,6 +1943,7 @@ class TestMediaApiActionConsolidation(unittest.TestCase):
         for method in ['set_watched', 'set_unwatched', 'get_user_rating', 'clear_user_rating']:
             pattern = rf'def {method}\(.*?\n(.*?)(?=\n    @staticmethod|\n    #+)'
             match = re.search(pattern, content, re.DOTALL)
+            assert match is not None, "the pattern above did not match"
             self.assertIsNotNone(match, f"{method} must exist")
             body = match.group(1)
             self.assertNotIn("try:", body,
@@ -1910,6 +1967,7 @@ class TestListMethodSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('"Series"', body)
@@ -1920,6 +1978,7 @@ class TestListMethodSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("UNSUPPORTED media_type", body, "Must err() on an invalid media_type")
@@ -1959,6 +2018,7 @@ class TestListMethodSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'(def list\(args, obj_args.*?\n.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find PLEX_Media.list()")
         body = match.group(1)
         self.assertIn("_normalize_list_args(", body)
@@ -1970,6 +2030,7 @@ class TestListMethodSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _normalize_list_args\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("'english'", body.lower(), "Must normalize 'english' to ISO code")
@@ -1994,6 +2055,7 @@ class TestExecuteTrashAndMoveSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r"def _execute_trash_and_move\(.*?\n(.*?)(?=\ndef )", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("'5'", body, "Must handle choice 5")
@@ -2006,6 +2068,7 @@ class TestExecuteTrashAndMoveSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def execute_resolution_action\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("_execute_trash_and_move(", body)
@@ -2028,6 +2091,7 @@ class TestVerifyCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def verify_cache\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("_verify_data_integrity()", body)
@@ -2037,6 +2101,7 @@ class TestVerifyCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _verify_data_integrity\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("OBJ_BY_COLLECTION", body)
@@ -2046,6 +2111,7 @@ class TestVerifyCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _verify_data_integrity\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("OBJ_BY_FILEPATH", body)
@@ -2068,6 +2134,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _finalize_and_save_cache\((.*?)\)', content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         params = match.group(1)
         self.assertIn("old_read_only", params, "Must accept old_read_only to restore READ_ONLY_MODE")
@@ -2080,6 +2147,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _finalize_and_save_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("_pending_save_extras", body)
@@ -2092,6 +2160,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _finalize_and_save_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("updated_library_object_counts", body)
@@ -2102,6 +2171,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         import re
         # Find PLEX_Library.update_cache specifically (not PLEX_Media.update_cache)
         match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("_finalize_and_save_cache(", body)
@@ -2111,6 +2181,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("old_read_only", body, "Must pass old_read_only to _finalize_and_save_cache")
@@ -2120,6 +2191,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'class PLEX_Library.*?def update_cache\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("update_and_save_cache(build_media_cache_dict(", body,
@@ -2138,6 +2210,7 @@ class TestBrokenHeaderOrder(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r"'PLEX-ID'.*?'SEVERITY'.*?'DIFF%'.*?'(DURATION|LIBRARY)'.*?'(DURATION|LIBRARY)'", content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --broken header line")
         self.assertEqual(match.group(1), 'DURATION', "DURATION must come before LIBRARY in --broken header")
         self.assertEqual(match.group(2), 'LIBRARY', "LIBRARY must come after DURATION in --broken header")
@@ -2148,6 +2221,7 @@ class TestBrokenHeaderOrder(unittest.TestCase):
         import re
         # Find the actual data print line (single line with plex_id_str, severity_str, diff_str)
         match = re.search(r'print\(f".*plex_id_str.*severity_str.*diff_str.*(dur_str).*(library).*filepath', content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --broken data print line")
         self.assertEqual(match.group(1), 'dur_str', "dur_str must come before library in data line")
         self.assertEqual(match.group(2), 'library', "library must come after dur_str in data line")
@@ -2175,6 +2249,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\((.*?)\)', content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         self.assertIn("version_limit", match.group(1))
 
@@ -2183,6 +2258,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("version_limit", body)
@@ -2193,6 +2269,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("idx", body, "Must track version index")
@@ -2205,6 +2282,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("prev_plex_id", body, "Must track previous plex_id for grouping")
@@ -2215,6 +2293,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("files_dict", body, "Must access files_dict for per-file iteration")
@@ -2225,6 +2304,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def list\(args, obj_args.*?\)', content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         self.assertIn("excess_versions", match.group(0), "list() must accept excess_versions parameter")
 
@@ -2233,6 +2313,7 @@ class TestExcessVersions(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def execute_global_commands\(.*?\n(.*?)(?=\n###)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("excess_versions", body)
@@ -2260,6 +2341,7 @@ class TestProblems(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --problems handler block")
         body = match.group(1)
         self.assertIn("_list_broken_files", body)
@@ -2274,6 +2356,7 @@ class TestProblems(unittest.TestCase):
         self.assertIn('_pc_excess', reg)
         # … and _pc_excess calls _list_excess_versions with limit 3.
         helper = re.search(r"def _pc_excess\(.*?\n(.*?)\n\n", content, re.DOTALL)
+        assert helper is not None, "the pattern above did not match"
         self.assertIsNotNone(helper, "Must find _pc_excess helper")
         self.assertIn("_list_excess_versions", helper.group(1))
         self.assertIn(", 3)", helper.group(1), "Must use limit 3 for excess versions")
@@ -2283,6 +2366,7 @@ class TestProblems(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("PROBLEM DETECTION", body)
@@ -2293,6 +2377,7 @@ class TestProblems(unittest.TestCase):
         self.assertIn("case 'problems':", content, "Must have --help problems case")
         import re
         match = re.search(r"case 'problems':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("PROBLEMS HELP", body)
@@ -2300,7 +2385,8 @@ class TestProblems(unittest.TestCase):
         # help case must iterate it, and the registry must carry the flags.
         self.assertIn("PROBLEM_CATEGORIES_REGISTRY.items()", body,
                       "--help problems must auto-generate categories from the registry")
-        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        reg = _must(re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL),
+                    'PROBLEM_CATEGORIES_REGISTRY').group(1)
         self.assertIsNotNone(reg, "Must find PROBLEM_CATEGORIES_REGISTRY")
         self.assertIn("'--broken'", reg)
         self.assertIn("'--excess-versions'", reg)
@@ -2310,6 +2396,7 @@ class TestProblems(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_broken_files\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("return 0", body, "Must return 0 when no broken files")
@@ -2320,6 +2407,7 @@ class TestProblems(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("return 0, 0", body, "Must return (0, 0) when no excess versions")
@@ -2374,6 +2462,7 @@ class TestReencode(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r"safe_getattr\(cmd_args, 'problems'.*?\n(.*?)(?=\n    # Handle --list)", src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --problems handler block")
         body = match.group(1)
         self.assertIn("_list_reencode_candidates(", body)
@@ -2422,6 +2511,7 @@ class TestReencode(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r'def _list_reencode_candidates\(.*?\n(.*?)(?=\n    @staticmethod)', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find _list_reencode_candidates body")
         body = match.group(1)
         self.assertIn("return 0", body, "Must return 0 when no candidates")
@@ -2432,6 +2522,7 @@ class TestReencode(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r"case 'problems':\n(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         self.assertIn("PROBLEM_CATEGORIES_REGISTRY.items()", match.group(1),
                       "--help problems must auto-generate categories from the registry")
@@ -2449,6 +2540,7 @@ class TestReencode(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r"case 'reencode':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find reencode help page")
         body = match.group(1)
         self.assertIn("--mark", body)
@@ -2505,6 +2597,7 @@ class TestReencode(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def reencode_item\(.*?\n(.*?)(?=\n    @staticmethod|\n    ###)', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find reencode_item body")
         return m.group(1)
 
@@ -2720,6 +2813,7 @@ class TestOndiskLabels(unittest.TestCase):
         """Extract the full --reencode handler block from src."""
         import re
         match = re.search(r"# Handle --reencode.*?# Handle --list", src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find reencode handler block")
         return match.group(0)
 
@@ -2814,6 +2908,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("move_to_trash(", body, "Must use move_to_trash, not os.remove/unlink")
@@ -2825,6 +2920,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         # Strip comments — we only care about actual code, not comments mentioning the function
@@ -2842,6 +2938,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def execute_cmd\(args, obj, obj_args\).*?\n(.*?)(?=\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         remove_pos = body.find('.remove(')
@@ -2855,6 +2952,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?\n(.*?)(?=\n    #)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("media.delete()", body, "remove() must NOT delete the Plex entry")
@@ -2864,6 +2962,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def delete\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("move_to_trash(", body, "delete() must NOT trash files")
@@ -2873,6 +2972,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def delete\(media_identifier.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("_remove_from_cache_by_id(", body,
@@ -2883,6 +2983,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "_remove_from_cache_by_id method must exist")
         body = match.group(1)
         self.assertIn("OBJ_BY_ID", body, "Must update OBJ_BY_ID")
@@ -2897,6 +2998,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         # Must handle Episode type specifically with series_key/S_str/E_str lookups
@@ -2921,6 +3023,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "remove() must accept rm_spec parameter")
         body = match.group(1)
         self.assertIn("rm_indices", body, "Must parse rm_spec into indices")
@@ -2932,6 +3035,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("idx not in rm_indices", body, "Must check idx against rm_indices")
@@ -2946,6 +3050,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("removed_versions", body, "Must track removed versions")
@@ -2958,6 +3063,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("OBJ_BY_LIBRARY = {}", body,
@@ -2968,6 +3074,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("GONE", body, "Must check if file is gone from disk")
@@ -2977,6 +3084,7 @@ class TestRemoveCommand(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def remove\(media_identifier.*?rm_spec.*?\n(.*?)(?=\n    ######)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         # The GONE check must appear BEFORE move_to_trash call
@@ -3006,6 +3114,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_broken_files\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("OBJ_BY_ID[key]", body, "_list_broken_files must use .get(key) not [key]")
@@ -3014,6 +3123,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_excess_versions\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("OBJ_BY_ID[key]", body, "_list_excess_versions must use .get(key) not [key]")
@@ -3022,6 +3132,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _find_duplicates\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("OBJ_BY_ID[okey]", body, "_find_duplicates must use .get(okey) not [okey]")
@@ -3031,6 +3142,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _filter_by_watch_and_audio\(.*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertNotIn("OBJ_BY_ID[key]", body, "_filter_by_watch_and_audio must use .get(key) not [key]")
@@ -3054,6 +3166,7 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def wait_for_plex_scans_complete\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("active_sections", body, "Must check plex.activities for ongoing scan activities")
@@ -3064,6 +3177,7 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _get_active_scan_section_ids\(.*?\n(.*?)(?=\ndef )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("library.update.section", body)
@@ -3074,6 +3188,7 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r"Waiting for all libraries to complete scanning.*?print\(f.*?=.*?76", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Could not find scan waiting section in update_cache")
         body = match.group(0)
         self.assertIn("wait_for_plex_scans_complete(", body,
@@ -3115,7 +3230,7 @@ def _fixture_library(d):
     `genre:Comedy` find a title tagged 'Komödie'."""
     import pickle
     from datetime import datetime
-    m = sys.modules[resolve_disk_map_variables.__module__]
+    m = _main_module()
     version = "90.0min 1920x1080 (h264 aac) 1500MB"
 
     def file_entry(fp, langs, **metadata):
@@ -4251,6 +4366,7 @@ class TestErrorOutputConventions(unittest.TestCase):
         """print_ssh_error must use ERROR prefix — SSH failures are fatal."""
         src = self._read_script()
         match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "print_ssh_error not found")
         body = match.group(1)
         self.assertIn('ERROR:', body, "print_ssh_error must use ERROR prefix")
@@ -4259,6 +4375,7 @@ class TestErrorOutputConventions(unittest.TestCase):
         """print_ssh_error must include verbose troubleshooting guidance."""
         src = self._read_script()
         match = re.search(r'def print_ssh_error\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         body = match.group(1)
         self.assertIn('ssh/config', body, "print_ssh_error must have SSH config instructions")
         self.assertIn('Example', body, "print_ssh_error must have example config")
@@ -4267,6 +4384,7 @@ class TestErrorOutputConventions(unittest.TestCase):
         """TRASH SSH failure path must include 'Possible reasons' block."""
         src = self._read_script()
         match = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "my_plex_file_operation not found")
         body = match.group(1)
         self.assertIn('Possible reasons:', body, "SSH failure paths must have 'Possible reasons' guidance")
@@ -4361,6 +4479,7 @@ class TestObjByLibraryDedup(unittest.TestCase):
         """All OBJ_BY_LIBRARY .append() calls in show/episode/season processing must check for duplicates."""
         src = self._read_script()
         match = re.search(r'def _process_series_from_database\(.*?\n(.*?)(?=\ndef )', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "_process_series_from_database not found")
         body = match.group(1)
         append_lines = re.findall(r"lib_dict\['\w+'\]\.append\((\w+)\)", body)
@@ -4394,6 +4513,7 @@ class TestObjByLibraryDedup(unittest.TestCase):
         src = self._read_script()
         match = re.search(r'# v2\.10: ONE merged save.*?\n\s*(update_and_save_cache\(.*?\*\*_pending,?\s*\)\s*)',
                           src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Final save must merge _pending_save_extras via **_pending")
         save_call = match.group(1)
         self.assertIn('build_media_cache_dict', save_call)
@@ -4442,6 +4562,7 @@ class TestDeleteRequiresRemove(unittest.TestCase):
         """--delete argparse help must mention that Plex also deletes files."""
         src = self._read_script()
         match = re.search(r"add_argument\('--delete', '--del'.*?help=\"(.*?)\"", src)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "--delete/--del media argparse not found")
         help_text = match.group(1)
         self.assertIn('files', help_text.lower(), "--delete help must mention files")
@@ -4450,6 +4571,7 @@ class TestDeleteRequiresRemove(unittest.TestCase):
         """delete() method must have a comment warning about file deletion."""
         src = self._read_script()
         match = re.search(r'def delete\(media_identifier.*?\n(.*?)\n', src)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "PLEX_Media.delete() not found")
         # Check the lines right after the def
         after_def = src[match.start():match.start()+500]
@@ -4817,6 +4939,7 @@ class TestCacheUpdateLog(unittest.TestCase):
             "Must define _write_cache_update_log function")
         import re
         match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("json.dump", func_body,
@@ -4829,6 +4952,7 @@ class TestCacheUpdateLog(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("changes_by_library", func_body,
@@ -4841,6 +4965,7 @@ class TestCacheUpdateLog(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r'(def _write_cache_update_log\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         self.assertIn("broken_files_from_metadata", func_body,
@@ -4856,6 +4981,7 @@ class TestCacheUpdateLog(unittest.TestCase):
         import re
         # Find the removal details section
         match = re.search(r"(# Build detailed info BEFORE removing.*?)(?=# Actually remove)", src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must have removal details section")
         removal_section = match.group(1)
         self.assertIn("'duration'", removal_section,
@@ -4897,6 +5023,7 @@ class TestCacheUpdateLog(unittest.TestCase):
         src = self._read_script()
         import re
         match = re.search(r'(def _run_batch_metadata_collection\(.*?\):\n.*?)(?=\ndef [a-z_])', src, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
         # Should NOT contain the old verbose BROKEN print pattern
@@ -4911,10 +5038,12 @@ class TestCacheUpdateLog(unittest.TestCase):
         # Must be used by both movie and show processing paths
         import re
         movie_section = re.search(r'def _process_movies_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
+        assert movie_section is not None, "the pattern above did not match"
         self.assertIsNotNone(movie_section)
         self.assertIn("_track_delta(", movie_section.group(),
             "_process_movies_from_database must call _track_delta")
         show_section = re.search(r'def _process_series_from_database.*?(?=\ndef [a-z_])', src, re.DOTALL)
+        assert show_section is not None, "the pattern above did not match"
         self.assertIsNotNone(show_section)
         self.assertIn("_track_delta(", show_section.group(),
             "_process_series_from_database must call _track_delta")
@@ -5124,6 +5253,7 @@ class TestMissingEpisodes(unittest.TestCase):
         # Find the PLEX_Library class section (ends at next top-level class)
         import re
         lib_section = re.search(r'class PLEX_Library.*?(?=\nclass [A-Z])', src, re.DOTALL)
+        assert lib_section is not None, "the pattern above did not match"
         self.assertIsNotNone(lib_section)
         self.assertIn("'--missing'", lib_section.group(),
             "--missing not found in PLEX_Library argparser")
@@ -5387,6 +5517,7 @@ class TestEpisodeSourceSelection(unittest.TestCase):
         import re
         src = self._read_script()
         lib_section = re.search(r'class PLEX_Library.*?(?=\nclass [A-Z])', src, re.DOTALL)
+        assert lib_section is not None, "the pattern above did not match"
         self.assertIsNotNone(lib_section)
         self.assertIn("'--source'", lib_section.group(),
             "--source not found in PLEX_Library argparser")
@@ -5780,7 +5911,7 @@ class TestEpisodesErr(unittest.TestCase):
         """Point the server alias at a name that cannot resolve. `.invalid`
         never does (RFC 2606), and _ssh_opts already carries BatchMode and
         ConnectTimeout, so the attempt fails at once rather than waiting."""
-        self._main = sys.modules[write_episodes_err.__module__]
+        self._main = _main_module()
         self._saved_host = self._main.PLEX_DB_REMOTE_HOST
         self._main.PLEX_DB_REMOTE_HOST = 'my-plex-tests-no-such-host.invalid'
 
@@ -5931,6 +6062,7 @@ class TestEpisodesErr(unittest.TestCase):
             content = f.read()
         import re
         match = re.search(r'def scrape_episodes\(.*?\ndef ', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find scrape_episodes function")
         body = match.group(0)
         self.assertIn('fallback_sources', body, "Must have fallback_sources list")
@@ -6000,6 +6132,7 @@ class TestEpisodesErrClassification(unittest.TestCase):
             content = f.read()
         import re
         match = re.search(r'def _classify_tsv_error\(.*?\n(?=def )', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertIn('suspicious_title', body)
@@ -6059,6 +6192,7 @@ class TestUnmatched(unittest.TestCase):
         content = self._read_script()
         import re
         match = re.search(r'def _list_unmatched\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("local://", body, "Must check for local:// guid prefix")
@@ -6088,6 +6222,7 @@ class TestUnmatched(unittest.TestCase):
         self.assertIn("case 'unmatched':", content)
         import re
         match = re.search(r"case 'unmatched':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('UNMATCHED', body)
@@ -6208,6 +6343,7 @@ class TestUnsorted(unittest.TestCase):
         import re
         content = self._read_script()
         match = re.search(r'def _list_unsorted\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("series_dir", body, "Must reference series_dir")
@@ -6244,6 +6380,7 @@ class TestUnsorted(unittest.TestCase):
         self.assertIn("case 'unsorted':", content)
         import re
         match = re.search(r"case 'unsorted':\n(.*?)sys\.exit\(0\)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('UNSORTED', body)
@@ -6280,6 +6417,7 @@ class TestUnsorted(unittest.TestCase):
         self.assertIn("'unsorted'", content)
         import re
         match = re.search(r'has_standalone_cmd\s*=.*', content)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         self.assertIn('unsorted', match.group(0), "has_standalone_cmd must include 'unsorted'")
 
@@ -6295,6 +6433,7 @@ class TestUnsorted(unittest.TestCase):
         content = self._read_script()
         # Global dispatch: --unsorted --fix → cmd_sort_new
         match = re.search(r"Handle --unsorted.*?\n(.*?)(?=\n    # Handle --mismatched)", content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn('fix', body, "Global --unsorted handler must check --fix flag")
@@ -6349,6 +6488,7 @@ class TestVersionStringCollision(unittest.TestCase):
         import re
         content = self._read_script()
         match = re.search(r'def fetch_movies_from_database\(.*?\ndef ', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertIn('_build_version_string(', body, "Movie DB path must use _build_version_string")
@@ -6358,6 +6498,7 @@ class TestVersionStringCollision(unittest.TestCase):
         import re
         content = self._read_script()
         match = re.search(r'def fetch_series_from_database\(.*?\ndef ', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertIn('_build_version_string(', body, "Episode DB path must use _build_version_string")
@@ -6367,6 +6508,7 @@ class TestVersionStringCollision(unittest.TestCase):
         import re
         content = self._read_script()
         match = re.search(r'def add_media_obj_via_PLEX_API\(.*?\ndef ', content, re.DOTALL)
+        assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertIn('_build_version_string(', body, "API path must use _build_version_string")
@@ -6475,7 +6617,7 @@ class TestTsvScrapersE2E(unittest.TestCase):
             pass
         return None
 
-    def _run_scraper_tmdb(self, tmdb_id, series_title):
+    def _run_scraper_tmdb(self, tmdb_id, series_title) -> dict[str, Any]:
         """Call TMDB API directly and return {'episodes': N, 'max_season': M} or {'error': ...}."""
         import json
         api_key = self._get_tmdb_api_key()
@@ -6503,7 +6645,7 @@ except Exception as e:
         except (json.JSONDecodeError, IndexError):
             return {'error': f'parse failed: {result.stderr[:200]}'}
 
-    def _run_scraper_fernsehserien(self, slug, series_id=None):
+    def _run_scraper_fernsehserien(self, slug, series_id=None) -> dict[str, Any]:
         """Scrape fernsehserien.de directly and return episode/season count."""
         import json
         code = f"""
@@ -7495,7 +7637,8 @@ class TestRenumber(unittest.TestCase):
         """--problems must include all 4 renumber checks via the registry (v3)."""
         content = self._read_script()
         import re
-        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        reg = _must(re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL),
+                    'PROBLEM_CATEGORIES_REGISTRY').group(1)
         self.assertIsNotNone(reg, "Must find PROBLEM_CATEGORIES_REGISTRY")
         section = reg
         self.assertIn('_list_renumber_candidates', section)
@@ -7512,7 +7655,8 @@ class TestRenumber(unittest.TestCase):
         self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', content[idx:end])
         # … which must define every renumber category.
         import re
-        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        reg = _must(re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL),
+                    'PROBLEM_CATEGORIES_REGISTRY').group(1)
         self.assertIsNotNone(reg)
         for category in ("'renumber'", "'renumber_nodata'",
                          "'renumber_season'", "'renumber_abs'"):
@@ -7528,7 +7672,8 @@ class TestRenumber(unittest.TestCase):
         end = content.index("sys.exit(0)", idx)
         self.assertIn('PROBLEM_CATEGORIES_REGISTRY.items()', content[idx:end])
         import re
-        reg = re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL).group(1)
+        reg = _must(re.search(r"PROBLEM_CATEGORIES_REGISTRY = \{(.*?)\n\}", content, re.DOTALL),
+                    'PROBLEM_CATEGORIES_REGISTRY').group(1)
         self.assertIsNotNone(reg)
         self.assertIn("'--renumber'", reg)
         self.assertIn('Lack of Data', reg)
@@ -7547,6 +7692,7 @@ class TestRenumber(unittest.TestCase):
     def test_renumber_scoped_e2e(self):
         """<SHOW> --renumber runs without error (E2E)."""
         self._skip_if_no_series()
+        assert self._series_key is not None
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber'],
             capture_output=True, text=True, timeout=60
@@ -7562,6 +7708,7 @@ class TestRenumber(unittest.TestCase):
     def test_renumber_fix_dry_run_e2e(self):
         """<SHOW> --renumber --fix --try runs without error (E2E, scoped to one show)."""
         self._skip_if_no_series()
+        assert self._series_key is not None
         result = subprocess.run(
             [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber', '--fix', '--try'],
             capture_output=True, text=True, timeout=60
@@ -7780,7 +7927,7 @@ class TestDiskMap(unittest.TestCase):
 
     def _with_preferred(self, prefs):
         """Context-manager-like helper: temporarily set PREFERRED_AUDIO_LANGUAGES."""
-        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        main_mod = _main_module()
         return main_mod, main_mod.PREFERRED_AUDIO_LANGUAGES, prefs
 
     def test_preferred_audio_lang_default_first_track(self):
@@ -8755,7 +8902,7 @@ class TestDiskMap(unittest.TestCase):
         OBJ_BY_SERIES_EPISODES.  Returns the main module so the test can
         restore PLEX_Media after.
         """
-        main_mod = sys.modules[finalize_disk_plex_map_uniform_fields.__module__]
+        main_mod = _main_module()
         # Snapshot
         saved = (dict(main_mod.PLEX_Media.OBJ_BY_ID),
                  dict(main_mod.PLEX_Media.OBJ_BY_SERIES),
@@ -8935,7 +9082,7 @@ class TestDiskMap(unittest.TestCase):
         def _fake_rename(src, new_filename, remote_host=None):
             renamed_calls.append((src, new_filename))
             return (True, os.path.join(os.path.dirname(src), new_filename))
-        main_mod = sys.modules[rename_file_siblings.__module__]
+        main_mod = _main_module()
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
              patch.object(main_mod, 'rename_file', _fake_rename):
             r, e = rename_file_siblings(old_path, new_path, remote_host=None,
@@ -8962,7 +9109,7 @@ class TestDiskMap(unittest.TestCase):
         def _fake_rename(src, new, remote_host=None):
             rename_calls.append((src, new))
             return (True, src)
-        main_mod = sys.modules[rename_file_siblings.__module__]
+        main_mod = _main_module()
         buf = StringIO()
         import contextlib
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
@@ -8981,7 +9128,7 @@ class TestDiskMap(unittest.TestCase):
         def _fake_op(op, path, host=None, **kw):
             listing_calls.append(op)
             return (True, [])
-        main_mod = sys.modules[rename_file_siblings.__module__]
+        main_mod = _main_module()
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op):
             r, e = rename_file_siblings('/x/A.mkv', '/x/A.mkv')
         self.assertEqual((r, e), (0, 0))
@@ -9002,7 +9149,7 @@ class TestDiskMap(unittest.TestCase):
         def _fake_rename(src, new, remote_host=None):
             renamed.append((src, new))
             return (True, src)
-        main_mod = sys.modules[rename_file_siblings.__module__]
+        main_mod = _main_module()
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
              patch.object(main_mod, 'rename_file', _fake_rename):
             r, e = rename_file_siblings(old_path, new_path)
@@ -9039,7 +9186,7 @@ class TestDiskMap(unittest.TestCase):
         }
 
     def _set_dpm(self, dpm):
-        main_mod = sys.modules[_classify_migration_action.__module__]
+        main_mod = _main_module()
         saved = main_mod.DISK_PLEX_MAP
         main_mod.DISK_PLEX_MAP = dpm
         return main_mod, saved
@@ -9201,6 +9348,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(([^)]*)\)', src)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find cmd_move signature")
         sig = m.group(1)
         for kw in ('dry_run', 'force', 'yes'):
@@ -9255,6 +9403,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r"case 'mv' \| 'move':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find --help mv page")
         body = m.group(1)
         for kw in ('DUPLICATE', '--force', 'SIBLINGS', 'SCOPE', '--yes'):
@@ -9265,6 +9414,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find cmd_move body")
         body = m.group(1)
         self.assertIn("PLEX_Library.OBJ_DICT", body)
@@ -9274,6 +9424,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("_get_disk_map_scope(", body)
@@ -9283,6 +9434,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("originalTitle", body)
@@ -9293,6 +9445,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("skip-all", body)
@@ -9304,6 +9457,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("if force:", body)
@@ -9313,6 +9467,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("sibling", body.lower())
@@ -9323,6 +9478,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         for idx in ('OBJ_BY_ID', 'OBJ_BY_LIBRARY', 'OBJ_BY_MOVIE', 'OBJ_BY_FILEPATH'):
@@ -9333,6 +9489,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("affected_libs", body)
@@ -9343,6 +9500,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("dest_lib_type", body)
@@ -9352,6 +9510,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("Re-run with --yes to execute", body)
@@ -9362,6 +9521,7 @@ class TestMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("SUMMARY", body)
@@ -9408,6 +9568,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
         body = m.group(1)
         self.assertIn("_is_scope_filter_token(", body)
@@ -9418,6 +9579,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def _get_universal_scope\(scope_tokens\).*?\n(.*?)def _get_disk_map_scope', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_universal_scope body")
         body = m.group(1)
         self.assertIn("set.intersection", body)
@@ -9428,6 +9590,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_move\(.*?\n(.*?)def cmd_sort_new', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("scope_tokens", body)
@@ -9451,6 +9614,7 @@ class TestUniversalScope(unittest.TestCase):
         # Must appear in the field whitelist (look for the tuple containing 'type')
         import re
         m = re.search(r'_SCOPE_FILTER_FIELDS = \((.*?)\)', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _SCOPE_FILTER_FIELDS")
         body = m.group(1)
         self.assertIn("'type'", body, "_SCOPE_FILTER_FIELDS must include 'type'")
@@ -9479,6 +9643,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def _resolve_scope_filter_expr\(expr\).*?\n(.*?)def _get_universal_scope', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _resolve_scope_filter_expr body")
         body = m.group(1)
         # Pure semantics doc comment present
@@ -9500,6 +9665,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
         body = m.group(1)
         self.assertIn("isinstance(target, (list, tuple))", body)
@@ -9538,6 +9704,7 @@ class TestUniversalScope(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r"case 'mv' \| 'move':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         for kw in ('COMPOUND SCOPE', 'country:france', 'original_lang:fr', 'AND-combine'):
@@ -9562,6 +9729,7 @@ class TestCompoundFilter(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def _parse_compound_filter\(.*?\n\s+"""(.*?)"""', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         doc = m.group(1)
         self.assertIn("HIGHER precedence than OR", doc)
@@ -9606,6 +9774,7 @@ class TestCompoundFilter(unittest.TestCase):
         # [^\n]*: -- the BODY is what this pins; the signature may carry a
         # return annotation (it does: the compiler is recursive).
         m = re.search(r'def _compile\(node\)[^\n]*:(.*?)label, fn = _compile', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("PLEX_Media.OBJ_BY_LIBRARY", body)
@@ -9632,6 +9801,7 @@ class TestCompoundFilter(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r"case 'scope':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         for kw in ('OR', 'AND', 'PARENS', 'CASE-SENSITIVE', 'SPACE-SEPARATED'):
@@ -9662,6 +9832,7 @@ class TestUncataloguedFolderMove(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'if has_layout_filter:(.*?)return items', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find the uncatalogued-folder loop")
         body = m.group(1)
         self.assertIn("known_paths = _get_known_filepaths_from_plex_db()", body)
@@ -9721,6 +9892,7 @@ class TestLayoutFilter(unittest.TestCase):
         self.assertIn("'layout'", src)
         import re
         m = re.search(r'_SCOPE_FILTER_FIELDS = \((.*?)\)', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         self.assertIn("'layout'", m.group(1))
 
@@ -9758,6 +9930,7 @@ class TestLayoutFilter(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r"if field == 'layout':(.*?)return label_str, _layout_fn", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find layout filter block")
         self.assertIn("_lookup_layout_for_filepath(", m.group(1))
 
@@ -9776,6 +9949,7 @@ class TestLayoutFilter(unittest.TestCase):
         self.assertIn("case 'layout':", src)
         import re
         m = re.search(r"case 'layout':(.*?)sys\.exit\(0\)", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
         for kw in ('layout:movie', 'layout:series', 'layout:season', 'layout:episode',
@@ -9898,6 +10072,7 @@ class TestOriginalLanguages(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r'def cmd_original_languages\(.*?\n(.*?)def format_duration', src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find cmd_original_languages body")
         body = m.group(1)
         self.assertIn("if o.get('original_language')", body)
@@ -9963,6 +10138,7 @@ class TestOriginalLanguages(unittest.TestCase):
         src = self._read_script()
         import re
         m = re.search(r"case 'original-languages'.*?sys\.exit\(0\)", src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find --help original-languages page")
         body = m.group(0)
         for kw in ('original_lang:', 'originallang:', 'country:', 'TMDB_API_KEY', 'french', 'france'):
@@ -11804,7 +11980,7 @@ class TestPlexConnectNotRequired(unittest.TestCase):
         class _Unauthorized(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(401); self.end_headers(); self.wfile.write(b'Unauthorized')
-            def log_message(self, *args): pass
+            def log_message(self, format: str, *args: Any) -> None: pass
         cls._httpd = http.server.HTTPServer(('127.0.0.1', 0), _Unauthorized)
         threading.Thread(target=cls._httpd.serve_forever, daemon=True).start()
         cls.url = f'http://127.0.0.1:{cls._httpd.server_address[1]}'
@@ -11942,7 +12118,7 @@ class TestVersionAndStamp(unittest.TestCase):
 
     def stamped(self):
         with open(self.script) as f:
-            return re.search(r'^SCRIPT_COMMIT\s*=\s*"([^"]*)"', f.read(), re.M).group(1)
+            return _must(re.search(r'^SCRIPT_COMMIT\s*=\s*"([^"]*)"', f.read(), re.M), 'SCRIPT_COMMIT').group(1)
 
     # --- --version ------------------------------------------------------
     def test_version_names_build_and_stamp(self):
@@ -12031,7 +12207,7 @@ class TestVersionNamesItsRelease(unittest.TestCase):
     def test_script_version_names_the_nearest_tag(self):
         here = os.path.dirname(MAIN_SCRIPT)
         with open(MAIN_SCRIPT) as f:
-            version = re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M).group(1)
+            version = _must(re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M), 'SCRIPT_VERSION').group(1)
         def git(*a):
             return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
         if git('rev-parse', '--git-dir').returncode != 0:
@@ -12346,9 +12522,9 @@ class TestRunTestsTAP(unittest.TestCase):
         precede it.  It need not be the very first line -- a preamble that is
         not a TAP line is no concern of the reader's."""
         plan = re.search(r'^1\.\.\d+$', self.out, re.M)
-        self.assertIsNotNone(plan, f"no plan line at all:\n{self.out[:300]}")
+        assert plan is not None, f"no plan line at all:\n{self.out[:300]}"
         first = self.LINE.search(self.out)
-        self.assertIsNotNone(first, "no result line at all")
+        assert first is not None, "no result line at all"
         self.assertLess(plan.start(), first.start(),
                         f"a result came before the plan:\n{self.out[:300]}")
 
@@ -12389,7 +12565,7 @@ class TestRunTestsTAP(unittest.TestCase):
                          + ", ".join(offenders))
 
     def test_the_plan_counts_the_tests_that_reported(self):
-        plan = int(re.search(r'^1\.\.(\d+)$', self.out, re.M).group(1))
+        plan = int(_must(re.search(r'^1\.\.(\d+)$', self.out, re.M), 'the TAP plan').group(1))
         self.assertEqual(plan, len(self.LINE.findall(self.out)),
                          f"plan 1..{plan} but a different number of tests reported")
 
@@ -12442,8 +12618,11 @@ class TestRunTestsTAP(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             result.startTest(case)
-            result.addSubTest(case, case,
-                              (AssertionError, AssertionError('deliberate'), None))
+            try:
+                raise AssertionError('deliberate')
+            except AssertionError:
+                failure = sys.exc_info()       # a real exc_info triple, as unittest hands over
+            result.addSubTest(case, case, failure)
             result.stopTest(case)
         line = buf.getvalue().strip()
         self.assertTrue(line.startswith('not ok 1 - '), f"got {line!r}")
@@ -12468,7 +12647,7 @@ class TestTrashNotRemove(unittest.TestCase):
     for could never work and the failure was swallowed into (False, None)."""
 
     def _op(self):
-        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        main_mod = _main_module()
         return main_mod.my_plex_file_operation
 
     def _body(self):
@@ -12477,6 +12656,7 @@ class TestTrashNotRemove(unittest.TestCase):
         src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
         m = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)',
                       src, re.DOTALL)
+        assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "my_plex_file_operation not found")
         return "\n".join(line for line in m.group(1).splitlines()
                          if not line.lstrip().startswith('#'))
@@ -12657,6 +12837,7 @@ class TestTopLevelHandlers(unittest.TestCase):
 
             # ...and the trace itself is kept, because it is what fixes the bug
             m = re.search(r'full trace:\s+(\S+)', out)
+            assert m is not None, "the pattern above did not match"
             self.assertIsNotNone(m, f"the line must name where the trace went:\n{out[-400:]}")
             trace = m.group(1)
             try:
@@ -12679,6 +12860,7 @@ class TestTopLevelHandlers(unittest.TestCase):
         try:
             proc = subprocess.Popen([sys.executable, '-B', copy],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert proc.stdout is not None
             try:
                 for _ in range(400):                 # wait for it to really be running
                     line = proc.stdout.readline()
@@ -12762,6 +12944,7 @@ class TestTopLevelHandlers(unittest.TestCase):
         try:
             proc = subprocess.Popen([sys.executable, '-B', copy],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert proc.stdout is not None
             try:
                 for _ in range(400):
                     line = proc.stdout.readline()
@@ -12816,7 +12999,7 @@ class TestSshOptions(unittest.TestCase):
     after the remote has answered."""
 
     def _opts(self, **kw):
-        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        main_mod = _main_module()
         return main_mod._ssh_opts(**kw)
 
     def _joined(self, **kw):
@@ -12857,7 +13040,7 @@ class TestSshOptions(unittest.TestCase):
         self.assertNotIn('ControlPath=', joined)
 
     def test_the_timeout_comes_from_the_config(self):
-        main_mod = sys.modules[resolve_disk_map_variables.__module__]
+        main_mod = _main_module()
         self.assertIn('SSH_CONNECT_TIMEOUT', main_mod.CONFIG_DEFAULTS,
                       "a tunable belongs in the config file, not in the body")
         self.assertIn(f"ConnectTimeout={main_mod.SSH_CONNECT_TIMEOUT}", self._joined())
@@ -12902,7 +13085,7 @@ class TestSecretArgs(unittest.TestCase):
     never silent, and `-` and `@FILE` give it somewhere safe to come from."""
 
     def _mod(self):
-        return sys.modules[resolve_disk_map_variables.__module__]
+        return _main_module()
 
     def _resolve(self, flag, value, argv=None, stdin=None):
         import contextlib
@@ -13728,7 +13911,7 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
                                  re.MULTILINE))
         self.assertGreater(len(emitted), 20, "the template rendered almost nothing")
 
-        mod = sys.modules[resolve_disk_map_variables.__module__]
+        mod = _main_module()
         keys = set(mod.CONFIG_DEFAULTS.keys())
         missing = sorted(keys - emitted)
         self.assertEqual(missing, [],
@@ -13743,7 +13926,7 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
         emitted = set(re.findall(r'^\s*#?\s*([A-Z_][A-Z_0-9]+)\s*=', r.stdout,
                                  re.MULTILINE))
-        mod = sys.modules[resolve_disk_map_variables.__module__]
+        mod = _main_module()
         keys = set(mod.CONFIG_DEFAULTS.keys())
         # section headers and prose can name other things; only assignments count
         stray = sorted(e for e in emitted - keys if not e.startswith('EXAMPLE'))
@@ -14101,7 +14284,7 @@ class TestBadStructureResolve(unittest.TestCase):
     levels too deep is a conflict before any ssh, and --auto skips the prompt."""
 
     def _mod(self):
-        return sys.modules[resolve_disk_map_variables.__module__]
+        return _main_module()
 
     def test_a_conflict_only_run_writes_its_log_and_swallows_nothing(self):
         import contextlib
@@ -14145,7 +14328,7 @@ class TestLegacyInlineBlock(unittest.TestCase):
     on in TestEndToEnd and the isolated --info test."""
 
     def _mod(self):
-        return sys.modules[resolve_disk_map_variables.__module__]
+        return _main_module()
 
     def test_format_filesize_picks_the_unit(self):
         f = self._mod().format_filesize
@@ -14318,13 +14501,13 @@ class _TAPResult(unittest.TextTestResult):
         if self._tap_verdict is None:   # never overwrite a failed subTest
             self._tap_verdict = ('ok', '')
 
-    def addSubTest(self, test, subtest, outcome):
+    def addSubTest(self, test, subtest, err):
         # A failed subTest never reaches addFailure -- unittest reports it
         # here and then calls stopTest once for the whole test.  Without this
         # the line read "not ok ... # no verdict recorded", which is the right
         # verdict for the wrong reason.
-        super().addSubTest(test, subtest, outcome)
-        if outcome is not None:
+        super().addSubTest(test, subtest, err)
+        if err is not None:
             self._tap_verdict = ('not ok', '')
 
     def addFailure(self, test, err):
@@ -14392,7 +14575,8 @@ def _tests_matching_title(filter_text):
     needle = filter_text.lower()
     return [t for cls in _UNITTEST_CLASSES
             for t in loader.loadTestsFromTestCase(cls)
-            if needle in f"{cls.__name__}.{t._testMethodName}".lower()]
+            if isinstance(t, unittest.TestCase)        # a suite yields cases, never nested suites, here
+            and needle in f"{cls.__name__}.{t._testMethodName}".lower()]
 
 
 def describe_test_scopes():
