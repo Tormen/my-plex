@@ -3432,6 +3432,15 @@ class TestEndToEnd(unittest.TestCase):
         # May fail if no server connection, but must not crash
         self.assertNotIn("Traceback", result.stderr, "--verify-cache must not crash with traceback")
 
+    def test_verify_cache_without_a_database_names_the_gap_not_an_empty_host(self):
+        """The fixture has no Plex DB file and no remote host.  --verify-cache
+        says so, instead of running ssh against an empty host name -- which is
+        what it did (2026-11-08: "ssh: connect to host  port 22: Connection
+        refused", twice per library)."""
+        result = self._run_cmd('--verify-cache')
+        self.assertNotIn('connect to host  port 22', result.stderr)
+        self.assertIn('PLEX_DB_REMOTE_HOST is empty', result.stderr)
+
     # --- Error handling ---
 
     def test_invalid_flag_errors(self):

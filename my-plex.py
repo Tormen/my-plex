@@ -5992,6 +5992,13 @@ def query_plex_database(query, mode='rows'):
     local_db_path = os.path.expanduser(PLEX_DB_PATH)
     use_local = os.path.exists(local_db_path)
 
+    if not use_local and not PLEX_DB_REMOTE_HOST:
+        # No database here and no host to ask: say so, instead of handing an
+        # empty host name to ssh ("ssh: connect to host  port 22").
+        print(f"ERROR: Plex database not reachable: {local_db_path} does not exist here "
+              f"and PLEX_DB_REMOTE_HOST is empty (see --help config)", file=sys.stderr)
+        return None
+
     if use_local:
         # LOCAL: run sqlite3 directly on local database
         if mode == 'raw':
