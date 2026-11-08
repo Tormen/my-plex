@@ -63,20 +63,14 @@ def _network_opted_in():
     """True only when someone asked for the tests that really fetch."""
     return bool(os.environ.get(TEST_NETWORK_ENV, '').strip())
 
-# How long a whole my-plex command may take against the REAL library before a
-# test calls it hung.  It is a SAFETY NET, not a performance budget -- the
-# house default for a rollout step that names no timeout is 5 minutes, for
-# exactly this reason -- and it has ONE owner because the same decision sat in
-# three places at three values (60, 60, 120).
-#
-# 60s was not a bound on anything: it measured the machine.  On horse,
-# 2026-11-05, against a 40 MB cache: --problems 83s, --info 49s,
-# --verify-cache 6s, --mismatched 2s.  So `--run-tests episodes` failed here
-# and my-rollout's gate would not offer the copy ("no passing --run-tests for
-# these bytes") -- a test bound, not the tool, stopping a deployment.
-# What these tests SHOULD do instead is read a fixture cache; TODO.local.md
-# carries that, and this constant goes when they do.
-E2E_REAL_LIBRARY_TIMEOUT = 300
+# How long a whole my-plex command may take against the FIXTURE library (see
+# _fixture_library) before a test calls it hung.  A SAFETY NET, not a
+# performance budget: a run there takes a few seconds, and the bound only
+# turns a hang into a failure.  ONE owner, because the same decision once sat
+# in three places at three values -- and at 60s it measured the machine: on
+# horse, 2026-11-05, against the real 40 MB cache, --problems took 83s, so a
+# test bound, not the tool, stopped a deployment.
+E2E_TIMEOUT = 120
 
 
 def _readme_path() -> str | None:
@@ -3088,26 +3082,182 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
             "--update-cache must NOT use raw lib.refreshing")
 
 
+# ---------------------------------------------------------------------------
+# A FIXTURE cache for the end-to-end tests: three libraries (an English and a
+# German movie library, a French series library) and nine titles, written to a
+# temp directory beside a config that points my-plex at it -- so a spawned
+# my-plex reads this and never ~/.my-plex/cache.pkl.  Built once per process.
+#
+# Why: the E2E tests ran against the user's real cache (40 MB) and real config.
+# They then measured the machine (one --problems run: 83s, 33s, 11s on three
+# attempts), reached the network through --info, and proved nothing on a
+# machine whose cache was never built.
+# ---------------------------------------------------------------------------
+_FIXTURE_CONF = None
+
+def _fixture_conf():
+    """The config of the process-wide fixture library, built on first use."""
+    global _FIXTURE_CONF
+    if _FIXTURE_CONF is None:
+        import atexit
+        d = tempfile.mkdtemp(prefix='my-plex-fixture-')
+        atexit.register(shutil.rmtree, d, True)
+        _FIXTURE_CONF = _fixture_library(d)
+    return _FIXTURE_CONF
+
+def _fixture_library(d):
+    """Write the fixture cache and its config into d; return the config path.
+
+    Objects carry every key a real cached object carries (the shapes were read
+    off a real cache on 2026-11-08), so a command that reads any field finds
+    it.  Genres go through the tool's own normaliser, as --update-cache does:
+    the cache holds canonical English names, which is what makes
+    `genre:Comedy` find a title tagged 'Komödie'."""
+    import pickle
+    from datetime import datetime
+    m = sys.modules[resolve_disk_map_variables.__module__]
+    version = "90.0min 1920x1080 (h264 aac) 1500MB"
+
+    def file_entry(fp, langs, **metadata):
+        entry = {'filepath': fp, 'filesize': 1572864000, 'part_id': '1',
+                 'audio_languages': list(langs), 'subtitle_languages': [],
+                 'file_segment_words': [os.path.basename(fp).split('.')],
+                 'file_metadata': {'container_duration': 5400000.0, 'filesize': 1572864000,
+                                   'scanned_at': '2026-01-01T00:00:00', 'file_type': 'mkv',
+                                   'file_ends_cleanly': True, 'disk_bytes': 1572864000}}
+        entry['file_metadata'].update(metadata)
+        return entry
+
+    def base(type_, id_, library, title, fp, year):
+        return {
+            'type': type_, 'type_str': type_, 'id': str(id_), 'item_id': str(id_), 'library': library,
+            'title': title, 'originalTitle': title, 'year': year, 'summary': '', 'file': fp,
+            'file_segment_words': [os.path.basename(fp).split('.')], 'files': {},
+            'actors': [], 'directors': [], 'writers': [], 'countries': [], 'collections': [],
+            'labels': [], 'ondisk_labels': [], 'genres': [], 'subtitle_languages': [],
+            'audio_languages': [], 'audio_codec': 'aac', 'video_codec': 'h264',
+            'resolution': '1080p', 'resolution_full': '1920x1080', 'version': version,
+            'addedAt': 1700000000, 'updatedAt': 1700000000, 'lastViewedAt': None, 'viewCount': 0,
+            'audienceRating': None, 'criticsRating': None, 'userRating': None, 'contentRating': None,
+            'duration': 5400000, 'filesize': 1572864000, 'media_cnt': 1, 'media_id': str(id_),
+            'media_idx': 0, 'media_nr': '1', 'part_cnt': 1, 'part_id': str(id_), 'part_idx': 0,
+            'part_nr': '1', 'E_idx': None, 'E_str': None, 'S_idx': None, 'S_str': None,
+            'S0XE0X': None, 'episode': None, 'season': None,
+        }
+
+    def movie(id_, library, title, year, genres, langs, **metadata):
+        fp = f"/lib/{library}/{title} ({year})/{title.lower().replace(' ', '.')}.{year}.mkv"
+        o = base('Movie', id_, library, title, fp, year)
+        o.update({'genres': m._normalize_genres(genres), 'audio_languages': list(langs),
+                  'audio_languages_plex': list(langs), 'guid': f'plex://movie/{id_:024d}',
+                  'external_ids': {}, 'versions': [version],
+                  'files': {version: file_entry(fp, langs, **metadata)}})
+        return o
+
+    container_only = {'media_cnt': None, 'media_id': None, 'media_idx': None, 'media_nr': None,
+                      'part_cnt': None, 'part_id': None, 'part_idx': None, 'part_nr': None,
+                      'duration': None, 'filesize': None, 'addedAt': None, 'updatedAt': None}
+    libs = {'library1':   ('Movie',  'en-US', 'tv.plex.agents.movie'),
+            'library_de': ('Movie',  'de-DE', 'tv.plex.agents.movie'),
+            'library_fr': ('Series', 'fr-FR', 'tv.plex.agents.series')}
+    movies = [
+        movie(1, 'library1', 'Some Movie', 2001, ['Comedy'], ['en']),
+        movie(2, 'library1', 'Another Movie', 2005, ['Drama'], ['en']),
+        movie(3, 'library_de', 'Irgendein Film', 2010, ['Komödie'], ['de']),
+        # the probe failed: BROKEN, with its reason
+        movie(4, 'library1', 'Broken Movie', 1999, [], ['en'], broken=True, reason='probe_error'),
+        # Plex's duration is off, but container and video stream agree: healthy
+        movie(5, 'library1', 'Misreported Movie', 1998, [], ['en'],
+              container_duration=4500000.0, video_duration=4500500.0, file_ends_cleanly=False),
+        # the container is short and nothing vouches for it: TRUNCATED
+        movie(6, 'library1', 'Truncated Movie', 1997, [], ['en'],
+              container_duration=4500000.0, file_ends_cleanly=False),
+    ]
+    series_dir = '/lib/library_fr/Une Serie'
+    series = base('Series', 10, 'library_fr', 'Une Serie', series_dir, 2015)
+    series.update(container_only)
+    series.update({'genres': m._normalize_genres(['Comédie']), 'guid': f'plex://show/{10:024d}',
+                   'external_ids': {'tvdb': '1', 'tmdb': '1', 'imdb': 'tt1'}, 'original_language': 'fr',
+                   'studio': '', 'series': 'Une Serie', 'series_key': 'Series:10', 'members': ['Season:11'],
+                   'S_count': 1, 'E_count': 2, 'S_pad_width': 2, 'E_pad_width': 2, 'abs_ep_max': 2,
+                   'AUDIO_LANG_uniform': None})
+    season = base('Season', 11, 'library_fr', 'Season 1', f'{series_dir}/S01', 2015)
+    season.update(container_only)
+    season.update({'series': 'Une Serie', 'series_key': 'Series:10', 'season': 'Season 1',
+                   'S_str': 'S01', 'S_idx': 1, 'S_count': 1, 'E_count': 2, 'abs_ep_max': 2,
+                   'AUDIO_LANG_uniform': 'fr', 'members': ['Episode:12', 'Episode:13']})
+    episodes = []
+    for n in (1, 2):
+        fp = f'{series_dir}/S01/une.serie.s01e{n:02d}.mkv'
+        e = base('Episode', 11 + n, 'library_fr', f'Episode {n}', fp, 2015)
+        e.update({'series': 'Une Serie', 'series_key': 'Series:10', 'season': 1, 'episode': n,
+                  'S_str': 'S01', 'S_idx': 1, 'E_str': f'E{n:02d}', 'E_idx': n, 'S0XE0X': f'S01E{n:02d}',
+                  'S_count': 1, 'E_count': 2, 'abs_ep_idx': n, 'genres': m._normalize_genres(['Comédie']),
+                  'audio_languages': ['fr'], 'audio_languages_plex': ['fr'], 'multi_episode_siblings': [],
+                  'versions': [version], 'files': {version: file_entry(fp, ('fr',))}})
+        episodes.append(e)
+
+    obj_by_id = {f"{o['type']}:{o['id']}": o for o in movies + [series, season] + episodes}
+    obj_by_library = {}
+    for key, o in obj_by_id.items():
+        obj_by_library.setdefault(o['library'], {}).setdefault(o['type'], []).append(key)
+    with_files = {key: o for key, o in obj_by_id.items() if o['files']}
+    obj_by_filepath = {fi['filepath']: key for key, o in with_files.items() for fi in o['files'].values()}
+    now = datetime(2026, 1, 1)
+    stats = {k: {} for k in ('updatedAt', 'plexUpdatedAt', 'itemsCount', 'episodesCount', 'totalDuration',
+                             'totalStorage', 'agent', 'language', 'locations', 'language_distribution')}
+    counts = {}
+    for lib, (ltype, lang, agent) in libs.items():
+        per_type = obj_by_library.get(lib, {})
+        stats['updatedAt'][lib] = now; stats['plexUpdatedAt'][lib] = now
+        stats['agent'][lib] = agent; stats['language'][lib] = lang
+        stats['locations'][lib] = [f'/lib/{lib}']
+        stats['itemsCount'][lib] = len(per_type.get(ltype, []))
+        stats['episodesCount'][lib] = len(per_type.get('Episode', []))
+        stats['totalDuration'][lib] = 0; stats['totalStorage'][lib] = 0
+        stats['language_distribution'][lib] = {}
+        for key in per_type.get('Movie', []) + per_type.get('Episode', []):
+            for code in obj_by_id[key]['audio_languages']:
+                stats['language_distribution'][lib].setdefault(code, []).append(key)
+        counts[lib] = ({'movies': len(per_type.get('Movie', []))} if ltype == 'Movie' else
+                       {'series': len(per_type.get('Series', [])), 'seasons': len(per_type.get('Season', [])),
+                        'episodes': len(per_type.get('Episode', []))})
+    cache = {
+        'obj_by_id': obj_by_id, 'obj_by_library': obj_by_library, 'obj_by_filepath': obj_by_filepath,
+        'obj_by_movie': {key: {v: fi['filepath'] for v, fi in o['files'].items()}
+                         for key, o in with_files.items() if o['type'] == 'Movie'},
+        'obj_by_series': {'Series:10': {'S01': 'Season:11'}},
+        'obj_by_series_episodes': {'Series:10': {'S01': {f'E{n:02d}': {version: [f'Episode:{11 + n}']}
+                                                         for n in (1, 2)}}},
+        'obj_by_series_scraped': {}, 'obj_by_collection': {}, 'ondisk_labels_index': {},
+        'plex_labels_index': {}, 'media_objs': {}, 'library_stats': stats,
+        'library_object_counts': counts, 'plex_known_filepaths': sorted(obj_by_filepath),
+        'layout_index': {}, 'problems': {},
+        'server_info': {'friendlyName': 'fixture', 'myPlexUsername': '', 'platform': 'test', 'version': '0'},
+    }
+    with open(os.path.join(d, 'cache.pkl'), 'wb') as f:
+        pickle.dump(cache, f)
+    conf = os.path.join(d, 'my-plex.conf')
+    with open(conf, 'w') as f:
+        f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
+        f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+        f.write(f"PLEX_DB_PATH = {os.path.join(d, 'plex.db')!r}\n")
+        # blank on purpose: no host to ssh to, no API to call -- the suite reaches no network
+        f.write("PLEX_DB_REMOTE_HOST = ''\nTVDB_API_KEY = ''\nTMDB_API_KEY = ''\n")
+        f.write("PLEX_URL = ''\nPLEX_TOKEN = ''\nPLEX_XML_URL = ''\n")
+    return conf
+
+
 class TestEndToEnd(unittest.TestCase):
-    """End-to-end tests: run actual commands as subprocesses to verify they work."""
+    """End-to-end tests: run actual commands as subprocesses, against the fixture library."""
 
     @classmethod
     def setUpClass(cls):
-        """Skip data-dependent E2E tests when the cache has no media."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list'],
-                                capture_output=True, text=True, timeout=30)
-        cls._cache_empty = 'No items match' in result.stdout or not result.stdout.strip()
-
-    def _skip_if_empty(self):
-        if self._cache_empty:
-            self.skipTest("Cache is empty — run 'my-plex --update-cache' to populate it first")
+        cls._conf = _fixture_conf()
 
     def _run_cmd(self, *extra_args):
-        import subprocess
-        cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=E2E_REAL_LIBRARY_TIMEOUT)
-        return result
+        cmd = [sys.executable, MAIN_SCRIPT, '--config', self._conf] + list(extra_args)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=E2E_TIMEOUT)
 
     # --- Help commands ---
 
@@ -3208,7 +3358,6 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_list_no_library(self):
         """my-plex --list without library must list all media as KEY  FILEPATH rows."""
-        self._skip_if_empty()
         result = self._run_cmd('--list')
         self.assertEqual(result.returncode, 0, f"--list failed: {result.stderr}")
         # Output is KEY<spaces>FILEPATH rows (e.g. 'Movie:123   /path/to/file')
@@ -3269,22 +3418,11 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr, "--info must not crash with traceback")
 
     def test_info_shows_broken_status(self):
-        """my-plex ID:<broken_id> must show BROKEN status with reason."""
-        # Get first broken file from --broken output
-        result = self._run_cmd('--broken')
-        if result.returncode != 0:
-            self.skipTest("--broken failed")
-        lines = result.stdout.strip().split('\n')
-        broken_id = None
-        for line in lines:
-            if line.startswith('ID:'):
-                broken_id = line.split()[0]  # e.g. "ID:33885"
-                break
-        if not broken_id:
-            self.skipTest("No broken files found to test")
-        result2 = self._run_cmd(broken_id)
-        self.assertEqual(result2.returncode, 0, f"my-plex {broken_id} failed")
-        self.assertIn("BROKEN", result2.stdout, f"--info for broken item {broken_id} must show BROKEN status")
+        """my-plex Movie:4 (the fixture's probe failure) shows BROKEN and its reason."""
+        result = self._run_cmd('Movie:4')
+        self.assertEqual(result.returncode, 0, f"my-plex Movie:4 failed: {result.stderr}")
+        self.assertIn("BROKEN", result.stdout)
+        self.assertIn("probe_error", result.stdout)
 
     # --- Verify cache (read-only) ---
 
@@ -3332,34 +3470,21 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"--list -f pretty failed: {result.stderr}")
 
     def test_broken_no_false_positives_with_video_duration(self):
-        """my-plex --broken must not flag files where container and video stream durations agree.
+        """--broken flags the fixture's truncated and probe-failed titles and not
+        the one whose container and video stream agree while Plex's duration is off.
 
-        Regression test: Modern Family episodes were false positives because Plex reported
-        a slightly different duration than ffprobe, but the files' container and video stream
-        durations agreed within 2s — meaning the files are healthy.
-        """
+        Regression: episodes were flagged because Plex reported a duration that
+        differed from ffprobe's, although container and video stream durations
+        agreed within 2s -- the files were healthy."""
         result = self._run_cmd('--broken')
         self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
-        # If any Modern Family files with video_duration in cache still appear, the
-        # cross-validation is broken. Check specifically for the known false-positive episodes.
-        lines = result.stdout.strip().split('\n')
-        false_positive_ids = {'ID:31983', 'ID:32028', 'ID:32020', 'ID:32041', 'ID:32038',
-                              'ID:32032', 'ID:32026', 'ID:32143', 'ID:32027', 'ID:32023',
-                              'ID:31981', 'ID:32037', 'ID:31987', 'ID:31984', 'ID:31979',
-                              'ID:32031', 'ID:31978'}
-        flagged_fps = []
-        for line in lines:
-            for fp_id in false_positive_ids:
-                if line.startswith(fp_id):
-                    flagged_fps.append(fp_id)
-        self.assertEqual(flagged_fps, [],
-            f"Cross-validation failed: known false-positive IDs still flagged as broken: {flagged_fps}")
+        flagged = {line.split()[0] for line in result.stdout.splitlines() if line.startswith('ID:')}
+        self.assertEqual(flagged, {'ID:4', 'ID:6'}, result.stdout)
 
     # --- Filter: localized genre matching ---
 
     def test_genre_filter_english(self):
         """genre:Comedy must match items with English 'Comedy' genre tag."""
-        self._skip_if_empty()
         result = self._run_cmd('genre:Comedy')
         self.assertEqual(result.returncode, 0, f"genre:Comedy failed: {result.stderr}")
         self.assertRegex(result.stdout, r'(Movie|Episode|Show|Season):\d+')
@@ -3382,22 +3507,20 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_genre_filter_german_localized(self):
         """genre:Comedy must also match German 'Komödie' genre tag (localized normalization)."""
-        self._skip_if_empty()
         lib = self._pick_lib_with_language('de')
-        if not lib:
-            self.skipTest("No German-language library in cache")
-        result = self._run_cmd('genre:Comedy', lib)
+        self.assertTrue(lib, "the fixture has a German-language library")
+        # library:NAME, not the bare name: a bare name is a scope only when it
+        # is shaped like `movies.X` (TODO.local.md has the finding)
+        result = self._run_cmd('genre:Comedy', f'library:{lib}')
         self.assertEqual(result.returncode, 0, f"genre:Comedy {lib} failed: {result.stderr}")
         self.assertRegex(result.stdout, r'Movie:\d+|Series:\d+|Episode:\d+',
             f"genre:Comedy must match German 'Komödie' genre in {lib}")
 
     def test_genre_filter_french_localized(self):
         """genre:Comedy must also match French 'Comédie' genre tag (localized normalization)."""
-        self._skip_if_empty()
         lib = self._pick_lib_with_language('fr')
-        if not lib:
-            self.skipTest("No French-language library in cache")
-        result = self._run_cmd('genre:Comedy', lib)
+        self.assertTrue(lib, "the fixture has a French-language library")
+        result = self._run_cmd('genre:Comedy', f'library:{lib}')
         self.assertEqual(result.returncode, 0, f"genre:Comedy {lib} failed: {result.stderr}")
         self.assertRegex(result.stdout, r'Movie:\d+|Series:\d+|Episode:\d+',
             f"genre:Comedy must match French 'Comédie' genre in {lib}")
@@ -3410,7 +3533,6 @@ class TestEndToEnd(unittest.TestCase):
         Regression: previously all matching episodes were listed individually even when
         an entire season/show passed the filter with identical values.
         """
-        self._skip_if_empty()
         result = self._run_cmd('codec:h264', 'type:series')
         self.assertEqual(result.returncode, 0, f"codec:h264 type:series failed: {result.stderr}")
         lines = [l for l in result.stdout.splitlines() if l.strip()]
@@ -4336,7 +4458,7 @@ class TestScan(unittest.TestCase):
     def _run_cmd(self, *extra_args):
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
         result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=E2E_REAL_LIBRARY_TIMEOUT)
+                                timeout=E2E_TIMEOUT)
         return result
 
     def test_scan_in_main_parser(self):
@@ -5836,8 +5958,8 @@ class TestEpisodesErr(unittest.TestCase):
         """--problems runs without error (E2E)."""
         import subprocess, sys
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--problems'],
-            capture_output=True, text=True, timeout=E2E_REAL_LIBRARY_TIMEOUT)
+            [sys.executable, MAIN_SCRIPT, '--config', _fixture_conf(), '--problems'],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT)
         self.assertEqual(result.returncode, 0, f"--problems failed: {result.stderr}")
         self.assertIn('PROBLEM DETECTION', result.stdout)
         self.assertIn('Episode Data', result.stdout)
@@ -6544,8 +6666,8 @@ class TestMismatched(unittest.TestCase):
     def test_e2e_runs(self):
         """--mismatched must run without error."""
         result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--mismatched'],
-            capture_output=True, text=True, timeout=E2E_REAL_LIBRARY_TIMEOUT)
+            [sys.executable, MAIN_SCRIPT, '--config', _fixture_conf(), '--mismatched'],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT)
         self.assertEqual(result.returncode, 0, f"--mismatched failed: {result.stderr}")
 
     def test_re_injection(self):
