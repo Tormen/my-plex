@@ -4087,11 +4087,12 @@ def _ssh_blocks(lines):
     return out
 
 
-def _install_ssh_entry():
+def _install_ssh_entry(remote):
     """The ssh half of --install: make PLEX_DB_REMOTE_HOST resolve to
     PLEX_DB_REMOTE, through a Host block in my-plex's own ~/.ssh/my-plex.conf
     and ONE Include line at the top of the ssh config.  Returns the outcome
-    for the summary: 'written', 'migrated' or 'unchanged'.
+    for the summary: 'written', 'migrated' or 'unchanged'.  REMOTE is
+    PLEX_DB_REMOTE parsed, (user, host, port): cmd_install requires it.
 
     ssh takes the FIRST value it obtains for each option, so a second block
     would silently do nothing; a block written by hand is therefore MOVED
@@ -4104,7 +4105,7 @@ def _install_ssh_entry():
     if not alias or ' ' in alias:
         err("00022", f"PLEX_DB_REMOTE_HOST = {PLEX_DB_REMOTE_HOST!r} is no ssh alias --"
                      f" --install writes the Host entry under that name")
-    user, host, port = _parse_db_remote(PLEX_DB_REMOTE)
+    user, host, port = remote
     conf = _ssh_config_file()
     ours = os.path.join(os.path.dirname(conf), 'my-plex.conf')
     want = {'hostname': host, 'user': user, 'port': str(port)}
@@ -4242,14 +4243,14 @@ def cmd_install() -> NoReturn:
     There is no `go` here for the same reason: nothing to guard, nothing
     changed.
     """
-    if not (PLEX_DB_REMOTE or '').strip():
+    remote = _parse_db_remote(PLEX_DB_REMOTE)
+    if remote is None:
         read = [p for _l, p in CONFIG_RECORD['files']] or ['(none)']
         err("00028", "--install needs PLEX_DB_REMOTE -- the Plex server as you would reach it with"
                      " ssh, 'user@host[:port]'.  It is the one thing --install cannot invent.\n"
                      "  config files read: " + ", ".join(read) + "\n"
                      "  set it in the site config, e.g. /etc/my-plex.conf"
                      " (my-plex --create-config prints a template)")
-    _parse_db_remote(PLEX_DB_REMOTE)
     rules = _little_snitch_rules()
     cli = LITTLE_SNITCH_CLI
 
@@ -4276,7 +4277,7 @@ def cmd_install() -> NoReturn:
         print()
         print(f"    > LITTLE_SNITCH_CLI in the config points at it elsewhere")
         print()
-        outcome = _install_ssh_entry()
+        outcome = _install_ssh_entry(remote)
         print()
         print(f" >>> SUMMARY  --install: no firewall rule (no my-little-snitch); ssh Host entry {outcome}")
         sys.exit(0)
@@ -4300,7 +4301,7 @@ def cmd_install() -> NoReturn:
         print(f"   > {cli} allow go {' '.join(args)}")
         print(f"       {why}")
     print()
-    outcome = _install_ssh_entry()
+    outcome = _install_ssh_entry(remote)
     print()
     print(f" >>> SUMMARY  --install: {len(rules)} firewall command(s) printed for root; ssh Host entry {outcome}")
     print(f"    > root, because littlesnitch refuses anyone else even to list,")
