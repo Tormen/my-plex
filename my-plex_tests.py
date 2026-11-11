@@ -13561,6 +13561,38 @@ class TestReadmeFlagsExist(unittest.TestCase):
         self.assertIn("You mean '--mv-to'", r.stderr, r.stderr[-500:])
 
 
+_FAKE_SSH_DIR = None
+
+def _fake_ssh_env(login_rc=0):
+    """An environment whose `ssh` answers -G with the REAL ssh -- it reads a
+    config and connects to nothing -- and a login with LOGIN_RC, so an
+    --install test reaches no host.  Its config file is the test's own
+    (SSH_CONFIG_FILE, see _install_lines), so the real ~/.ssh is never read
+    or written."""
+    global _FAKE_SSH_DIR
+    if _FAKE_SSH_DIR is None:
+        real = shutil.which('ssh') or '/usr/bin/ssh'
+        _FAKE_SSH_DIR = tempfile.mkdtemp(prefix='my-plex-fake-ssh-')
+        import atexit
+        atexit.register(shutil.rmtree, _FAKE_SSH_DIR, True)
+        stub = os.path.join(_FAKE_SSH_DIR, 'ssh')
+        with open(stub, 'w') as f:
+            f.write("#!/bin/dash\n"
+                    "# -G only prints the effective config: the real ssh does that\n"
+                    f'case " $* " in *" -G "*) exec {real} "$@";; esac\n'
+                    'exit "${FAKE_SSH_LOGIN_RC:-0}"\n')
+        os.chmod(stub, 0o755)
+    return dict(os.environ, PYTHONDONTWRITEBYTECODE='1', FAKE_SSH_LOGIN_RC=str(login_rc),
+                PATH=_FAKE_SSH_DIR + os.pathsep + os.environ.get('PATH', ''))
+
+
+def _install_lines(d, remote='me@192.0.2.10'):
+    """The config lines an --install test needs: an endpoint, and an ssh
+    config file in the test's own directory D."""
+    return (f"PLEX_DB_REMOTE = {remote!r}\n"
+            f"SSH_CONFIG_FILE = {os.path.join(d, 'ssh', 'config')!r}\n")
+
+
 class TestInstallFirewallRules(unittest.TestCase):
     """--install writes one firewall rule per host my-plex connects to.
 
@@ -13582,12 +13614,12 @@ class TestInstallFirewallRules(unittest.TestCase):
             f.write(f"LITTLE_SNITCH_CLI = {cli_path!r}\n")
             f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
             f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+            f.write(_install_lines(d))
         return d, c
 
     def _run(self, *argv):
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
-                              text=True, timeout=120,
-                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+                              text=True, timeout=120, env=_fake_ssh_env())
 
     def test_install_does_not_wait_for_the_cache_lock(self):
         """--install reads the config and nothing else, so an --update-cache
@@ -13601,7 +13633,7 @@ class TestInstallFirewallRules(unittest.TestCase):
             try:
                 r = subprocess.run([MAIN_SCRIPT, '--config', c, '--install'],
                                    capture_output=True, text=True, timeout=60,
-                                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+                                   env=_fake_ssh_env())
             except subprocess.TimeoutExpired:
                 self.fail("--install waited for the cache lock it has no use for")
             finally:
@@ -13717,7 +13749,7 @@ class TestInstallFirewallRules(unittest.TestCase):
         with open(stub, 'w') as f:
             f.write(f'#!/bin/dash\ntouch {sentinel!r}\n')
         os.chmod(stub, 0o755)
-        with open(conf, 'w') as f:
+        with open(conf, 'a') as f:
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
         try:
             r = self._run('--config', conf, '--install')
@@ -13749,7 +13781,7 @@ class TestInstallFirewallRules(unittest.TestCase):
         with open(stub, 'w') as f:
             f.write('#!/bin/dash\nexit 0\n')
         os.chmod(stub, 0o755)
-        with open(conf, 'w') as f:
+        with open(conf, 'a') as f:
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
         try:
             r = self._run('--config', conf, '--install')
@@ -14264,6 +14296,129 @@ class TestConfigEnvVar(unittest.TestCase):
         self.assertIn('/LINKS/default/my-plex.conf', r.stdout, r.stdout[-600:])
 
 
+class TestInstallSshEntry(unittest.TestCase):
+    """--install makes PLEX_DB_REMOTE_HOST resolve to PLEX_DB_REMOTE.
+
+    The reason it exists: on macado the alias was never arranged by hand, so
+    every DB query failed with "Could not resolve hostname my-plex".  Each
+    test has an ssh config of its own (SSH_CONFIG_FILE) and an ssh whose
+    login is a stub: no real ~/.ssh is read or written, no host is reached.
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix='my-plex-sshentry-')
+        os.makedirs(os.path.join(self.d, 'ssh'))
+        self.ssh_conf = os.path.join(self.d, 'ssh', 'config')
+        self.ours = os.path.join(self.d, 'ssh', 'my-plex.conf')
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def install(self, remote='me@192.0.2.10', login_rc=0, extra=''):
+        c = os.path.join(self.d, 'my-plex.conf')
+        with open(c, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = '/nonexistent/my-little-snitch'\n")
+            f.write(f"CACHE_FILE = {os.path.join(self.d, 'cache.pkl')!r}\n")
+            f.write(f"LOCK_FILE = {os.path.join(self.d, 'cache.lock')!r}\n")
+            if remote is not None:
+                f.write(_install_lines(self.d, remote))
+            else:
+                f.write(f"SSH_CONFIG_FILE = {self.ssh_conf!r}\n")
+            f.write(extra)
+        return subprocess.run([MAIN_SCRIPT, '--config', c, '--install'], capture_output=True,
+                              text=True, timeout=120, env=_fake_ssh_env(login_rc))
+
+    def read(self, path):
+        with open(path) as f:
+            return f.read()
+
+    def effective(self):
+        out = subprocess.run([shutil.which('ssh') or '/usr/bin/ssh', '-G', '-F', self.ssh_conf, 'my-plex'],
+                             capture_output=True, text=True).stdout
+        return {k: v for k, _s, v in (ln.partition(' ') for ln in out.splitlines())
+                if k in ('hostname', 'user', 'port')}
+
+    def test_an_alias_nobody_arranged_is_written_and_resolves(self):
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        self.assertEqual(self.effective(), {'hostname': '192.0.2.10', 'user': 'me', 'port': '22'})
+        self.assertTrue(self.read(self.ssh_conf).startswith(f"Include {self.ours}\n"))
+        self.assertIn('ssh Host entry written', r.stdout)
+
+    def test_a_second_run_changes_nothing(self):
+        self.install()
+        before = (self.read(self.ssh_conf), self.read(self.ours))
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertEqual((self.read(self.ssh_conf), self.read(self.ours)), before)
+        self.assertIn('ssh Host entry unchanged', r.stdout)
+
+    def test_a_port_is_written_when_it_is_not_22(self):
+        r = self.install(remote='me@ssh.example.invalid:53146')
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertEqual(self.effective()['port'], '53146')
+
+    def test_a_hand_written_block_is_migrated_with_its_other_options(self):
+        """The option my-plex does not generate -- here a key outside ssh's
+        default places -- is what keeps that machine working: dropped, it
+        would stop logging in."""
+        with open(self.ssh_conf, 'w') as f:
+            f.write("Host other\n    HostName 192.0.2.99\n\n"
+                    "Host my-plex\n    Hostname 192.0.2.10\n    #Port 53146\n"
+                    "    User me\n    IdentityFile /keys/ada,id_rsa\n\n"
+                    "Host www\n    Port 2222\n")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        conf = self.read(self.ssh_conf)
+        self.assertNotIn('Host my-plex', conf, "the hand-written block is still there")
+        self.assertIn('Host other', conf)
+        self.assertIn('Host www', conf)
+        ours = self.read(self.ours)
+        self.assertIn('IdentityFile /keys/ada,id_rsa', ours)
+        self.assertIn('# migrated from', ours)
+        self.assertIn('ssh Host entry migrated', r.stdout)
+        self.assertEqual(self.effective()['hostname'], '192.0.2.10')
+
+    def test_a_block_that_disagrees_is_left_alone(self):
+        text = "Host my-plex\n    HostName 192.0.2.77\n    User me\n"
+        with open(self.ssh_conf, 'w') as f:
+            f.write(text)
+        r = self.install()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('two answers', r.stderr)
+        self.assertEqual(self.read(self.ssh_conf), text, "a disagreeing block was changed")
+        self.assertFalse(os.path.exists(self.ours))
+
+    def test_a_block_naming_other_aliases_too_is_left_alone(self):
+        text = "Host my-plex ada\n    HostName 192.0.2.10\n    User me\n"
+        with open(self.ssh_conf, 'w') as f:
+            f.write(text)
+        r = self.install()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('other aliases', r.stderr)
+        self.assertEqual(self.read(self.ssh_conf), text)
+
+    def test_without_PLEX_DB_REMOTE_it_writes_nothing(self):
+        r = self.install(remote=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--install needs PLEX_DB_REMOTE', r.stderr)
+        self.assertFalse(os.path.exists(self.ssh_conf))
+
+    def test_a_failed_login_is_an_error(self):
+        """Resolving proves nothing about logging in: only a login does."""
+        r = self.install(login_rc=255)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('the login through', r.stderr)
+        self.assertIn('[rc 255]', r.stdout + r.stderr)
+
+    def test_the_ssh_rule_takes_its_host_from_PLEX_DB_REMOTE(self):
+        """As root, `ssh -G` reads root's ssh config, and on a fresh machine
+        the alias does not exist yet: the rule must not depend on it."""
+        r = self.install(remote='me@192.0.2.42')
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn('192.0.2.42', r.stdout)
+
+
 class TestInstallPlexRule(unittest.TestCase):
     """--install must write a rule for the PLEX SERVER too.
 
@@ -14294,6 +14449,7 @@ class TestInstallPlexRule(unittest.TestCase):
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
             f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
             f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+            f.write(_install_lines(d))
             for k, v in keys.items():
                 f.write(f"{k} = {v!r}\n")
         return d, c
@@ -14303,7 +14459,7 @@ class TestInstallPlexRule(unittest.TestCase):
         try:
             r = subprocess.run([MAIN_SCRIPT, '--config', c, '--install'],
                                capture_output=True, text=True, timeout=180,
-                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+                               env=_fake_ssh_env())
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
             return [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
         finally:
@@ -14385,23 +14541,15 @@ class TestInstallPlexRule(unittest.TestCase):
                              f"{host}: expected both forms, got:\n"
                              + "\n".join(for_host))
 
-    def test_nothing_is_invented_for_an_unconfigured_ssh_host(self):
+    def test_the_ssh_rule_names_only_the_configured_host(self):
         """ADVERSARIAL to the ssh test: a rule hard-coded for the user's own
-        server would pass that one. With no host there must be no ssh rule at
-        all -- my-plex is published.
-
-        The host is blanked EXPLICITLY, and that is the finding this test
-        made: CONFIG_DEFAULTS['PLEX_DB_REMOTE_HOST'] is 'my-plex', one
-        particular machine's ssh alias, in a tool published for anyone. So
-        "not configured" is not a state my-plex has by default, and on a
-        stranger's machine that alias resolves to whatever their ssh config
-        says -- or to the literal name. TODO.local.md carries it; the default
-        cannot simply be emptied, because the user's own config relies on
-        it."""
-        lines = self._install(PLEX_DB_REMOTE_HOST='')
-        self.assertFalse([ln for ln in lines if '--via ssh' in ln],
-                         f"an ssh rule appeared with no host configured:\n"
-                         + "\n".join(lines))
+        server would pass that one.  The ssh rule's host comes from
+        PLEX_DB_REMOTE alone (--install requires it), so the ssh rule must
+        name exactly that host and no other -- my-plex is published."""
+        lines = self._install(PLEX_DB_REMOTE='me@192.0.2.42')
+        ssh = [ln for ln in lines if '--via ssh' in ln or ' ssh ' in ln.split(' allow go ', 1)[-1][:6]]
+        self.assertTrue(ssh, "no ssh rule at all:\n" + "\n".join(lines))
+        self.assertTrue(all('192.0.2.42' in ln for ln in ssh), "\n".join(ssh))
 
     def test_no_plex_configured_still_installs_the_rest(self):
         """my-plex is published: on a machine with no Plex configured yet,
@@ -14633,7 +14781,7 @@ _UNITTEST_SCOPES = {
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection],
-    'install':    [TestInstallFirewallRules, TestInstallPlexRule],
+    'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry],
     'conf-template': [TestConfigTemplateCoversEveryKey],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
     'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,

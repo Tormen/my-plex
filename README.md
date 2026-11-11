@@ -153,10 +153,10 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   and a scheduled run has nobody to answer it, so it stops talking with no
   error of its own. `my-plex --help install` lists the whole set, which is
   also the list the rules are generated from.
-- The **ssh** endpoint's rule names `ssh` as the program, not Python, and is
-  resolved from your ssh alias with `ssh -G` (which reads `~/.ssh/config` and
-  connects to nothing), because an alias is not something a firewall can
-  resolve.
+- The **ssh** endpoint's rule names `ssh` as the program, not Python, and
+  takes its host and port from `PLEX_DB_REMOTE` -- not from the ssh alias,
+  which a firewall cannot resolve and which does not exist yet on a fresh
+  machine.
 - The **Plex server's** rule comes from your config (`PLEX_URL`, or the host
   in `PLEX_XML_URL`) and carries its port, because 32400 is not the default
   a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
@@ -164,11 +164,24 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   would stop matching — back into an alert — the next time that IP changes.
   A bare IP becomes an address rule, any other name a host rule. With no Plex
   server configured, no rule is invented for one.
-- **`--install`** prints the root commands that write them, and writes
-  nothing itself: `littlesnitch` refuses anyone but root, even to list, and
-  my-plex does not run as root. Same shape as `--create-config`, which prints
-  a config for you to place. Run them in a root shell, or let a rollout step
-  do it.
+- **`--install`** prints the root commands that write them: `littlesnitch`
+  refuses anyone but root, even to list, and my-plex does not run as root.
+  Run them in a root shell, or let a rollout step do it.
+
+### The ssh Host entry (`--install`)
+- Every DB query, file move and ffprobe runs `ssh <PLEX_DB_REMOTE_HOST>`.
+  `--install` writes that alias from `PLEX_DB_REMOTE` -- the Plex server as
+  you would reach it with ssh, `user@host[:port]`, set in the site config --
+  as a Host block in `~/.ssh/my-plex.conf`, plus one `Include` line at the
+  top of `~/.ssh/config`. No key path: ssh finds your own key.
+- A Host block you wrote by hand for that alias is **moved** into
+  `~/.ssh/my-plex.conf`, keeping every option my-plex does not generate
+  (`IdentityFile`, `ProxyJump`), with the old lines kept there as a dated
+  comment. One that names a different host is left alone with an error
+  naming both; so is one that names other aliases too.
+- It ends with one real login, `ssh <alias> true` in BatchMode, and prints
+  its exit code. Run `--install` once per machine and user; a second run
+  changes nothing.
 - The rules name the Python that runs my-plex, because the fetches use
   `urllib.request` and the interpreter is what opens the socket; one
   consequence is that they also cover other scripts run by that same Python,
@@ -320,24 +333,34 @@ my-plex --disk2plex --dry-run
 
 ## Configuration
 
-Configuration file (Python syntax, loaded via `exec()`). Searched in order,
-first hit wins:
+Configuration files are Python, run with `exec()`. my-plex reads up to
+two, the later winning for a key both set:
 
-1. `$MY_PLEX_CONFIG` — a config for ONE run: a test, a CI job, a one-off
-2. `--config FILE` / `-C FILE` — replaces the default locations below
-3. `/LINKS/default/my-plex.conf` (or `/LINKS/default/my-plex`) — primary system-wide location
-4. `~/.my-plex/my-plex.conf`
-5. `~/.my-plex.conf` — legacy, still honoured
-6. `/etc/my-plex.conf`
-7. `/usr/local/etc/my-plex.conf`
+1. **The site config**, the same for every user of a machine: every one of
+   `$LINKS/default/my-plex.conf` and `$LINKS/default/my-plex` that exists
+   (`/LINKS` when `LINKS` is unset; a `.GLOBAL` twin linked into a `global/`
+   tree is read first), else the first of `/etc/my-plex.conf` and
+   `/usr/local/etc/my-plex.conf`.
+2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf`. Two
+   different files there are an error -- merge them into one.
 
-A path named by `$MY_PLEX_CONFIG` or `--config` that is not there is an
-**error**: my-plex does not fall back to the default locations, so a run
-pointed at its own config can never silently read another one. `my-plex
---help config` prints this order from the same code that searches it.
+Each file runs with every value set before it defined, so yours can extend
+a site value (`X = X + [...]`); a plain assignment replaces it whole. The
+Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
+`TMDB_API_KEY`) belong in your config only, `PLEX_DB_REMOTE` and
+`LITTLE_SNITCH_CLI` in the site config only: my-plex refuses them in the
+other. A config file that cannot be read or fails to run stops the run;
+`--help` and a bare `my-plex` only warn.
+
+`$MY_PLEX_CONFIG` (a config for ONE run: a test, a CI job, a one-off), else
+`--config FILE` / `-C FILE`, names a file that is read **alone**. Such a path
+that is not there is an **error**, never a fallback. `my-plex --help config`
+prints the read order from the same code that reads.
 
 ```python
-# Required: SSH host for Plex server
+# Required in the site config: the Plex server as you would ssh to it
+PLEX_DB_REMOTE = 'user@192.0.2.10'
+# The ssh alias --install writes from it (the default)
 PLEX_DB_REMOTE_HOST = 'my-plex'
 
 # Required: Path to Plex database on the server
