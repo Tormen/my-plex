@@ -17,6 +17,7 @@ import re
 import inspect
 import pickle
 import io
+import contextlib
 import json
 import shutil
 import signal
@@ -13934,6 +13935,207 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
                          f"the template assigns keys the tool does not have: {stray}")
 
 
+class TestConfigLayers(unittest.TestCase):
+    """The site config, then the user's, the later winning per key.
+
+    Each test builds a fake /LINKS/default (via $LINKS) and a fake home (via
+    $HOME) in a temp directory, so no real config of this machine takes part.
+    The loader is called in-process; a run that only prints would turn every
+    refusal into a warning, so the module is told it is not one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mp = _import_tool('mp_layers')
+        cls.mp._PRINT_ONLY_RUN = False
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix='my-plex-layers-')
+        self.links = os.path.join(self.d, 'LINKS')
+        self.home = os.path.join(self.d, 'home')
+        for sub in ('LINKS/default', 'LINKS/global/etc/default', 'LINKS/local/etc/default',
+                    'home/.my-plex', 'etc'):
+            os.makedirs(os.path.join(self.d, sub))
+        self.env = {k: os.environ.get(k) for k in ('LINKS', 'HOME', 'MY_PLEX_CONFIG')}
+        os.environ['LINKS'], os.environ['HOME'] = self.links, self.home
+        os.environ.pop('MY_PLEX_CONFIG', None)
+        self.saved_sys = self.mp.SYSTEM_CONFIG_PATHS
+        self.mp.SYSTEM_CONFIG_PATHS = (os.path.join(self.d, 'etc', 'my-plex.conf'),)
+
+    def tearDown(self):
+        self.mp.SYSTEM_CONFIG_PATHS = self.saved_sys
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def write(self, rel, text):
+        path = os.path.join(self.d, rel)
+        with open(path, 'w') as f:
+            f.write(text)
+        return path
+
+    def site(self, text):
+        return self.write('LINKS/default/my-plex.conf', text)
+
+    def user(self, text):
+        return self.write('home/.my-plex.conf', text)
+
+    def load(self, config_file=None):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            conf = self.mp.load_config_file(config_file)
+        return conf, err.getvalue()
+
+    def refused(self, config_file=None):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            self.mp.load_config_file(config_file)
+        return err.getvalue()
+
+    def test_a_key_only_in_the_user_file_survives_the_site_file(self):
+        """First-wins keeps only the site file's keys -- the bug layering fixes."""
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        self.user("DEFAULT_SCOPE = 'user-scope'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf.get('PLEX_DB_REMOTE_HOST'), 'site-host')
+        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'user-scope')
+
+    def test_a_key_in_both_takes_the_users_value(self):
+        site = self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        user = self.user("PLEX_DB_REMOTE_HOST = 'user-host'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'user-host')
+        self.assertEqual(self.mp.CONFIG_RECORD['origin']['PLEX_DB_REMOTE_HOST'], user)
+        self.assertEqual([l for l, _p in self.mp.CONFIG_RECORD['files']], ['site', 'user'])
+        self.assertNotEqual(site, user)
+
+    def test_an_empty_user_value_still_overrides_the_site(self):
+        """A merge that treats a falsy value as 'not set' answers wrongly here."""
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        self.user("PLEX_DB_REMOTE_HOST = ''\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], '')
+
+    def test_a_user_file_can_extend_a_site_value(self):
+        """One namespace: the user's file runs with the site's values defined."""
+        self.site("ALTERNATIVE_ROOTPATHS = ['/site']\n")
+        self.user("ALTERNATIVE_ROOTPATHS = ALTERNATIVE_ROOTPATHS + ['/user']\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['ALTERNATIVE_ROOTPATHS'], ['/site', '/user'])
+
+    def test_a_named_file_is_read_alone(self):
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        self.user("DEFAULT_SCOPE = 'user-scope'\n")
+        named = self.write('named.conf', "EDITOR = 'named-editor'\n")
+        for how in ('flag', 'env'):
+            with self.subTest(how=how):
+                if how == 'env':
+                    os.environ['MY_PLEX_CONFIG'] = named
+                conf, _ = self.load(named if how == 'flag' else None)
+                os.environ.pop('MY_PLEX_CONFIG', None)
+                self.assertEqual(conf, {'EDITOR': 'named-editor'})
+
+    def test_a_named_file_that_is_absent_is_refused(self):
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        out = self.refused(os.path.join(self.d, 'absent.conf'))
+        self.assertIn('ERROR 00016', out)
+        self.assertIn('absent.conf', out)
+
+    def test_two_different_user_files_are_an_error(self):
+        self.user("DEFAULT_SCOPE = 'legacy'\n")
+        self.write('home/.my-plex/my-plex.conf', "DEFAULT_SCOPE = 'preferred'\n")
+        out = self.refused()
+        self.assertIn('two different user configs', out)
+
+    def test_two_names_for_one_user_file_are_fine(self):
+        real = self.write('real.conf', "DEFAULT_SCOPE = 'one'\n")
+        os.symlink(real, os.path.join(self.home, '.my-plex.conf'))
+        os.symlink(real, os.path.join(self.home, '.my-plex', 'my-plex.conf'))
+        conf, err = self.load()
+        self.assertEqual(conf['DEFAULT_SCOPE'], 'one')
+        self.assertEqual(err, '')
+
+    def test_a_secret_in_the_site_config_is_refused(self):
+        self.site("TMDB_API_KEY = 'fixture-secret'\n")
+        out = self.refused()
+        self.assertIn('TMDB_API_KEY', out)
+        self.assertNotIn('fixture-secret', out, "the refusal must not print the secret")
+
+    def test_a_site_only_key_in_the_user_file_is_refused(self):
+        self.user("LITTLE_SNITCH_CLI = '/elsewhere'\n")
+        out = self.refused()
+        self.assertIn('LITTLE_SNITCH_CLI', out)
+
+    def test_a_config_that_fails_to_run_stops_the_run(self):
+        """Today's loader warned and went on WITHOUT the file -- with layers,
+        the site's server but not your token."""
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        user = self.user("DEFAULT_SCOPE = 'x'\nBROKEN = undefined_name\n")
+        out = self.refused()
+        self.assertIn(user, out)
+        self.assertIn('line 2', out)
+        self.assertIn('NameError', out)
+
+    def test_a_print_only_run_warns_instead(self):
+        self.user("BROKEN = undefined_name\n")
+        self.mp._PRINT_ONLY_RUN = True
+        try:
+            conf, err = self.load()
+        finally:
+            self.mp._PRINT_ONLY_RUN = False
+        self.assertIn('Warning', err)
+        self.assertNotIn('BROKEN', conf)
+
+    def test_a_dangling_site_link_is_skipped_with_a_warning(self):
+        os.symlink(os.path.join(self.d, 'gone.conf'), os.path.join(self.links, 'default', 'my-plex.conf'))
+        self.user("DEFAULT_SCOPE = 'user-scope'\n")
+        conf, err = self.load()
+        self.assertIn('broken', err)
+        self.assertEqual(conf['DEFAULT_SCOPE'], 'user-scope')
+
+    def test_the_global_file_is_read_before_the_local_one(self):
+        """Told by where the link points, not by the name: the farm may give
+        the global file the plain name and the local one .GLOBAL never."""
+        g = self.write('LINKS/global/etc/default/my-plex.conf',
+                       "PLEX_DB_REMOTE_HOST = 'global'\nEDITOR = 'global-only'\n")
+        l = self.write('LINKS/local/etc/default/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'local'\n")
+        os.symlink(g, os.path.join(self.links, 'default', 'my-plex.conf.GLOBAL'))
+        os.symlink(l, os.path.join(self.links, 'default', 'my-plex.conf'))
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'local')
+        self.assertEqual(conf['EDITOR'], 'global-only')
+        for f in os.listdir(os.path.join(self.links, 'default')):
+            os.unlink(os.path.join(self.links, 'default', f))
+        os.symlink(l, os.path.join(self.links, 'default', 'my-plex.conf.GLOBAL'))
+        os.symlink(g, os.path.join(self.links, 'default', 'my-plex.conf'))
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'local', "the name decided, not the link")
+
+    def test_the_system_config_is_a_fallback_only(self):
+        self.write('etc/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'etc'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'etc')
+        self.site("PLEX_DB_REMOTE_HOST = 'farm'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'farm')
+        self.assertEqual([l for l, _p in self.mp.CONFIG_RECORD['files']], ['site'])
+
+    def test_the_user_paths_follow_HOME_at_read_time(self):
+        """Expanded once at import, they answered /var/root for every later
+        user -- the root phase's drop needs them computed when read."""
+        self.user("DEFAULT_SCOPE = 'first-home'\n")
+        other = os.path.join(self.d, 'other-home')
+        os.makedirs(other)
+        with open(os.path.join(other, '.my-plex.conf'), 'w') as f:
+            f.write("DEFAULT_SCOPE = 'second-home'\n")
+        os.environ['HOME'] = other
+        conf, _ = self.load()
+        self.assertEqual(conf['DEFAULT_SCOPE'], 'second-home')
+
+
 class TestConfigEnvVar(unittest.TestCase):
     """$MY_PLEX_CONFIG: a config for ONE run, first in the search order.
 
@@ -14434,7 +14636,7 @@ _UNITTEST_SCOPES = {
     'install':    [TestInstallFirewallRules, TestInstallPlexRule],
     'conf-template': [TestConfigTemplateCoversEveryKey],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
-    'config':     [TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
+    'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
                    TestAudioLangPureVsCompleted,
