@@ -1082,7 +1082,8 @@ def read_site() -> Site:
 #      /etc/my-plex.conf and /usr/local/etc/my-plex.conf;
 #   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf, from the run's
 #      HOME when read -- never once at import, which as root is /var/root.
-# A file named for one run ($MY_PLEX_CONFIG, else --config) is read ALONE.
+# A file named for one run ($MY_PLEX_CONFIG, else --config) is read ALONE,
+# by that run and every my-plex it starts.  A test run reads neither layer.
 SITE_CONFIG_NAMES = ('my-plex.conf', 'my-plex')
 SYSTEM_CONFIG_PATHS = ('/etc/my-plex.conf', '/usr/local/etc/my-plex.conf')
 USER_CONFIG_NAMES = ('.my-plex/my-plex.conf', '.my-plex.conf')
@@ -1191,7 +1192,7 @@ def _global_first(paths):
 
 def config_layers(config_file=None):
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
-    alone, or the site files then the user's.
+    alone, or the site files then the user's -- none in a test run.
 
     Refuses here, where the search is decided, what no later step can
     repair: a NAMED file that is not there (no fallback -- a run pointed at
@@ -1215,7 +1216,16 @@ def config_layers(config_file=None):
             return []
         return [('named', first)]
 
-    in_farm = [p + sfx for p in _site_farm_paths() for sfx in ('.GLOBAL', '')]
+    # A test reads no config installed for real: the suite would otherwise
+    # run with this machine's scope, roots and routes, and pass here only.
+    if _TEST_RUN:
+        found = [p for _l, p in search if os.path.lexists(p)]
+        if found:
+            print(f" >>> not read for this test run (a test reads no config installed "
+                  f"for real): {', '.join(found)}", file=sys.stderr)
+        return []
+
+    in_farm =[p + sfx for p in _site_farm_paths() for sfx in ('.GLOBAL', '')]
     site = _global_first([q for q in in_farm if os.path.lexists(q)])
     if not site:
         site = next(([q] for q in SYSTEM_CONFIG_PATHS if os.path.lexists(q)), [])
@@ -33312,7 +33322,10 @@ def main_print_help(args, remaining_args, main_parser):
                     print(f"       {_p}")
             print( "     two different files there are an ERROR: merge them into one.")
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
-            print( "  ALONE -- a config for ONE run: a test, CI, a one-off.")
+            print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
+            print( "  every my-plex that run starts (a pipeline's phases): --config is")
+            print(f"  passed on to them as ${CONFIG_ENV}.")
+            print( "  A test run (--run-tests) reads neither the site config nor yours.")
             print()
             print(f"  A path named by ${CONFIG_ENV} or --config that is not there is")
             print( "  an ERROR: my-plex does not fall back to the defaults, so a run")
@@ -44705,6 +44718,13 @@ def main():
 
     # Load configuration file
     loaded_config = load_config_file(config_args.config_file)
+
+    # A file named with --config is the file for every my-plex this run
+    # starts too -- a pipeline's phases, the cache refresh -- through the
+    # variable they inherit, so no child reads the site config and yours.
+    _source, _path = config_search_paths(config_args.config_file)[0]
+    if _source == '--config':
+        os.environ[CONFIG_ENV] = os.path.abspath(_path)
 
     # Bare --config: the files read, then each key they set and where from.
     if _print_current_config and not _asking_help:

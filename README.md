@@ -365,9 +365,12 @@ my-plex refuses them in the other. A config file that cannot be read or fails to
 `--help` and a bare `my-plex` only warn.
 
 `$MY_PLEX_CONFIG` (a config for ONE run: a test, a CI job, a one-off), else
-`--config FILE` / `-C FILE`, names a file that is read **alone**. Such a path
-that is not there is an **error**, never a fallback. `my-plex --help config`
-prints the read order from the same code that reads.
+`--config FILE` / `-C FILE`, names a file that is read **alone** -- by that
+run and by every my-plex it starts (a pipeline's phases), which get
+`--config` as `$MY_PLEX_CONFIG`. Such a path that is not there is an
+**error**, never a fallback. A test run (`--run-tests`) reads neither the
+site config nor yours. `my-plex --help config` prints the read order from
+the same code that reads.
 
 `my-plex --config` prints the files read, in order, then one line per key
 they set, with the layer that set it -- `-DD` names each key's file too:

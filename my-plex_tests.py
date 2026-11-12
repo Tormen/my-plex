@@ -14317,6 +14317,32 @@ class TestConfigLayers(unittest.TestCase):
                 os.environ.pop('MY_PLEX_CONFIG', None)
                 self.assertEqual(conf, {'EDITOR': 'named-editor'})
 
+    def test_a_test_run_reads_neither_the_site_nor_the_user_config(self):
+        """ADVERSARIAL: a test run (--run-tests) read the site config and
+        yours like any other run, so the suite ran with this machine's
+        DEFAULT_SCOPE, roots and routes -- a test could pass here and fail
+        on a machine configured otherwise.  Poison in both layers; the
+        control, an ordinary run, must see it, or the test proves nothing.
+        A file a test names is still read, alone."""
+        site = self.site("PLEX_DB_REMOTE_HOST = 'poison-site'\n")
+        self.user("DEFAULT_SCOPE = 'poison-user'\n")
+        named = self.write('named.conf', "EDITOR = 'named-editor'\n")
+        conf, out = self.load()
+        self.assertEqual((conf.get('PLEX_DB_REMOTE_HOST'), conf.get('DEFAULT_SCOPE')),
+                         ('poison-site', 'poison-user'), "control: an ordinary run reads both")
+        self.assertNotIn('not read for this test run', out, "control: said for an ordinary run")
+        self.mp._TEST_RUN = True
+        try:
+            conf, out = self.load()
+            self.assertEqual(conf, {}, "a test run read an installed config")
+            self.assertEqual(self.mp.CONFIG_RECORD['files'], [])
+            self.assertIn('not read for this test run', out, "the skip is not said")
+            self.assertIn(site, out, "the skipped file is not named")
+            conf, _ = self.load(named)
+            self.assertEqual(conf, {'EDITOR': 'named-editor'}, "a named file is not read")
+        finally:
+            self.mp._TEST_RUN = False
+
     def test_a_named_file_that_is_absent_is_refused(self):
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
         out = self.refused(os.path.join(self.d, 'absent.conf'))
@@ -14705,6 +14731,30 @@ class TestConfigEnvVar(unittest.TestCase):
             r = self._run('--config', MY_PLEX_CONFIG=conf)
             self.assertEqual(r.returncode, 0,
                              f"a config that IS there was refused: {r.stderr[-400:]}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_named_config_reaches_the_runs_it_starts(self):
+        """ADVERSARIAL: -C FILE was read by the run it was given to and by
+        none of the my-plex runs that run starts -- a pipeline's phases read
+        the site config and yours instead.  The phase here is a bare
+        --config, which prints what IT read: the named file's marker, with
+        '(named)' as its origin, and nothing from another file."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgchild-')
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            f.write("PIPELINES = {'--probe': [['--config']]}\n"
+                    "PLEX_DB_REMOTE_HOST = 'fixture-host-PHASE'\n")
+        try:
+            r = self._run('-C', conf, '--probe')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn('phase 1/1', r.stdout, f"the pipeline did not run:\n{r.stdout[-400:]}")
+            host = next((l for l in r.stdout.splitlines() if l.startswith('PLEX_DB_REMOTE_HOST ')), '')
+            self.assertIn("'fixture-host-PHASE'", host,
+                          f"the phase did not read the named file:\n{r.stdout[-600:]}")
+            self.assertTrue(host.endswith('(named)'), host)
+            self.assertNotIn('(site)', r.stdout, "the phase read the site config")
+            self.assertNotIn('(yours)', r.stdout, "the phase read your config")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
