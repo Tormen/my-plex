@@ -240,7 +240,7 @@ ln -s "$(pwd)/my-plex/my-plex.py" /usr/local/bin/my-plex   # or anywhere in your
 my-plex --create-config ~/.my-plex.conf      # Write default config to file
 # Or: my-plex --create-config > ~/.my-plex.conf   # Same via stdout
 # Edit ~/.my-plex.conf with your Plex DB path and SSH host
-# Inspect the active config any time:  my-plex --config
+# See the files read and each key they set:  my-plex --config
 ```
 
 my-plex refuses to run as root for every command that *does* anything. As
@@ -368,6 +368,21 @@ my-plex refuses them in the other. A config file that cannot be read or fails to
 `--config FILE` / `-C FILE`, names a file that is read **alone**. Such a path
 that is not there is an **error**, never a fallback. `my-plex --help config`
 prints the read order from the same code that reads.
+
+`my-plex --config` prints the files read, in order, then one line per key
+they set, with the layer that set it -- `-DD` names each key's file too:
+
+```
+# config files read, in order -- for a key both set, the later wins:
+#   site   /LINKS/default/my-plex.conf -> /LINKS/global/etc/default/my-plex.conf
+#   yours  /Users/you/.my-plex.conf
+PLEX_DB_REMOTE             = 'user@192.0.2.10'            (site)
+PLEX_XML_URL               = 'http://192.0.2.10:32400/library/sections?X-Plex-Token=<redacted>'   (yours)
+TMDB_API_KEY               = <redacted, 32 chars>         (yours)
+```
+
+It never prints a secret: a secret-named key shows only its length, and the
+token in a URL is cut out.
 
 ```python
 # Required in the site config: the Plex server as you would ssh to it

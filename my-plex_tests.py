@@ -14466,6 +14466,75 @@ class TestConfigLayers(unittest.TestCase):
         self.assertLess(text.index(site_offer), text.index(self.mp.SYSTEM_CONFIG_PATHS[0]),
                         "the site's place comes first")
 
+    SECRET_URL = 'http://h:32400/library/sections?X-Plex-Token=SECRETSECRET'
+
+    def secrets_pair(self):
+        """A site file and a user file, the user's holding both kinds of
+        secret and overriding one site key."""
+        site = self.site("PLEX_DB_REMOTE_HOST = 'site-host'\nDEFAULT_SCOPE = 'site-scope'\n")
+        user = self.user(f"PLEX_XML_URL = {self.SECRET_URL!r}\nTMDB_API_KEY = 'APIKEYAPIKEY'\n"
+                         "DEFAULT_SCOPE = 'user-scope'\n")
+        conf, _ = self.load()
+        return site, user, conf
+
+    def test_bare_config_names_both_files_who_set_each_key_and_no_secret(self):
+        """ADVERSARIAL: bare --config printed the ONE file it found, raw -- the
+        token in PLEX_XML_URL and the API key with it -- and nothing of the
+        other layer, so a key the site set looked unset."""
+        site, user, conf = self.secrets_pair()
+        out = self.mp.config_report(conf)
+        self.assertNotIn('SECRETSECRET', out)
+        self.assertNotIn('APIKEYAPIKEY', out)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], '# config files read, in order -- for a key both set, the later wins:')
+        self.assertIn(f'#   site   {site}', out)
+        self.assertIn(f'#   yours  {user}', out)
+
+        def line(key):
+            return next(l for l in lines if l.startswith(key + ' '))
+        self.assertIn("'site-host'", line('PLEX_DB_REMOTE_HOST'))
+        self.assertTrue(line('PLEX_DB_REMOTE_HOST').endswith('(site)'), line('PLEX_DB_REMOTE_HOST'))
+        self.assertIn("'user-scope'", line('DEFAULT_SCOPE'))
+        self.assertTrue(line('DEFAULT_SCOPE').endswith('(yours)'), line('DEFAULT_SCOPE'))
+        self.assertIn('X-Plex-Token=<redacted>', line('PLEX_XML_URL'))
+        self.assertTrue(line('PLEX_XML_URL').endswith('(yours)'))
+        self.assertIn('<redacted, 12 chars>', line('TMDB_API_KEY'))
+        self.assertEqual(sum(1 for l in lines if not l.startswith('#')), 4,
+                         "one line per key the files set, and only those")
+        self.assertLess(out.index('PLEX_DB_REMOTE_HOST'), out.index('TMDB_API_KEY'),
+                        "the keys come in read order: the site's first")
+
+    def test_bare_config_says_which_layer_had_no_file(self):
+        user = self.user("DEFAULT_SCOPE = 'only-mine'\n")
+        conf, _ = self.load()
+        out = self.mp.config_report(conf)
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        self.assertIn(f'#   site   (none of: {farm}, ', out)
+        self.assertIn(f'#   yours  {user}', out)
+
+    def test_bare_config_of_a_named_file_says_it_was_read_alone(self):
+        self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
+        named = self.write('named.conf', "EDITOR = 'named-editor'\n")
+        conf, _ = self.load(named)
+        out = self.mp.config_report(conf, named)
+        self.assertIn('named by --config, so neither the site config nor yours', out)
+        self.assertIn(f'#   named  {named}', out)
+        self.assertNotIn('site-host', out)
+        self.assertNotIn('#   site', out)
+
+    def test_deepdebug_config_applied_names_the_origin_and_no_secret(self):
+        """ADVERSARIAL: -DD's 'Config applied' line masked only keys named
+        *TOKEN*, so PLEX_XML_URL went out with its X-Plex-Token in full."""
+        site, user, conf = self.secrets_pair()
+        lines = {k: self.mp.config_applied_line(k, v) for k, v in conf.items()}
+        for text in lines.values():
+            self.assertNotIn('SECRETSECRET', text)
+            self.assertNotIn('APIKEYAPIKEY', text)
+        self.assertTrue(lines['PLEX_DB_REMOTE_HOST'].endswith(f'(site: {site})'), lines['PLEX_DB_REMOTE_HOST'])
+        self.assertTrue(lines['PLEX_XML_URL'].endswith(f'(yours: {user})'), lines['PLEX_XML_URL'])
+        self.assertIn('X-Plex-Token=<redacted>', lines['PLEX_XML_URL'])
+        self.assertIn('TMDB_API_KEY = <redacted, 12 chars>', lines['TMDB_API_KEY'])
+
 
 class TestConfigEnvVar(unittest.TestCase):
     """$MY_PLEX_CONFIG: a config for ONE run, first in the search order.
@@ -14544,6 +14613,47 @@ class TestConfigEnvVar(unittest.TestCase):
             r = self._run('--config', MY_PLEX_CONFIG=conf)
             self.assertEqual(r.returncode, 0,
                              f"a config that IS there was refused: {r.stderr[-400:]}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _secret_conf(self, extra=''):
+        """A config holding a Plex token in a URL and an API key."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgsecret-')
+        c = os.path.join(d, 'my-plex.conf')
+        with open(c, 'w') as f:
+            f.write("PLEX_XML_URL = 'http://h:32400/library/sections?X-Plex-Token=SECRETSECRET'\n"
+                    "TMDB_API_KEY = 'APIKEYAPIKEY'\n" + extra)
+        return d, c
+
+    def test_bare_config_prints_no_secret(self):
+        """ADVERSARIAL: bare --config printed the config file raw -- the
+        token and the API key included."""
+        d, conf = self._secret_conf()
+        try:
+            r = self._run('--config', MY_PLEX_CONFIG=conf)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            for secret in ('SECRETSECRET', 'APIKEYAPIKEY'):
+                self.assertNotIn(secret, r.stdout + r.stderr)
+            self.assertIn('named by $MY_PLEX_CONFIG', r.stdout)
+            self.assertIn(f'#   named  {conf}', r.stdout)
+            tmdb = next(l for l in r.stdout.splitlines() if l.startswith('TMDB_API_KEY '))
+            self.assertTrue(tmdb.endswith('(named)'), tmdb)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_deepdebug_prints_no_secret(self):
+        """ADVERSARIAL: -DD printed PLEX_XML_URL in full, its X-Plex-Token
+        with it.  A legacy key stops the run right after the config is
+        applied, so nothing else is touched."""
+        d, conf = self._secret_conf("DISK_MAP = {}\n")
+        try:
+            r = self._run('-DD', '--complete', 'genres', MY_PLEX_CONFIG=conf)
+            self.assertIn('Legacy config key', r.stderr, r.stderr[-500:])
+            for secret in ('SECRETSECRET', 'APIKEYAPIKEY'):
+                self.assertNotIn(secret, r.stdout + r.stderr)
+            self.assertIn(f"Config applied: TMDB_API_KEY = <redacted, 12 chars>   (named: {conf})", r.stderr)
+            self.assertIn("Config applied: PLEX_XML_URL = 'http://h:32400/library/sections?"
+                          f"X-Plex-Token=<redacted>'   (named: {conf})", r.stderr)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

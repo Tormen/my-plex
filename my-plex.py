@@ -4392,13 +4392,74 @@ def _install_ssh_entry(remote):
     return outcome
 
 
+# How a config layer is named where my-plex prints it.
+_LAYER_LABEL = {'site': 'site', 'user': 'yours', 'named': 'named'}
+
+
 def _config_origin(key):
     """Where KEY's value came from, for a message: the file, or 'default'."""
     path = CONFIG_RECORD['origin'].get(key)
     if not path:
         return 'default'
     layer = next((l for l, p in CONFIG_RECORD['files'] if p == path), '?')
-    return f"{'site' if layer == 'site' else 'yours' if layer == 'user' else layer}: {path}"
+    return f"{_LAYER_LABEL.get(layer, layer)}: {path}"
+
+
+def _config_value_text(key, value) -> str:
+    """VALUE as --config and -DD print it, never a secret: a secret-named key
+    as its length, any other value in Python form with every X-Plex-Token cut
+    out -- one nested in a list or a dict too."""
+    if value and _SECRET_KEY_RE.search(key):
+        return str(_redact(key, value))
+
+    def scrub(v: Any) -> Any:
+        if isinstance(v, str):
+            return _redact('', v)
+        if isinstance(v, list):
+            return [scrub(x) for x in v]
+        if isinstance(v, tuple):
+            return tuple(scrub(x) for x in v)
+        if isinstance(v, dict):
+            return {k: scrub(x) for k, x in v.items()}
+        return v
+    return repr(scrub(value))
+
+
+def config_applied_line(key, value) -> str:
+    """-DD's line for a key a config file set: its value and the file."""
+    return f"Config applied: {key} = {_config_value_text(key, value)}   ({_config_origin(key)})"
+
+
+def config_report(conf, config_file=None) -> str:
+    """Bare --config: the files read, in order, then one line per key they
+    SET, each with the layer that set it.  CONF is load_config_file()'s
+    return; CONFIG_RECORD says which file set what.  Prints no secret."""
+    files = CONFIG_RECORD['files']
+    source = config_search_paths(config_file)[0][0]
+    if source in ('site', 'user'):
+        lines = ["# config files read, in order -- for a key both set, the later wins:"]
+        searched = default_config_paths()
+        for layer in ('site', 'user'):
+            label = f"{_LAYER_LABEL[layer]:<6}"
+            read = [p for l, p in files if l == layer]
+            if not read:
+                lines.append(f"#   {label} (none of: "
+                             + ", ".join(p for l, p in searched if l == layer) + ")")
+            for p in read:
+                real = os.path.realpath(p)
+                lines.append(f"#   {label} {p}" + (f" -> {real}" if real != p else ""))
+    else:
+        lines = [f"# config file read -- named by {source}, so neither the site config nor yours:"]
+        lines += [f"#   {_LAYER_LABEL[l]:<6} {p}" for l, p in files]
+
+    order = [p for _l, p in files]
+    per_layer = {l: sum(1 for m, _p in files if m == l) for l, _p in files}
+    for key, path in sorted(CONFIG_RECORD['origin'].items(), key=lambda kp: order.index(kp[1])):
+        layer = next(l for l, p in files if p == path)
+        # A layer read from two files (a .GLOBAL beside the file) names the file.
+        origin = _LAYER_LABEL[layer] + (f": {path}" if per_layer[layer] > 1 else "")
+        lines.append(f"{key:<26} = {_config_value_text(key, conf.get(key)):<28}   ({origin})")
+    return "\n".join(lines)
 
 
 def cmd_install() -> NoReturn:
@@ -33173,7 +33234,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("CONFIG HELP")
             print("=" * 76)
             print()
-            print("Usage: my-plex --config                  # Print current (active) config")
+            print("Usage: my-plex --config                  # The files read, then each key they set")
             print("       my-plex --config FILE              # Use specific config file")
             print("       my-plex --config-file FILE         # Same as --config FILE")
             print("       my-plex -C FILE                    # Same (short form)")
@@ -33213,6 +33274,11 @@ def main_print_help(args, remaining_args, main_parser):
             print("  TMDB_API_KEY) belong in YOUR config only, LITTLE_SNITCH_CLI in the")
             print("  site config only: my-plex refuses them in the other.")
             print()
+            print("  A bare --config prints the files read, in order, then one line per")
+            print("  key they SET, with the layer that set it (site / yours / named).  It")
+            print("  never prints a secret: a secret-named key shows only its length, and")
+            print("  the X-Plex-Token in a URL is cut out.  -DD names each key's file too.")
+            print()
             print("KEY SETTINGS:")
             print("  PLEX_DB_REMOTE_HOST          SSH host for Plex server")
             print("  PLEX_DB_PATH                 Path to Plex database on server")
@@ -33235,7 +33301,7 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("EXAMPLES:")
             print()
-            print("  my-plex --config                       # Print current active config")
+            print("  my-plex --config                       # The files read, then each key they set")
             print("  my-plex -C ~/alt-config.conf           # Use alternate config")
             print("  my-plex --create-config                # Print default config to stdout")
             print("  my-plex --create-config ~/.my-plex.conf  # Write default config to file")
@@ -44485,7 +44551,7 @@ def main():
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config). Use with --create to generate a new config file with default values.")
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print current config (path + contents) and exit. With FILE: use that config file (same as --config-file).")
+                               help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print default config to stdout. With FILE: write default config to FILE (refuses to overwrite).")
     config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden legacy: use with --config-file
@@ -44549,26 +44615,16 @@ def main():
             print(f"Error creating config file '{target}': {e}", file=sys.stderr)
             sys.exit(1)
 
-    # Handle bare --config: print current (active) config file path + contents and exit
-    if _print_current_config and not _asking_help:
-        # Resolve which config file would be loaded
-        search = [p for _l, p in config_layers(config_args.config_file)]
-        active = None
-        for _p in search:
-            if os.path.exists(_p) and os.path.isfile(os.path.realpath(_p)):
-                active = _p
-                break
-        if not active:
-            print(no_config_offer(), file=sys.stderr)
-            sys.exit(1)
-        real = os.path.realpath(active)
-        print(f"# Active config file: {active}" + (f"  ->  {real}" if real != active else ""))
-        with open(real, 'r') as f:
-            sys.stdout.write(f.read())
-        sys.exit(0)
-
     # Load configuration file
     loaded_config = load_config_file(config_args.config_file)
+
+    # Bare --config: the files read, then each key they set and where from.
+    if _print_current_config and not _asking_help:
+        if not CONFIG_RECORD['files']:
+            print(no_config_offer(), file=sys.stderr)
+            sys.exit(1)
+        print(config_report(loaded_config, config_args.config_file))
+        sys.exit(0)
 
     if DEEPDBG:
         print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
@@ -44582,13 +44638,14 @@ def main():
             if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
                 if value and not str(value).startswith('< PLEASE CONFIGURE'):
                     globals()[key] = value
-                    if DEEPDBG: print(f"{DBGPFX}Config applied: {key} = {'<set>' if 'TOKEN' in key else value}", file=sys.stderr)
+                    if DEEPDBG and key in loaded_config:
+                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
                 continue
 
             # For other config values, apply normally
             globals()[key] = value
-            if DEEPDBG:
-                print(f"{DBGPFX}✓ Set {key} from config file", file=sys.stderr)
+            if DEEPDBG and key in loaded_config:
+                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
         except Exception as e:
             print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
             import traceback
