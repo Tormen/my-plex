@@ -13961,13 +13961,14 @@ class TestNeverRunsAsRoot(unittest.TestCase):
                        "runpy.run_path(sys.argv[0], run_name='__main__')\n")
 
     def _run_print_only(self, home: str, argv: list[str], as_root: bool,
-                        base_env: dict[str, str] | None = None) -> 'subprocess.CompletedProcess[str]':
+                        base_env: dict[str, str] | None = None,
+                        script: str = MAIN_SCRIPT) -> 'subprocess.CompletedProcess[str]':
         env = dict(base_env if base_env is not None else os.environ,
                    HOME=home, PYTHONDONTWRITEBYTECODE='1')
         env.pop('MY_PLEX_TEST_EUID', None)
         if as_root:
             env['MY_PLEX_TEST_EUID'] = '0'
-        return subprocess.run([sys.executable, '-c', self._AS_ROOT_RUNNER, MAIN_SCRIPT, *argv],
+        return subprocess.run([sys.executable, '-c', self._AS_ROOT_RUNNER, script, *argv],
                               capture_output=True, text=True, timeout=60,
                               env=env, stdin=subprocess.DEVNULL)
 
@@ -14039,6 +14040,88 @@ class TestNeverRunsAsRoot(unittest.TestCase):
             self.assertEqual(r.returncode, 1, f"-h as root: exit {r.returncode}\n{r.stderr[-400:]}")
             self.assertRegex(r.stderr, r'ERROR 00001 \[1\]:',
                              f"-h as root was not refused:\n{r.stderr[-400:]}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_as_root_a_help_flag_after_the_separator_is_not_a_help_request(self):
+        """After `--` every token is a positional to the parser, so a literal
+        `--help` there asks for no help: `my-plex --list -- --help` as root
+        matched the token anywhere in argv, passed the refusal and went on
+        into a real run (it read the cache), and `-U -Y -- --help` queried
+        the Plex DB over ssh as root.  Its own config gives it a cache of its
+        own and a fake ssh, so even a regression reaches no host."""
+        d = tempfile.mkdtemp(prefix='my-plex-rootseparator-')
+        try:
+            conf = os.path.join(d, 'my-plex.conf')
+            with open(conf, 'w') as f:
+                f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"
+                        f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n"
+                        + _install_lines(d))
+            home = os.path.join(d, 'root')
+            os.makedirs(home)
+            r = self._run_print_only(home, ['--config', conf, '--list', '--', '--help'],
+                                     as_root=True, base_env=_fake_ssh_env(login_rc=255))
+            self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
+            # 00001, the FIRST check: the one that comes before the venv
+            # bootstrap and before anything is imported for a real run.
+            self.assertRegex(r.stderr, r'ERROR 00001 \[1\]: my-plex does not run as root',
+                             f"`--list -- --help` as root was not refused at once:\n{r.stderr[-400:]}")
+            self.assertNotIn('CACHE file', r.stdout + r.stderr,
+                             "`--list -- --help` as root got as far as the cache")
+            self.assertEqual(os.listdir(home), [], "`--list -- --help` as root wrote into HOME")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_as_root_the_attached_help_forms_are_print_only(self):
+        """`--help=WHAT` and `-HWHAT` are the same request as `--help WHAT`
+        to the parser -- it prints that page -- so as root they are answered
+        too, and write nothing.  The rule counted only the exact tokens, so
+        both came back as ERROR 00001 while `--help install` printed."""
+        d = tempfile.mkdtemp(prefix='my-plex-roothelpeq-')
+        try:
+            for argv in (['--help=install'], ['-Hinstall']):
+                home = os.path.join(d, 'root' + argv[0])
+                os.makedirs(home)
+                r = self._run_print_only(home, argv, as_root=True)
+                self.assertNotIn('does not run as root', r.stderr,
+                                 f"{argv[0]} as root was refused:\n{r.stderr[-400:]}")
+                self.assertEqual(r.returncode, 0, f"{argv[0]} as root: exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertIn('INSTALL HELP', r.stdout, f"{argv[0]} as root printed no install page")
+                self.assertEqual(os.listdir(home), [], f"{argv[0]} as root wrote into HOME")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_as_root_the_parser_has_the_last_word_on_a_help_request(self):
+        """The early rule reads argv before any parser exists, so it is an
+        estimate; whether this run IS a help request is what main_parser
+        answers.  Where the two ever disagree, root is still refused once the
+        parser has spoken, before any command runs.
+
+        A copy whose early rule calls EVERY run print-only stands in for any
+        argv it misjudges: as root, `--list-libraries` must still end in the
+        refusal, not in the command."""
+        with open(MAIN_SCRIPT) as f:
+            src = f.read()
+        early = '_PRINT_ONLY_RUN = (len(sys.argv) == 1'
+        self.assertEqual(src.count(early), 1, "the early print-only rule moved: this test neuters nothing")
+        d = tempfile.mkdtemp(prefix='my-plex-rootbackstop-')
+        try:
+            copy = os.path.join(d, 'my-plex.py')
+            with open(copy, 'w') as f:
+                f.write(src.replace(early, '_PRINT_ONLY_RUN = True or (len(sys.argv) == 1', 1))
+            conf = os.path.join(d, 'my-plex.conf')
+            with open(conf, 'w') as f:
+                f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"
+                        f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n"
+                        + _install_lines(d))
+            home = os.path.join(d, 'root')
+            os.makedirs(home)
+            r = self._run_print_only(home, ['--config', conf, '--list-libraries'], as_root=True,
+                                     base_env=_fake_ssh_env(login_rc=255), script=copy)
+            self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: my-plex does not run as root',
+                             f"a misjudged root run was not refused:\n{r.stderr[-400:]}")
+            self.assertEqual(os.listdir(home), [], "a misjudged root run wrote into HOME")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

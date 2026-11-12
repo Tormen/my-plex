@@ -126,12 +126,20 @@ def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
 # config -- so there is nothing for root to put in the wrong home, and
 # refusing it would only hide the help from whoever is in a root shell.
 # It is answered HERE, this early, because it reads nothing but argv.
-# The help flags are the ones main_parser answers with help, `-H` and
-# `--help`: `-h` is not one of them, and counting it let a root `my-plex -h`
-# past the refusal into a real run.
-_VERSION_ASKED = any(a in ('--version', '-version') for a in sys.argv[1:])
+# It reads argv the way main_parser will: only the tokens before a `--`,
+# after which every token is a positional (`-U -Y -- --help` asks for no
+# help -- matched anyway, it ran --update-cache as root).  The help flags
+# are main_parser's `-H` / `--help`, in every spelling it accepts with a
+# WHAT: `--help WHAT`, `--help=WHAT`, `-HWHAT`.  `-h` is no flag of
+# my-plex, and counting it let a root `my-plex -h` into a real run.
+# Bundled into other short flags (`-VH`) it is not counted: as root that is
+# refused, like any argv this misjudges -- the parser has the last word
+# (the second root check in main).
+_ARGV_OPTIONS = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
+_VERSION_ASKED = any(a in ('--version', '-version') for a in _ARGV_OPTIONS)
 _PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
-                   or any(a in ('--help', '-H') for a in sys.argv[1:]))
+                   or any(a == '--help' or a.startswith('--help=') or a.startswith('-H')
+                          for a in _ARGV_OPTIONS))
 
 # my-plex runs as the user whose Plex and whose media files these are, and as
 # nobody else.  ROOT is refused for every command that DOES anything, because
@@ -155,17 +163,23 @@ _PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
 # zsh completion and ~/.my-plex, which every run of an ordinary user writes,
 # are skipped on it (their two call sites read this).
 _AS_ROOT = os.geteuid() == 0
+
+
+def _root_refusal():
+    """The text of the root refusal -- one text, said at both root checks."""
+    return ("my-plex does not run as root -- run it as the user whose Plex this is.\n"
+            f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
+            "Possible reasons:\n"
+            "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
+            "  - a rollout step: give it `# user: <that user>` instead of root\n"
+            "  - the firewall rules: run `my-plex --install` as that user -- it\n"
+            "    prints the root commands that write them, and writes none itself\n"
+            "  - only READING what this tool is: `my-plex`, `--help [WHAT]` (or\n"
+            "    `-H`) and `--version` print and touch nothing, so they work as root")
+
+
 if _AS_ROOT and not _PRINT_ONLY_RUN:
-    err("00001",
-        "my-plex does not run as root -- run it as the user whose Plex this is.\n"
-        f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
-        "Possible reasons:\n"
-        "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
-        "  - a rollout step: give it `# user: <that user>` instead of root\n"
-        "  - the firewall rules: run `my-plex --install` as that user -- it\n"
-        "    prints the root commands that write them, and writes none itself\n"
-        "  - only READING what this tool is: `my-plex`, `--help` and\n"
-        "    `--version` print and touch nothing, so they work as root")
+    err("00001", _root_refusal())
 
 VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
@@ -44888,6 +44902,13 @@ def main():
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
         err("00164", f"{e}\nUse --help to see available options.")
+    # The second root check.  The first one, at the top of the file, judged
+    # argv before any parser existed; whether this run IS a help request is
+    # the parser's answer, so a root run it misjudged as print-only stops
+    # here, before any command runs.  (The bare run is the usage, and
+    # --version was answered at import.)
+    if _AS_ROOT and args.help is None and len(sys.argv) > 1:
+        err("00165", _root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -44919,11 +44940,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00165", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00166", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00166", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00167", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -45402,7 +45423,7 @@ if __name__ == '__main__':
     except Exception as unexpected:
         # A bug.  One line here, the trace in a file -- it is still what fixes
         # the bug, it is just not the user's screen.  70 is EX_SOFTWARE.
-        err("00167",
+        err("00168",
             f"my-plex stopped on a bug -- this is not something you did wrong.\n"
             f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
             f"  full trace:    {_write_crash_trace()}\n"
