@@ -44040,6 +44040,40 @@ def _resolve_secret_arg(flag: str, value):
     return value
 
 
+def refuse_legacy_keys(loaded_config) -> None:
+    """Stop the run when a config file still sets a key that is no longer
+    recognised (a hard cutover): one migration hint per key, and the file
+    that set it -- with layered configs that may be the site config or a
+    named one, not the user's own.  LOADED_CONFIG is load_config_file()'s
+    return."""
+    legacy_keys = ('DISK_MAP', 'DISK_MAP_MOVIE_DIR', 'DISK_MAP_SERIES_DIR',
+                   'DISK_MAP_SEASON_DIR', 'DISK_MAP_MERGE', 'DISK_MAP_PUSH',
+                   'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN',
+                   'PROBLEM_CATEGORIES_DISABLED',
+                   'CLEAN_CATEGORIES_REGISTRY', 'CLEAN_CATEGORIES_ENABLED')
+    legacy_set = [k for k in legacy_keys if k in loaded_config]
+    if not legacy_set:
+        return
+    hints = {
+        'PROBLEM_CATEGORIES_DISABLED':
+            "Use PROBLEM_CATEGORIES_ENABLED instead "
+            "(None = all, [] = none, [list] = explicit).",
+        'CLEAN_CATEGORIES_REGISTRY':
+            "Removed; housekeeping is now a PIPELINE — the default "
+            "is '--cleanup' (junk + orphaned).  Add your own "
+            "PIPELINES['--clean'] in CONF for the bundle you want.",
+        'CLEAN_CATEGORIES_ENABLED':
+            "Removed; housekeeping is now a PIPELINE — the default "
+            "is '--cleanup' (junk + orphaned).  Add your own "
+            "PIPELINES['--clean'] in CONF for the bundle you want.",
+    }
+    lines = [f"  - {k}: {hints.get(k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}\n"
+             f"      set in {_config_origin(k)}"
+             for k in legacy_set]
+    err("00163", "Legacy config key(s) found:\n" + "\n".join(lines) +
+           "\n  Delete each from the file that sets it to continue.")
+
+
 def main():
     global DBG, VRB, DEEPDBG, VERYVRB, QUIET, PLEXOBJ, GLOBAL_CMD_PARSER, PLEX_URL, PLEX_TOKEN, PLEX_XML_URL, FORCE_CACHE_UPDATE, FORCE_PLEXDATA, FORCE_METADATA, RESCAN_BROKEN, FROM_SCRATCH, FORCE_TSV, FORMAT, OFFLINE, READ_ONLY_MODE, SCAN_LIBRARIES
     global ALTERNATIVE_ROOTPATHS, DUPLICATE_FILE, DUPLICATES_IGNORE_LIBRARY_COMBINATIONS, CACHE_FILE, LOCK_FILE, MAX_PARALLEL_WORKERS, RATE_LIMIT_DELAY_RANGE, LIBRARY_START_DELAY, PLEX_RETRY_DELAYS, SSH_RETRY_DELAYS, CACHE_CHECKPOINT_INTERVAL
@@ -44690,35 +44724,7 @@ def main():
             print(f"  {_e}", file=sys.stderr)
         sys.exit(1)
 
-    # Hard cutover: legacy keys are no longer recognised.  If a config file
-    # still sets any of them, abort with a migration hint per key and the file
-    # that set it -- with layered configs that may be the site config or a
-    # named one, not the user's own.
-    _legacy_keys = ('DISK_MAP', 'DISK_MAP_MOVIE_DIR', 'DISK_MAP_SERIES_DIR',
-                    'DISK_MAP_SEASON_DIR', 'DISK_MAP_MERGE', 'DISK_MAP_PUSH',
-                    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN',
-                    'PROBLEM_CATEGORIES_DISABLED',
-                    'CLEAN_CATEGORIES_REGISTRY', 'CLEAN_CATEGORIES_ENABLED')
-    _legacy_set = [_k for _k in _legacy_keys if _k in loaded_config]
-    if _legacy_set:
-        _hints = {
-            'PROBLEM_CATEGORIES_DISABLED':
-                "Use PROBLEM_CATEGORIES_ENABLED instead "
-                "(None = all, [] = none, [list] = explicit).",
-            'CLEAN_CATEGORIES_REGISTRY':
-                "Removed; housekeeping is now a PIPELINE — the default "
-                "is '--cleanup' (junk + orphaned).  Add your own "
-                "PIPELINES['--clean'] in CONF for the bundle you want.",
-            'CLEAN_CATEGORIES_ENABLED':
-                "Removed; housekeeping is now a PIPELINE — the default "
-                "is '--cleanup' (junk + orphaned).  Add your own "
-                "PIPELINES['--clean'] in CONF for the bundle you want.",
-        }
-        _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}\n"
-                  f"      set in {_config_origin(_k)}"
-                  for _k in _legacy_set]
-        err("00163", "Legacy config key(s) found:\n" + "\n".join(_lines) +
-               "\n  Delete each from the file that sets it to continue.")
+    refuse_legacy_keys(loaded_config)
 
     # Re-derive values that are computed from config keys (not set directly by name in globals).
     # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
