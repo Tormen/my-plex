@@ -12677,6 +12677,39 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
                       "the copy's tool imported a boot module from elsewhere")
         self.assertEqual(r.returncode, 0, out[-900:])
 
+    def test_a_deployed_copy_with_no_bytecode_says_so_in_one_line(self):
+        """Imported from lib/my-plex/, the tool is parsed once and every later
+        start loads its bytecode -- the reason for the launcher.  A copy whose
+        module has no bytecode for the Python running it parses 2.3 MB on
+        every start, silently; my-rollout's `go` compiles it, so a copy
+        without it says so.  Only a DEPLOYED copy: a checkout has no such
+        step, and saying it there would be noise.
+
+        Three runs: no bytecode deployed (the line), bytecode compiled (no
+        line), the checkout (no line)."""
+        d = tempfile.mkdtemp(prefix='my-plex-bytecode-')
+        try:
+            launcher = _deployed_copy(d, with_suite=False)
+            env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+            def run(*cmd: str) -> 'subprocess.CompletedProcess[str]':
+                return subprocess.run([*cmd, '--help'], capture_output=True, text=True,
+                                      timeout=180, env=env)
+            r = run(sys.executable, launcher)
+            self.assertEqual(r.returncode, 0, r.stderr[-600:])
+            v = sys.version_info
+            self.assertIn(f"my-plex: no bytecode for python {v.major}.{v.minor} here", r.stderr,
+                          "a deployed copy with no bytecode said nothing")
+            self.assertEqual(r.stderr.count('no bytecode'), 1, "one line, not more")
+            c = subprocess.run([sys.executable, '-m', 'compileall', '-q',
+                                os.path.join(d, 'lib', 'my-plex')], capture_output=True, text=True)
+            self.assertEqual(c.returncode, 0, c.stderr)
+            r = run(sys.executable, launcher)
+            self.assertNotIn('no bytecode', r.stderr, "the copy has its bytecode, and still said so")
+            r = run(sys.executable, MAIN_SCRIPT)
+            self.assertNotIn('no bytecode', r.stderr, "a checkout is no deployed copy")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_only_main_script_knows_where_the_tool_is(self):
         """MAIN_SCRIPT, TOOL_SOURCE and BOOT_SOURCE are the one owner of
         "where is the tool", because only the tool can answer it: it

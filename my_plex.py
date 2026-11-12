@@ -45390,9 +45390,25 @@ def main():
 
     sys.exit(0)
 
+def _say_when_no_bytecode() -> None:
+    """One line on stderr when a DEPLOYED copy finds no bytecode of this module
+    for the Python running it: such a start parses all of my_plex.py again,
+    which is what the launcher exists to avoid.  Only where it is deployed --
+    lib/my-plex/, where root's `my-rollout go` compiles it; a checkout has no
+    such step.  One stat."""
+    # the spec's, not __cached__: Python 3.15 no longer sets that on a module
+    cached = getattr(globals().get("__spec__"), "cached", None)
+    deployed = os.path.dirname(os.path.abspath(__file__)).endswith("/lib/my-plex")
+    if deployed and isinstance(cached, str) and not os.path.exists(cached):
+        v = sys.version_info
+        print(f"my-plex: no bytecode for python {v.major}.{v.minor} here -- each start parses "
+              f"my_plex.py again (~0.2 s); root's `my-rollout go` compiles it", file=sys.stderr)
+
+
 def run() -> None:
     """The tool's entry: my_plex_boot.main() calls it once this run is in the
     right interpreter.  Everything above ran at import."""
+    _say_when_no_bytecode()
     # Reset SIGPIPE to OS default so piping to head/grep/etc. terminates us silently.
     # (without this, Python converts SIGPIPE → BrokenPipeError and prints "Exception ignored")
     # In -D / --debug mode: keep Python's default SIGPIPE handling so BrokenPipeError

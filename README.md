@@ -266,6 +266,11 @@ on its first run it
 `--help` and `--version` answer without any of that, so they work on a machine
 with no virtualenv and no network.
 
+The launcher is there so that `my_plex.py` is IMPORTED, and its bytecode cached:
+deployed, every start after the first loads it instead of parsing the module
+again. A deployed copy (`lib/my-plex/`) that finds no bytecode for the Python
+running it says so in one line on stderr; root's `my-rollout go` compiles it.
+
 ### Requirements
 - Python 3.10+ (uses `match/case`)
 - SSH access to the Plex server (for database and file operations)
