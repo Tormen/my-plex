@@ -495,5 +495,10 @@ def _drop_to(user: str, launcher: str, config: "str | None") -> "NoReturn":
     try:
         os.execvp("su", ["su", "-l", user, "-c", line])
     except OSError as e:
+        # Not "run --install as that user": with the firewall tool there, the
+        # user's own --install is refused "needs root".  Root's again finds
+        # every rule already there and hands over.
         err("00008", f"could not hand over to {user}: su: {e.strerror}\n"
-                     f"  the firewall rules are written; run `my-plex --install` as {user} for the rest")
+                     f"  the firewall rules are written; the ssh half, as {user}, is not.\n"
+                     f"  Once su runs here, run `my-plex --install` as root again: it finds\n"
+                     f"  the rules already there and hands over.")

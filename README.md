@@ -407,7 +407,7 @@ output, since this machine has no venv yet:
 
 ```
  >>> my-plex --install          (as plexuser: the ssh half)
-    > the firewall rules: written by root just before it handed over
+    > the firewall rules: root's half, done before it handed over
 
  >>> the ssh Host entry my-plex's own ssh goes through
     > alias 'my-plex' -> user@192.0.2.10   (PLEX_DB_REMOTE, site: /etc/my-plex.conf)
@@ -416,7 +416,7 @@ output, since this machine has no venv yet:
     > ssh -G my-plex: user@192.0.2.10 port 22
  >>> one login through it: ssh my-plex true   [rc 0]
 
- >>> SUMMARY  --install: firewall rules written by root; ssh Host entry written
+ >>> SUMMARY  --install: firewall rules by root's half; ssh Host entry written
 ```
 
 A second run writes nothing: root's verdict reads `0 rule(s) written, 14

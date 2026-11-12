@@ -4513,7 +4513,6 @@ def _install_ssh_entry(remote):
                         f"  - no key of yours that {user}@{host} accepts (BatchMode: no password asked) --"
                         f" a key outside ssh's default places is named by PLEX_DB_REMOTE_IDENTITY\n")
                      + f"  - the host is off or unreachable from here\n"
-                     f"  - the host is off or unreachable from here\n"
                      f"  - a firewall holds the connection")
     return outcome
 
@@ -4633,8 +4632,10 @@ def cmd_install() -> NoReturn:
 
     print(f" >>> my-plex --install          (as {getpass.getuser()}: the ssh half)")
     if os.path.isfile(cli):
-        print(f"    > the firewall rules: written by root just before it handed over")
-        firewall = "firewall rules written by root"
+        # This run cannot tell what root's half did -- written, or found
+        # already there -- so it names whose they are, never a count.
+        print(f"    > the firewall rules: root's half, done before it handed over")
+        firewall = "firewall rules by root's half"
     else:
         print(f" >>> no my-little-snitch at {cli} -- no rule written, and no root needed")
         print(f"    > allow these hosts for {sys.executable} in whatever firewall you run:")

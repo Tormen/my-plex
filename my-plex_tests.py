@@ -14245,7 +14245,12 @@ class TestInstallFirewallRules(unittest.TestCase):
                                env=dict(_fake_ssh_env(), MY_PLEX_INSTALL_FROM_ROOT='1'))
             self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
             self.assertNotIn('needs root', r.stderr)
-            self.assertIn('written by root', r.stdout, r.stdout[-600:])
+            # This run cannot know whether root wrote a rule or found every
+            # one already there -- a second run writes none -- so it claims
+            # neither: it said "firewall rules written by root" after root's
+            # own "0 rule(s) written".
+            self.assertIn("root's half", r.stdout, r.stdout[-600:])
+            self.assertNotIn('written by root', r.stdout, r.stdout[-600:])
             self.assertFalse(os.path.exists(sentinel), "the user's run ran the firewall tool")
             self.assertTrue(os.path.exists(os.path.join(d, 'ssh', 'config')),
                             "the ssh Host entry was not written")
@@ -14728,6 +14733,38 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertEqual(again.r.returncode, 0, again.text())
         self.assertIn(f"0 rule(s) written, {n} already there", again.r.stdout)
         self.assertFalse([c for c in again.calls if c.startswith('cli remove')], again.calls)
+
+    def test_a_missing_key_does_not_stop_roots_half(self):
+        """Pins what README says of PLEX_DB_REMOTE_IDENTITY: root never reads
+        the key -- it is a file in the user's home, checked by the ssh half --
+        so root writes its rules and hands over, and only the ssh half stops.
+        README said --install stopped "before anything is written"."""
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
+                                       "PLEX_DB_REMOTE_IDENTITY = '~/.ssh/no-such-key'\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertTrue(run.allows(), run.text())
+        self.assertEqual(run.su[:2], ['-l', 'nobody'], run.text())
+
+    def test_when_su_cannot_start_the_advice_is_a_command_that_works(self):
+        """No `su` on PATH: the drop fails after the rules are written.  The
+        error told the user to run `my-plex --install` themselves -- which,
+        with the firewall tool there, is refused "--install needs root".
+        Root's own --install again is what works: its rules are found already
+        there, and it hands over.  PATH here holds python3 and what the stub
+        firewall tool runs, and no su -- so no real su is ever reached."""
+        bindir = os.path.join(self.tmp, 'bin-without-su')
+        os.makedirs(bindir, exist_ok=True)
+        for name, target in (('python3', shutil.which('python3', path=_fake_ssh_env()['PATH'])),
+                             ('grep', shutil.which('grep')), ('cat', shutil.which('cat'))):
+            link = os.path.join(bindir, name)
+            if target and not os.path.lexists(link):
+                os.symlink(target, link)
+        run = self.run_root(env={'PATH': bindir})
+        self.assertNotEqual(run.r.returncode, 0, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]: could not hand over to nobody')
+        self.assertTrue(run.allows(), "the rules were not written first")
+        self.assertNotIn("run `my-plex --install` as nobody", run.r.stderr)
+        self.assertIn('as root again', run.r.stderr, run.text())
 
 
 class TestNeverRunsAsRoot(unittest.TestCase):
@@ -16221,6 +16258,10 @@ class TestInstallSshEntry(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('the login through', r.stderr)
         self.assertIn('[rc 255]', r.stdout + r.stderr)
+        reasons = [ln for ln in r.stderr.splitlines() if ln.startswith('  - ')]
+        self.assertGreater(len(reasons), 1, r.stderr[-600:])
+        self.assertEqual(len(reasons), len(set(reasons)),
+                         f"a reason is listed twice:\n" + "\n".join(reasons))
 
     def key(self, name: str = 'ada,id_rsa') -> str:
         """A stand-in key file in the test's own directory: --install checks
