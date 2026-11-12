@@ -337,10 +337,11 @@ Configuration files are Python, run with `exec()`. my-plex reads up to
 two, the later winning for a key both set:
 
 1. **The site config**, the same for every user of a machine: every one of
-   `$LINKS/default/my-plex.conf` and `$LINKS/default/my-plex` that exists
-   (`/LINKS` when `LINKS` is unset; a `.GLOBAL` twin linked into a `global/`
-   tree is read first), else the first of `/etc/my-plex.conf` and
-   `/usr/local/etc/my-plex.conf`.
+   `<dir>/my-plex.conf` and `<dir>/my-plex` that exists, where `<dir>` is
+   `CONFIG_SEARCH_DIR` from the site file `/LINKS/default/site.conf` (a
+   `.GLOBAL` twin linked into a `global/` tree is read first), else the
+   first of `/etc/my-plex.conf` and `/usr/local/etc/my-plex.conf`. Without
+   a site file, only the latter two.
 2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf`. Two
    different files there are an error -- merge them into one.
 

@@ -13970,10 +13970,11 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
 class TestConfigLayers(unittest.TestCase):
     """The site config, then the user's, the later winning per key.
 
-    Each test builds a fake /LINKS/default (via $LINKS) and a fake home (via
-    $HOME) in a temp directory, so no real config of this machine takes part.
-    The loader is called in-process; a run that only prints would turn every
-    refusal into a warning, so the module is told it is not one.
+    Each test builds a site file of its own naming a fake search directory,
+    and a fake home (via $HOME), in a temp directory, so no real config of
+    this machine takes part.  The loader is called in-process; a run that
+    only prints would turn every refusal into a warning, so the module is
+    told it is not one.
     """
 
     @classmethod
@@ -13988,14 +13989,18 @@ class TestConfigLayers(unittest.TestCase):
         for sub in ('LINKS/default', 'LINKS/global/etc/default', 'LINKS/local/etc/default',
                     'home/.my-plex', 'etc'):
             os.makedirs(os.path.join(self.d, sub))
-        self.env = {k: os.environ.get(k) for k in ('LINKS', 'HOME', 'MY_PLEX_CONFIG')}
-        os.environ['LINKS'], os.environ['HOME'] = self.links, self.home
+        self.env = {k: os.environ.get(k) for k in ('HOME', 'MY_PLEX_CONFIG')}
+        os.environ['HOME'] = self.home
         os.environ.pop('MY_PLEX_CONFIG', None)
         self.saved_sys = self.mp.SYSTEM_CONFIG_PATHS
         self.mp.SYSTEM_CONFIG_PATHS = (os.path.join(self.d, 'etc', 'my-plex.conf'),)
+        self.saved_site = self.mp.SITE_CONF
+        self.mp.SITE_CONF = self.write(
+            'site.conf', f'CONFIG_SEARCH_DIR="{os.path.join(self.links, "default")}"\n')
 
     def tearDown(self):
         self.mp.SYSTEM_CONFIG_PATHS = self.saved_sys
+        self.mp.SITE_CONF = self.saved_site
         for k, v in self.env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -14073,7 +14078,7 @@ class TestConfigLayers(unittest.TestCase):
     def test_a_named_file_that_is_absent_is_refused(self):
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
         out = self.refused(os.path.join(self.d, 'absent.conf'))
-        self.assertIn('ERROR 00016', out)
+        self.assertIn('ERROR 00018', out)
         self.assertIn('absent.conf', out)
 
     def test_two_different_user_files_are_an_error(self):
@@ -14166,6 +14171,98 @@ class TestConfigLayers(unittest.TestCase):
         os.environ['HOME'] = other
         conf, _ = self.load()
         self.assertEqual(conf['DEFAULT_SCOPE'], 'second-home')
+
+    def test_the_site_file_alone_says_where_the_site_config_is(self):
+        """The search directory comes from the site file, and from nothing
+        else: with no site file, a config sitting where $LINKS or the old
+        built-in /LINKS/default would point is NOT read, and an exported
+        DATA_BASE_DIR does not take the neutral value's place."""
+        elsewhere = os.path.join(self.d, 'elsewhere')
+        os.makedirs(os.path.join(elsewhere, 'default'))
+        with open(os.path.join(elsewhere, 'default', 'my-plex.conf'), 'w') as f:
+            f.write("PLEX_DB_REMOTE_HOST = 'from-the-environment'\n")
+        saved = {k: os.environ.get(k) for k in ('LINKS', 'DATA_BASE_DIR', 'CONFIG_SEARCH_DIR')}
+        os.environ.update(LINKS=elsewhere, DATA_BASE_DIR='/elsewhere',
+                          CONFIG_SEARCH_DIR=os.path.join(elsewhere, 'default'))
+        try:
+            os.unlink(self.mp.SITE_CONF)
+            self.assertEqual(self.mp.read_site(), self.mp.Site())
+            self.assertEqual(self.mp.read_site().data_base_dir, '/var/db')
+            conf, _ = self.load()
+            self.assertNotIn('PLEX_DB_REMOTE_HOST', conf, "a config found through the environment")
+            self.assertEqual([p for _l, p in self.mp.default_config_paths()][:1],
+                             list(self.mp.SYSTEM_CONFIG_PATHS[:1]), "a search directory without a site file")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        # with the site file: its values, and the bare name is read as well
+        self.write('site.conf', 'DATA_BASE_DIR="/srv/data"\nLOG_BASE_DIR="/srv/log"\n'
+                                f'CONFIG_SEARCH_DIR="{os.path.join(self.links, "default")}"\n'
+                                '# a comment\n\nOTHER_TOOLS_KEY="x"\n')
+        site = self.mp.read_site()
+        self.assertEqual((site.data_base_dir, site.log_base_dir), ('/srv/data', '/srv/log'))
+        self.write('LINKS/default/my-plex', "PLEX_DB_REMOTE_HOST = 'bare-name'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf['PLEX_DB_REMOTE_HOST'], 'bare-name')
+
+    def test_a_site_file_there_but_unusable_is_an_error(self):
+        """Never the neutral values: they would put this run's config apart
+        from everyone else's, silently."""
+        for text, expect in (('CONFIG_SEARCH_DIR="/x"\n', 'cannot read'),
+                             ('CONFIG_SEARCH_DIR="$HOME/x"\n', 'not a plain KEY="value" line'),
+                             ('CONFIG_SEARCH_DIR=/x\n', 'not a plain KEY="value" line')):
+            with self.subTest(text=text):
+                self.write('site.conf', text)
+                if expect == 'cannot read':
+                    os.chmod(self.mp.SITE_CONF, 0)
+                err = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                        self.mp.read_site()
+                finally:
+                    os.chmod(self.mp.SITE_CONF, 0o600)
+                self.assertIn('ERROR', err.getvalue())
+                self.assertIn(expect, err.getvalue())
+
+    def test_the_offer_names_only_searched_paths(self):
+        """Every offered path is searched -- or is the site's offer directory
+        while the site's search directory is searched; the search directory
+        itself, a farm, is never offered."""
+        farm = os.path.join(self.links, 'default')
+        offer_dir = os.path.join(self.links, 'global', 'etc', 'default')
+        site_offer = os.path.join(offer_dir, 'my-plex.conf')
+        states = {
+            'site': f'CONFIG_SEARCH_DIR="{farm}"\nCONFIG_OFFER_DIR="{offer_dir}"\n'
+                    'CONFIG_OFFER_NOTE="linked there by a run"\n',
+            # an offer directory and nothing searching it: a file written
+            # there would be read from nowhere
+            'offer-only': f'CONFIG_OFFER_DIR="{offer_dir}"\n',
+            'none': None,
+        }
+        for state, text in states.items():
+            with self.subTest(state=state):
+                if text is None:
+                    os.unlink(self.mp.SITE_CONF)
+                else:
+                    self.write('site.conf', text)
+                searched = {p for _l, p in self.mp.default_config_paths()}
+                offered = self.mp.config_offer_paths()
+                self.assertTrue(offered, "nothing offered")
+                for p in offered:
+                    self.assertFalse(p.startswith(farm + os.sep), f"offered the farm: {p}")
+                    if p == site_offer:
+                        self.assertIn(os.path.join(farm, 'my-plex.conf'), searched)
+                    else:
+                        self.assertIn(p, searched, f"offered but not searched: {p}")
+                self.assertEqual(site_offer in offered, state == 'site')
+        self.write('site.conf', states['site'])
+        text = self.mp.no_config_offer()
+        self.assertIn(f"> my-plex --create-config > {site_offer}   (linked there by a run)", text)
+        self.assertLess(text.index(site_offer), text.index(self.mp.SYSTEM_CONFIG_PATHS[0]),
+                        "the site's place comes first")
 
 
 class TestConfigEnvVar(unittest.TestCase):
@@ -14293,7 +14390,12 @@ class TestConfigEnvVar(unittest.TestCase):
         r = self._run('--help', 'config')
         self.assertIn('MY_PLEX_CONFIG', r.stdout,
                       "the page does not name the first thing it searches")
-        self.assertIn('/LINKS/default/my-plex.conf', r.stdout, r.stdout[-600:])
+        self.assertIn('/etc/my-plex.conf', r.stdout, r.stdout[-600:])
+        # the site's search directory, wherever this machine's site file puts it
+        site = _import_tool('mp_helpsite').read_site()
+        if site.config_search_dir:
+            self.assertIn(os.path.join(site.config_search_dir, 'my-plex.conf'), r.stdout,
+                          r.stdout[-600:])
 
 
 class TestInstallSshEntry(unittest.TestCase):
