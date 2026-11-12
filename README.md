@@ -511,11 +511,12 @@ two, the later winning for a key both set:
    `.GLOBAL` twin linked into a `global/` tree is read first), else the
    first of `/etc/my-plex.conf` and `/usr/local/etc/my-plex.conf`. Without
    a site file, only the latter two.
-2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf`. Two
-   different files there are an error -- merge them into one.
+2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf` (a
+   `.GLOBAL` twin beside it is read first). Two different files there are
+   an error -- merge them into one.
 
 A name that is a link pointing nowhere is skipped, with a warning naming
-it, and the search goes on to the next name.
+it, and does not end the search; its `.GLOBAL` twin is still read.
 
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The

@@ -869,8 +869,9 @@ def read_site() -> Site:
 #      the site file's CONFIG_SEARCH_DIR (both spellings, each with a .GLOBAL
 #      twin the farm may link beside it, global first), else the first of
 #      /etc/my-plex.conf and /usr/local/etc/my-plex.conf;
-#   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf, from the run's
-#      HOME when read -- never once at import, which as root is /var/root.
+#   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf (a .GLOBAL
+#      twin beside it first), from the run's HOME when read -- never once at
+#      import, which as root is /var/root.
 # A file named for one run ($MY_PLEX_CONFIG, else --config) is read ALONE,
 # by that run and every my-plex it starts.  A test run, and every my-plex it
 # starts, reads neither layer.
@@ -1056,8 +1057,8 @@ def config_layers(config_file=None):
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
     alone, or the site files then the user's -- none in a test run.
 
-    A default name that is a dangling link is passed over -- the search goes
-    on to the next name, so a real file behind it is read -- and stays in
+    A default name that is a dangling link does not end the search -- a
+    real file behind it, or its own .GLOBAL twin, is read -- and stays in
     the list, in its place, for the loader to skip and name.
 
     Refuses here, where the search is decided, what no later step can
@@ -1098,7 +1099,7 @@ def config_layers(config_file=None):
     site = ([q for q in in_farm if _dangling(q)]
             + _global_first([q for q in in_farm if os.path.exists(q)]))
     if not any(os.path.exists(q) for q in site):
-        site += _first_real(SYSTEM_CONFIG_PATHS)
+        site += _first_real([q] for q in SYSTEM_CONFIG_PATHS)
     # Root reads the site config alone: it cannot know whose home to look in
     # (RUN_AS_USER comes from the site config).  Every file root reads -- a
     # site file as much as a named one -- must be root's alone: load_config_file
@@ -1115,9 +1116,9 @@ def config_layers(config_file=None):
                + "  Merge them into one, and make the other a link to it or remove it.")
         if _config_must_stop(msg):
             err("00025", msg)
-    user = _first_real(users)
-    if user and os.path.exists(user[-1]) and os.path.lexists(user[-1] + '.GLOBAL'):
-        user.insert(-1, user[-1] + '.GLOBAL')
+    # A name's .GLOBAL twin goes with it, read first -- beside a dangling
+    # name too, which is then not passed over: its twin is a file to read.
+    user = _first_real([u + '.GLOBAL', u] if os.path.lexists(u) else [] for u in users)
     return [('site', s) for s in site] + [('user', u) for u in user]
 
 
@@ -1126,15 +1127,15 @@ def _dangling(path) -> bool:
     return os.path.lexists(path) and not os.path.exists(path)
 
 
-def _first_real(paths) -> list[str]:
-    """The first of PATHS that is there, after every dangling link the search
-    passed on the way to it -- only those links when none is there."""
+def _first_real(names) -> list[str]:
+    """The search through NAMES, each a group of paths read together: every
+    path that is there, up to the first group with a real file in it -- so
+    the dangling links passed on the way stay, for the loader to name."""
     out = []
-    for p in paths:
-        if os.path.exists(p):
-            return out + [p]
-        if _dangling(p):
-            out.append(p)
+    for group in names:
+        out += [p for p in group if os.path.lexists(p)]
+        if any(os.path.exists(p) for p in group):
+            break
     return out
 
 
@@ -1152,10 +1153,11 @@ def _config_must_stop(msg=''):
 # record --config, -DD and the error texts ask, so none of them guesses.
 # 'set_by' lists, per key, every file that set it, in read order; 'origin'
 # is the last of them, the one whose value wins.
-# 'skipped' holds the files config_layers() chose that were not read, each
-# with why: a dangling link the search passed over, or (in a run that only
-# prints) a file that failed to run, or (as root) one not root's alone.
-CONFIG_RECORD = {'files': [], 'skipped': [], 'origin': {}, 'set_by': {}}
+# 'chosen' holds every file config_layers() chose, in its order, read or
+# not, each with why it was not read ('' when it was): a dangling link the
+# search passed over, or (in a run that only prints) a file that failed to
+# run, or (as root) one not root's alone.
+CONFIG_RECORD = {'files': [], 'chosen': [], 'origin': {}, 'set_by': {}}
 
 
 # Default configuration values
@@ -3032,8 +3034,8 @@ def load_config_file(config_file=None):
     A file that cannot be read or fails to run stops the run, naming the
     file and the reason: two layers half-loaded -- the site's server without
     your token -- are worse than none.  A link that points nowhere is
-    skipped with a warning naming it; config_layers() already went on to
-    the next name.  A key in the wrong layer is refused.  As root,
+    skipped with a warning naming it; config_layers() has already searched
+    past it.  A key in the wrong layer is refused.  As root,
     each file is read through _config_text_as_root(): root's alone, or not
     run at all.
     """
@@ -3053,12 +3055,12 @@ def load_config_file(config_file=None):
     origin = {}
     set_by = {}
     files = []
-    skipped = []
+    chosen = []
     for layer, path in config_layers(config_file):
         if not os.path.exists(path):
             print(f"Warning: config link {path} -> {os.readlink(path)} points nowhere "
-                  f"-- skipped, the search goes on", file=sys.stderr)
-            skipped.append((layer, path, 'points nowhere -- skipped'))
+                  f"-- skipped", file=sys.stderr)
+            chosen.append((layer, path, 'points nowhere -- skipped'))
             continue
         before = snap(ns)
         try:
@@ -3066,7 +3068,7 @@ def load_config_file(config_file=None):
                 src = _config_text_as_root(f"{config_search_paths(config_file)[0][0]} names"
                                            if layer == 'named' else f"the {layer} config", path)
                 if src is None:
-                    skipped.append((layer, path, "not root's alone -- not read"))
+                    chosen.append((layer, path, "not root's alone -- not read"))
                     continue
             else:
                 with open(path, 'r') as f:
@@ -3083,9 +3085,10 @@ def load_config_file(config_file=None):
                    + f"\n  {where}{type(e).__name__}: {e}")
             if _config_must_stop(msg):
                 err("00026", msg)
-            skipped.append((layer, path, 'did not run -- not read'))
+            chosen.append((layer, path, 'did not run -- not read'))
             continue
         files.append((layer, path))
+        chosen.append((layer, path, ''))
         after = snap(ns)
         # A file SETS a key when it changes the value or assigns it at all --
         # the same value as an earlier file is still a line in this one.
@@ -3110,7 +3113,7 @@ def load_config_file(config_file=None):
             origin[k] = path
             set_by.setdefault(k, []).append(path)
     CONFIG_RECORD['files'] = files
-    CONFIG_RECORD['skipped'] = skipped
+    CONFIG_RECORD['chosen'] = chosen
     CONFIG_RECORD['origin'] = origin
     CONFIG_RECORD['set_by'] = set_by
     return {k: ns[k] for k in origin}
@@ -4602,13 +4605,11 @@ def config_report(conf, config_file=None) -> str:
     SET, each with the layer that set it.  CONF is load_config_file()'s
     return; CONFIG_RECORD says which file set what.  Prints no secret."""
     files = CONFIG_RECORD['files']
-    skipped = CONFIG_RECORD['skipped']
 
     def chosen(layer: str) -> list[str]:
-        # Every file the search chose for LAYER, read or not, in read order.
-        out = [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}" for l, p in files if l == layer]
-        return out + [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}   ({why})"
-                      for l, p, why in skipped if l == layer]
+        # Every file the search chose for LAYER, read or not, in search order.
+        return [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}" + (f"   ({why})" if why else "")
+                for l, p, why in CONFIG_RECORD['chosen'] if l == layer]
 
     source = config_search_paths(config_file)[0][0]
     if source in ('site', 'user'):
@@ -33425,13 +33426,13 @@ def main_print_help(args, remaining_args, main_parser):
             for _l, _p in _defaults:
                 if _l == 'site' and _p not in _farm:
                     print(f"         {_p}")
-            print("  2. your config, the first of:")
+            print("  2. your config, the first of  (a .GLOBAL twin beside it first)")
             for _l, _p in _defaults:
                 if _l == 'user':
                     print(f"       {_p}")
             print( "     two different files there are an ERROR: merge them into one.")
             print( "  A name that is a link pointing nowhere is skipped, with a warning")
-            print( "  naming it, and the search goes on to the next name.")
+            print( "  naming it, and does not end the search; its .GLOBAL twin is still read.")
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
             print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
             print( "  every my-plex that run starts (a pipeline's phases): --config is")

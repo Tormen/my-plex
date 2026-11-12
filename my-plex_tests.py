@@ -15702,6 +15702,46 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(f'config link {farm} -> ', err)
         self.assertIn(f'config link {etc} -> ', err)
 
+    def test_a_dangling_user_name_still_brings_its_real_GLOBAL_twin(self):
+        """ADVERSARIAL (#39 review): a user name's .GLOBAL twin is read before
+        it; when the name itself was a dangling link, the search passed the
+        name over and took its real twin along, so the run went on with no
+        user config -- the warning named only the link."""
+        link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        os.symlink('../gone.conf', link)
+        twin = self.write('home/.my-plex/my-plex.conf.GLOBAL', "DEFAULT_SCOPE = 'from-global-twin'\n")
+        conf, err = self.load()
+        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'from-global-twin', err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('user', twin)])
+        self.assertIn(f'config link {link} -> ../gone.conf points nowhere -- skipped', err)
+
+    def test_the_warning_for_the_last_dangling_name_claims_no_next_name(self):
+        """ADVERSARIAL (#39 review): 'skipped, the search goes on' was said of
+        every dangling link -- of the last name too, after which nothing is
+        searched and nothing of that layer is read."""
+        link = os.path.join(self.home, '.my-plex.conf')
+        os.symlink('gone.conf', link)
+        _conf, err = self.load()
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [])
+        self.assertIn(f'config link {link} -> gone.conf points nowhere -- skipped', err)
+        self.assertNotIn('the search goes on', err)
+
+    def test_bare_config_lists_a_layers_files_in_search_order(self):
+        """ADVERSARIAL (#39 review): the report printed the files read first
+        and the skipped ones after, so a dangling link the search passed
+        stood BELOW the file found behind it -- the reverse of the order
+        its header claims."""
+        link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        os.symlink('../gone.conf', link)
+        real = self.user("DEFAULT_SCOPE = 'real-user-file'\n")
+        conf, _ = self.load()
+        out = self.mp.config_report(conf)
+        skipped_line = f'#   yours  {link} -> ../gone.conf   (points nowhere -- skipped)'
+        read_line = f'#   yours  {real}\n'
+        self.assertIn(skipped_line, out, out)
+        self.assertIn(read_line, out, out)
+        self.assertLess(out.index(skipped_line), out.index(read_line), out)
+
     def test_the_global_file_is_read_before_the_local_one(self):
         """Told by where the link points, not by the name: the farm may give
         the global file the plain name and the local one .GLOBAL never."""
