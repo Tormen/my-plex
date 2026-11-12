@@ -261,8 +261,15 @@ def _inside_our_venv():
     a ModuleNotFoundError on the first `import readchar`.  It stayed hidden
     because a machine whose venv is a DIFFERENT python version from its
     python3 compares two different paths and works by accident.
+
+    A run WITHOUT site is outside too.  The launcher's shebang adds -S, and
+    when the python3 PATH finds is the venv's own (the venv activated, or its
+    bin/ first in a job's PATH), sys.prefix is the venv -- read from
+    pyvenv.cfg at startup -- while its site-packages, which only site adds,
+    are not importable.  The re-exec runs the venv's python without -S.
     """
-    return os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
+    return (not sys.flags.no_site
+            and os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR))
 
 
 def _exec_in_venv():

@@ -13684,21 +13684,53 @@ class TestVenvDetection(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def _ask(self, interpreter, expected):
-        """Import the boot module under `interpreter`, point it at the temp
-        venv, and have it answer _inside_our_venv().  Importing it decides
-        nothing -- its main() does -- so nothing re-execs while we ask."""
+    def _ask(self, interpreter, expected, *flags: str):
+        """Import the boot module under `interpreter` (started with `flags`),
+        point it at the temp venv, and have it answer _inside_our_venv().
+        Importing it decides nothing -- its main() does -- so nothing
+        re-execs while we ask."""
         snippet = _tool_import_snippet(['my-plex', '--help'], path=BOOT_SOURCE) + (
             "mp.VENV_DIR = %r\n"
             "mp.VENV_PYTHON = os.path.join(mp.VENV_DIR, 'bin', 'python3')\n"
             "os.write(2, (b'ANSWER=' + str(mp._inside_our_venv()).encode()))\n"
         ) % (self.venv,)
-        r = subprocess.run([interpreter, '-B', '-c', snippet],
+        r = subprocess.run([interpreter, *flags, '-B', '-c', snippet],
                            capture_output=True, text=True, timeout=180)
         self.assertIn('ANSWER=', r.stderr,
                       f"the probe did not run under {interpreter}:\n{r.stderr[-900:]}")
         self.assertIn(f'ANSWER={expected}', r.stderr,
-                      f"_inside_our_venv() said {not expected} under {interpreter}")
+                      f"_inside_our_venv() said {not expected} under {interpreter} {' '.join(flags)}")
+
+    def test_the_venvs_interpreter_without_site_is_not_inside_it(self):
+        """The launcher's shebang is `env -S python3 -I -S`.  When the python3
+        PATH finds is the venv's own -- the venv activated, or its bin/ first
+        in a job's PATH -- that interpreter runs with -S: sys.prefix is the
+        venv (read from pyvenv.cfg), but site never ran, so none of the venv's
+        packages are importable.  "Inside" there meant no re-exec and a
+        ModuleNotFoundError on `import readchar`."""
+        self.assertTrue(self.venv_built, "could not build the probe venv")
+        self._ask(self.venv_python, False, '-I', '-S')
+
+    def test_the_launcher_runs_when_path_finds_the_venvs_python3_first(self):
+        """The same, end to end, through the launcher's own shebang: HOME's
+        venv is the one this suite runs in (a symlink), and its bin/ is first
+        on PATH.  A command that is not print-only must run, not die on the
+        first third-party import."""
+        if sys.prefix == sys.base_prefix:
+            self.skipTest("the suite does not run inside a venv to point HOME at")
+        home = os.path.join(self.tmp, 'home-venv-first')
+        os.makedirs(os.path.join(home, '.python.venv'), exist_ok=True)
+        venv = os.path.join(home, '.python.venv', 'my-plex')
+        if not os.path.islink(venv):
+            os.symlink(sys.prefix, venv)
+        env = dict(os.environ, HOME=home, PYTHONDONTWRITEBYTECODE='1',
+                   PATH=os.path.join(venv, 'bin') + os.pathsep + os.environ.get('PATH', ''))
+        env.pop('MY_PLEX_VENV_REEXEC', None)
+        r = subprocess.run([MAIN_SCRIPT, '--create-config'], capture_output=True, text=True,
+                           timeout=180, env=env, stdin=subprocess.DEVNULL)
+        self.assertNotIn('Traceback', r.stderr, f"it died instead of re-executing:\n{r.stderr[-900:]}")
+        self.assertEqual(r.returncode, 0, r.stderr[-900:])
+        self.assertIn('PLEX_DB_REMOTE', r.stdout, "--create-config printed no config")
 
     def test_the_base_interpreter_is_not_inside_the_venv_it_built(self):
         """THE adversarial case, and ada's: the venv was built from this very
