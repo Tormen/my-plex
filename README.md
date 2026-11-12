@@ -204,8 +204,9 @@ network.
 
 The launcher is there so that `my_plex.py` is IMPORTED, and its bytecode cached:
 deployed, every start after the first loads it instead of parsing the module
-again. A deployed copy (`lib/my-plex/`) that finds no bytecode for the Python
-running it says so in one line on stderr; root's `my-rollout go` compiles it.
+again. A deployed copy (`lib/my-plex/`) that finds no current bytecode for
+the Python running it -- none, or bytecode of an older `my_plex.py` -- says so
+in one line on stderr; root's `my-rollout go` compiles it.
 So `my_plex.py` is not a command: started directly (`python3 my_plex.py ...`)
 it refuses and names the launcher. A launcher whose modules are missing --
 beside it or in `../lib/my-plex/` -- says that in one line too.

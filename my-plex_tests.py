@@ -12774,20 +12774,47 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
             r = run(sys.executable, launcher)
             self.assertEqual(r.returncode, 0, r.stderr[-600:])
             v = sys.version_info
-            self.assertIn(f"my-plex: no bytecode for python {v.major}.{v.minor} here", r.stderr,
-                          "a deployed copy with no bytecode said nothing")
-            self.assertEqual(r.stderr.count('no bytecode'), 1, "one line, not more")
+            self.assertIn(f"my-plex: no current bytecode for python {v.major}.{v.minor} here",
+                          r.stderr, "a deployed copy with no bytecode said nothing")
+            self.assertEqual(r.stderr.count('no current bytecode'), 1, "one line, not more")
             c = subprocess.run([sys.executable, '-m', 'compileall', '-q',
                                 os.path.join(d, 'lib', 'my-plex')], capture_output=True, text=True)
             self.assertEqual(c.returncode, 0, c.stderr)
             r = run(sys.executable, launcher)
-            self.assertNotIn('no bytecode', r.stderr, "the copy has its bytecode, and still said so")
+            self.assertNotIn('no current bytecode', r.stderr,
+                             "the copy has its bytecode, and still said so")
             # A checkout this test lays out itself: MAIN_SCRIPT is one only
             # by accident -- run from a deployed copy, it IS that copy.
             checkout = _tool_copy(os.path.join(d, 'checkout'))
             r = run(sys.executable, checkout)
             self.assertEqual(r.returncode, 0, r.stderr[-600:])
-            self.assertNotIn('no bytecode', r.stderr, "a checkout is no deployed copy")
+            self.assertNotIn('no current bytecode', r.stderr, "a checkout is no deployed copy")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_deployed_copy_with_stale_bytecode_says_so(self):
+        """Bytecode left from an OLDER my_plex.py -- new sources copied in,
+        not yet compiled for this Python -- is rejected by Python as stale,
+        and in a __pycache__ the user cannot write every start parses the
+        module again.  The note checked only that the .pyc EXISTS, so it said
+        nothing.  It reads the header as my-rollout's compile step does:
+        magic, flags 0, the source's mtime and size."""
+        d = tempfile.mkdtemp(prefix='my-plex-stale-')
+        try:
+            launcher = _deployed_copy(d, with_suite=False)
+            tool = os.path.join(d, 'lib', 'my-plex', 'my_plex.py')
+            other = os.path.join(d, 'other.py')
+            with open(other, 'w', encoding='utf-8') as f:
+                f.write('x = 1\n')
+            import importlib.util, py_compile
+            py_compile.compile(other, cfile=importlib.util.cache_from_source(tool), doraise=True)
+            r = subprocess.run([sys.executable, launcher, '--help'], capture_output=True, text=True,
+                               timeout=180, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            self.assertEqual(r.returncode, 0, r.stderr[-600:])
+            v = sys.version_info
+            self.assertIn(f"my-plex: no current bytecode for python {v.major}.{v.minor} here",
+                          r.stderr, "stale bytecode, and the copy said nothing")
+            self.assertEqual(r.stderr.count('no current bytecode'), 1, "one line, not more")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

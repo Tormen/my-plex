@@ -45643,18 +45643,36 @@ def main():
     sys.exit(0)
 
 def _say_when_no_bytecode() -> None:
-    """One line on stderr when a DEPLOYED copy finds no bytecode of this module
-    for the Python running it: such a start parses all of my_plex.py again,
-    which is what the launcher exists to avoid.  Only where it is deployed --
-    lib/my-plex/, where root's `my-rollout go` compiles it; a checkout has no
-    such step.  One stat."""
+    """One line on stderr when a DEPLOYED copy finds no CURRENT bytecode of
+    this module for the Python running it -- none, or bytecode of an older
+    my_plex.py, which Python rejects as stale and cannot replace in a
+    __pycache__ the user may not write: either way the start parses all of
+    my_plex.py again, which is what the launcher exists to avoid.  Only where
+    it is deployed -- lib/my-plex/, where root's `my-rollout go` compiles it;
+    a checkout has no such step.  "Current" is read as that compile step
+    reads it: the header's magic, flags 0, and the source's mtime and size.
+    One open, one stat."""
     # the spec's, not __cached__: Python 3.15 no longer sets that on a module
     cached = getattr(globals().get("__spec__"), "cached", None)
     deployed = os.path.dirname(os.path.abspath(__file__)).endswith("/lib/my-plex")
-    if deployed and isinstance(cached, str) and not os.path.exists(cached):
+    if not deployed or not isinstance(cached, str):
+        return
+    from importlib.util import MAGIC_NUMBER
+    try:
+        with open(cached, "rb") as f:
+            head = f.read(16)
+        st = os.stat(__file__)
+    except OSError:
+        head, st = b"", None
+    current = (st is not None and head[:4] == MAGIC_NUMBER
+               and int.from_bytes(head[4:8], "little") == 0
+               and int.from_bytes(head[8:12], "little") == int(st.st_mtime) & 0xFFFFFFFF
+               and int.from_bytes(head[12:16], "little") == st.st_size & 0xFFFFFFFF)
+    if not current:
         v = sys.version_info
-        print(f"my-plex: no bytecode for python {v.major}.{v.minor} here -- each start parses "
-              f"my_plex.py again (~0.2 s); root's `my-rollout go` compiles it", file=sys.stderr)
+        print(f"my-plex: no current bytecode for python {v.major}.{v.minor} here -- each start "
+              f"parses my_plex.py again (~0.2 s); root's `my-rollout go` compiles it",
+              file=sys.stderr)
 
 
 def run() -> None:
