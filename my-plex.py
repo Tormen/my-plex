@@ -5016,6 +5016,31 @@ def build_media_cache_dict(include_paths=True, **extra):
     d.update(extra)
     return d
 
+_LIBRARY_NAMES_IN_CACHE_FILE: "frozenset[str] | None" = None
+
+def is_library_name(name: str) -> bool:
+    """Whether name is a library of the cache: what makes a bare word a
+    library scope, whatever the library is called.
+
+    The loaded cache's library index answers.  The argv is read before the
+    cache is loaded, so until then the same index answers from the cache
+    file, read once, without the lock (the cache is written whole, by
+    rename) and without touching CACHE: the load itself -- and a
+    --force-plex rebuild moving the file aside -- come later, as before.
+    A missing or unreadable cache names no library; its load says why."""
+    global _LIBRARY_NAMES_IN_CACHE_FILE
+    if PLEX_Media.OBJ_BY_LIBRARY:
+        return name in PLEX_Media.OBJ_BY_LIBRARY
+    if _LIBRARY_NAMES_IN_CACHE_FILE is None:
+        names: frozenset[str] = frozenset()
+        try:
+            with open(os.path.join(Path.home(), CACHE_FILE), 'rb') as f:
+                names = frozenset(pickle.load(f).get('obj_by_library', {}))
+        except Exception:  # whatever the file holds, its load reports it
+            pass
+        _LIBRARY_NAMES_IN_CACHE_FILE = names
+    return name in _LIBRARY_NAMES_IN_CACHE_FILE
+
 def load_media_cache(source):
     """Load media cache structures from a dict (CACHE or partial_cache).
 
@@ -31052,9 +31077,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("means `library=lib1 AND lang=fr AND year>2020`.")
             print()
             print("BARE-WORD AUTO-INTERPRETATION (simple + intuitive default):")
-            print("  Bare words that match a Plex library are recognised as LIBRARY")
-            print("  scope automatically — no `library:` prefix needed.  Other bare")
-            print("  words become free-text title-search (`title~<word>`).")
+            print("  A bare word that names a library in the cache is that LIBRARY's")
+            print("  scope, whatever the library is called — no `library:` prefix")
+            print("  needed.  Other bare words become free-text title-search")
+            print("  (`title~<word>`).")
             print()
             print("    my-plex library1                    # library scope (auto-detect)")
             print("    my-plex library1 lang:fr year>2020  # lib AND filters")
@@ -36093,7 +36119,7 @@ def _parse_compound_filter(expr_or_tokens):
             #   lib1 ( country:france OR country:italy )
             # instead of
             #   library:lib1 ( country:france OR country:italy )
-            if atom in PLEX_Media.OBJ_BY_LIBRARY:
+            if is_library_name(atom):
                 parsed = PLEX_Media._parse_filter_sub_expr(f'library:{atom}')
                 if parsed:
                     return parsed
@@ -44167,20 +44193,24 @@ def main():
     # FIRST STEP: Extract debug/verbose flags from command-line args BEFORE any config loading
     # This allows us to use DBG/DEEPDBG during config file loading
     import sys
-    for arg in sys.argv[1:]:
-        if arg in ['-D', '--debug']:
-            DBG = True
-            VRB = True  # debug implies verbose
-        elif arg in ['-DD', '--deepdebug']:
-            DEEPDBG = True
-            DBG = True  # deepdebug implies debug
-            VERYVRB = True  # deepdebug implies very-verbose
-            VRB = True  # …and therefore also verbose
-        elif arg in ['-V', '--verbose']:
-            VRB = True
-        elif arg in ['-VV', '--very-verbose']:
-            VERYVRB = True
-            VRB = True  # very-verbose implies verbose
+    def _verbosity_from_argv():
+        """-V / -VV / -D / -DD as the command line gives them, before argparse reads it."""
+        global DBG, VRB, DEEPDBG, VERYVRB
+        for arg in sys.argv[1:]:
+            if arg in ['-D', '--debug']:
+                DBG = True
+                VRB = True  # debug implies verbose
+            elif arg in ['-DD', '--deepdebug']:
+                DEEPDBG = True
+                DBG = True  # deepdebug implies debug
+                VERYVRB = True  # deepdebug implies very-verbose
+                VRB = True  # …and therefore also verbose
+            elif arg in ['-V', '--verbose']:
+                VRB = True
+            elif arg in ['-VV', '--very-verbose']:
+                VERYVRB = True
+                VRB = True  # very-verbose implies verbose
+    _verbosity_from_argv()
 
     # Debug: print sys.argv to see what arguments were actually passed
     if DBG or DEEPDBG:
@@ -44243,6 +44273,145 @@ def main():
                 # Rewrite: remove --help from current position, replace with --help <topic>
                 sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != '--help'] + ['--help', _topic]
                 if DBG: print(f" ~~~ Normalized --help (left): {_redact_argv(sys.argv)}", file=sys.stderr)
+
+    # Early argument parsing for --config / --config-file / --create-config options
+    _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
+    _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
+    # `--create` (`--create=FILE`) is gone: named before anything runs -- the
+    # config its old twin --config-file names is not read first.
+    _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
+    if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
+        err("00164", "Invalid flag '--create'." + _flag_hint('--create'))
+    # No abbreviations, as in every other parser of the tool: here a prefix of
+    # --create-config ('--creat FILE') would write a config nobody asked for.
+    config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config).")
+    config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
+                               help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
+    config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
+                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link.")
+    config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
+    config_args, _ = config_parser.parse_known_args()
+    if getattr(config_args, 'print_problem_categories_md', False):
+        _emit_problem_categories_markdown()
+        sys.exit(0)
+
+    # Resolve --config: with FILE behaves like --config-file; bare --config triggers print-current after load.
+    _print_current_config = False
+    if config_args.config is not None:
+        if config_args.config == _CFG_PRINT_SENTINEL:
+            _print_current_config = True
+        else:
+            if config_args.config_file and config_args.config_file != config_args.config:
+                print(f"Error: --config and --config-file both given with different paths", file=sys.stderr)
+                sys.exit(1)
+            config_args.config_file = config_args.config
+
+    # If user is asking for help, defer all early-exit config actions to the help dispatcher.
+    _asking_help = ('--help' in sys.argv) or ('-h' in sys.argv) or ('-H' in sys.argv)
+
+    # Handle --create-config (new flag, takes optional FILE)
+    if not _asking_help and config_args.create_config is not None:
+        config_content = generate_default_config()
+        if config_args.create_config == _CREATE_STDOUT_SENTINEL:
+            sys.stdout.write(config_content)
+            sys.exit(0)
+        target = os.path.expanduser(config_args.create_config)
+        # One step that creates or fails: O_EXCL refuses anything already at
+        # the path, a link included, so nothing is written over or through.
+        # 0600 because the file is where PLEX_TOKEN goes.
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            # the link first: isdir and isfile look through it
+            _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
+                     else 'a file' if os.path.isfile(target) else 'something else')
+            err("00165", f"refusing to write the config: {target} exists ({_kind})")
+        except OSError as e:
+            err("00166", f"cannot create the config {target}: {e.strerror}")
+        try:
+            os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
+            with os.fdopen(fd, 'w') as f:
+                f.write(config_content)
+        except OSError as e:
+            os.unlink(target)  # created by this run a moment ago: no half config left
+            err("00167", f"cannot write the config {target}: {e.strerror}")
+        print(f"Created config file: {target} (mode 0600)")
+        print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
+        sys.exit(0)
+
+    # Load configuration file
+    loaded_config = load_config_file(config_args.config_file)
+
+    # A file named with --config is the file for every my-plex this run
+    # starts too -- a pipeline's phases -- through the variable they inherit,
+    # so no phase reads the site config and yours; a phase that names its own
+    # config still reads that one.  Never from the suite itself: the file
+    # named for it is not the file of the runs each test starts.
+    _source, _path = config_search_paths(config_args.config_file)[0]
+    if _source == '--config' and not _SUITE_RUN:
+        os.environ[CONFIG_INHERITED_ENV] = os.path.abspath(_path)
+
+    # Bare --config: the files read, then each key they set and where from.
+    if _print_current_config and not _asking_help:
+        if not CONFIG_RECORD['files']:
+            print(no_config_offer(), file=sys.stderr)
+            sys.exit(1)
+        print(config_report(loaded_config, config_args.config_file))
+        sys.exit(0)
+
+    if DEEPDBG:
+        print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
+
+    # Apply config values (config file overrides defaults, command-line will override config file)
+    for key in CONFIG_DEFAULTS:
+        try:
+            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+
+            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+                if value and not str(value).startswith('< PLEASE CONFIGURE'):
+                    globals()[key] = value
+                    if DEEPDBG and key in loaded_config:
+                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
+                continue
+
+            # For other config values, apply normally
+            globals()[key] = value
+            if DEEPDBG and key in loaded_config:
+                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
+        except Exception as e:
+            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
+    # Validate DISK_PLEX_MAP.  Empty config validates trivially.
+    _dpm_errors = validate_disk_plex_map(globals().get('DISK_PLEX_MAP', {}))
+    if _dpm_errors:
+        print("ERROR: invalid DISK_PLEX_MAP configuration:", file=sys.stderr)
+        for _e in _dpm_errors:
+            print(f"  {_e}", file=sys.stderr)
+        sys.exit(1)
+
+    refuse_legacy_keys(loaded_config)
+
+    # Re-derive values that are computed from config keys (not set directly by name in globals).
+    # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
+    # so they must be recomputed here after the config file values have been applied.
+    global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
+    _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.5})
+    _c = []
+    if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
+    if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
+    REENCODE_THRESHOLD_MBPS    = min(_c) if _c else 2.0
+    ONDISK_LABEL_START_MARKER  = globals().get('ONDISK_LABEL_START_MARKER', '[')
+    ONDISK_LABEL_END_MARKER    = globals().get('ONDISK_LABEL_END_MARKER',   ']')
+    PROBLEMS2DISK              = globals().get('PROBLEMS2DISK', {})
+
+    # The config is read before the argv is normalised, because the cache it
+    # names knows which bare word is a library -- and applying it just reset
+    # -V / -D to their defaults, which the normalisation prints under.
+    _verbosity_from_argv()
 
     # Normalize key:value filter tokens → translate to existing flags or collect filter expressions.
     # Handles: type:movie  lang:de  watched:no  resolution:1080p  codec:h265  year>2015  etc.
@@ -44557,18 +44726,6 @@ def main():
                             '--set-view-offset', '--set-user-rating',
                             '--remove', '--rm',                  # VERSIONS: '1,3' must not become 'ALL'
                             '--unrecognized', '--alien'}         # its value is re-injected as the scope
-            # v2.1: a bare token that matches a library name is normally
-            # treated as a SCOPE (library scope).  EXCEPT when the user
-            # has ALSO written an explicit `library:NAME` somewhere — that
-            # signals "I'm using library: explicitly, treat the rest as
-            # title-search even if they look like library names".
-            _is_library_name = (arg in PLEX_Media.OBJ_BY_LIBRARY) and not _explicit_library_used
-            # Library-shaped names (lib4 / lib5 / lib1) also
-            # bypass the search heuristic UNLESS explicit library: is used.
-            _is_library_shaped = (
-                arg.startswith(',') or
-                bool(re.match(r'^(?:movies?|series|shows?|music|photos?|collections?)\.\w', arg, re.IGNORECASE))
-            ) and not _explicit_library_used
             # `+field` (e.g. +library / +year) is a display-only column
             # marker — pass through to the compound filter parser, never
             # treat as a title search.
@@ -44578,14 +44735,18 @@ def main():
                 if DBG: print(f" ~~~ Display column '{arg}' → filter atom", file=sys.stderr)
                 _i += 1
                 continue
+            # A bare word that names a library of the cache is that library's
+            # scope -- unless an explicit `library:NAME` is written anywhere:
+            # then the rest is title search, even a library's name.  Asked
+            # last, so the cache file is read only for a word that would
+            # otherwise be searched.
             _is_search = (not arg.startswith(('-', '/'))
                           and ':' not in arg
                           and ' ' not in arg  # multi-word quoted strings are scope, not search
-                          and not _is_library_shaped
                           and not re.match(r'^\d+$', arg)  # bare number = potential Plex ID
                           and arg not in ('--', 'all', 'ALL')
-                          and not _is_library_name
-                          and _prev_arg not in _VALUE_FLAGS)  # skip values of --type, --info, etc.
+                          and _prev_arg not in _VALUE_FLAGS  # skip values of --type, --info, etc.
+                          and (_explicit_library_used or not is_library_name(arg)))
             if _is_search and not arg.startswith('-'):
                 # v2.56: avoid double-prefix when user already typed `title~…`.
                 _filter_exprs.append(arg if arg.startswith(('title~','title:','title=','originaltitle~','originaltitle:','originaltitle=','~')) else f"title~{arg}")
@@ -44693,140 +44854,6 @@ def main():
                 has_list = True
                 if DBG: print(f" ~~~ Injected --list before filter expr '{_fa}': {_redact_argv(sys.argv)}", file=sys.stderr)
             break  # only check first positional arg
-
-    # Early argument parsing for --config / --config-file / --create-config options
-    _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
-    _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
-    # `--create` (`--create=FILE`) is gone: named before anything runs -- the
-    # config its old twin --config-file names is not read first.
-    _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
-    if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
-        err("00164", "Invalid flag '--create'." + _flag_hint('--create'))
-    # No abbreviations, as in every other parser of the tool: here a prefix of
-    # --create-config ('--creat FILE') would write a config nobody asked for.
-    config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config).")
-    config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
-    config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link.")
-    config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
-    config_args, _ = config_parser.parse_known_args()
-    if getattr(config_args, 'print_problem_categories_md', False):
-        _emit_problem_categories_markdown()
-        sys.exit(0)
-
-    # Resolve --config: with FILE behaves like --config-file; bare --config triggers print-current after load.
-    _print_current_config = False
-    if config_args.config is not None:
-        if config_args.config == _CFG_PRINT_SENTINEL:
-            _print_current_config = True
-        else:
-            if config_args.config_file and config_args.config_file != config_args.config:
-                print(f"Error: --config and --config-file both given with different paths", file=sys.stderr)
-                sys.exit(1)
-            config_args.config_file = config_args.config
-
-    # If user is asking for help, defer all early-exit config actions to the help dispatcher.
-    _asking_help = ('--help' in sys.argv) or ('-h' in sys.argv) or ('-H' in sys.argv)
-
-    # Handle --create-config (new flag, takes optional FILE)
-    if not _asking_help and config_args.create_config is not None:
-        config_content = generate_default_config()
-        if config_args.create_config == _CREATE_STDOUT_SENTINEL:
-            sys.stdout.write(config_content)
-            sys.exit(0)
-        target = os.path.expanduser(config_args.create_config)
-        # One step that creates or fails: O_EXCL refuses anything already at
-        # the path, a link included, so nothing is written over or through.
-        # 0600 because the file is where PLEX_TOKEN goes.
-        try:
-            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            # the link first: isdir and isfile look through it
-            _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
-                     else 'a file' if os.path.isfile(target) else 'something else')
-            err("00165", f"refusing to write the config: {target} exists ({_kind})")
-        except OSError as e:
-            err("00166", f"cannot create the config {target}: {e.strerror}")
-        try:
-            os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
-            with os.fdopen(fd, 'w') as f:
-                f.write(config_content)
-        except OSError as e:
-            os.unlink(target)  # created by this run a moment ago: no half config left
-            err("00167", f"cannot write the config {target}: {e.strerror}")
-        print(f"Created config file: {target} (mode 0600)")
-        print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
-        sys.exit(0)
-
-    # Load configuration file
-    loaded_config = load_config_file(config_args.config_file)
-
-    # A file named with --config is the file for every my-plex this run
-    # starts too -- a pipeline's phases -- through the variable they inherit,
-    # so no phase reads the site config and yours; a phase that names its own
-    # config still reads that one.  Never from the suite itself: the file
-    # named for it is not the file of the runs each test starts.
-    _source, _path = config_search_paths(config_args.config_file)[0]
-    if _source == '--config' and not _SUITE_RUN:
-        os.environ[CONFIG_INHERITED_ENV] = os.path.abspath(_path)
-
-    # Bare --config: the files read, then each key they set and where from.
-    if _print_current_config and not _asking_help:
-        if not CONFIG_RECORD['files']:
-            print(no_config_offer(), file=sys.stderr)
-            sys.exit(1)
-        print(config_report(loaded_config, config_args.config_file))
-        sys.exit(0)
-
-    if DEEPDBG:
-        print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
-
-    # Apply config values (config file overrides defaults, command-line will override config file)
-    for key in CONFIG_DEFAULTS:
-        try:
-            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
-
-            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
-            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
-                if value and not str(value).startswith('< PLEASE CONFIGURE'):
-                    globals()[key] = value
-                    if DEEPDBG and key in loaded_config:
-                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-                continue
-
-            # For other config values, apply normally
-            globals()[key] = value
-            if DEEPDBG and key in loaded_config:
-                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-        except Exception as e:
-            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
-
-    # Validate DISK_PLEX_MAP.  Empty config validates trivially.
-    _dpm_errors = validate_disk_plex_map(globals().get('DISK_PLEX_MAP', {}))
-    if _dpm_errors:
-        print("ERROR: invalid DISK_PLEX_MAP configuration:", file=sys.stderr)
-        for _e in _dpm_errors:
-            print(f"  {_e}", file=sys.stderr)
-        sys.exit(1)
-
-    refuse_legacy_keys(loaded_config)
-
-    # Re-derive values that are computed from config keys (not set directly by name in globals).
-    # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,
-    # so they must be recomputed here after the config file values have been applied.
-    global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
-    _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.5})
-    _c = []
-    if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
-    if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
-    REENCODE_THRESHOLD_MBPS    = min(_c) if _c else 2.0
-    ONDISK_LABEL_START_MARKER  = globals().get('ONDISK_LABEL_START_MARKER', '[')
-    ONDISK_LABEL_END_MARKER    = globals().get('ONDISK_LABEL_END_MARKER',   ']')
-    PROBLEMS2DISK              = globals().get('PROBLEMS2DISK', {})
 
     # --complete genres / --complete labels: fast cache query for zsh tab-completion.
     # Must run after config so CACHE_FILE is resolved. Prints one value per line, exits.

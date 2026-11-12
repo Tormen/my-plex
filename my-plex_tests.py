@@ -4179,14 +4179,7 @@ class TestDefaultScope(unittest.TestCase):
         self.assertIn('SCOPE', result.stdout,
             "--help scope must show scope help page")
 
-    def test_cat_d_skips_library_names(self):
-        """Library-shaped names (movies.X / series.X / ,unsorted) must NOT trigger Cat-D title search."""
-        src = self._read_script()
-        # v2.1: the heuristic moved into a named helper variable.
-        self.assertIn("_is_library_shaped", src,
-            "Cat-D must skip library-shaped names via the _is_library_shaped check")
-        self.assertIn("movies?|series|shows?", src,
-            "Cat-D must check the library-name regex")
+    # A bare library name is a scope, not a title search: TestBareLibraryScope.
 
     # --- Negative Cat-C: -field removes columns ---
 
@@ -9778,7 +9771,8 @@ class TestCompoundFilter(unittest.TestCase):
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
-        self.assertIn("PLEX_Media.OBJ_BY_LIBRARY", body)
+        # the one owner of "is this word a library", as the argv normaliser asks it
+        self.assertIn("is_library_name(atom)", body)
         self.assertIn("library:", body)
 
     def test_argv_pass_through_operators(self):
@@ -12282,6 +12276,93 @@ class TestArgvValueFlags(unittest.TestCase):
         self.assertNotIn(secret, out)
         out = self._probe('--plex-xml-url', f'https://h:32400/library/metadata/1?X-Plex-Token={secret}')
         self.assertNotIn(secret, out)
+
+
+class TestBareLibraryScope(unittest.TestCase):
+    """A bare word that names a library of the cache is that library's scope,
+    whatever the library is called; any other bare word is a title search.
+
+    The fixture library with its German library renamed 'Kids' -- a name shaped
+    like a word, not like `movies.X`.  Argv is read before the cache is loaded,
+    so a check against the loaded cache there knows no library at all, and a
+    name could only be recognised by its shape: `Kids` became `title~Kids` and
+    printed "No items match the filter." while `library:Kids` listed it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import atexit
+        src = os.path.dirname(_fixture_conf())
+        d = tempfile.mkdtemp(prefix='my-plex-kids-')
+        atexit.register(shutil.rmtree, d, True)
+
+        def renamed(o: Any) -> Any:
+            if isinstance(o, dict):
+                return {renamed(k): renamed(v) for k, v in o.items()}
+            if isinstance(o, list):
+                return [renamed(x) for x in o]
+            if isinstance(o, str):
+                return o.replace('library_de', 'Kids')
+            return o
+        with open(os.path.join(src, 'cache.pkl'), 'rb') as f:
+            cache = renamed(pickle.load(f))
+        assert 'Kids' in cache['obj_by_library'], "the fixture has no library_de to rename"
+        with open(os.path.join(d, 'cache.pkl'), 'wb') as f:
+            pickle.dump(cache, f)
+        with open(os.path.join(src, 'my-plex.conf')) as f:
+            conf = f.read().replace(src, d)
+        cls._conf = os.path.join(d, 'my-plex.conf')
+        with open(cls._conf, 'w') as f:
+            f.write(conf)
+        # the same config with no cache behind it
+        cls._conf_no_cache = os.path.join(d, 'no-cache.conf')
+        with open(cls._conf_no_cache, 'w') as f:
+            f.write(conf.replace(os.path.join(d, 'cache.pkl'), os.path.join(d, 'absent', 'cache.pkl')))
+
+    def _run(self, *args, conf=None):
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', conf or self._conf, *args],
+                           capture_output=True, text=True, timeout=E2E_TIMEOUT)
+        return r, r.stdout + r.stderr
+
+    def test_the_explicit_scope_lists_the_library(self):
+        """The control: the fixture's renamed library is there, and listed."""
+        r, out = self._run('library:Kids')
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn('Irgendein Film', out)
+
+    def test_a_library_named_like_a_word_is_a_scope(self):
+        r, out = self._run('Kids')
+        self.assertEqual(r.returncode, 0, out)
+        self.assertNotIn('No items match', out, "the library name was taken for a title search")
+        self.assertIn('Irgendein Film', out)
+        self.assertNotIn('Some Movie', out, "a title of another library was listed")
+
+    def test_a_bare_library_name_is_a_scope_beside_a_filter(self):
+        r, out = self._run('Kids', 'year>2000')
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn('Irgendein Film', out)
+        self.assertNotIn('Some Movie', out)
+
+    def test_a_word_that_is_no_library_stays_a_title_search(self):
+        r, out = self._run('Irgendein')
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn('Irgendein Film', out)
+        self.assertNotIn('Some Movie', out)
+        r, out = self._run('Some')
+        self.assertIn('Some Movie', out)
+        self.assertNotIn('Irgendein Film', out)
+
+    def test_an_explicit_library_scope_makes_a_library_name_a_title_search(self):
+        """`library:NAME` anywhere: every other bare word is searched, as --help scope says."""
+        r, out = self._run('-D', 'library:library1', 'Kids')
+        self.assertIn("Search token 'Kids'", out, "'Kids' was not searched in the titles")
+        self.assertNotIn('Irgendein Film', out)
+        self.assertNotIn('Some Movie', out, "'Kids' was not searched in the titles of library1")
+
+    def test_with_no_cache_a_bare_word_is_still_read(self):
+        """No cache file: no library is known, the word is a title search, nothing crashes."""
+        r, out = self._run('-D', 'Kids', conf=self._conf_no_cache)
+        self.assertNotIn('Traceback', out)
+        self.assertIn("Search token 'Kids'", out)
 
 
 class TestTypeCheck(unittest.TestCase):
@@ -15800,7 +15881,7 @@ _UNITTEST_SCOPES = {
     'renumber':   [TestRenumber],
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
-    'scope':              [TestUniversalScope, TestArgvValueFlags],
+    'scope':              [TestUniversalScope, TestArgvValueFlags, TestBareLibraryScope],
     'unrecognized':       [TestUnrecognized],
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
