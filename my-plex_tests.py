@@ -6987,12 +6987,88 @@ class TestJunk(unittest.TestCase):
         self.assertIn('--junk --resolve', reg,
             "registry 'junk' fix hint must point to --junk --resolve")
 
+    # The Plex server's files, as the junk walk's remote `find ... -exec stat
+    # -f "%z %N"` prints them -- SIZE, one space, PATH -- under the fixture
+    # library's three roots.  The paths carry spaces, as real ones do.
+    # JUNK: one per default pattern it hits.  NOT junk: the three videos --
+    # one in a FOLDER whose name the 'samples' regexp matches, because a
+    # pattern judges the file's name, never its folder's.
+    _JUNK = (('sidecars', '/lib/library1/Some Movie (2001)/Some Movie (2001).nfo'),
+             ('samples',  '/lib/library_de/Irgendein Film (2010)/sample-irgendein.film.mkv'),
+             ('os_index', '/lib/library_fr/Une Serie/S01/Thumbs.db'))
+    _NOT_JUNK = ('/lib/library1/Some Movie (2001)/some.movie.2001.mkv',
+                 '/lib/library1/Free-Sample-Story (2004)/free.story.2004.mkv',
+                 '/lib/library_fr/Une Serie/S01/une.serie.s01e01.mkv')
+    _ROOTS = ('/lib/library1', '/lib/library_de', '/lib/library_fr')
+
+    @classmethod
+    def setUpClass(cls):
+        """The fixture library and a config of its own, whose Plex server is
+        an ssh alias that only the suite's fake ssh answers -- so --junk runs
+        its remote walk, and reaches no real host."""
+        cls.d = tempfile.mkdtemp(prefix='my-plex-junk-')
+        cls.conf = _fixture_library(cls.d)
+        ssh_config = os.path.join(cls.d, 'ssh_config')
+        open(ssh_config, 'w').close()
+        with open(cls.conf, 'a') as f:
+            f.write("PLEX_DB_REMOTE_HOST = 'fixture-server'\n")
+            f.write(f"SSH_CONFIG_FILE = {ssh_config!r}\n")
+        sizes = {'.nfo': 4096, '.db': 6144}
+        cls.listing = os.path.join(cls.d, 'server-files')
+        with open(cls.listing, 'w') as f:
+            for fp in [fp for _p, fp in cls._JUNK] + list(cls._NOT_JUNK):
+                f.write(f"{sizes.get(os.path.splitext(fp)[1], 1572864000)} {fp}\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, True)
+
+    def _junk(self, *argv):
+        """`my-plex --junk ARGV` against the fixture; returns the run and the
+        ssh command lines it started."""
+        log = os.path.join(self.d, 'ssh.log')
+        if os.path.exists(log):
+            os.remove(log)
+        r = subprocess.run([MAIN_SCRIPT, '--config', self.conf, '--junk', *argv],
+                           capture_output=True, text=True, timeout=E2E_TIMEOUT,
+                           env=_fake_ssh_env(find_listing=self.listing, log=log))
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        return r, calls
+
     def test_e2e_runs(self):
-        """--junk must run without error."""
-        result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--junk'],
-            capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, f"--junk failed: {result.stderr}")
+        """--junk walks every library root on the Plex server, over ssh, and
+        counts what it found: exit 0, one walk per pattern and root, all of
+        them to the configured host."""
+        r, calls = self._junk()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn(f"{len(self._JUNK)} junk file(s) found across {len(self._ROOTS)} root(s).",
+                      r.stdout, out[-1500:])
+        walked = sorted({_must(re.search(r'find "([^"]+)"', c), c).group(1) for c in calls})
+        self.assertEqual(walked, sorted(self._ROOTS), calls)
+        self.assertTrue(all(' fixture-server find "' in c for c in calls), calls)
+
+    def test_a_junk_file_in_the_listing_is_reported(self):
+        """Each junk file the server lists is counted under its pattern, and
+        -V names it -- a path with spaces whole, as the listing gave it."""
+        r, _calls = self._junk('-V')
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        for pattern, fp in self._JUNK:
+            with self.subTest(fp=fp):
+                self.assertRegex(r.stdout, rf"(?m)^\s+1\s+{pattern}\s", out[-1500:])
+                self.assertRegex(r.stdout, rf"(?m)^\s+{pattern}\s.*\s{re.escape(fp)}$", out[-1500:])
+
+    def test_a_non_junk_file_is_not_reported(self):
+        """A file no pattern matches stays out of the report -- the video in
+        a folder named like a sample too: the regexp judges the file NAME."""
+        r, _calls = self._junk('-V')
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn(f"{len(self._JUNK)} junk file(s) found", r.stdout, out[-1500:])
+        for fp in self._NOT_JUNK:
+            with self.subTest(fp=fp):
+                self.assertNotIn(fp, r.stdout)
 
     def test_pattern_criteria_use_and_semantics(self):
         """When a JUNK_PATTERNS entry sets BOTH regex and size, they must AND-combine.
@@ -14146,12 +14222,17 @@ class TestReadmeFlagsExist(unittest.TestCase):
 
 _FAKE_SSH_DIR = None
 
-def _fake_ssh_env(login_rc=0):
+def _fake_ssh_env(login_rc=0, find_listing=None, log=None):
     """An environment whose `ssh` answers -G with the REAL ssh -- it reads a
     config and connects to nothing -- and a login with LOGIN_RC, so an
     --install test reaches no host.  Its config file is the test's own
     (SSH_CONFIG_FILE, see _install_lines), so the real ~/.ssh is never read
-    or written."""
+    or written.
+
+    FIND_LISTING is a file of the server's files as `find ... -exec stat -f
+    "%z %N"` prints them (SIZE PATH): a remote `find "ROOT" ...` is answered
+    with its lines under ROOT.  LOG gets one line per ssh started, its
+    arguments as given."""
     global _FAKE_SSH_DIR
     if _FAKE_SSH_DIR is None:
         real = shutil.which('ssh') or '/usr/bin/ssh'
@@ -14163,9 +14244,20 @@ def _fake_ssh_env(login_rc=0):
             f.write("#!/bin/dash\n"
                     "# -G only prints the effective config: the real ssh does that\n"
                     f'case " $* " in *" -G "*) exec {real} "$@";; esac\n'
+                    '[ -z "${FAKE_SSH_LOG:-}" ] || printf \'%s\\n\' "$*" >> "$FAKE_SSH_LOG"\n'
+                    '# the remote command is the last argument\n'
+                    'for cmd do :; done\n'
+                    'if [ -n "${FAKE_SSH_FIND_LISTING:-}" ]; then\n'
+                    '  case $cmd in \'find "\'*)\n'
+                    '    root=${cmd#find \\"}; root=${root%%\\"*}\n'
+                    '    ROOT="$root/" awk \'index(substr($0, index($0, " ") + 1), ENVIRON["ROOT"]) == 1\' \\\n'
+                    '      "$FAKE_SSH_FIND_LISTING";;\n'
+                    '  esac\n'
+                    'fi\n'
                     'exit "${FAKE_SSH_LOGIN_RC:-0}"\n')
         os.chmod(stub, 0o755)
     return dict(os.environ, PYTHONDONTWRITEBYTECODE='1', FAKE_SSH_LOGIN_RC=str(login_rc),
+                FAKE_SSH_FIND_LISTING=find_listing or '', FAKE_SSH_LOG=log or '',
                 PATH=_FAKE_SSH_DIR + os.pathsep + os.environ.get('PATH', ''))
 
 
