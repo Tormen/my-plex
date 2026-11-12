@@ -12705,10 +12705,56 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
             self.assertEqual(c.returncode, 0, c.stderr)
             r = run(sys.executable, launcher)
             self.assertNotIn('no bytecode', r.stderr, "the copy has its bytecode, and still said so")
-            r = run(sys.executable, MAIN_SCRIPT)
+            # A checkout this test lays out itself: MAIN_SCRIPT is one only
+            # by accident -- run from a deployed copy, it IS that copy.
+            checkout = _tool_copy(os.path.join(d, 'checkout'))
+            r = run(sys.executable, checkout)
+            self.assertEqual(r.returncode, 0, r.stderr[-600:])
             self.assertNotIn('no bytecode', r.stderr, "a checkout is no deployed copy")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_its_own_suite_passes_the_root_and_bytecode_tests_from_there(self):
+        """my-rollout's gate runs a PENDING COPY's own suite, so every test
+        must pass when the suite is lib/my-plex/my-plex_tests.py and the
+        launcher bin/my-plex -- not only from a checkout.  Two did not, and
+        each was right in a checkout by accident:
+
+          - _run_print_only's default script was bound to MAIN_SCRIPT when
+            the suite was LOADED, before the tool set MAIN_SCRIPT to its
+            launcher, so from a copy four root tests ran lib/my-plex/my-plex,
+            which does not exist;
+          - the bytecode test's "a checkout says nothing" leg ran MAIN_SCRIPT,
+            which from a copy with no bytecode is that copy, and says so.
+
+        One test of each, run from this class's copy -- with no bytecode, the
+        state the second one needs to show itself."""
+        for title in ('test_as_root_a_print_only_run_writes_nothing_into_home',
+                      'test_a_deployed_copy_with_no_bytecode_says_so_in_one_line'):
+            r = subprocess.run([sys.executable, '-B', self.copy, '--run-tests', title],
+                               capture_output=True, text=True, timeout=300,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            out = r.stdout + r.stderr
+            self.assertRegex(out, r'(?m)^1\.\.1$', f"{title}: not run alone:\n{out[-800:]}")
+            self.assertEqual(r.returncode, 0, f"{title} fails from a deployed copy:\n{out[-1500:]}")
+
+    def test_no_parameter_default_holds_where_the_tool_is(self):
+        """A parameter default is evaluated ONCE, when the suite is loaded --
+        and the tool sets MAIN_SCRIPT, TOOL_SOURCE and BOOT_SOURCE only after
+        that.  So a default naming one of them keeps the checkout fallback
+        for good: right in a checkout, wrong in a deployed copy.  Read them
+        in the body instead (`script = script or MAIN_SCRIPT`)."""
+        owners = {'MAIN_SCRIPT', 'TOOL_SOURCE', 'BOOT_SOURCE'}
+        with open(os.path.realpath(__file__)) as f:
+            tree = ast.parse(f.read())
+        leaks: 'list[str]' = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                defaults = node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+                leaks += [f"line {node.lineno}: {n.id}" for d in defaults
+                          for n in ast.walk(d) if isinstance(n, ast.Name) and n.id in owners]
+        self.assertEqual(leaks, [], "a parameter default binds the checkout's path at load time:\n  "
+                         + "\n  ".join(leaks))
 
     def test_only_main_script_knows_where_the_tool_is(self):
         """MAIN_SCRIPT, TOOL_SOURCE and BOOT_SOURCE are the one owner of
@@ -14332,7 +14378,10 @@ class TestNeverRunsAsRoot(unittest.TestCase):
 
     def _run_print_only(self, home: str, argv: list[str], as_root: bool,
                         base_env: dict[str, str] | None = None,
-                        script: str = MAIN_SCRIPT) -> 'subprocess.CompletedProcess[str]':
+                        script: str | None = None) -> 'subprocess.CompletedProcess[str]':
+        # Read here, not as the default: the tool sets MAIN_SCRIPT after the
+        # suite is loaded, and a default would keep the checkout's fallback.
+        script = script or MAIN_SCRIPT
         env = dict(base_env if base_env is not None else os.environ,
                    HOME=home, PYTHONDONTWRITEBYTECODE='1')
         env.pop('MY_PLEX_TEST_EUID', None)
