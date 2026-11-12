@@ -4367,12 +4367,15 @@ def _install_ssh_entry(remote):
         err("00030", f"after writing, ssh still resolves {alias!r} to"
                      f" {got['user']}@{got['hostname']}:{got['port']}, not {user}@{host}:{port} --"
                      f" something earlier in {conf} answers first")
-    if ident and eff.get('identityfile') != _ssh_path(ident):
-        err("00031", f"after writing, ssh offers {eff.get('identityfile') or 'no key'} first for"
+    # `ssh -G` prints an IdentityFile as written -- `~` unexpanded -- so both
+    # sides are expanded the way ssh expands them before they are compared
+    offered = _ssh_path(eff.get('identityfile') or '')
+    if ident and offered != _ssh_path(ident):
+        err("00031", f"after writing, ssh offers {offered or 'no key'} first for"
                      f" {alias!r}, not {_ssh_path(ident)} (PLEX_DB_REMOTE_IDENTITY) -- an IdentityFile"
                      f" earlier in {conf} answers first")
     print(f"    > ssh -G {alias}: {got['user']}@{got['hostname']} port {got['port']}"
-          + (f", key {eff.get('identityfile')}" if ident else "")
+          + (f", key {offered}" if ident else "")
           + ("   [nothing written]" if outcome == 'unchanged' else ""))
 
     import subprocess

@@ -14906,6 +14906,20 @@ class TestInstallSshEntry(unittest.TestCase):
         r2 = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
         self.assertIn('ssh Host entry unchanged', r2.stdout, r2.stdout[-800:])
 
+    def test_a_key_named_with_tilde_is_the_same_key_ssh_offers(self):
+        """macado, 2026-11-12 15:20: the site value is '~/.ssh/keys.mine/
+        ada,id_rsa', and `ssh -G` prints an IdentityFile AS WRITTEN -- `~`
+        unexpanded -- so a check comparing it with the expanded path called
+        one file two answers and failed a login that worked.  The key here
+        is named through `~` and `..` into the test's own directory, so ssh
+        prints the same unexpanded form and the real home holds nothing."""
+        import pwd
+        k = self.key()
+        tilde = '~/' + os.path.relpath(k, pwd.getpwuid(os.getuid()).pw_dir)
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {tilde!r}\n")
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        self.assertIn(f"IdentityFile {tilde}", self.read(self.ours))
+
     def test_the_identity_is_a_site_key(self):
         main_mod = _main_module()
         self.assertIn('PLEX_DB_REMOTE_IDENTITY', main_mod.SITE_ONLY_KEYS)
