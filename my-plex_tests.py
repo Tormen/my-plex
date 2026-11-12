@@ -39,11 +39,11 @@ TOOL_SOURCE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my_plex
 BOOT_SOURCE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my_plex_boot.py')
 
 # No README beside a DEPLOYED copy: that is bin/my-plex, and the suite beside
-# it is lib/my-plex_tests.py.  "Absent" is therefore a real answer -- but it
-# was given twice, differently, by the two tests that read the README: one
-# opened it outright (so it ERRORED on a copy) and one caught the
-# FileNotFoundError and skipped (so it asserted nothing there, quietly).  One
-# owner answers it once, and TestReadmeIsFound keeps the skip honest by
+# its modules is lib/my-plex/my-plex_tests.py.  "Absent" is therefore a real
+# answer -- but it was given twice, differently, by the two tests that read
+# the README: one opened it outright (so it ERRORED on a copy) and one caught
+# the FileNotFoundError and skipped (so it asserted nothing there, quietly).
+# One owner answers it once, and TestReadmeIsFound keeps the skip honest by
 # failing if a CHECKOUT ever stops finding its own README.
 _NO_README = ("no README.md beside the tool or the suite -- a deployed copy; "
               "the README claims are a source-tree check")
