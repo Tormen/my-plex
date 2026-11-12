@@ -14244,11 +14244,65 @@ class TestCreateConfig(unittest.TestCase):
             r = self._run('--config-file', target, '--create')
             self.assertEqual(r.returncode, 1, r.stdout[-400:])
             self.assertRegex(r.stderr, r"ERROR \d{5} \[1\]: .*'--create'.*"
-                                       r"\n  You mean '--create-config FILE'\.")
+                                       r"\n  You mean '--create-config FILE'")
             self.assertEqual(r.stdout, '', "the old spelling printed something")
             self.assertEqual(os.listdir(d), [], "the old spelling wrote a file")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_near_miss_of_create_does_not_create_a_config(self):
+        """ADVERSARIAL: the early parser took any prefix of --create-config
+        as that flag, so '--create=FILE' and '--creat FILE' -- near misses
+        of the removed '--create' -- wrote a config and exited 0."""
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            for argv in ([f'--create={target}'], ['--creat', target], ['--create-con', target],
+                         ['--config-file', target, '--creat']):
+                with self.subTest(argv=argv):
+                    r = self._run(*argv)
+                    self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+                    self.assertNotIn('# my-plex configuration file', r.stdout,
+                                     "the template was printed")
+                    self.assertEqual(os.listdir(d), [], "a near miss wrote a file")
+            r = self._run(f'--create={target}')
+            self.assertRegex(r.stderr, r"'--create'.*\n  You mean '--create-config FILE'")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_hint_for_create_names_the_playlist_flag_too(self):
+        """--playlist's own help showed '--create <media1> <media2>' as the
+        example of --create-playlist; a user following it was told, with
+        confidence, that they meant a config-file flag."""
+        r = self._run('--playlist', 'P', '--create', 'm1', 'm2')
+        self.assertEqual(r.returncode, 1, r.stdout[-400:])
+        self.assertIn("'--create-playlist", r.stderr)
+        self.assertIn("'--create-config FILE'", r.stderr)
+        h = self._run('--help', 'playlist')
+        self.assertIn('--create-playlist', h.stdout)
+        self.assertNotRegex(h.stdout, r'Example: --create <',
+                            "the playlist help still gives '--create' as the example")
+
+    def test_a_directory_at_the_path_is_named_as_one(self):
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            r = self._run('--create-config', d)
+            self.assertEqual(r.returncode, 1, r.stdout[-400:])
+            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: .*\(a directory\)')
+            self.assertNotIn('a file or a link', r.stderr)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_readme_says_what_the_stdout_form_does(self):
+        """The README called `--create-config > FILE` 'Same via stdout' under
+        the FILE form's 'mode 0600, never over an existing file' -- but the
+        shell's redirect replaces an existing config and takes the umask."""
+        with open(os.path.join(os.path.dirname(MAIN_SCRIPT), 'README.md')) as f:
+            lines = [ln for ln in f if '--create-config >' in ln]
+        self.assertTrue(lines, "the README no longer shows the stdout form")
+        for ln in lines:
+            self.assertNotIn('Same', ln, ln)
+            self.assertIn('overwrites', ln, ln)
 
 
 class TestConfigLayers(unittest.TestCase):
@@ -14615,6 +14669,9 @@ class TestConfigLayers(unittest.TestCase):
         self.write('site.conf', states['site'])
         text = self.mp.no_config_offer()
         self.assertIn(f"> my-plex --create-config > {site_offer}   (linked there by a run)", text)
+        # Your own file is offered in the FILE form: created 0600 -- it is
+        # where PLEX_TOKEN goes -- where the redirect takes the umask.
+        self.assertIn(f"> my-plex --create-config {os.path.join(self.home, '.my-plex.conf')}\n", text)
         self.assertLess(text.index(site_offer), text.index(self.mp.SYSTEM_CONFIG_PATHS[0]),
                         "the site's place comes first")
 

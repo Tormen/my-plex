@@ -1197,7 +1197,10 @@ def no_config_offer() -> str:
     for p in config_offer_paths():
         note = (f"   ({site.config_offer_note})"
                 if site.config_offer_note and os.path.dirname(p) == site.config_offer_dir else "")
-        lines.append(f"    > my-plex --create-config > {p}{note}")
+        # Yours alone, and where PLEX_TOKEN goes: the FILE form creates it
+        # 0600; a shared file takes the redirect, readable by its group.
+        form = '' if p == os.path.join(_home(), '.my-plex.conf') else '> '
+        lines.append(f"    > my-plex --create-config {form}{p}{note}")
     lines.append("    (my-plex --help config: the full read order)")
     return "\n".join(lines)
 
@@ -3950,9 +3953,10 @@ def _redact_argv(argv: list[str]) -> list[str]:
             out.append(str(_redact('', a)))
     return out
 
-# A flag this tool used to have, and the one that replaced it.  Only so that
-# the old spelling is answered with the new name instead of "invalid flag":
-# the old name does not work, it is merely recognised.
+# A flag this tool used to have, and the one that replaced it -- or, where the
+# old spelling reads as more than one thing, each of them, separated by '|'.
+# Only so that the old spelling is answered with the new name instead of
+# "invalid flag": the old name does not work, it is merely recognised.
 _RENAMED_FLAGS = {
     '--test': '--run-tests',
     '--mv': '--mv-to',          # renamed in v1.20: the destination is the FIRST
@@ -3960,15 +3964,16 @@ _RENAMED_FLAGS = {
     # retired in v3, not renamed: the backfill it did runs at the tail of
     # every --update-cache now, which is what to run instead
     '--original-languages': '--update-cache',
-    # `--config-file FILE --create`: one file, one flag that names the action
-    '--create': '--create-config FILE',
+    # `--config-file FILE --create`: one file, one flag that names the action;
+    # and --playlist's help once gave '--create' as --create-playlist's example
+    '--create': '--create-config FILE|--create-playlist',
 }
 
 def _flag_hint(arg):
     """What to say after "Invalid flag ARG": the name that replaced it, or
     where to look."""
     if arg in _RENAMED_FLAGS:
-        return f"\n  You mean '{_RENAMED_FLAGS[arg]}'."
+        return "\n  You mean " + " or ".join(f"'{n}'" for n in _RENAMED_FLAGS[arg].split('|')) + "."
     return " Use --help to see available options."
 
 def _little_snitch_owner() -> str:
@@ -30224,7 +30229,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
     argparser._optionals.title = '// if PLEX_OBJECT is a playlist_name: Available <PLAYLIST_COMMAND>s' # argparse.SUPPRESS
     argparser.add_argument('--list', action='store_true', help="List all items in the playlist.")
     argparser.add_argument('--delete', action='store_true', help="Delete the specified playlist.")
-    argparser.add_argument('--create-playlist', nargs='+', help="Create a playlist. Example: --create <media1> <media2>...")
+    argparser.add_argument('--create-playlist', nargs='+', help="Create a playlist. Example: --create-playlist <media1> <media2>...")
     argparser.add_argument('--add-to', nargs='+', metavar='<MEDIA_ITEM>', help="Add <MEDIA_ITEM> to the specified playlist.")
     argparser.add_argument('--remove-from', nargs='+', metavar='<MEDIA_ITEM>', help="Remove <MEDIA_ITEM> from the specified playlist.")
 
@@ -33407,7 +33412,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex -C ~/alt-config.conf           # Use alternate config")
             print("  my-plex --create-config                # Print default config to stdout")
             print("  my-plex --create-config ~/.my-plex.conf  # Write default config to file (mode 0600)")
-            print("  my-plex --create-config > my.conf      # Pipe default config into a file")
+            print("  my-plex --create-config > my.conf      # The same template; the shell's redirect overwrites,")
+            print("                                         #   with the umask's mode")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -44684,12 +44690,14 @@ def main():
     # Early argument parsing for --config / --config-file / --create-config options
     _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
     _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
-    # `--create` is gone, and would otherwise be read below as an abbreviation
-    # of --create-config -- printing the template instead of naming the flag.
+    # `--create` (`--create=FILE`) is gone: named before anything runs -- the
+    # config its old twin --config-file names is not read first.
     _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
-    if '--create' in _before_dashdash:
+    if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
         err("00164", "Invalid flag '--create'." + _flag_hint('--create'))
-    config_parser = argparse.ArgumentParser(add_help=False)
+    # No abbreviations, as in every other parser of the tool: here a prefix of
+    # --create-config ('--creat FILE') would write a config nobody asked for.
+    config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config).")
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
@@ -44728,7 +44736,10 @@ def main():
         try:
             fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            err("00165", f"refusing to write the config: {target} exists (a file or a link)")
+            # the link first: isdir and isfile look through it
+            _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
+                     else 'a file' if os.path.isfile(target) else 'something else')
+            err("00165", f"refusing to write the config: {target} exists ({_kind})")
         except OSError as e:
             err("00166", f"cannot create the config {target}: {e.strerror}")
         try:
