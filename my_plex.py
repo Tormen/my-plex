@@ -1992,7 +1992,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # RUN_AS_USER: the user whose Plex this is -- `my-plex --install`, run as
 # root, writes the firewall rules for that user, removes only the denies that
 # user owns, and hands the rest of the install over to them.  Empty: the user who ran sudo; with neither, --install
-# as root stops and names this key.  SITE config only.  The default is empty;
+# as root stops and names this key.  Any spelling macOS accepts for the user
+# (another case, an alias) means that user, by its own name.  SITE config only.  The default is empty;
 # the value is an example.
 #
 # Example:
@@ -4088,7 +4089,12 @@ def _install_user() -> "tuple[str, str]":
     /var/root, which is what my-plex's refusal of root exists to prevent.
 
     No guess beyond SUDO_USER: under a rollout daemon no sudo is involved,
-    and the owner of /dev/console is whoever sits at the screen."""
+    and the owner of /dev/console is whoever sits at the screen.
+
+    The name returned is the user's CANONICAL one, never the spelling given:
+    macOS's getpwnam accepts any case and an alias RecordName, while
+    `my-little-snitch list` prints a rule's owner as the uid's own name -- so
+    the deny owner check, the rules' --owner and the drop all use that."""
     import pwd
     name = (RUN_AS_USER or '').strip()
     source = f"RUN_AS_USER, {_config_origin('RUN_AS_USER')}"
@@ -4106,7 +4112,9 @@ def _install_user() -> "tuple[str, str]":
     if pw.pw_uid == 0:
         err("00034", f"{source} names {name!r}, which is root -- the venv and ~/.ssh would land\n"
                      f"  in {pw.pw_dir}.  Name the user whose Plex this is.")
-    return name, source
+    if pw.pw_name != name:
+        source += f", spelled {name!r}"
+    return pw.pw_name, source
 
 
 def _deny_ids(listing: str, program: str, tail: "list[str]",
@@ -33660,7 +33668,8 @@ def main_print_help(args, remaining_args, main_parser):
             print('      may still stop my-plex')
             print('   3. the two rules per remote, owned by RUN_AS_USER (else the user')
             print('      who ran sudo; with neither, an ERROR) -- never root, who only')
-            print('      writes them')
+            print("      writes them -- under that user's own name, as the firewall")
+            print("      lists it (`ME` or an alias names user `me`)")
             print('   4. `su -l <that user>`: the rest runs as that user, in a fresh')
             print("      login with that user's HOME and PATH, given the config root")
             print('      read when one was named')

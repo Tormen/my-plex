@@ -14767,6 +14767,30 @@ class TestInstallAsRoot(_RootInstallCase):
         for rid in ('oth333', 'sub444'):
             self.assertNotIn(rid, run.r.stdout, "another user's deny does not stop my-plex's user")
 
+    def test_the_owner_is_the_user_not_how_RUN_AS_USER_spells_it(self):
+        """macOS's getpwnam accepts a user name in any case (and an alias
+        RecordName), while `my-little-snitch list` prints the owner as the
+        uid's canonical name.  RUN_AS_USER = 'NOBODY' is user nobody, so
+        nobody's deny goes -- compared as spelled, 'nobody' != 'NOBODY' and
+        the run said "none found" while that deny beat every allow written.
+        The rules and the drop name the canonical user too."""
+        import pwd
+        try:
+            canonical = pwd.getpwnam('NOBODY').pw_name
+        except KeyError:
+            self.skipTest("this system's user names are case-sensitive")
+        self.assertEqual(canonical, 'nobody')
+        py = self.listed_python()
+        run = self.run_root(conf_lines="RUN_AS_USER = 'NOBODY'\n",
+                            listing=f"own777\t{py}  deny  api.themoviedb.org  tcp/443  nobody\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('removed own777', run.calls, "\n".join(run.calls))
+        self.assertTrue(run.allows(), run.text())
+        for a in run.allows():
+            self.assertTrue(a.endswith('--owner nobody'), a)
+        self.assertIn('nobody', run.su, run.su)
+        self.assertNotIn('NOBODY', run.su, run.su)
+
     def test_a_firewall_tool_that_cannot_start_is_an_error_not_a_traceback(self):
         """LITTLE_SNITCH_CLI names a file that is there but cannot be run:
         an ERROR naming it, nothing handed over -- and no traceback."""

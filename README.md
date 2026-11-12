@@ -241,7 +241,9 @@ all, from the one list the rules are written from. In this order:
 3. **Two rules per remote**: one naming the program that connects -- Python,
    or `ssh` for the ssh endpoint -- and one for `any` process connecting via
    it. Each rule's **owner** is `RUN_AS_USER` from the site config, else the
-   user who ran sudo -- never root, who only writes them. With neither, or
+   user who ran sudo -- never root, who only writes them -- under that user's
+   own name, as the firewall lists it (`ME` or an alias names user `me`, and
+   its denies are `me`'s). With neither, or
    with a name that is root or no user of this machine, it is an ERROR.
 4. **The drop**: `su -l <that user>`, so the rest runs as that user in a
    fresh login -- that user's HOME and PATH, nothing of root's environment --
