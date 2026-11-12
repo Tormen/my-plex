@@ -10857,9 +10857,10 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
 
     def test_auto_refresh_gate_order(self):
         """_maybe_refresh_cache_for_state_changing_command must short-circuit
-        in this order: OFFLINE/READ_ONLY → cache mtime → scanned_at diff."""
+        in this order: OFFLINE/READ_ONLY/no PLEX_DB_PATH → cache mtime →
+        scanned_at diff."""
         src = self._read_script()
-        self.assertRegex(src, r"if OFFLINE or READ_ONLY_MODE:\s*\n\s*return False")
+        self.assertRegex(src, r"if OFFLINE or READ_ONLY_MODE or not PLEX_DB_PATH:\s*\n\s*return False")
         self.assertRegex(src, r"if _age < _AUTO_UPDATE_CACHE_MAX_AGE_S:\s*\n.*\n.*return False")
         self.assertRegex(src, r"changed\s*=\s*\[\]")
 
