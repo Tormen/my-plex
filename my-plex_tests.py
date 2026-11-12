@@ -15742,6 +15742,25 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(read_line, out, out)
         self.assertLess(out.index(skipped_line), out.index(read_line), out)
 
+    def test_a_dangling_names_real_twin_and_a_real_second_name_are_two_configs(self):
+        """ADVERSARIAL (#39 review): a dangling ~/.my-plex/my-plex.conf whose
+        .GLOBAL twin is real ends the search at that twin, and the check for
+        two different user files counted the plain names only -- so a real,
+        different ~/.my-plex.conf was neither read, nor named, nor refused."""
+        link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        os.symlink('../gone.conf', link)
+        twin = self.write('home/.my-plex/my-plex.conf.GLOBAL', "DEFAULT_SCOPE = 'twin'\n")
+        real = self.user("PLEX_DB_REMOTE_HOST = 'from-real-user-file'\n")
+        out = self.refused()
+        self.assertIn('two different user configs', out)
+        self.assertIn(twin, out)
+        self.assertIn(real, out)
+        # control: ~/.my-plex.conf linked to that twin is one config, read
+        os.unlink(real)
+        os.symlink(twin, real)
+        conf, err = self.load()
+        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'twin', err)
+
     def test_the_global_file_is_read_before_the_local_one(self):
         """Told by where the link points, not by the name: the farm may give
         the global file the plain name and the local one .GLOBAL never."""

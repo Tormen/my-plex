@@ -516,7 +516,7 @@ two, the later winning for a key both set:
    an error -- merge them into one.
 
 A name that is a link pointing nowhere is skipped, with a warning naming
-it, and does not end the search; its `.GLOBAL` twin is still read.
+it; the search goes on with its `.GLOBAL` twin, then the next name.
 
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The

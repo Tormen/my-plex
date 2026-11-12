@@ -1057,15 +1057,16 @@ def config_layers(config_file=None):
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
     alone, or the site files then the user's -- none in a test run.
 
-    A default name that is a dangling link does not end the search -- a
-    real file behind it, or its own .GLOBAL twin, is read -- and stays in
-    the list, in its place, for the loader to skip and name.
+    A default name that is a dangling link does not end the search -- its
+    own .GLOBAL twin, then the next name, is looked at -- and stays in the
+    list, in its place, for the loader to skip and name.
 
     Refuses here, where the search is decided, what no later step can
     repair: a NAMED file that is not there (no fallback -- a run pointed at
-    its own config must not read another one), and two different user files
-    (which one you edit is not for my-plex to guess).  A run that only
-    prints is never stopped by a config: it warns and goes on.
+    its own config must not read another one), and two different user files,
+    a dangling name's real .GLOBAL twin counting as its file (which one you
+    edit is not for my-plex to guess).  A run that only prints is never
+    stopped by a config: it warns and goes on.
     """
     search = config_search_paths(config_file)
     source, first = search[0]
@@ -1108,7 +1109,10 @@ def config_layers(config_file=None):
         return [('site', s) for s in site]
 
     users = [os.path.join(_home(), n) for n in USER_CONFIG_NAMES]
-    found = [u for u in users if os.path.exists(u)]
+    # A name's file is the name itself, or -- when it points nowhere -- its
+    # real .GLOBAL twin, which the search below reads in its place.
+    found = [p for u in users if os.path.lexists(u)
+             for p in [u if os.path.exists(u) else u + '.GLOBAL'] if os.path.exists(p)]
     distinct = {os.path.realpath(u) for u in found}
     if len(distinct) > 1:
         msg = ("two different user configs -- my-plex will not guess which one you edit:\n"
@@ -33432,7 +33436,7 @@ def main_print_help(args, remaining_args, main_parser):
                     print(f"       {_p}")
             print( "     two different files there are an ERROR: merge them into one.")
             print( "  A name that is a link pointing nowhere is skipped, with a warning")
-            print( "  naming it, and does not end the search; its .GLOBAL twin is still read.")
+            print( "  naming it; the search goes on with its .GLOBAL twin, then the next name.")
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
             print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
             print( "  every my-plex that run starts (a pipeline's phases): --config is")
