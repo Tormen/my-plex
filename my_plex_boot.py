@@ -104,8 +104,8 @@ def main(launcher: str) -> None:
             # The --install root hands over rebuilds a venv of another Python
             # minor: root has just written rules naming THIS python3, and to
             # the firewall another minor is another program.  Only that run:
-            # a user's own --install may yet be refused "needs root" -- after
-            # this point, by the tool -- and must not clear the venv first.
+            # a user's own --install writes no rule, so none names this
+            # python3, and it must not clear the venv.
             built_from = (_venv_minor() if install_asked(argv)
                           and os.environ.get(INSTALL_FROM_ROOT_ENV) == "1" else None)
             stale = built_from is not None and built_from != _this_minor()
@@ -419,9 +419,10 @@ def _bootstrap_venv(rebuilt_from: "str | None" = None):
 MIN_PYTHON = (3, 10)
 
 # Set in the command root hands over with, so the run as the user knows the
-# firewall half is done: there, a firewall tool that exists would otherwise
-# send it back to root ("--install needs root").  An environment variable
-# because `su -l` passes nothing else but the command line itself.
+# firewall half is done: without it, a firewall tool that exists means a
+# user's own --install, which writes the ssh half alone and says the rules
+# need root.  An environment variable because `su -l` passes nothing else but
+# the command line itself.
 INSTALL_FROM_ROOT_ENV = "MY_PLEX_INSTALL_FROM_ROOT"
 
 # What root's --install takes beside --install: the config to read, and -Q.
@@ -509,9 +510,10 @@ def _drop_to(user: str, launcher: str, config: "str | None") -> "NoReturn":
     try:
         os.execvp("su", ["su", "-l", user, "-c", line])
     except OSError as e:
-        # Not "run --install as that user": with the firewall tool there, the
-        # user's own --install is refused "needs root".  Root's again finds
-        # every rule already there and hands over.
+        # Not "run --install as that user": that run writes the ssh half but
+        # rebuilds no venv of another Python minor, as the run root hands
+        # over does.  Root's again finds every rule already there and hands
+        # over.
         err("00008", f"could not hand over to {user}: su: {e.strerror}\n"
                      f"  the firewall rules are written; the ssh half, as {user}, is not.\n"
                      f"  Once su runs here, run `my-plex --install` as root again: it finds\n"

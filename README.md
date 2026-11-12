@@ -215,7 +215,8 @@ beside it or in `../lib/my-plex/` -- says that in one line too.
 
 `--install` is the one my-plex command that runs as root. It does the one
 privileged thing, then hands over to an ordinary run as the user my-plex
-belongs to:
+belongs to (any other user runs `--install` as themselves, for the ssh
+`Host` entry alone):
 
 ```bash
 my-plex --install       # in a root shell, or a rollout step with `# user: root`
@@ -337,8 +338,12 @@ Python minor, saying so in one line: root has just written rules naming this
 defaults to `/LINKS/sbin/my-little-snitch` -- there is nothing for root to
 write: `--install` needs no root, runs as you, writes no rule, names the
 hosts to allow in whatever firewall you run, and writes the ssh `Host`
-entry. With it, a `--install` you start yourself is refused ("--install
-needs root"): `littlesnitch` refuses anyone but root, even to list.
+entry. With it, a `--install` you start yourself writes the ssh `Host` entry
+alone, says in one line on stderr that the firewall rules need root
+(`littlesnitch` refuses anyone but root, even to list; `my-plex --install`
+in a root shell writes them for `RUN_AS_USER`), and exits 0 when the entry
+is in place -- so a second user of the machine, whom root does not hand over
+to, gets the entry this way.
 
 **Which Python the rules name.** The fetches use `urllib.request`, so the
 interpreter opens the socket and is what a firewall sees. Root names the

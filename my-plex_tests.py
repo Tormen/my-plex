@@ -13979,10 +13979,10 @@ class TestVenvRebuildOnPythonMinor(unittest.TestCase):
 
     def test_a_users_own_install_rebuilds_nothing(self):
         """The rebuild is for the run ROOT hands over: there the rules naming
-        this python3 have just been written.  A user's own --install, where a
-        firewall tool exists, is refused "needs root" -- and the boot runs
-        before that refusal, so a rebuild there cleared the user's venv and
-        ran pip with no rule for the new Python, then said "needs root"."""
+        this python3 have just been written.  A user's own --install writes
+        no rule -- where a firewall tool exists, it says they need root -- so
+        a rebuild there cleared the user's venv and ran pip with no rule for
+        the new Python."""
         calls, stderr = self._boot(['my-plex', '--install'], '3.9', from_root=False)
         self.assertEqual(calls, [], f"a user's own --install rebuilt the venv:\n{stderr[-600:]}")
 
@@ -14280,22 +14280,45 @@ class TestInstallFirewallRules(unittest.TestCase):
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
         return d, conf, stub, sentinel
 
-    def test_with_the_firewall_tool_there_it_needs_root(self):
-        """#32: --install needs root exactly when LITTLE_SNITCH_CLI exists --
-        writing the rules is root's, and littlesnitch refuses anyone else even
-        to list.  It printed the root commands and exited 0 instead.
+    def test_with_the_firewall_tool_there_a_users_own_run_does_the_ssh_half(self):
+        """#44: with LITTLE_SNITCH_CLI there, a user's own --install was
+        refused "--install needs root" -- so a second local user, whom root
+        does not hand over to, could not get the ssh Host entry at all.  The
+        rules are root's to write (littlesnitch refuses anyone else even to
+        list); the ssh entry is the user's.  So this run writes the entry,
+        says in ONE line on stderr that the rules need root, and exits 0.
 
         Adversarial by construction: the firewall tool leaves a file behind if
-        it is ever run, and the refusal comes before anything is written."""
+        it is ever run, and a run that still refused writes no ssh config."""
         d, conf, stub, sentinel = self._sentinel_conf()
         try:
             r = self._run('--config', conf, '--install')
-            self.assertEqual(r.returncode, 1, r.stdout[-600:] + r.stderr[-600:])
-            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: --install needs root')
-            self.assertIn(stub, r.stderr, "the error does not say which file made root necessary")
+            self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
+            self.assertNotIn('ERROR', r.stderr, r.stderr[-600:])
+            self.assertTrue(os.path.exists(os.path.join(d, 'ssh', 'config')),
+                            "the ssh Host entry was not written")
             self.assertFalse(os.path.exists(sentinel), "it ran the firewall tool")
-            self.assertFalse(os.path.exists(os.path.join(d, 'ssh', 'config')),
-                             "it wrote the ssh Host entry before refusing")
+            said = [ln for ln in r.stderr.splitlines() if 'need root' in ln]
+            self.assertEqual(len(said), 1, f"not ONE line about root:\n{r.stderr[-600:]}")
+            for part in ('`my-plex --install` in a root shell', 'RUN_AS_USER', stub):
+                self.assertIn(part, said[0], f"the line does not name {part!r}: {said[0]}")
+            self.assertNotIn("root's half", r.stdout, "it claims root's half ran")
+            self.assertRegex(r.stdout, r'SUMMARY  --install: no firewall rule \(they need root\);'
+                                       r' ssh Host entry written')
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_with_the_firewall_tool_there_a_failed_login_still_fails(self):
+        """ADVERSARIAL to the test above: exit 0 is for an ssh half that
+        SUCCEEDED.  A run that turned the refusal into a plain exit 0 would
+        pass that test and report a failed login as done."""
+        d, conf, _stub, sentinel = self._sentinel_conf()
+        try:
+            r = subprocess.run([MAIN_SCRIPT, '--config', conf, '--install'], capture_output=True,
+                               text=True, timeout=120, env=_fake_ssh_env(login_rc=255))
+            self.assertNotEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
+            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: ', r.stderr[-600:])
+            self.assertFalse(os.path.exists(sentinel), "it ran the firewall tool")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -14310,7 +14333,7 @@ class TestInstallFirewallRules(unittest.TestCase):
                                text=True, timeout=120,
                                env=dict(_fake_ssh_env(), MY_PLEX_INSTALL_FROM_ROOT='1'))
             self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
-            self.assertNotIn('needs root', r.stderr)
+            self.assertNotIn('need root', r.stderr, "root's own hand-over said the rules need root")
             # This run cannot know whether root wrote a rule or found every
             # one already there -- a second run writes none -- so it claims
             # neither: it said "firewall rules written by root" after root's
@@ -14876,7 +14899,8 @@ class TestInstallAsRoot(_RootInstallCase):
     def test_when_su_cannot_start_the_advice_is_a_command_that_works(self):
         """No `su` on PATH: the drop fails after the rules are written.  The
         error told the user to run `my-plex --install` themselves -- which,
-        with the firewall tool there, is refused "--install needs root".
+        with the firewall tool there, was refused "--install needs root", and
+        since #44 writes the ssh half but rebuilds no venv of another minor.
         Root's own --install again is what works: its rules are found already
         there, and it hands over.  PATH here holds python3 and what the stub
         firewall tool runs, and no su -- so no real su is ever reached."""
