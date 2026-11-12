@@ -374,15 +374,17 @@ they set, with the layer that set it -- `-DD` names each key's file too:
 
 ```
 # config files read, in order -- for a key both set, the later wins:
-#   site   /LINKS/default/my-plex.conf -> /LINKS/global/etc/default/my-plex.conf
+#   site   /LINKS/default/my-plex.conf -> ../global/etc/default/my-plex.conf
 #   yours  /Users/you/.my-plex.conf
 PLEX_DB_REMOTE             = 'user@192.0.2.10'            (site)
 PLEX_XML_URL               = 'http://192.0.2.10:32400/library/sections?X-Plex-Token=<redacted>'   (yours)
 TMDB_API_KEY               = <redacted, 32 chars>         (yours)
 ```
 
-It never prints a secret: a secret-named key shows only its length, and the
-token in a URL is cut out.
+A link shows its own target, as `ls -l` does. A file the search chose but
+did not read says why, e.g. `(points nowhere -- not read)` for a dangling
+link. It never prints a secret: a secret-named key shows only its length, and
+the token in a URL is cut out, whatever its case.
 
 ```python
 # Required in the site config: the Plex server as you would ssh to it

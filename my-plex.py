@@ -1246,7 +1246,10 @@ def _config_must_stop(msg=''):
 
 # Which file set each config key, filled by load_config_file() -- the one
 # record --config, -DD and the error texts ask, so none of them guesses.
-CONFIG_RECORD = {'files': [], 'origin': {}}
+# 'skipped' holds the files config_layers() chose that were not read, each
+# with why: a dangling link, or (in a run that only prints) a file that
+# failed to run.
+CONFIG_RECORD = {'files': [], 'skipped': [], 'origin': {}}
 
 
 # Default configuration values
@@ -3114,10 +3117,12 @@ def load_config_file(config_file=None):
     ns = {k: copy.deepcopy(v) for k, v in CONFIG_DEFAULTS.items()}
     origin = {}
     files = []
+    skipped = []
     for layer, path in config_layers(config_file):
         if not os.path.exists(path):
             print(f"Warning: Config file symlink '{path}' is broken - points to "
                   f"non-existent target: {os.readlink(path)}", file=sys.stderr)
+            skipped.append((layer, path, 'points nowhere'))
             continue
         before = snap(ns)
         try:
@@ -3134,6 +3139,7 @@ def load_config_file(config_file=None):
                    + f"\n  {where}{type(e).__name__}: {e}")
             if _config_must_stop(msg):
                 err("00020", msg)
+            skipped.append((layer, path, 'did not run'))
             continue
         files.append((layer, path))
         after = snap(ns)
@@ -3154,6 +3160,7 @@ def load_config_file(config_file=None):
         for k in set_here:
             origin[k] = path
     CONFIG_RECORD['files'] = files
+    CONFIG_RECORD['skipped'] = skipped
     CONFIG_RECORD['origin'] = origin
     return {k: ns[k] for k in origin}
 
@@ -3868,13 +3875,18 @@ def prompt_yes_no(question):
 
 _SECRET_KEY_RE = re.compile(r'TOKEN|PASSWORD|SECRET|API_KEY', re.IGNORECASE)
 
+# A Plex token in a URL, in any case and with its '=' plain or
+# percent-encoded: Plex reads the parameter whatever its case, so every
+# spelling carries the token.
+_URL_TOKEN_RE = re.compile(r'(X-Plex-Token(?:=|%3D))[^&\s#]+', re.IGNORECASE)
+
 def _redact(key: str, value: Any) -> Any:
     """Value safe to print in debug output: a secret-named key shows only its
     length, and a token embedded in a URL (X-Plex-Token=...) is cut out."""
     if value and _SECRET_KEY_RE.search(key):
         return f"<redacted, {len(str(value))} chars>"
     if isinstance(value, str):
-        return re.sub(r'(X-Plex-Token=)[^&\s]+', r'\1<redacted>', value)
+        return _URL_TOKEN_RE.sub(r'\1<redacted>', value)
     return value
 
 def _redact_argv(argv: list[str]) -> list[str]:
@@ -4411,19 +4423,27 @@ def _config_origin(key):
 def _config_value_text(key, value) -> str:
     """VALUE as --config and -DD print it, never a secret: a secret-named key
     as its length, any other value in Python form with every X-Plex-Token cut
-    out -- one nested in a list or a dict too."""
+    out -- one nested in a list, tuple, set, bytes or dict too, and a dict
+    entry under a secret-named key shown as its length."""
     if value and _SECRET_KEY_RE.search(key):
         return str(_redact(key, value))
 
     def scrub(v: Any) -> Any:
         if isinstance(v, str):
             return _redact('', v)
+        if isinstance(v, bytes):
+            return str(_redact('', v.decode('latin-1'))).encode('latin-1')
         if isinstance(v, list):
             return [scrub(x) for x in v]
         if isinstance(v, tuple):
             return tuple(scrub(x) for x in v)
+        if isinstance(v, frozenset):
+            return frozenset(scrub(x) for x in v)
+        if isinstance(v, set):
+            return {scrub(x) for x in v}
         if isinstance(v, dict):
-            return {k: scrub(x) for k, x in v.items()}
+            return {k: _redact(str(k), x) if _SECRET_KEY_RE.search(str(k)) else scrub(x)
+                    for k, x in v.items()}
         return v
     return repr(scrub(value))
 
@@ -4438,22 +4458,29 @@ def config_report(conf, config_file=None) -> str:
     SET, each with the layer that set it.  CONF is load_config_file()'s
     return; CONFIG_RECORD says which file set what.  Prints no secret."""
     files = CONFIG_RECORD['files']
+    skipped = CONFIG_RECORD['skipped']
+
+    def arrow(p: str) -> str:
+        # The link's own target, as `ls -l` shows it -- never a realpath,
+        # which would resolve every linked parent (/LINKS) as well.
+        return f" -> {os.readlink(p)}" if os.path.islink(p) else ""
+
+    def chosen(layer: str) -> list[str]:
+        # Every file the search chose for LAYER, read or not, in read order.
+        out = [f"#   {_LAYER_LABEL[layer]:<6} {p}{arrow(p)}" for l, p in files if l == layer]
+        return out + [f"#   {_LAYER_LABEL[layer]:<6} {p}{arrow(p)}   ({why} -- not read)"
+                      for l, p, why in skipped if l == layer]
+
     source = config_search_paths(config_file)[0][0]
     if source in ('site', 'user'):
         lines = ["# config files read, in order -- for a key both set, the later wins:"]
         searched = default_config_paths()
         for layer in ('site', 'user'):
-            label = f"{_LAYER_LABEL[layer]:<6}"
-            read = [p for l, p in files if l == layer]
-            if not read:
-                lines.append(f"#   {label} (none of: "
-                             + ", ".join(p for l, p in searched if l == layer) + ")")
-            for p in read:
-                real = os.path.realpath(p)
-                lines.append(f"#   {label} {p}" + (f" -> {real}" if real != p else ""))
+            lines += chosen(layer) or [f"#   {_LAYER_LABEL[layer]:<6} (none of: "
+                                       + ", ".join(p for l, p in searched if l == layer) + ")"]
     else:
         lines = [f"# config file read -- named by {source}, so neither the site config nor yours:"]
-        lines += [f"#   {_LAYER_LABEL[l]:<6} {p}" for l, p in files]
+        lines += chosen('named')
 
     order = [p for _l, p in files]
     per_layer = {l: sum(1 for m, _p in files if m == l) for l, _p in files}
@@ -33278,7 +33305,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  site config only: my-plex refuses them in the other.")
             print()
             print("  A bare --config prints the files read, in order, then one line per")
-            print("  key they SET, with the layer that set it (site / yours / named).  It")
+            print("  key they SET, with the layer that set it (site / yours / named).  A")
+            print("  file chosen but not read says why: (points nowhere -- not read).  It")
             print("  never prints a secret: a secret-named key shows only its length, and")
             print("  the X-Plex-Token in a URL is cut out.  -DD names each key's file too.")
             print()

@@ -14535,6 +14535,55 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn('X-Plex-Token=<redacted>', lines['PLEX_XML_URL'])
         self.assertIn('TMDB_API_KEY = <redacted, 12 chars>', lines['TMDB_API_KEY'])
 
+    def test_bare_config_names_a_dangling_link_it_skipped_instead_of_none(self):
+        """ADVERSARIAL: the search takes the first name that is there, a
+        dangling link included, and the loader skips that link -- but the
+        report built its 'none' line from the whole search list, and so
+        called a real file behind the link absent."""
+        user_link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        os.symlink('../gone.conf', user_link)
+        self.user("DEFAULT_SCOPE = 'real-user-file'\n")
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        os.symlink('../global/etc/default/gone.conf', farm)
+        self.write('etc/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'etc-host'\n")
+        conf, _ = self.load()
+        out = self.mp.config_report(conf)
+        self.assertNotIn('(none of:', out, out)
+        self.assertIn(f'#   yours  {user_link} -> ../gone.conf   (points nowhere -- not read)', out)
+        self.assertIn(f'#   site   {farm} -> ../global/etc/default/gone.conf   (points nowhere -- not read)', out)
+
+    def test_bare_config_shows_the_links_own_target_and_no_arrow_on_a_file(self):
+        """ADVERSARIAL: the arrow showed os.path.realpath(), which resolves
+        every linked parent too -- /LINKS came out as /Users/... and a plain
+        file in a temp dir (/var -> /private/var) got an arrow as if it were
+        a link."""
+        target = self.write('LINKS/global/etc/default/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'g'\n")
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        os.symlink('../global/etc/default/my-plex.conf', farm)
+        user = self.user("DEFAULT_SCOPE = 'mine'\n")
+        conf, _ = self.load()
+        self.assertTrue(os.path.exists(target))
+        lines = self.mp.config_report(conf).splitlines()
+        self.assertIn(f'#   site   {farm} -> ../global/etc/default/my-plex.conf', lines)
+        self.assertIn(f'#   yours  {user}', lines)
+
+    def test_no_spelling_of_a_secret_gets_through(self):
+        """ADVERSARIAL: the token was cut out only as 'X-Plex-Token=' in that
+        exact case; a lowercase or a percent-encoded one went out in full, and
+        so did a secret-named key inside a dict and a token inside a set."""
+        self.user("PLEX_XML_URL = 'http://h:32400/library/sections?x-plex-token=LOWERLOWER'\n"
+                  "PLEX_URL = 'http://h:32400/?X-Plex-Token%3DENCENC'\n"
+                  "SORT_NEW_MOVIE_ROUTES = [{'api_key': 'DICTKEYDICTKEY', 'x': 'kept'}]\n"
+                  "ALTERNATIVE_ROOTPATHS = {'http://h/?X-Plex-Token=SETSET'}\n")
+        conf, _ = self.load()
+        texts = [self.mp.config_report(conf)] + [self.mp.config_applied_line(k, v) for k, v in conf.items()]
+        for text in texts:
+            for secret in ('LOWERLOWER', 'ENCENC', 'DICTKEYDICTKEY', 'SETSET'):
+                self.assertNotIn(secret, text)
+        self.assertIn("'kept'", texts[0], "a dict value under an ordinary key stays")
+        self.assertIn('x-plex-token=<redacted>', texts[0])
+        self.assertIn('X-Plex-Token%3D<redacted>', texts[0])
+
 
 class TestConfigEnvVar(unittest.TestCase):
     """$MY_PLEX_CONFIG: a config for ONE run, first in the search order.
@@ -14560,14 +14609,17 @@ class TestConfigEnvVar(unittest.TestCase):
                               text=True, timeout=120, env=e)
 
     def test_the_variable_names_the_config_that_is_read(self):
-        """Observed through bare --config, which prints the active file AND its
-        contents -- so the marker inside it is the evidence, not a path that
-        /var symlinks would rewrite anyway."""
+        """Observed through bare --config, which prints one line per key the
+        named file sets -- so the PLEX_DB_REMOTE_HOST line, with the marker as
+        its value and '(named)' as its origin, is the evidence, not a path
+        that /var symlinks would rewrite anyway."""
         d, conf = self._conf('fixture-host-A')
         try:
             r = self._run('--config', MY_PLEX_CONFIG=conf)
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            self.assertIn('fixture-host-A', r.stdout, r.stdout[-400:])
+            host = next((l for l in r.stdout.splitlines() if l.startswith('PLEX_DB_REMOTE_HOST ')), '')
+            self.assertIn("'fixture-host-A'", host, r.stdout[-400:])
+            self.assertTrue(host.endswith('(named)'), host)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
