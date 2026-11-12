@@ -14281,6 +14281,16 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(f"set in site: {site}\n", out)
         self.assertIn(f"set in yours: {user}\n", out)
 
+    def test_a_legacy_key_behind_a_link_names_the_links_target(self):
+        """ADVERSARIAL: the refusal named the site file by the link it was
+        read through -- a generated farm entry nobody edits -- while bare
+        --config shows the same file with the link's own target."""
+        self.write('LINKS/global/etc/default/my-plex.conf', "DISK_MAP = {}\n")
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        os.symlink('../global/etc/default/my-plex.conf', farm)
+        out = self.legacy_refusal()
+        self.assertIn(f"set in site: {farm} -> ../global/etc/default/my-plex.conf\n", out)
+
     def test_an_empty_user_value_still_overrides_the_site(self):
         """A merge that treats a falsy value as 'not set' answers wrongly here."""
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")

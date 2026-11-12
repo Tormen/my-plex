@@ -4423,10 +4423,18 @@ def _install_ssh_entry(remote):
 _LAYER_LABEL = {'site': 'site', 'user': 'yours', 'named': 'named'}
 
 
+def _config_path_text(path: str) -> str:
+    """A config file's path as my-plex prints it: a link with its own
+    target, as `ls -l` shows it, so the file to edit is visible behind a
+    generated farm entry -- never a realpath, which would resolve every
+    linked parent (/LINKS) as well."""
+    return f"{path} -> {os.readlink(path)}" if os.path.islink(path) else path
+
+
 def _config_file_label(path):
     """A config file as a message names it: its layer, then the path."""
     layer = next((l for l, p in CONFIG_RECORD['files'] if p == path), '?')
-    return f"{_LAYER_LABEL.get(layer, layer)}: {path}"
+    return f"{_LAYER_LABEL.get(layer, layer)}: {_config_path_text(path)}"
 
 
 def _config_origin(key):
@@ -4475,15 +4483,10 @@ def config_report(conf, config_file=None) -> str:
     files = CONFIG_RECORD['files']
     skipped = CONFIG_RECORD['skipped']
 
-    def arrow(p: str) -> str:
-        # The link's own target, as `ls -l` shows it -- never a realpath,
-        # which would resolve every linked parent (/LINKS) as well.
-        return f" -> {os.readlink(p)}" if os.path.islink(p) else ""
-
     def chosen(layer: str) -> list[str]:
         # Every file the search chose for LAYER, read or not, in read order.
-        out = [f"#   {_LAYER_LABEL[layer]:<6} {p}{arrow(p)}" for l, p in files if l == layer]
-        return out + [f"#   {_LAYER_LABEL[layer]:<6} {p}{arrow(p)}   ({why} -- not read)"
+        out = [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}" for l, p in files if l == layer]
+        return out + [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}   ({why} -- not read)"
                       for l, p, why in skipped if l == layer]
 
     source = config_search_paths(config_file)[0][0]
@@ -33326,8 +33329,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  the X-Plex-Token in a URL is cut out.  -DD names each key's file too.")
             print()
             print("  A key my-plex no longer reads (DISK_MAP, PROBLEM_CATEGORIES_DISABLED,")
-            print("  ...) stops every run, naming each file that sets it -- delete it from")
-            print("  all of them.")
+            print("  ...) stops every run, naming each file that sets it, a link with its")
+            print("  own target -- delete it from all of them.")
             print()
             print("KEY SETTINGS:")
             print("  PLEX_DB_REMOTE_HOST          SSH host for Plex server")
