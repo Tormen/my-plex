@@ -13803,6 +13803,88 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_the_deny_clear_line_does_nothing_when_no_deny_matches(self):
+        """The printed deny-clear lines are RUN, by dash and by zsh, against a
+        stub firewall tool whose `remove` fails on an empty stdin as the real
+        one does (err 00036).
+
+        The normal case is that no deny stands, so awk prints nothing -- and
+        the line printed until now piped that nothing into `remove go`, which
+        failed: a root shell or a rollout step that checks rc saw an error on
+        a machine that needed nothing cleared.  Adversarial on both sides: a
+        line that never calls remove passes (a) and fails (b); one that
+        swallows a failed listing passes (a) and (b) and fails (c)."""
+        d, conf = self._conf('/bin/true')       # replaced just below
+        calls = os.path.join(d, 'calls')
+        listing = os.path.join(d, 'listing')
+        stub = os.path.join(d, 'my-little-snitch')
+        with open(stub, 'w') as f:
+            f.write("#!/bin/dash\n"
+                    "case \"$1\" in\n"
+                    f"  list) echo \"list $2\" >> {calls!r}\n"
+                    f"        [ -f {listing!r} ] || {{ echo 'ERROR 00099 [1]: needs root' >&2; exit 1; }}\n"
+                    f"        cat {listing!r};;\n"
+                    "  remove) ids=$(cat)\n"
+                    f"          [ -n \"$ids\" ] || {{ echo 'remove (empty)' >> {calls!r}; "
+                    "echo 'ERROR 00036 [1]: remove [go] <ID>..' >&2; exit 1; }\n"
+                    f"          for i in $ids; do echo \"remove $i\" >> {calls!r}; done;;\n"
+                    "esac\n")
+        os.chmod(stub, 0o755)
+        with open(conf, 'a') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+        py = ('/opt/homebrew/Cellar/python@3.14/*/Frameworks/Python.framework/'
+              'Versions/3.14/Resources/Python.app/Contents/MacOS/Python')
+
+        def rule(rid, process, action):
+            return f"{rid}\t{process}  {action}  api.themoviedb.org  any  me\n"
+
+        def run(shell, line, rules):
+            for p in (calls, listing):
+                if os.path.exists(p):
+                    os.remove(p)
+            if rules is not None:
+                with open(listing, 'w') as f:
+                    f.writelines(rules)
+            r = subprocess.run([*shell, line], capture_output=True, text=True, timeout=30)
+            with open(calls) as f:
+                return r, f.read().split('\n')
+
+        try:
+            r = self._run('--config', conf, '--install')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            lines = [ln.split('> ', 1)[1] for ln in r.stdout.splitlines()
+                     if ' remove go' in ln]
+            self.assertTrue(lines, f"no deny-clear line printed:\n{r.stdout[-800:]}")
+            tmdb = [ln for ln in lines if re.search(r' list api\.themoviedb\.org\b', ln)]
+            self.assertEqual(len(tmdb), 1, "\n".join(lines))
+            shells = [['/bin/dash', '-c']]
+            if os.path.exists('/bin/zsh'):
+                shells.append(['/bin/zsh', '-f', '-c'])
+            for shell in shells:
+                # (a) no deny for my-plex: every line exits 0, remove is never called
+                for ln in lines:
+                    res, log = run(shell, ln, [rule('ddd444', py, 'allow'),
+                                               rule('eee555', '/usr/bin/curl', 'allow')])
+                    self.assertEqual(res.returncode, 0,
+                                     f"{shell[0]}: nothing to clear must exit 0: {ln}\n{res.stderr}")
+                    self.assertFalse([c for c in log if c.startswith('remove')],
+                                     f"{shell[0]}: remove was called with nothing to remove: {log}")
+                # (b) Python's deny and an `any` deny go; curl's deny stays
+                res, log = run(shell, tmdb[0], [rule('aaa111', py, 'deny'),
+                                                rule('bbb222', 'any', 'deny'),
+                                                rule('ccc333', '/usr/bin/curl', 'deny'),
+                                                rule('ddd444', py, 'allow')])
+                self.assertEqual(res.returncode, 0, f"{shell[0]}: {res.stderr}")
+                self.assertEqual(sorted(c for c in log if c.startswith('remove')),
+                                 ['remove aaa111', 'remove bbb222'], f"{shell[0]}: {log}")
+                # (c) a listing that fails is a failure, not "nothing to clear"
+                res, log = run(shell, tmdb[0], None)
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{shell[0]}: a failed `list` read as nothing to clear")
+                self.assertFalse([c for c in log if c.startswith('remove')], f"{shell[0]}: {log}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_go_is_answered_rather_than_passed_through(self):
         """`--install go` was the earlier shape. Someone who types it gets told
         what changed, not argparse's `Invalid parameter`."""

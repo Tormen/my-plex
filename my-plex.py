@@ -4157,10 +4157,17 @@ def _little_snitch_deny_clears():
             # that on 2026-11-05 -- Python.app deny for 192.168.192.252, any
             # port -- and a pattern of 'ssh' alone walked past it.
             pat = r'Python\.app|ssh'
+        # `remove go` with no ID on stdin is an error, and no deny is the
+        # normal case -- so the IDs are collected first and remove runs only
+        # when there are some.  The listing is captured on its own so that a
+        # `list` that fails (not root) fails the line, rather than reading as
+        # "nothing to clear".  One line, for dash and zsh alike.
         out.append((tail[0],
-                    f"{cli} list {tail[0]} | awk -F '\\t' "
+                    f"rules=$({cli} list {tail[0]}) && ids=$(printf '%s\\n' \"$rules\" | "
+                    f"awk -F '\\t' "
                     f"'$2 ~ / deny / && ($2 ~ /{pat}/ || $2 ~ /^any  /) "
-                    f"{{ print $1 }}' | {cli} remove go"))
+                    f"{{ print $1 }}') && {{ [ -z \"$ids\" ] || "
+                    f"printf '%s\\n' \"$ids\" | {cli} remove go; }}"))
     return out
 
 
