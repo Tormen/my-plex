@@ -13835,6 +13835,24 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_install_then_help_shows_the_page_and_installs_nothing(self):
+        """`--install --help` is `--help install`, as `--update-cache --help`
+        is.  It ran the install instead: printed the rules and wrote the ssh
+        Host entry -- and since --help makes a run print-only, a root shell's
+        `my-plex --install --help` got past the root refusal and did that as
+        root, naming root as the owner, with /var/root/.ssh/config as the
+        file."""
+        d, conf = self._conf(os.path.join('/nonexistent', 'my-little-snitch'))
+        try:
+            r = self._run('--config', conf, '--install', '--help')
+            self.assertEqual(r.returncode, 0, r.stderr[-400:])
+            self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])
+            self.assertNotIn(' >>> my-plex --install', r.stdout, "it ran the install")
+            self.assertFalse(os.path.exists(os.path.join(d, 'ssh', 'config')),
+                             "it wrote the ssh Host entry")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_the_help_page_exists_and_names_the_hosts(self):
         r = self._run('--help', 'install')
         self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])

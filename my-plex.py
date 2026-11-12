@@ -44966,6 +44966,9 @@ def main():
             'unwatched':         'unwatched',
             'scan':              'scan',
             'sort_new':          'sort-new',
+            # Without it `--install --help` ran the install, which comes
+            # before the help below -- and as root, past the refusal.
+            'install':           'install',
         }
         for attr, topic in _MAIN_PARSER_HELP_REDIRECTS.items():
             if safe_getattr(args, attr, False):
