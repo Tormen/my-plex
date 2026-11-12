@@ -5854,12 +5854,16 @@ def _ssh_opts(multiplex: bool = True) -> list[str]:
     if SSH_CONFIG_FILE:
         opts = ['-F', os.path.expanduser(SSH_CONFIG_FILE), *opts]
     if not multiplex:
-        # ControlMaster=no: may not even USE a shared connection.  For the
-        # parallel metadata workers, which each stream thousands of paths and
-        # their ffprobe output: sharing one TCP connection would serialise
-        # them at the transport, and with MAX_PARALLEL_WORKERS above sshd's
-        # MaxSessions (10 by default) the later ones would be refused.
-        return [*opts, '-o', 'ControlMaster=no']
+        # A connection of its own, never a shared one.  ControlMaster=no only
+        # stops it BECOMING a master: ssh still rides a live one on the user's
+        # ControlPath (their `ssh ada` -- the same socket when the alias names
+        # the same host), so ControlPath=none too.  For the parallel metadata
+        # workers, which each stream thousands of paths and their ffprobe
+        # output: one shared TCP connection would serialise them, and past
+        # sshd's MaxSessions (10 by default) refuse the later ones.  For
+        # --install's login check: a ride on the user's session proves no
+        # login of my-plex's own -- not its key, not ada's host key.
+        return [*opts, '-o', 'ControlMaster=no', '-o', 'ControlPath=none']
     ssh_dir = os.path.expanduser('~/.ssh')
     os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
     return [*opts,

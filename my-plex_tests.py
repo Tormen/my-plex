@@ -13038,7 +13038,16 @@ class TestSshOptions(unittest.TestCase):
         joined = self._joined(multiplex=False)
         self.assertIn('ControlMaster=no', joined)
         self.assertNotIn('ControlPersist=', joined)
-        self.assertNotIn('ControlPath=', joined)
+
+    def test_an_unshared_connection_rides_no_live_master(self):
+        """ControlMaster=no alone still USES a live master on the user's
+        ControlPath -- on horse `ssh -G -o ControlMaster=no my-plex` and
+        `ssh -G ada` name the same socket, so --install's login check could
+        pass through the user's open session without logging in at all."""
+        opts = self._opts(multiplex=False)
+        paths = [o for o in opts if o.startswith('ControlPath=')]
+        self.assertEqual(paths, ['ControlPath=none'],
+                         "an unshared connection must not reach any control socket")
 
     def test_the_timeout_comes_from_the_config(self):
         main_mod = _main_module()
