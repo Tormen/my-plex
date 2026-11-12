@@ -14610,7 +14610,7 @@ class TestInstallAsRoot(_RootInstallCase):
         py = self.listed_python()
 
         def rule(rid: str, process: str, action: str) -> str:
-            return f"{rid}\t{process}  {action}  api.themoviedb.org  tcp/443  me\n"
+            return f"{rid}\t{process}  {action}  api.themoviedb.org  tcp/443  nobody\n"
         run = self.run_root(listing=rule('aaa111', py, 'deny') + rule('bbb222', 'any', 'deny')
                             + rule('ccc333', '/usr/bin/curl', 'deny') + rule('ddd444', py, 'allow'))
         self.assertEqual(run.r.returncode, 0, run.text())
@@ -14720,7 +14720,7 @@ class TestInstallAsRoot(_RootInstallCase):
         py = self.listed_python()
 
         def rule(rid: str, process: str, remote: str, port: str) -> str:
-            return f"{rid}\t{process}  deny  {remote}  {port}  me\n"
+            return f"{rid}\t{process}  deny  {remote}  {port}  nobody\n"
         listing = (rule('fff111', '/Applications/Firefox.app/Contents/MacOS/firefox',
                         'ssh.example.net', 'tcp/53146')
                    + rule('ccc222', '/usr/bin/curl', 'ssh.example.net', 'any')
@@ -14739,6 +14739,33 @@ class TestInstallAsRoot(_RootInstallCase):
                             listing=rule('aaa111', py, '10.0.0.12', 'any'))
         self.assertEqual(run.r.returncode, 0, run.text())
         self.assertEqual([c for c in run.calls if c.startswith('removed ')], [], "\n".join(run.calls))
+
+    def test_a_deny_is_removed_only_when_the_my_plex_user_owns_it(self):
+        """#42: a deny is its OWNER's decision.  The same deny -- my-plex's
+        Python, this remote, this port -- owned by another user stays, and so
+        does one owned by `nobody2`: the owner is matched as a whole field,
+        never as a substring of the line.  One owned by the my-plex user
+        (RUN_AS_USER here) goes, a verdict token after its owner or not.
+        `anyone` and `system` are no user's own (my-little-snitch: `anyone`
+        is a rule with neither uid nor system, `system` is root's), so they
+        stay too -- and are NAMED, since such a deny may still stop my-plex
+        and beat the allow just written."""
+        py = self.listed_python()
+
+        def rule(rid: str, owner: str, tail: str = '') -> str:
+            return f"{rid}\t{py}  deny  api.themoviedb.org  tcp/443  {owner}{tail}\n"
+        listing = (rule('own111', 'nobody') + rule('own222', 'nobody', '   cleanup?[expired]')
+                   + rule('oth333', 'someone-else') + rule('sub444', 'nobody2')
+                   + rule('any555', 'anyone') + rule('sys666', 'system'))
+        run = self.run_root(listing=listing)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
+                         ['removed own111', 'removed own222'], "\n".join(run.calls))
+        for rid, owner in (('any555', 'anyone'), ('sys666', 'system')):
+            self.assertRegex(run.r.stdout, rf'kept .*{rid}.*owner {owner}',
+                             f"a kept {owner} deny is not named")
+        for rid in ('oth333', 'sub444'):
+            self.assertNotIn(rid, run.r.stdout, "another user's deny does not stop my-plex's user")
 
     def test_a_firewall_tool_that_cannot_start_is_an_error_not_a_traceback(self):
         """LITTLE_SNITCH_CLI names a file that is there but cannot be run:
