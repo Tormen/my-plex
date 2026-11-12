@@ -4684,8 +4684,21 @@ def cmd_install() -> NoReturn:
         print(f"    > the firewall rules: root's half, done before it handed over")
         firewall = "firewall rules by root's half"
     elif os.path.isfile(cli):
+        # Root writes every rule --owner RUN_AS_USER, so the line names that
+        # user, and says when it is not this one: asking root then gives the
+        # rules to somebody else.
+        import pwd
+        owner = (RUN_AS_USER or '').strip()
+        if not owner:
+            whose = "RUN_AS_USER (unset: the user who runs sudo)"
+        else:
+            try:
+                mine = pwd.getpwnam(owner).pw_uid == os.getuid()
+            except KeyError:
+                mine = False
+            whose = f"RUN_AS_USER {owner!r}" + ("" if mine else f" -- not for you ({getpass.getuser()})")
         print(f" >>> no firewall rule written: they need root -- `my-plex --install` in a root"
-              f" shell writes them for RUN_AS_USER   (LITTLE_SNITCH_CLI {cli} is there)",
+              f" shell writes them for {whose}   (LITTLE_SNITCH_CLI {cli} is there)",
               file=sys.stderr, flush=True)
         firewall = "no firewall rule (they need root)"
     else:
@@ -33654,9 +33667,10 @@ def main_print_help(args, remaining_args, main_parser):
             print('WRITING a rule needs root: littlesnitch refuses anyone else, even')
             print('to list. So whenever LITTLE_SNITCH_CLI exists, only root\'s --install')
             print('writes them; anyone else\'s writes the ssh Host entry alone, says in')
-            print('one line on stderr that the rules need root, and exits 0 -- how a')
-            print('second user, whom root does not hand over to, gets the entry. Every')
-            print('other command refuses root. As')
+            print('one line on stderr that the rules need root and whose root writes')
+            print('them -- RUN_AS_USER\'s, by name, "not for you" when that is another')
+            print('user -- and exits 0 -- how a second user, whom root does not hand')
+            print('over to, gets the entry. Every other command refuses root. As')
             print('root it reads the site config alone, or a file named by')
             print('$MY_PLEX_CONFIG or --config -- each only when root owns it, and')
             print('every directory above it, and neither group nor others can write')

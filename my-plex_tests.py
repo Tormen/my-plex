@@ -18,6 +18,7 @@ import inspect
 import pickle
 import io
 import contextlib
+import getpass
 import json
 import shutil
 import signal
@@ -14307,6 +14308,34 @@ class TestInstallFirewallRules(unittest.TestCase):
                                        r' ssh Host entry written')
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_line_about_root_names_whose_rules_root_would_write(self):
+        """#44 review: the line said root's run "writes them for RUN_AS_USER"
+        -- the KEY, byte for byte the same whoever ran it.  Root writes every
+        rule with --owner RUN_AS_USER, so for a second user (the one #44 is
+        for) asking root gives the rules to somebody else.  The line names the
+        value and says when it is not the caller; unset, it says whom root
+        falls back to.  Adversarial: the caller is never 'nobody'."""
+        me = getpass.getuser()
+        cases = (("RUN_AS_USER = 'nobody'\n", ("'nobody'", f"not for you ({me})")),
+                 (f"RUN_AS_USER = {me!r}\n", (f"{me!r}",)),
+                 ("", ("unset", "sudo")))
+        for lines, parts in cases:
+            d, conf, _stub, sentinel = self._sentinel_conf()
+            try:
+                with open(conf, 'a') as f:
+                    f.write(lines)
+                r = self._run('--config', conf, '--install')
+                self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
+                self.assertFalse(os.path.exists(sentinel), "it ran the firewall tool")
+                said = [ln for ln in r.stderr.splitlines() if 'need root' in ln]
+                self.assertEqual(len(said), 1, f"not ONE line about root:\n{r.stderr[-600:]}")
+                for part in parts:
+                    self.assertIn(part, said[0], f"{lines!r}: the line lacks {part!r}: {said[0]}")
+                if lines.startswith(f"RUN_AS_USER = {me!r}"):
+                    self.assertNotIn('not for you', said[0], said[0])
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
 
     def test_with_the_firewall_tool_there_a_failed_login_still_fails(self):
         """ADVERSARIAL to the test above: exit 0 is for an ssh half that

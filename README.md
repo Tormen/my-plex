@@ -341,9 +341,10 @@ hosts to allow in whatever firewall you run, and writes the ssh `Host`
 entry. With it, a `--install` you start yourself writes the ssh `Host` entry
 alone, says in one line on stderr that the firewall rules need root
 (`littlesnitch` refuses anyone but root, even to list; `my-plex --install`
-in a root shell writes them for `RUN_AS_USER`), and exits 0 when the entry
-is in place -- so a second user of the machine, whom root does not hand over
-to, gets the entry this way.
+in a root shell writes them for `RUN_AS_USER`, and the line names that user
+-- "not for you" when it is someone else, whose rules they then are), and
+exits 0 when the entry is in place -- so a second user of the machine, whom
+root does not hand over to, gets the entry this way.
 
 **Which Python the rules name.** The fetches use `urllib.request`, so the
 interpreter opens the socket and is what a firewall sees. Root names the
