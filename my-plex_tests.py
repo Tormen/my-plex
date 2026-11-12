@@ -6975,6 +6975,9 @@ class TestJunk(unittest.TestCase):
         self.assertIn('MAX_SIZE_MB', result.stdout)
         self.assertIn('RECURSIVE', result.stdout)
         self.assertIn('--resolve', result.stdout, "Help must use --resolve as the action verb")
+        # what test_local_walk_judges_hidden_files holds the walk to
+        self.assertIn('Hidden files (.DS_Store, ._*) are judged like any other', result.stdout)
+        self.assertIn('(.Trashes, .Spotlight-V100 ...) are not entered.', result.stdout)
 
     def test_problems_integration(self):
         """--junk must be wired into --problems via the registry's 'junk' category (v3)."""
@@ -6990,15 +6993,18 @@ class TestJunk(unittest.TestCase):
     # The Plex server's files, as the junk walk's remote `find ... -exec stat
     # -f "%z %N"` prints them -- SIZE, one space, PATH -- under the fixture
     # library's three roots.  The paths carry spaces, as real ones do.
-    # JUNK: each hits one default pattern; one sits directly in a root, so a
-    # depth-1 walk finds it too.  NOT junk: the three videos -- one in a
+    # JUNK: each hits one default pattern -- hidden files too, which the walk
+    # judges like any other; one sits directly in a root, so a depth-1 walk
+    # finds it too.  NOT junk: the three videos -- one in a
     # FOLDER whose name the 'samples' regexp matches, because a pattern judges
     # the file's name, never its folder's -- and a sample inside a hidden
     # folder, which the walk does not enter.
     _JUNK = (('sidecars', '/lib/library1/Some Movie (2001)/Some Movie (2001).nfo'),
              ('samples',  '/lib/library_de/Irgendein Film (2010)/sample-irgendein.film.mkv'),
              ('os_index', '/lib/library_fr/Une Serie/S01/Thumbs.db'),
-             ('os_index', '/lib/library_de/Thumbs.db'))
+             ('os_index', '/lib/library_de/Thumbs.db'),
+             ('os_index', '/lib/library1/Some Movie (2001)/.DS_Store'),
+             ('macos_dotunderscore', '/lib/library1/Some Movie (2001)/._some.movie.2001.mkv'))
     _DEPTH_ONE = ('/lib/library_de/Thumbs.db',)
     _NOT_JUNK = ('/lib/library1/Some Movie (2001)/some.movie.2001.mkv',
                  '/lib/library1/Free-Sample-Story (2004)/free.story.2004.mkv',
@@ -7093,6 +7099,38 @@ class TestJunk(unittest.TestCase):
         for fp in self._NOT_JUNK:
             with self.subTest(fp=fp):
                 self.assertNotIn(fp, r.stdout)
+
+    def test_local_walk_judges_hidden_files(self):
+        """With no Plex server host the walk runs the local find: .DS_Store
+        and ._ files are reported like any other file a pattern matches, a
+        hidden folder is not entered, and no ssh is started."""
+        d = tempfile.mkdtemp(prefix='my-plex-junk-local-', dir=self.d)
+        junk = ('Some Movie (2001)/.DS_Store', 'Some Movie (2001)/._some.movie.2001.mkv',
+                'Some Movie (2001)/Thumbs.db')
+        for rel in junk + ('Some Movie (2001)/some.movie.2001.mkv', '.Trashes/501/._old.movie.mkv'):
+            os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+            open(os.path.join(d, rel), 'w').close()
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(self.conf) as src, open(conf, 'w') as f:
+            f.write(src.read().replace("PLEX_DB_REMOTE_HOST = 'fixture-server'\n", ''))
+            f.write("PLEX_DB_REMOTE_HOST = ''\n")
+            f.write("JUNK_PATTERNS = {\n")
+            for name, regexp in (('os_index', r'(?i)(\.ds_store$|^thumbs\.db$)'),
+                                 ('macos_dotunderscore', r'^\._')):
+                f.write(f"    {name!r}: {{'SCOPE': {d!r}, 'FILENAME_REGEXP': {regexp!r},"
+                        f" 'MAX_SIZE_MB': 0, 'RECURSIVE': 'yes'}},\n")
+            f.write("}\n")
+        log = os.path.join(d, 'ssh.log')
+        r = subprocess.run([MAIN_SCRIPT, '--config', conf, '--junk', '-V'],
+                           capture_output=True, text=True, timeout=E2E_TIMEOUT,
+                           env=_fake_ssh_env(log=log))
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn(f"{len(junk)} junk file(s) found across 1 root(s).", r.stdout, out[-1500:])
+        for rel in junk:
+            self.assertIn(os.path.join(d, rel), r.stdout, out[-1500:])
+        self.assertNotIn('.Trashes', r.stdout, out[-1500:])
+        self.assertFalse(os.path.exists(log), "the local walk started an ssh")
 
     def test_pattern_criteria_use_and_semantics(self):
         """When a JUNK_PATTERNS entry sets BOTH regex and size, they must AND-combine.

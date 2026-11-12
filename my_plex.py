@@ -1542,6 +1542,8 @@ CONFIG_DEFAULTS = {
     #
     #   RECURSIVE         'yes' → walk the scope's directory tree fully.
     #                     'no'  → only files at depth-1 in the scope root(s).
+    #                     Hidden folders (.Trashes ...) are never entered;
+    #                     hidden files (.DS_Store, ._*) are matched as any other.
     #
     # If BOTH FILENAME_REGEXP and MAX_SIZE_MB are set, the pattern only
     # flags files that satisfy BOTH (AND semantics).  At least one of
@@ -2345,6 +2347,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 #   RECURSIVE        'yes' → walk the scope's directory tree fully.
 #                    'no'  → only files at depth-1 in the scope root(s).
+#                    Hidden folders (.Trashes ...) are never entered;
+#                    hidden files (.DS_Store, ._*) are matched as any other.
 #                    Also accepts True / False / 'true' / 'false' /
 #                    '1' / '0' (case-insensitive).
 #
@@ -25524,13 +25528,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             recursive = pat_recursive if recursive_override is None else bool(recursive_override)
             depth_args_remote = '' if recursive else ' -maxdepth 1'
             depth_args_local  = [] if recursive else ['-maxdepth', '1']
+            # Hidden FOLDERS (.Trashes, .Spotlight-V100, ...) are not entered;
+            # hidden FILES are judged like any other: .DS_Store and ._* are
+            # what the os_index and macos_dotunderscore patterns exist for.
             for d in roots:
                 escaped = escape_path_for_ssh(d)
                 if PLEX_DB_REMOTE_HOST:
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                           f'find "{escaped}"{depth_args_remote} -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
+                           f'find "{escaped}"{depth_args_remote} -type d -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
                 else:
-                    cmd = ['find', d, *depth_args_local, '-name', '.*', '-prune', '-o', '-type', 'f',
+                    cmd = ['find', d, *depth_args_local, '-type', 'd', '-name', '.*', '-prune', '-o', '-type', 'f',
                            '-exec', 'stat', '-f', '%z %N', '{}', '+']
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
@@ -31795,6 +31802,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("Pure DISK-BASED clutter detection driven by the JUNK_PATTERNS dict")
             print("in your config.  Plex's index is NOT consulted — works on files")
             print("Plex never indexed (.htm / .lnk / .url / thumbs.db / .ds_store etc.).")
+            print("Hidden files (.DS_Store, ._*) are judged like any other; hidden folders")
+            print("(.Trashes, .Spotlight-V100 ...) are not entered.")
             print()
             print("PATTERNS:")
             print("  Each entry in JUNK_PATTERNS is a NAMED pattern.  Each carries its")
