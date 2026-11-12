@@ -6730,15 +6730,23 @@ def plex_db_path() -> str:
 
     It has no default: where the database lies is the server's, the same for
     every user, so the offer is the site config's, site location first --
-    or, when this run reads one named file, that file."""
+    or, when this run reads one named file, that file.  A file that sets it
+    to '' is named too; when an earlier file sets it, removing that line is
+    the answer, and the earlier file's value is named as what then applies."""
     if PLEX_DB_PATH:
         return PLEX_DB_PATH
     named = next((p for layer, p in CONFIG_RECORD['files'] if layer == 'named'), None)
-    if named:
+    emptied = CONFIG_RECORD['origin'].get('PLEX_DB_PATH')
+    earlier = [p for p in CONFIG_RECORD['set_by'].get('PLEX_DB_PATH', []) if p != emptied]
+    if emptied and earlier:
+        where = [f"--> {_config_file_label(emptied)} sets it to '' -- remove that line, and"
+                 f" the value in {_config_file_label(earlier[-1])} applies"]
+    elif named:
         where = [f"--> set it in {named} -- the one file this run reads"]
     else:
-        where = ["--> set it in the site config -- the server's path, the same for every"
-                 " user -- most common place first:"]
+        where = [f"--> {_config_file_label(emptied)} sets it to ''"] if emptied else []
+        where += ["--> set it in the site config -- the server's path, the same for every"
+                  " user -- most common place first:"]
         where += [f"    > {p}{_offer_note(p)}" for p in site_config_offer_paths()]
     err("00062", "\n".join([
         "PLEX_DB_PATH is empty -- this command reads the Plex database, and its path"
@@ -30394,9 +30402,12 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     def detect_if_of_OBJ_TYPE(args, obj):   # return True or False - if obj is a <CLASSNAME> PLEX_OBJ
-        # Use DB query instead of API — playlists are metadata_type=15
-        if OFFLINE:
-            if DBG: print(f"{DBGPFX}PLEX_Playlist.detect_if_of_OBJ_TYPE(): skipped (offline mode)")
+        # Use DB query instead of API — playlists are metadata_type=15.
+        # Tried last, for any name nothing else claimed: without a database
+        # it is no playlist, so a mistyped name is answered as unknown.
+        if OFFLINE or not PLEX_DB_PATH:
+            if DBG: print(f"{DBGPFX}PLEX_Playlist.detect_if_of_OBJ_TYPE(): skipped "
+                          f"({'offline mode' if OFFLINE else 'no PLEX_DB_PATH'})")
             return False
         try:
             safe_obj = obj.replace("'", "''")
@@ -32924,7 +32935,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  plex_var handler registry.")
             print()
             print("  Built-in push handlers:")
-            print("    WATCHED      → markWatched + last_viewed_at (Plex API + DB)")
+            print("    WATCHED      → markWatched + last_viewed_at (Plex API + DB).")
+            print("                   A dated marker writes the DB: with one pending")
+            print("                   and PLEX_DB_PATH empty, the run stops after the")
+            print("                   plan, before Plex is changed.")
             print("    AUDIO_LANG   → NO-OP (v2.69).  AUDIO_LANG is a DERIVED")
             print("                   attribute, not a push target.  Plex re-")
             print("                   detects audio language from the container")
@@ -36993,8 +37007,10 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     # build.  Plex view-state changes (view_count, last_viewed_at) do
     # NOT bump library.updatedAt, so incremental --update-cache misses
     # them and we'd write no [vu] for items watched only in Plex.
-    # The sweep is a single SQL query joined by GUID — cheap.
-    if not OFFLINE and not READ_ONLY_MODE:
+    # The sweep is a single SQL query joined by GUID — cheap.  Best effort,
+    # like the auto-refresh: no PLEX_DB_PATH skips it, never plex_db_path()'s
+    # ERROR -- the markers come from the cache.
+    if not OFFLINE and not READ_ONLY_MODE and PLEX_DB_PATH:
         try:
             n_changed, _n_total = sync_view_state_into_cache()
             if n_changed:
@@ -37350,6 +37366,12 @@ def _scope_paths_for_obj(obj):
 # Errors should print a clear line and return False.
 # ============================================================================
 
+def _watched_date(change):
+    """The WATCHED_DATE a WATCHED change carries (`[vu@YYYY-MM-DD]`), or
+    None.  Pushing one writes the Plex database itself, beside the API."""
+    return (change.get('extras') or {}).get('WATCHED_DATE')
+
+
 def _push_watched_dpm(obj, change, dry_run):
     """Push WATCHED (and optional WATCHED_DATE from extras) to Plex."""
     title = obj.get('title', '?')
@@ -37357,7 +37379,7 @@ def _push_watched_dpm(obj, change, dry_run):
     if not item_id:
         print(f"    ERROR: no item_id for {title}", file=sys.stderr)
         return False
-    wd = (change.get('extras') or {}).get('WATCHED_DATE')
+    wd = _watched_date(change)
     if dry_run:
         if wd:
             print(f"    Would mark watched (date={wd}): {title}")
@@ -37592,6 +37614,12 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
     if no_handler_vars:
         print(f"\nNote: no push handler for: {', '.join(no_handler_vars)} — "
               f"those changes will be skipped.")
+
+    # A dated WATCHED push writes the Plex database after the API has marked
+    # the item: ask for its path now, before any change -- not halfway
+    # through a confirmed batch, with the sidecar never saved.
+    if any(c['plex_var'] == 'WATCHED' and _watched_date(c) for c in flat):
+        plex_db_path()
 
     # ---------- Decide whether to proceed to Phase 2 ----------
     if dry_run:

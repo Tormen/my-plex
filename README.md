@@ -106,7 +106,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 ### Disk Map (Metadata Markers)
 - **Bidirectional sync** between Plex metadata and filesystem markers
   - `--plex2disk` — sync Plex metadata → disk (add `[marker]` tags to filenames/directories)
-  - `--disk2plex` — sync disk markers → Plex (push watched status, ratings, labels back)
+  - `--disk2plex` — sync disk markers → Plex (push watched status, ratings, labels back). A dated watched marker (`[vu@YYYY-MM-DD]`) writes its date into the Plex database, so with one pending and `PLEX_DB_PATH` empty the run stops after the plan, before Plex is changed
   - `--plex-disk-sync` / `--sync` — bidirectional: disk→plex first, then plex→disk
   - **Invariant (v2.69):** sync touches FILENAMES / PATHNAMES only — never the bytes of your media files. Container audio-track tags, codecs, container format are explicitly OUT of scope. For file mutation, use the explicit commands: `--no-audio-language --resolve` (rewrites container audio-track tags via mp4box / mkvpropedit), `--remux` (repackage container, no re-encode), `--reencode` (re-encode streams).
   - `--remux` — stream-copy outdated-container files (e.g. `.avi`) to `.mkv`, attaching the resolved audio language as track metadata. Default: PREVIEW only; `--yes` commits. Combine with `--no-audio-language` to bulk-fix files where Plex has no audio language yet (e.g. German DVR recordings with `[TVOON]` filename hints).
@@ -179,8 +179,9 @@ ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex      # or anywhere in your
 # Configure
 my-plex --create-config ~/.my-plex.conf      # Write default config to file: mode 0600, never over an existing file
 # Or: my-plex --create-config > FILE   # the template on stdout: the redirect overwrites a file there, with the umask's mode
-# Edit ~/.my-plex.conf with the Plex token; the Plex server's ssh address and
-# its database path go in the site config (see "Installing" below)
+# Edit ~/.my-plex.conf with the Plex token; the Plex server's ssh address
+# (see "Installing" below) and its database path, PLEX_DB_PATH
+# (see "Configuration"), go in the site config
 # See the files read and each key they set:  my-plex --config
 
 # Then, in a root shell: the firewall rules, and the ssh Host entry as you

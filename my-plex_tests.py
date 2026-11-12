@@ -15550,6 +15550,126 @@ class TestPlexDbPathRequired(unittest.TestCase):
         self.assertTrue(any('plex-test-host' in c and f"sqlite3 -header -csv '{path}'" in c
                             for c in calls), calls)
 
+    def _disk2plex(self, mod: Any, db_path: str, extras: dict[str, str]) -> tuple[list[int], str]:
+        """cmd_disk2plex --yes over ONE item whose disk marker says watched,
+        with EXTRAS beside it ({'WATCHED_DATE': ...} for `[vu@DATE]`).
+        Returns the item ids Plex was told to mark watched, and stderr.  The
+        database write is the real one when DB_PATH is empty (its door
+        decides), a stub that succeeds when it is set (no ssh)."""
+        from unittest import mock
+        marked: list[int] = []
+
+        class _Media:
+            def __init__(self, i: int) -> None:
+                self.i = i
+
+            def markWatched(self) -> None:
+                marked.append(self.i)
+
+        class _Plex:
+            def fetchItem(self, i: int) -> _Media:
+                return _Media(i)
+
+        e = io.StringIO()
+        with mock.patch.multiple(
+                mod, PLEX_DB_PATH=db_path, DISK_PLEX_MAP={'WATCHED': {}},
+                _ensure_disk_plex_map_uniforms_computed=lambda: None,
+                load_disk_map_sidecar=lambda: {},
+                save_disk_map_sidecar=lambda sc: None,
+                _get_disk_map_scope=lambda t: [('Movie:7', {'title': 'T', 'item_id': 7})],
+                resolve_disk_map_variables=lambda o, k: {'WATCHED': False},
+                _scope_paths_for_obj=lambda o: [('movie', 'T.mkv', '/x/T.mkv')],
+                read_markers_from_disk=lambda *a: {'WATCHED': True, **extras},
+                ensure_plex_api=lambda: _Plex()), \
+                mock.patch.object(mod, 'query_plex_database_write',
+                                  (lambda sql: True) if db_path else mod.query_plex_database_write), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(e):
+            try:
+                mod.cmd_disk2plex(None, yes=True)
+            except SystemExit:
+                pass
+        return marked, e.getvalue()
+
+    def test_a_dated_watched_push_stops_before_plex_is_changed(self):
+        """A `[vu@DATE]` marker is pushed in two writes: the Plex API marks
+        the item watched, then a direct UPDATE of the database sets the date.
+        With no database path, the run must stop BEFORE the first one -- not
+        between them, with the confirmed batch half applied and the sidecar
+        never saved."""
+        mod = _main_module()
+        marked, stderr = self._disk2plex(mod, '', {'WATCHED_DATE': '2024-01-02'})
+        self.assertIn('PLEX_DB_PATH is empty', stderr)
+        self.assertEqual(marked, [], "Plex was changed before the run stopped")
+        marked, stderr = self._disk2plex(mod, '/srv/plex/x.db', {'WATCHED_DATE': '2024-01-02'})
+        self.assertEqual(marked, [7], "control: set, the dated push goes through")
+        self.assertNotIn('PLEX_DB_PATH is empty', stderr)
+        marked, stderr = self._disk2plex(mod, '', {})
+        self.assertEqual(marked, [7], "an undated push writes no database: it needs no path")
+        self.assertNotIn('PLEX_DB_PATH is empty', stderr)
+
+    def test_the_plex2disk_view_state_sweep_skips_without_it(self):
+        """--plex2disk refreshes view counts from the database first -- best
+        effort, the markers come from the cache.  Empty PLEX_DB_PATH skips
+        that refresh, as the auto-refresh does, rather than stopping a
+        command the README says never asks for it."""
+        from unittest import mock
+        mod = _main_module()
+        swept: list[bool] = []
+        common: dict[str, Any] = dict(
+            OFFLINE=False, READ_ONLY_MODE=False, DISK_PLEX_MAP={'WATCHED': {}},
+            _ensure_disk_plex_map_uniforms_computed=lambda: None,
+            _get_disk_map_scope=lambda t: [])
+        e = io.StringIO()
+        with mock.patch.multiple(mod, PLEX_DB_PATH='', **common), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(e):
+            try:
+                mod.cmd_plex2disk(None)
+            except SystemExit:
+                self.fail("--plex2disk stopped on its optional sweep: " + e.getvalue()[-300:])
+        self.assertNotIn('PLEX_DB_PATH is empty', e.getvalue())
+        with mock.patch.multiple(mod, PLEX_DB_PATH='/srv/plex/x.db',
+                                 sync_view_state_into_cache=lambda: swept.append(True) or (0, 0),
+                                 **common), \
+                contextlib.redirect_stdout(io.StringIO()):
+            mod.cmd_plex2disk(None)
+        self.assertEqual(swept, [True], "control: set, the sweep runs")
+
+    def test_playlist_detection_skips_without_it(self):
+        """A name that is no library, collection or media item is tried as a
+        playlist last, by a database query.  Without a path it is not one --
+        as offline -- so a mistyped name is answered as unknown, not with the
+        database ERROR."""
+        from unittest import mock
+        mod = _main_module()
+        e = io.StringIO()
+        with mock.patch.multiple(mod, PLEX_DB_PATH='', OFFLINE=False), \
+                contextlib.redirect_stderr(e):
+            self.assertFalse(mod.PLEX_Playlist.detect_if_of_OBJ_TYPE(None, 'nosuchthing'))
+        self.assertNotIn('PLEX_DB_PATH is empty', e.getvalue())
+        with mock.patch.multiple(mod, PLEX_DB_PATH='/srv/plex/x.db', OFFLINE=False,
+                                 query_plex_database=lambda q, mode='rows': [('1',)]):
+            self.assertTrue(mod.PLEX_Playlist.detect_if_of_OBJ_TYPE(None, 'mine'),
+                            "control: set, the query decides")
+
+    def test_the_readme_points_at_the_section_that_describes_it(self):
+        """The install block says where the database path goes and names a
+        section to read: that section must describe PLEX_DB_PATH."""
+        readme = _readme_path()
+        if readme is None:
+            self.skipTest(_NO_README)
+        with open(readme) as f:
+            text = f.read()
+        m = re.search(r'database path[^(]*\(see "([^"]+)"', text)
+        self.assertIsNotNone(m, "the README no longer says where the database path goes")
+        assert m is not None
+        heads = [h for h in re.finditer(r'^#{2,} (.*)$', text, re.M)]
+        start = next((h for h in heads if h.group(1).startswith(m.group(1))), None)
+        self.assertIsNotNone(start, f'no section "{m.group(1)}"')
+        assert start is not None
+        nxt = next((h.start() for h in heads if h.start() > start.end()), len(text))
+        self.assertIn('PLEX_DB_PATH', text[start.end():nxt],
+                      f'section "{m.group(1)}" does not describe PLEX_DB_PATH')
+
 
 class TestConfigLayers(unittest.TestCase):
     """The site config, then the user's, the later winning per key.
@@ -15769,6 +15889,25 @@ class TestConfigLayers(unittest.TestCase):
         self.assertEqual(self.mp.CONFIG_RECORD['origin']['PLEX_DB_REMOTE_HOST'], user)
         self.assertEqual([l for l, _p in self.mp.CONFIG_RECORD['files']], ['site', 'user'])
         self.assertNotEqual(site, user)
+
+    def test_an_empty_PLEX_DB_PATH_names_the_file_that_empties_it(self):
+        """The site config sets the server's database path and your own file
+        sets it to '' -- the later layer wins.  The ERROR names YOUR file,
+        and the site file whose value removing that line brings back; it
+        does not send you to set it in the site config, which already does."""
+        from unittest import mock
+        site = self.site("PLEX_DB_PATH = '/srv/plex/x.db'\n")
+        user = self.user("PLEX_DB_PATH = ''\n")
+        conf, _ = self.load()
+        e = io.StringIO()
+        with mock.patch.object(self.mp, 'PLEX_DB_PATH', conf['PLEX_DB_PATH']), \
+                contextlib.redirect_stderr(e), self.assertRaises(SystemExit):
+            self.mp.plex_db_path()
+        out = e.getvalue()
+        self.assertIn('PLEX_DB_PATH is empty', out)
+        self.assertIn(user, out)
+        self.assertIn(site, out)
+        self.assertNotIn('set it in the site config', out)
 
     def legacy_refusal(self) -> str:
         """The legacy-key refusal for the files loaded now, as printed."""
