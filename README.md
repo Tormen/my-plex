@@ -233,8 +233,8 @@ all, from the one list the rules are written from. In this order:
 1. `python3` is 3.10 or newer, or an ERROR names the one found.
 2. A stored **deny** for that very remote -- any port, or its own -- that
    names my-plex's Python, `ssh` or `any` is removed: a deny beats an allow.
-   A deny naming another program or another remote is somebody else's, and
-   stays.
+   A deny naming another program -- another Python minor too -- or another
+   remote is somebody else's, and stays.
 3. **Two rules per remote**: one naming the program that connects -- Python,
    or `ssh` for the ssh endpoint -- and one for `any` process connecting via
    it. Each rule's **owner** is `RUN_AS_USER` from the site config, else the

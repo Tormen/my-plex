@@ -14348,6 +14348,25 @@ def _su_stub(d: str) -> None:
     os.chmod(stub, 0o755)
 
 
+def _listed_python(python3: str) -> str:
+    """PYTHON3 as `my-little-snitch list` shows a rule naming it: the
+    Python.app of its framework, Homebrew's version folder as `*` -- the
+    form an alert stores, written out here from my-little-snitch's own
+    tests rather than asked of my-plex, so the test is no copy of the code."""
+    real = os.path.realpath(python3)
+    real = re.sub(r'(/Python\.framework/Versions/[^/]+)/bin/python[0-9.]*$',
+                  r'\1/Resources/Python.app/Contents/MacOS/Python', real)
+    return re.sub(r'(/Cellar/[^/]+)/[^/]+/', r'\1/*/', real, count=1)
+
+
+def _another_minor(listed: str) -> str:
+    """LISTED with its Python minor one lower: another program, to a firewall."""
+    m = re.search(r'Versions/(\d+)\.(\d+)/', listed)
+    assert m, f"no Python version in {listed}"
+    old, new = f"{m[1]}.{m[2]}", f"{m[1]}.{int(m[2]) - 1}"
+    return listed.replace(f"@{old}/", f"@{new}/").replace(f"Versions/{old}/", f"Versions/{new}/")
+
+
 class _RootRun:
     """What one root --install left: the run, and what it asked of the
     firewall tool and of su."""
@@ -14390,6 +14409,11 @@ class _RootInstallCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @staticmethod
+    def listed_python() -> str:
+        """The python3 a root run here names, as the firewall tool lists it."""
+        return _listed_python(shutil.which('python3', path=_fake_ssh_env()['PATH']) or 'python3')
 
     def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv=('--install',),
                  env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
@@ -14502,8 +14526,7 @@ class TestInstallAsRoot(_RootInstallCase):
                          f"remove called with nothing to remove: {run.calls}")
         self.assertIn('none found', run.r.stdout)
 
-        py = ('/opt/homebrew/Cellar/python@3.15/*/Frameworks/Python.framework/'
-              'Versions/3.15/Resources/Python.app/Contents/MacOS/Python')
+        py = self.listed_python()
 
         def rule(rid: str, process: str, action: str) -> str:
             return f"{rid}\t{process}  {action}  api.themoviedb.org  tcp/443  me\n"
@@ -14608,9 +14631,11 @@ class TestInstallAsRoot(_RootInstallCase):
         rules, and 10.0.0.1's holds 10.0.0.12's: a deny for another remote,
         never this one's.  A deny for another port does not stop this one
         either.  Each stays; the controls -- my-plex's Python and ssh on the
-        remote itself, any port -- go."""
-        py = ('/opt/homebrew/Cellar/python@3.15/*/Frameworks/Python.framework/'
-              'Versions/3.15/Resources/Python.app/Contents/MacOS/Python')
+        remote itself, any port -- go.
+
+        Another Python MINOR is another program too: it matched once, because
+        any process holding 'Python.app' was taken for my-plex's own."""
+        py = self.listed_python()
 
         def rule(rid: str, process: str, remote: str, port: str) -> str:
             return f"{rid}\t{process}  deny  {remote}  {port}  me\n"
@@ -14620,6 +14645,7 @@ class TestInstallAsRoot(_RootInstallCase):
                    + rule('ppp333', py, 'upload.pypi.org', 'tcp/443')
                    + rule('ttt444', py, 'ssh.example.net', 'tcp/22')
                    + rule('ggg555', '/usr/bin/ssh', 'ssh.example.net', 'any')
+                   + rule('mmm777', _another_minor(py), 'pypi.org', 'any')
                    + rule('hhh666', py, 'pypi.org', 'any'))
         run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
                                        "PLEX_DB_REMOTE = 'me@ssh.example.net:53146'\n",

@@ -4093,9 +4093,11 @@ def _deny_ids(listing: str, program: str, tail: "list[str]") -> "list[str]":
     my-plex's business.  So each COLUMN of the rule is matched, never the
     line as a whole (a host named ssh.example.net made every deny for it
     look like ssh's):
-      - PROCESS: the program my-plex connects with -- its Python (every
-        Python rule names the stored `Python.app`), or `ssh` -- as the
-        process or the via program, or `any`.  Firefox's deny stays.
+      - PROCESS: the program my-plex connects with -- the Python running
+        this, in the form a rule stores it (its Python.app, Homebrew's
+        version folder as `*`), or `ssh` -- as the process or the via
+        program, or `any`.  Firefox's deny stays, and so does one for
+        another Python minor: to the firewall that is another program.
       - REMOTE: this remote itself.  `list` is a FILTER, so pypi.org's
         listing holds upload.pypi.org's rules too, and 10.0.0.1's holds
         10.0.0.12's.
@@ -4108,9 +4110,20 @@ def _deny_ids(listing: str, program: str, tail: "list[str]") -> "list[str]":
     remote = tail[0]
     port = int(tail[tail.index('--port') + 1]) if '--port' in tail else 443
 
+    def stored(path):
+        # my-little-snitch's own form of a program: a framework Python
+        # connects as its Python.app, and Homebrew's version folder is `*`
+        # (a patch upgrade keeps the rule, a minor one does not).  Applied to
+        # the listed name too, so a version folder written out still matches.
+        path = re.sub(r'(/Python\.framework/Versions/[^/]+)/bin/python[0-9.]*$',
+                      r'\1/Resources/Python.app/Contents/MacOS/Python', path)
+        return re.sub(r'(/Cellar/[^/]+)/[^/]+/', r'\1/*/', path, count=1)
+
+    this_python = stored(os.path.realpath(sys.executable))
+
     def stops_program(process):
         return process == 'any' or any(
-            'Python.app' in name or (program == 'ssh' and os.path.basename(name) == 'ssh')
+            stored(name) == this_python or (program == 'ssh' and os.path.basename(name) == 'ssh')
             for name in process.split(' via '))
 
     def stops_port(spec):
@@ -33592,8 +33605,8 @@ def main_print_help(args, remaining_args, main_parser):
             print('   1. python3 >= 3.10, or an ERROR naming the one it found')
             print('   2. a stored DENY for that very remote, any port or its own,')
             print("      naming my-plex's Python, ssh or `any`, is removed -- a deny")
-            print('      beats an allow; one naming another program or another remote')
-            print("      is somebody else's and stays")
+            print('      beats an allow; one naming another program (another Python')
+            print("      minor too) or another remote is somebody else's and stays")
             print('   3. the two rules per remote, owned by RUN_AS_USER (else the user')
             print('      who ran sudo; with neither, an ERROR) -- never root, who only')
             print('      writes them')
