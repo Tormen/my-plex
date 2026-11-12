@@ -14351,6 +14351,15 @@ class TestInstallFirewallRules(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_help_install_says_exit_0_only_for_an_entry_in_place(self):
+        """#44 review: --help install said a user's own run "exits 0" with no
+        condition, while the test above shows a failed login exits 1.  The
+        claim names its condition, as the README does."""
+        r = subprocess.run([MAIN_SCRIPT, '--help', 'install'], capture_output=True,
+                           text=True, timeout=60)
+        text = ' '.join(r.stdout.split())
+        self.assertIn('exits 0 once the entry is in place (a failed login is an ERROR)', text)
+
     def test_after_roots_half_the_user_run_writes_the_ssh_entry(self):
         """The run root hands over to is a user's --install with the firewall
         tool there -- and must not be sent back to root.  The command root
