@@ -179,8 +179,8 @@ ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex      # or anywhere in your
 # Configure
 my-plex --create-config ~/.my-plex.conf      # Write default config to file: mode 0600, never over an existing file
 # Or: my-plex --create-config > FILE   # the template on stdout: the redirect overwrites a file there, with the umask's mode
-# Edit ~/.my-plex.conf with your Plex DB path and the Plex token; the Plex
-# server's ssh address goes in the site config (see "Installing" below)
+# Edit ~/.my-plex.conf with the Plex token; the Plex server's ssh address and
+# its database path go in the site config (see "Installing" below)
 # See the files read and each key they set:  my-plex --config
 
 # Then, in a root shell: the firewall rules, and the ssh Host entry as you
@@ -583,8 +583,11 @@ PLEX_DB_REMOTE_HOST = 'my-plex'
 RUN_AS_USER = 'plexuser'
 PLEX_API_REMOTE = '192.0.2.10:32400'
 
-# Required: Path to Plex database on the server
-PLEX_DB_PATH = '/path/to/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
+# Site config: the Plex database's path on the server.  No default: a
+# command that reads the database stops without it, naming where to set it;
+# one that reads only the cache never asks.  The value is an example -- a
+# macOS server's standard path, for a server run by plexuser
+PLEX_DB_PATH = '/Users/plexuser/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
 
 # Optional: Alternative mount points (for local file access)
 ALTERNATIVE_ROOTPATHS = [('/server/path/', '/local/mount/')]

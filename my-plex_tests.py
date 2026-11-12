@@ -15413,6 +15413,143 @@ class TestCreateConfig(unittest.TestCase):
             self.assertIn('overwrites', ln, ln)
 
 
+class TestPlexDbPathRequired(unittest.TestCase):
+    """PLEX_DB_PATH has no default: where the database lies is the SERVER's
+    business, and a default naming one user's server path is that user's
+    value in everybody's tool.  A command that reads the database with it
+    empty stops with ONE ERROR that names the key and offers the site config
+    -- before anything is handed to ssh, where an empty path became
+    `sqlite3 ''` on the server.  A command that reads only the cache never
+    asks for it.  Set, the database is read as before."""
+
+    EXAMPLE = ('/Users/plexuser/Library/Application Support/Plex Media Server/'
+               'Plug-in Support/Databases/com.plexapp.plugins.library.db')
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix='my-plex-dbpath-')
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.log = os.path.join(self.d, 'ssh.log')
+        bindir = os.path.join(self.d, 'bin')
+        os.mkdir(bindir)
+        # A fake ssh that records every call and connects to nothing.
+        with open(os.path.join(bindir, 'ssh'), 'w') as f:
+            f.write('#!/bin/dash\nprintf \'%s\\n\' "$*" >> "$FAKE_SSH_LOG"\nexit 1\n')
+        os.chmod(os.path.join(bindir, 'ssh'), 0o755)
+        self.env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', FAKE_SSH_LOG=self.log,
+                        PATH=bindir + os.pathsep + os.environ.get('PATH', ''))
+
+    def conf(self, db_line: str) -> str:
+        p = os.path.join(self.d, 'my-plex.conf')
+        with open(p, 'w') as f:
+            f.write(f"CACHE_FILE = {os.path.join(self.d, 'cache.pkl')!r}\n"
+                    f"LOCK_FILE = {os.path.join(self.d, 'cache.lock')!r}\n"
+                    f"SSH_CONFIG_FILE = {os.path.join(self.d, 'ssh_config')!r}\n"
+                    "PLEX_DB_REMOTE_HOST = 'plex-test-host'\n"
+                    "TVDB_API_KEY = ''\nTMDB_API_KEY = ''\n"
+                    "PLEX_URL = ''\nPLEX_TOKEN = ''\nPLEX_XML_URL = ''\n" + db_line)
+        return p
+
+    def ssh_calls(self) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as f:
+            return f.read().splitlines()
+
+    def run_cmd(self, conf: str, *argv: str) -> 'subprocess.CompletedProcess[str]':
+        return subprocess.run([MAIN_SCRIPT, '--config', conf, *argv], capture_output=True,
+                              text=True, timeout=120, env=self.env)
+
+    def test_the_default_is_empty_and_the_template_shows_an_example(self):
+        mod = _main_module()
+        self.assertEqual(mod.CONFIG_DEFAULTS['PLEX_DB_PATH'], '')
+        r = subprocess.run([MAIN_SCRIPT, '--create-config'], capture_output=True, text=True,
+                           timeout=120, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        block = r.stdout.split('# PLEX_DB_PATH:', 1)[1].split('\n\n', 1)[0]
+        self.assertIn(f"# PLEX_DB_PATH = {self.EXAMPLE!r}", block)
+        self.assertIn('The default is empty; the value is an example', block)
+        self.assertNotIn('/Users/me/', r.stdout, "one user's path in the template")
+
+    def test_empty_stops_a_database_command_before_ssh(self):
+        """Unset, or set empty, in the file this run names: the ERROR names
+        that file -- the one this run reads.  (No file named: the site
+        config's places -- the in-process test below; a run under another
+        HOME would build a venv there.)"""
+        for state, line in (('unset', ''), ('empty', "PLEX_DB_PATH = ''\n")):
+            with self.subTest(state=state):
+                if os.path.exists(self.log):
+                    os.unlink(self.log)
+                conf = self.conf(line)
+                r = self.run_cmd(conf, '--update-cache')
+                self.assertEqual(r.returncode, 1, r.stdout[-600:] + r.stderr[-600:])
+                self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: PLEX_DB_PATH is empty')
+                self.assertIn(f"set it in {conf}", r.stderr)
+                self.assertIn(self.EXAMPLE, r.stderr)
+                self.assertNotIn('Traceback', r.stderr)
+                self.assertEqual(self.ssh_calls(), [], "ssh was called with no database path")
+
+    def test_empty_stops_every_database_query_in_process(self):
+        """Both doors to the database -- the read and the write -- refuse,
+        and with no file named the offer is the site config's places, never
+        your own file: the path is the server's."""
+        mod = _main_module()
+        saved = mod.PLEX_DB_PATH, mod.PLEX_DB_REMOTE_HOST
+        calls: list[Any] = []
+        real_run = mod.subprocess.run
+        mod.subprocess.run = lambda *a, **k: calls.append(a) or real_run(['false'])
+        mod.PLEX_DB_PATH, mod.PLEX_DB_REMOTE_HOST = '', 'plex-test-host'
+        saved_files = mod.CONFIG_RECORD['files']
+        mod.CONFIG_RECORD['files'] = []
+        try:
+            for fn in (mod.query_plex_database, mod.query_plex_database_write):
+                with self.subTest(fn=fn.__name__):
+                    e = io.StringIO()
+                    with contextlib.redirect_stderr(e), self.assertRaises(SystemExit):
+                        fn('SELECT 1')
+                    self.assertIn('PLEX_DB_PATH is empty', e.getvalue())
+                    self.assertIn('> /etc/my-plex.conf', e.getvalue())
+                    self.assertNotIn(os.path.join(mod._home(), '.my-plex.conf'), e.getvalue())
+            self.assertEqual(calls, [])
+        finally:
+            mod.subprocess.run = real_run
+            mod.PLEX_DB_PATH, mod.PLEX_DB_REMOTE_HOST = saved
+            mod.CONFIG_RECORD['files'] = saved_files
+
+    def test_the_auto_refresh_of_a_changing_command_skips_without_it(self):
+        """--mv and --sort-new refresh the cache first when Plex has scanned
+        since -- best effort, documented to skip with no Plex DB and never to
+        block the command.  Empty PLEX_DB_PATH skips it, rather than stopping
+        the command with the ERROR meant for a command that reads the DB."""
+        mod = _main_module()
+        saved = (mod.PLEX_DB_PATH, mod.CACHE_FILE, mod.OFFLINE, mod.READ_ONLY_MODE)
+        mod.PLEX_DB_PATH, mod.CACHE_FILE = '', os.path.join(self.d, 'no-cache.pkl')
+        mod.OFFLINE = mod.READ_ONLY_MODE = False
+        try:
+            e = io.StringIO()
+            with contextlib.redirect_stderr(e):
+                self.assertFalse(mod._maybe_refresh_cache_for_state_changing_command('--mv'))
+            self.assertNotIn('PLEX_DB_PATH is empty', e.getvalue())
+        finally:
+            mod.PLEX_DB_PATH, mod.CACHE_FILE, mod.OFFLINE, mod.READ_ONLY_MODE = saved
+
+    def test_a_cache_command_does_not_ask_for_it(self):
+        conf = _fixture_conf()
+        with open(conf, 'a') as f:
+            f.write("PLEX_DB_PATH = ''\n")
+        r = self.run_cmd(conf, '--list-libraries')
+        self.assertEqual(r.returncode, 0, r.stderr[-600:])
+        self.assertNotIn('PLEX_DB_PATH', r.stderr)
+        self.assertEqual(self.ssh_calls(), [])
+
+    def test_set_reads_the_database_as_before(self):
+        path = '/srv/plex-test/com.plexapp.plugins.library.db'   # not here: ssh it is
+        r = self.run_cmd(self.conf(f"PLEX_DB_PATH = {path!r}\n"), '--update-cache')
+        self.assertNotIn('PLEX_DB_PATH is empty', r.stderr)
+        calls = self.ssh_calls()
+        self.assertTrue(any('plex-test-host' in c and f"sqlite3 -header -csv '{path}'" in c
+                            for c in calls), calls)
+
+
 class TestConfigLayers(unittest.TestCase):
     """The site config, then the user's, the later winning per key.
 
@@ -17104,7 +17241,7 @@ _UNITTEST_SCOPES = {
     'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry, TestInstallAsRoot],
     'conf-template': [TestConfigTemplateCoversEveryKey, TestCreateConfig],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound, TestReadmeInstallOutput],
-    'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
+    'config':     [TestConfigLayers, TestPlexDbPathRequired, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
                    TestAudioLangPureVsCompleted,
