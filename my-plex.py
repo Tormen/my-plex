@@ -5020,7 +5020,8 @@ _LIBRARY_NAMES_IN_CACHE_FILE: "frozenset[str] | None" = None
 
 def is_library_name(name: str) -> bool:
     """Whether name is a library of the cache: what makes a bare word a
-    library scope, whatever the library is called.
+    library scope, whatever the library is called -- once no type shortcut,
+    watched/unwatched or field name has claimed the word.
 
     The loaded cache's library index answers.  The argv is read before the
     cache is loaded, so until then the same index answers from the cache
@@ -31079,8 +31080,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("BARE-WORD AUTO-INTERPRETATION (simple + intuitive default):")
             print("  A bare word that names a library in the cache is that LIBRARY's")
-            print("  scope, whatever the library is called — no `library:` prefix")
-            print("  needed.  Other bare words become free-text title-search")
+            print("  scope — no `library:` prefix needed — unless the word already")
+            print("  means something else: a type shortcut (movie, movies, series,")
+            print("  show, shows), watched / unwatched, or a field name (title, year,")
+            print("  genre, ...).  For a library called like one of those, write")
+            print("  `library:NAME`.  Other bare words become free-text title-search")
             print("  (`title~<word>`).")
             print()
             print("    my-plex library1                    # library scope (auto-detect)")

@@ -12280,7 +12280,8 @@ class TestArgvValueFlags(unittest.TestCase):
 
 class TestBareLibraryScope(unittest.TestCase):
     """A bare word that names a library of the cache is that library's scope,
-    whatever the library is called; any other bare word is a title search.
+    unless the word is a type shortcut, watched/unwatched or a field name; any
+    other bare word is a title search.
 
     The fixture library with its German library renamed 'Kids' -- a name shaped
     like a word, not like `movies.X`.  Argv is read before the cache is loaded,
@@ -12288,11 +12289,13 @@ class TestBareLibraryScope(unittest.TestCase):
     name could only be recognised by its shape: `Kids` became `title~Kids` and
     printed "No items match the filter." while `library:Kids` listed it."""
 
-    @classmethod
-    def setUpClass(cls):
+    @staticmethod
+    def _renamed_fixture(name: str) -> str:
+        """The fixture library with library_de renamed `name`, in a directory
+        of its own; returns its config."""
         import atexit
         src = os.path.dirname(_fixture_conf())
-        d = tempfile.mkdtemp(prefix='my-plex-kids-')
+        d = tempfile.mkdtemp(prefix='my-plex-renamed-')
         atexit.register(shutil.rmtree, d, True)
 
         def renamed(o: Any) -> Any:
@@ -12301,18 +12304,26 @@ class TestBareLibraryScope(unittest.TestCase):
             if isinstance(o, list):
                 return [renamed(x) for x in o]
             if isinstance(o, str):
-                return o.replace('library_de', 'Kids')
+                return o.replace('library_de', name)
             return o
         with open(os.path.join(src, 'cache.pkl'), 'rb') as f:
             cache = renamed(pickle.load(f))
-        assert 'Kids' in cache['obj_by_library'], "the fixture has no library_de to rename"
+        assert name in cache['obj_by_library'], "the fixture has no library_de to rename"
         with open(os.path.join(d, 'cache.pkl'), 'wb') as f:
             pickle.dump(cache, f)
         with open(os.path.join(src, 'my-plex.conf')) as f:
             conf = f.read().replace(src, d)
-        cls._conf = os.path.join(d, 'my-plex.conf')
-        with open(cls._conf, 'w') as f:
+        path = os.path.join(d, 'my-plex.conf')
+        with open(path, 'w') as f:
             f.write(conf)
+        return path
+
+    @classmethod
+    def setUpClass(cls):
+        cls._conf = cls._renamed_fixture('Kids')
+        d = os.path.dirname(cls._conf)
+        with open(cls._conf) as f:
+            conf = f.read()
         # the same config with no cache behind it
         cls._conf_no_cache = os.path.join(d, 'no-cache.conf')
         with open(cls._conf_no_cache, 'w') as f:
@@ -12363,6 +12374,34 @@ class TestBareLibraryScope(unittest.TestCase):
         r, out = self._run('-D', 'Kids', conf=self._conf_no_cache)
         self.assertNotIn('Traceback', out)
         self.assertIn("Search token 'Kids'", out)
+
+    def test_a_library_named_like_a_shortcut_or_a_field_needs_library_colon(self):
+        """A word that is a type shortcut, watched/unwatched or a field name
+        keeps that meaning, whatever library the cache holds: `series` is
+        `--type series`, `Year` is the YEAR column.  --help scope said a bare
+        library name is a scope "whatever the library is called", which was
+        false for exactly these names; it now names them and `library:NAME`."""
+        conf = self._renamed_fixture('series')
+        r, out = self._run('series', conf=conf)
+        self.assertIn('Une Serie', out, "'series' is no longer the type shortcut")
+        self.assertNotIn('Irgendein Film', out)
+        r, out = self._run('library:series', conf=conf)
+        self.assertIn('Irgendein Film', out, "library:series does not reach the library")
+        self.assertNotIn('Une Serie', out)
+        r, out = self._run('Year', conf=self._renamed_fixture('Year'))
+        self.assertIn('Some Movie', out, "'Year' is no longer the YEAR column over every library")
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--help', 'scope'],
+                           capture_output=True, text=True, timeout=E2E_TIMEOUT)
+        page = ' '.join(r.stdout.split())
+        self.assertFalse('whatever the library is called' in page, "--help scope still promises every name")
+        for claim in ('a type shortcut (movie, movies, series, show, shows)',
+                      'watched / unwatched', 'a field name (title, year, genre, ...)',
+                      'write `library:NAME`'):
+            self.assertTrue(claim in page, f"--help scope does not say: {claim}")
+        with open(os.path.join(os.path.dirname(os.path.realpath(MAIN_SCRIPT)), 'README.md')) as f:
+            readme = ' '.join(f.read().split())
+        self.assertFalse('whatever it is called' in readme, "the README still promises every name")
+        self.assertTrue('then write `library:NAME`' in readme, "the README does not name library:NAME")
 
     def _scan_conf(self, with_cache: bool) -> str:
         """A config of its own for one --scan run: the scan updates the cache
