@@ -68,9 +68,10 @@ def main(launcher: str) -> None:
          --install is the one command root runs: its firewall half, then
          the drop to the user (_root_install), never past this point;
       2. -Q, so the bootstrap's own output is silenced too;
-      3. the venv: build it when missing -- or, for --install, when it was
-         built from another Python minor -- then re-exec the launcher inside
-         it.  A run that only prints skips this -- see print_only_run();
+      3. the venv: build it when missing -- or, for the --install root hands
+         over, when it was built from another Python minor -- then re-exec
+         the launcher inside it.  A run that only prints skips this -- see
+         print_only_run();
       4. import the tool and run it.
     """
     global LAUNCHER
@@ -99,10 +100,13 @@ def main(launcher: str) -> None:
     # line, and 130.
     try:
         if not print_only_run(argv) and not _inside_our_venv():
-            # --install rebuilds a venv of another Python minor: the firewall
-            # rules name THIS python3, and to the firewall another minor is
-            # another program.  Only --install: a minor upgrade is its cue.
-            built_from = _venv_minor() if install_asked(argv) else None
+            # The --install root hands over rebuilds a venv of another Python
+            # minor: root has just written rules naming THIS python3, and to
+            # the firewall another minor is another program.  Only that run:
+            # a user's own --install may yet be refused "needs root" -- after
+            # this point, by the tool -- and must not clear the venv first.
+            built_from = (_venv_minor() if install_asked(argv)
+                          and os.environ.get(INSTALL_FROM_ROOT_ENV) == "1" else None)
             stale = built_from is not None and built_from != _this_minor()
             if stale or not _venv_has_deps():
                 _bootstrap_venv(rebuilt_from=built_from if stale else None)
@@ -363,8 +367,8 @@ def _bootstrap_venv(rebuilt_from: "str | None" = None):
     Python minor it was built from -- install deps, and re-exec."""
     if rebuilt_from:
         print(f"\n >>> rebuilding python virtualenv '{VENV_DIR}': it was built from python "
-              f"{rebuilt_from}, and this python3 is {_this_minor()} -- the firewall rules name "
-              f"this one\n", file=sys.stderr)
+              f"{rebuilt_from}, and this python3, the one root's --install ran under, is "
+              f"{_this_minor()}\n", file=sys.stderr)
     else:
         print(f"\n >>> Creating python virtualenv '{VENV_DIR}'...\n", file=sys.stderr)
 
@@ -461,8 +465,13 @@ def _root_install(launcher: str, argv: "list[str]") -> "NoReturn":
                      f"    put the newer one first in root's PATH, or install it")
     config = _root_install_config(argv)
     tool = _import_tool()
-    user = tool.install_firewall(config)
-    _drop_to(user, launcher, config)
+    try:
+        user, named = tool.install_firewall(config)
+    except Exception as unexpected:
+        # Outside the tool's run(), so its bug handler is called here: one
+        # ERROR line and a trace file, never a traceback -- and no drop.
+        tool.report_bug(unexpected)
+    _drop_to(user, launcher, named)
 
 
 def _drop_to(user: str, launcher: str, config: "str | None") -> "NoReturn":
@@ -472,8 +481,9 @@ def _drop_to(user: str, launcher: str, config: "str | None") -> "NoReturn":
     run that kept root's would build the venv and write ~/.ssh in /var/root.
 
     The run names the python3 root ran under: the venv is then built from the
-    Python the rules name.  The config root read travels as --config, since
-    su keeps no environment."""
+    Python the rules name.  CONFIG, the file named for this run that root
+    read (None: the site config), travels as --config, since su keeps no
+    environment -- $MY_PLEX_CONFIG would otherwise be lost on the way."""
     import shlex
     cmd = [sys.executable, "-I", "-S", launcher, "--install"]
     if config:

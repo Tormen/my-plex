@@ -13854,7 +13854,11 @@ class TestVenvRebuildOnPythonMinor(unittest.TestCase):
     The boot module runs in a child with venv's and pip's calls and the
     re-exec replaced by recorders, so nothing is built and nothing fetched."""
 
-    def _boot(self, argv: 'list[str]', venv_minor: str) -> 'tuple[list[list[str]], str]':
+    def _boot(self, argv: 'list[str]', venv_minor: str,
+              from_root: bool = True) -> 'tuple[list[list[str]], str]':
+        """The boot's venv and pip calls for ARGV over a venv of VENV_MINOR,
+        in the run root hands over to -- or, without FROM_ROOT, a run the
+        user started."""
         d = tempfile.mkdtemp(prefix='my-plex-venvminor-')
         try:
             venv = os.path.join(d, 'venv')
@@ -13877,6 +13881,9 @@ class TestVenvRebuildOnPythonMinor(unittest.TestCase):
                 "mp.main('/the/launcher')\n") % (venv,)
             env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
             env.pop('MY_PLEX_VENV_REEXEC', None)
+            env.pop('MY_PLEX_INSTALL_FROM_ROOT', None)
+            if from_root:
+                env['MY_PLEX_INSTALL_FROM_ROOT'] = '1'
             r = subprocess.run([sys.executable, '-B', '-c', snippet], capture_output=True,
                                text=True, timeout=60, env=env)
             m = re.search(r'CALLS=(.*)', r.stderr)
@@ -13903,6 +13910,15 @@ class TestVenvRebuildOnPythonMinor(unittest.TestCase):
         self.assertEqual(calls, [], f"a run that is not --install rebuilt the venv:\n{stderr[-600:]}")
         calls, stderr = self._boot(['my-plex', '--install'], here)
         self.assertEqual(calls, [], f"a venv of this minor was rebuilt:\n{stderr[-600:]}")
+
+    def test_a_users_own_install_rebuilds_nothing(self):
+        """The rebuild is for the run ROOT hands over: there the rules naming
+        this python3 have just been written.  A user's own --install, where a
+        firewall tool exists, is refused "needs root" -- and the boot runs
+        before that refusal, so a rebuild there cleared the user's venv and
+        ran pip with no rule for the new Python, then said "needs root"."""
+        calls, stderr = self._boot(['my-plex', '--install'], '3.9', from_root=False)
+        self.assertEqual(calls, [], f"a user's own --install rebuilt the venv:\n{stderr[-600:]}")
 
 
 class TestReadmeFlagsExist(unittest.TestCase):
@@ -14298,7 +14314,8 @@ class TestInstallFirewallRules(unittest.TestCase):
 def _firewall_stub(d: str) -> str:
     """A my-little-snitch in directory D that answers as the real one does
     and logs every call to D/calls (`cli <argv>`), so a test reads what root
-    asked of it.  `list R` prints the lines of D/listing that name R -- no
+    asked of it.  `list R` prints the lines of D/listing that CONTAIN R, as
+    the real one does (a filter, so upload.pypi.org is in pypi.org's) -- no
     D/listing is the real one's refusal of anyone but root; `remove` takes
     IDs on stdin and fails on none (the real err 00036); `allow` fails while
     D/fail-allow exists, and says "already there" while D/already does."""
@@ -14309,7 +14326,7 @@ def _firewall_stub(d: str) -> str:
                 'printf "cli %s\\n" "$*" >> "$D/calls"\n'
                 'case "$1" in\n'
                 '  list) [ -f "$D/listing" ] || { echo "ERROR 00099 [1]: needs root" >&2; exit 1; }\n'
-                '        grep -F -- "  $2  " "$D/listing"; exit 0;;\n'
+                '        grep -F -- "$2" "$D/listing"; exit 0;;\n'
                 '  remove) ids=$(cat)\n'
                 '          [ -n "$ids" ] || { echo "ERROR 00036 [1]: remove [go] <ID>.." >&2; exit 1; }\n'
                 '          for i in $ids; do echo "removed $i" >> "$D/calls"; done;;\n'
@@ -14377,7 +14394,9 @@ class _RootInstallCase(unittest.TestCase):
     def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv=('--install',),
                  env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
                  copy: 'str | None' = None, firewall: bool = True,
-                 touch: 'tuple[str, ...]' = ()) -> _RootRun:
+                 touch: 'tuple[str, ...]' = (), conf_in_env: bool = False) -> _RootRun:
+        """One root --install.  Its config is named by --config, or with
+        CONF_IN_ENV by $MY_PLEX_CONFIG and nothing in argv."""
         d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
         stub = _firewall_stub(d) if firewall else os.path.join(d, 'no-such-firewall-tool')
         _su_stub(d)
@@ -14394,8 +14413,11 @@ class _RootInstallCase(unittest.TestCase):
         e = dict(_fake_ssh_env(), HOME=home)
         e['PATH'] = d + os.pathsep + e['PATH']
         e.pop('SUDO_USER', None)
+        if conf_in_env:
+            e['MY_PLEX_CONFIG'] = conf
         e.update(env or {})
-        r = subprocess.run([copy or self.copy, '--config', conf, *argv], capture_output=True,
+        named = [] if conf_in_env else ['--config', conf]
+        r = subprocess.run([copy or self.copy, *named, *argv], capture_output=True,
                            text=True, timeout=120, env=e, stdin=subprocess.DEVNULL)
         return _RootRun(r, d, home, conf, shutil.which('python3', path=e['PATH']) or '?')
 
@@ -14558,6 +14580,128 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertEqual(run.r.returncode, 0, run.text())
         self.assertIn('no rule written', run.r.stdout)
         self.assertEqual(run.su[:2], ['-l', 'nobody'], run.text())
+
+    def test_the_config_root_read_is_the_one_handed_over(self):
+        """`su -l` keeps no environment, so a config root read from
+        $MY_PLEX_CONFIG must travel as --config -- or the user's half reads
+        the site and user layers instead, and writes its ssh Host entry from
+        another PLEX_DB_REMOTE than the rules root just wrote.  With both
+        named, root reads $MY_PLEX_CONFIG (first in the search), so that is
+        the one handed over, not the argv's."""
+        run = self.run_root(conf_in_env=True)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        line = run.su[3] if len(run.su) > 3 else ''
+        self.assertIn(f"--config {run.conf}", line, f"the config root read does not travel: {run.su}")
+        other = os.path.join(self.tmp, 'not-read.conf')
+        run = self.run_root(conf_in_env=True, argv=('--install', '--config', other))
+        self.assertEqual(run.r.returncode, 0, run.text())
+        line = run.su[3] if len(run.su) > 3 else ''
+        self.assertIn(f"--config {run.conf}", line, f"not the file root read: {run.su}")
+        self.assertNotIn(other, line)
+
+    def test_a_deny_for_another_program_or_another_remote_stays(self):
+        """Only a deny that stops my-plex is my-plex's to remove.  The ssh
+        remote here is a host whose NAME holds 'ssh' -- the house's own public
+        endpoint does -- so a pattern searched over the whole rule line took
+        Firefox's and curl's denies for it as ssh's.  The firewall tool's
+        list is a FILTER, so pypi.org's listing holds upload.pypi.org's
+        rules, and 10.0.0.1's holds 10.0.0.12's: a deny for another remote,
+        never this one's.  A deny for another port does not stop this one
+        either.  Each stays; the controls -- my-plex's Python and ssh on the
+        remote itself, any port -- go."""
+        py = ('/opt/homebrew/Cellar/python@3.15/*/Frameworks/Python.framework/'
+              'Versions/3.15/Resources/Python.app/Contents/MacOS/Python')
+
+        def rule(rid: str, process: str, remote: str, port: str) -> str:
+            return f"{rid}\t{process}  deny  {remote}  {port}  me\n"
+        listing = (rule('fff111', '/Applications/Firefox.app/Contents/MacOS/firefox',
+                        'ssh.example.net', 'tcp/53146')
+                   + rule('ccc222', '/usr/bin/curl', 'ssh.example.net', 'any')
+                   + rule('ppp333', py, 'upload.pypi.org', 'tcp/443')
+                   + rule('ttt444', py, 'ssh.example.net', 'tcp/22')
+                   + rule('ggg555', '/usr/bin/ssh', 'ssh.example.net', 'any')
+                   + rule('hhh666', py, 'pypi.org', 'any'))
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
+                                       "PLEX_DB_REMOTE = 'me@ssh.example.net:53146'\n",
+                            listing=listing)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
+                         ['removed ggg555', 'removed hhh666'], "\n".join(run.calls))
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\nPLEX_DB_REMOTE = 'me@10.0.0.1'\n",
+                            listing=rule('aaa111', py, '10.0.0.12', 'any'))
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual([c for c in run.calls if c.startswith('removed ')], [], "\n".join(run.calls))
+
+    def test_a_firewall_tool_that_cannot_start_is_an_error_not_a_traceback(self):
+        """LITTLE_SNITCH_CLI names a file that is there but cannot be run:
+        an ERROR naming it, nothing handed over -- and no traceback."""
+        d = tempfile.mkdtemp(dir=self.tmp)
+        cli = os.path.join(d, 'my-little-snitch')
+        with open(cli, 'w') as f:
+            f.write("#!/bin/dash\nexit 0\n")
+        os.chmod(cli, 0o644)
+        run = self.run_root(conf_lines=f"RUN_AS_USER = 'nobody'\nLITTLE_SNITCH_CLI = {cli!r}\n")
+        self.assertEqual(run.r.returncode, 1, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]:')
+        self.assertIn(cli, run.r.stderr)
+        self.assertNotIn('Traceback', run.r.stderr)
+        self.assertEqual(run.su, [], "it handed over after a failure")
+
+    def test_a_bug_in_roots_half_is_one_ERROR_line_and_a_trace_file(self):
+        """An unexpected exception in the firewall half is a bug: ONE line,
+        exit 70, the trace in a file -- as for every other command.  Root's
+        half runs outside the tool's run(), so it needs the same handler;
+        and the trace goes to the system temp directory, never root's home."""
+        copy = _tool_copy(os.path.join(self.tmp, 'tool-bug'),
+                          {'boot': [('os.geteuid() == 0', 'True')],
+                           'tool': [("    cli = LITTLE_SNITCH_CLI\n    py = sys.executable\n",
+                                     "    cli = LITTLE_SNITCH_CLI\n    py = sys.executable\n"
+                                     "    raise LookupError('injected for the test')\n")]})
+        run = self.run_root(copy=copy)
+        self.assertEqual(run.r.returncode, 70, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[70\]:')
+        self.assertIn('injected for the test', run.r.stderr)
+        self.assertNotIn('Traceback', run.r.stderr)
+        self.assertEqual(run.su, [], "it handed over after a bug")
+        self.assertEqual(os.listdir(run.home), [], "root wrote its trace into HOME")
+        m = re.search(r'full trace: +(\S+)', run.r.stderr)
+        self.assertTrue(m and os.path.isfile(m.group(1)), run.r.stderr)
+        assert m is not None
+        os.remove(m.group(1))
+
+    def test_as_root_the_API_rule_comes_from_PLEX_API_REMOTE_alone(self):
+        """#33: every key root reads is a site-only key.  PLEX_URL is not --
+        a user's own config may set another server, and wins in every run of
+        theirs -- so root's rule from the site's PLEX_URL would name a
+        server my-plex never connects to."""
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
+                                       "PLEX_URL = 'https://site-plex.example.net:32400'\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertFalse([a for a in run.allows() if 'site-plex.example.net' in a],
+                         "\n".join(run.allows()))
+        self.assertIn('no PLEX_API_REMOTE', run.r.stdout)
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
+                                       "PLEX_API_REMOTE = 'site-plex.example.net'\n")
+        self.assertTrue([a for a in run.allows() if 'site-plex.example.net --host --port 32400' in a],
+                        "control: PLEX_API_REMOTE gets its rule\n" + "\n".join(run.allows()))
+        mp = _import_tool('mp_plexurl')
+        mp.PLEX_API_REMOTE, mp.PLEX_URL = '', 'https://site-plex.example.net:32400'
+        self.assertEqual(mp._plex_remote(), ('site-plex.example.net', 'host', 32400),
+                         "a user's run -- the one that names the hosts without a firewall "
+                         "tool -- still takes the server from PLEX_URL")
+
+    def test_a_second_run_writes_nothing_and_says_so(self):
+        """Every rule already stored: the verdict counts none as written --
+        the run after a run must say it did nothing -- and no deny is
+        touched."""
+        first = self.run_root()
+        self.assertEqual(first.r.returncode, 0, first.text())
+        n = len(first.allows())
+        self.assertIn(f"{n} rule(s) written, 0 already there", first.r.stdout)
+        again = self.run_root(touch=('already',))
+        self.assertEqual(again.r.returncode, 0, again.text())
+        self.assertIn(f"0 rule(s) written, {n} already there", again.r.stdout)
+        self.assertFalse([c for c in again.calls if c.startswith('cli remove')], again.calls)
 
 
 class TestNeverRunsAsRoot(unittest.TestCase):
@@ -15117,6 +15261,87 @@ class TestConfigLayers(unittest.TestCase):
             self.assertIn('0664', out)
         finally:
             self.mp._AS_ROOT = saved
+
+    def test_as_root_a_site_config_must_be_roots_and_writable_by_root_alone(self):
+        """The rule of #26 holds for EVERY file root runs, not only a named
+        one: a site file is Python run by exec() just the same.  Where the
+        farm has no my-plex config, root falls back to
+        /usr/local/etc/my-plex.conf -- a directory Homebrew's owner and
+        group admin can write -- and ran whatever was planted there."""
+        from unittest import mock
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        try:
+            site = self.site("RUN_AS_USER = 'me'\n")
+            os.chmod(site, 0o644)
+            conf, _ = self.load()
+            self.assertEqual(conf.get('RUN_AS_USER'), 'me', "control: a site file root may run is read")
+            os.chmod(site, 0o664)
+            out = self.refused()
+            self.assertIn(site, out)
+            self.assertIn('0664', out)
+            os.remove(site)
+            fallback = self.write('etc/my-plex.conf', "RUN_AS_USER = 'me'\n")
+            os.chmod(fallback, 0o644)
+            with mock.patch('os.geteuid', return_value=0):
+                out = self.refused()
+            self.assertIn(fallback, out)
+            self.assertIn('root does not own', out)
+        finally:
+            self.mp._AS_ROOT = saved
+
+    def test_as_root_a_config_in_a_directory_others_can_write_is_refused(self):
+        """A file root owns, in a directory another user can write, is that
+        user's to swap: they replace the file between any check and the
+        read.  So the directories on the way to it count as the file does."""
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        try:
+            shared = os.path.join(self.d, 'shared')
+            os.makedirs(shared)
+            named = self.write('shared/named.conf', "RUN_AS_USER = 'me'\n")
+            os.chmod(named, 0o644)
+            os.chmod(shared, 0o755)
+            conf, _ = self.load(named)
+            self.assertEqual(conf.get('RUN_AS_USER'), 'me', "control: read from a directory root alone writes")
+            os.chmod(shared, 0o777)
+            out = self.refused(named)
+            self.assertIn(f"group or others can write {os.path.realpath(shared)} (mode 0777)", out,
+                          "the error does not name the directory")
+        finally:
+            self.mp._AS_ROOT = saved
+
+    def test_as_root_the_file_checked_is_the_file_read(self):
+        """A check on the PATH and a read of the PATH are two lookups, and
+        whoever owns a link on it can re-point it in between.  The stat()
+        here answers for a file root may run while the link already names
+        another one -- that window, made to last.  Whatever root checks must
+        be what it reads: the other file's code never runs."""
+        from unittest import mock
+        good = self.write('good.conf', "RUN_AS_USER = 'me'\n")
+        os.chmod(good, 0o644)
+        mark = os.path.join(self.d, 'EVIL-RAN')
+        evil = self.write('evil.conf', f"RUN_AS_USER = 'me'\nopen({mark!r}, 'w').close()\n")
+        os.chmod(evil, 0o666)
+        link = os.path.join(self.d, 'named.conf')
+        os.symlink(evil, link)
+        real_stat = os.stat
+
+        def stat(path: Any, *a: Any, **k: Any) -> os.stat_result:
+            return real_stat(good if path == link else path, *a, **k)
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        out = io.StringIO()
+        try:
+            with mock.patch('os.stat', stat), contextlib.redirect_stderr(out):
+                try:
+                    self.mp.load_config_file(link)
+                except SystemExit:
+                    pass
+        finally:
+            self.mp._AS_ROOT = saved
+        self.assertFalse(os.path.exists(mark), "root ran the file the check never saw:\n" + out.getvalue())
+        self.assertIn('0666', out.getvalue())
 
     def test_a_key_only_in_the_user_file_survives_the_site_file(self):
         """First-wins keeps only the site file's keys -- the bug layering fixes."""
@@ -16122,9 +16347,7 @@ class TestInstallPlexRule(_RootInstallCase):
         """THE missing rule. A domain, not the host: the per-server label
         carries the server's LAN IP, so a host rule would break -- back into
         an alert -- the next time that IP changes."""
-        lines = self._install(
-            PLEX_XML_URL='https://192-168-192-252.abc123.plex.direct:32400'
-                         '/library/metadata/1?X-Plex-Token=nope')
+        lines = self._install(PLEX_API_REMOTE='192-168-192-252.abc123.plex.direct:32400')
         plex = [ln for ln in lines if 'plex.direct' in ln]
         self.assertTrue(plex, f"no rule for the Plex server:\n" + "\n".join(lines))
         self.assertEqual(len(plex), 2,
@@ -16143,7 +16366,7 @@ class TestInstallPlexRule(_RootInstallCase):
         """ADVERSARIAL, and the one that matters: a test that only looked for
         'plex.direct' would pass just as well if someone put plex.direct in
         NETWORK_HOSTS. Another server must give another remote."""
-        lines = self._install(PLEX_URL='https://plex.example.net:32400')
+        lines = self._install(PLEX_API_REMOTE='plex.example.net:32400')
         own = [ln for ln in lines if 'plex.example.net' in ln]
         self.assertTrue(own, f"the configured server got no rule:\n" + "\n".join(lines))
         self.assertIn('--host', own[0],
@@ -16156,7 +16379,7 @@ class TestInstallPlexRule(_RootInstallCase):
     def test_a_bare_address_is_an_address_rule(self):
         """An IP is not a domain and not a host name; the firewall tool has a
         third form for it, and says so."""
-        lines = self._install(PLEX_URL='http://192.168.1.5:32400')
+        lines = self._install(PLEX_API_REMOTE='192.168.1.5:32400')
         own = [ln for ln in lines if '192.168.1.5' in ln]
         self.assertTrue(own, f"no rule for the configured address:\n" + "\n".join(lines))
         self.assertIn('--address', own[0], own[0])

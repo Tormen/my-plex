@@ -158,8 +158,10 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   which a firewall cannot resolve and which does not exist yet on a fresh
   machine.
 - The **Plex server's** rule comes from the config -- `PLEX_API_REMOTE`,
-  `host[:port]` in the site config, the address without the token; else
-  `PLEX_URL` or the host in `PLEX_XML_URL` -- and carries its port, because
+  `host[:port]` in the site config, the address without the token. Root
+  reads no other key for it, since a `PLEX_URL` may be a user's own; the run
+  without a firewall tool also names `PLEX_URL` or the host in
+  `PLEX_XML_URL`. It carries its port, because
   32400 is not the default a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
   that host name carries the server's own LAN IP, so a rule naming the host
   would stop matching — back into an alert — the next time that IP changes.
@@ -169,15 +171,19 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   `littlesnitch` refuses anyone but root, even to list. So when
   `LITTLE_SNITCH_CLI` exists, `--install` needs root and refuses any other
   user; every other command refuses root. As root it reads the site config
-  alone -- a file named by `$MY_PLEX_CONFIG` or `--config` only when root
-  owns it and neither group nor others can write it -- and, in this order:
-  checks that `python3` is 3.10 or newer; removes a stored deny for a remote
-  that names my-plex's Python, `ssh` or `any`, because a deny beats an
-  allow (one naming another program stays); writes the rules, owned by
-  `RUN_AS_USER` from the site config, else the user who ran sudo, else an
-  ERROR; and hands over with `su -l <that user>`, so the rest of `--install`
-  runs as that user, in a fresh login. A failure is an ERROR, and nothing is
-  handed over. It builds no venv and writes nothing into root's home.
+  alone, or a file named by `$MY_PLEX_CONFIG` or `--config` -- each only
+  when root owns it, and every directory above it, and neither group nor
+  others can write them -- and, in this order: checks that `python3` is
+  3.10 or newer; removes a stored deny for that very remote (any port, or
+  its own) that names my-plex's Python, `ssh` or `any`, because a deny
+  beats an allow (one naming another program or another remote stays);
+  writes the rules, owned by `RUN_AS_USER` from the site config, else the
+  user who ran sudo, else an ERROR; and hands over with `su -l <that
+  user>`, so the rest of `--install` runs as that user, in a fresh login,
+  with the config root read when one was named. A failure is an ERROR, and
+  nothing is handed over. It builds no venv and writes nothing into root's
+  home. A second run writes nothing, and its verdict says every rule is
+  already there.
 
 ### The ssh Host entry (`--install`)
 - Every DB query, file move and ffprobe runs `ssh <PLEX_DB_REMOTE_HOST>`.
@@ -206,7 +212,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   and there is no narrower form for a Python script. It is the base
   `python3` the launcher runs under, which exists before any venv does. A
   Python minor upgrade needs `--install` again: the rules name that minor,
-  and `--install` rebuilds a venv built from another minor with it.
+  and the run root hands over rebuilds a venv built from another minor with
+  it. A `--install` you start yourself rebuilds nothing.
 - **Each remote gets two rules.** Little Snitch attributes a connection to
   the app *above* Python and calls Python the **via** program, so a rule
   naming Python as the process does not match a run started from a shell, a
@@ -215,7 +222,8 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   rules were already stored. So each remote also gets a second rule, for
   `any` process connecting *via* that Python — `any` rather than a list of
   apps, because my-plex is run from all of them and enumerating them never
-  ends. `my-plex --help install` prints both commands in full.
+  ends. `my-plex --help install` lists every remote; the root run prints
+  each one's two exit codes.
 - Without the firewall tool there is nothing for root to write: `--install`
   runs as you, writes no rule and names the hosts, so it is safe to run
   anywhere. See `my-plex --help install`.
@@ -388,7 +396,10 @@ Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
 `TMDB_API_KEY`) belong in your config only, and the keys root reads for
 `--install` -- `PLEX_DB_REMOTE`, `PLEX_DB_REMOTE_IDENTITY`,
 `LITTLE_SNITCH_CLI`, `RUN_AS_USER` and `PLEX_API_REMOTE` -- in the site
-config only: my-plex refuses them in the other. A config file that cannot be read or fails to run stops the run;
+config only: my-plex refuses them in the other. As root, a config file --
+site or named -- is read only when root owns it, and every directory above
+it, and neither group nor others can write them: a config is Python, and
+root would run another user's code. A config file that cannot be read or fails to run stops the run;
 `--help` and a bare `my-plex` only warn.
 
 `$MY_PLEX_CONFIG` (a config for ONE run: a test, a CI job, a one-off), else
