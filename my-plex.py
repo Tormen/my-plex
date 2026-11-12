@@ -44690,8 +44690,10 @@ def main():
             print(f"  {_e}", file=sys.stderr)
         sys.exit(1)
 
-    # Hard cutover: legacy keys are no longer recognised.  If the user
-    # conf still contains any of them, abort with a one-line migration hint.
+    # Hard cutover: legacy keys are no longer recognised.  If a config file
+    # still sets any of them, abort with a migration hint per key and the file
+    # that set it -- with layered configs that may be the site config or a
+    # named one, not the user's own.
     _legacy_keys = ('DISK_MAP', 'DISK_MAP_MOVIE_DIR', 'DISK_MAP_SERIES_DIR',
                     'DISK_MAP_SEASON_DIR', 'DISK_MAP_MERGE', 'DISK_MAP_PUSH',
                     'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN',
@@ -44712,10 +44714,11 @@ def main():
                 "is '--cleanup' (junk + orphaned).  Add your own "
                 "PIPELINES['--clean'] in CONF for the bundle you want.",
         }
-        _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}"
+        _lines = [f"  - {_k}: {_hints.get(_k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}\n"
+                  f"      set in {_config_origin(_k)}"
                   for _k in _legacy_set]
         err("00163", "Legacy config key(s) found:\n" + "\n".join(_lines) +
-               "\n  Delete them from ~/.my-plex.conf to continue.")
+               "\n  Delete each from the file that sets it to continue.")
 
     # Re-derive values that are computed from config keys (not set directly by name in globals).
     # These were computed at module load time from CONFIG_DEFAULTS before the config file was read,

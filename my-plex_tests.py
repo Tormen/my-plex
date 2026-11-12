@@ -14709,6 +14709,29 @@ class TestConfigEnvVar(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_a_legacy_key_names_the_file_that_set_it(self):
+        """ADVERSARIAL: the refusal of a legacy key said "Delete them from
+        ~/.my-plex.conf" whatever file set the key -- with layered configs it
+        may sit in the site config or a named one, and the user is sent to
+        edit a file that does not hold it."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfglegacy-')
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            f.write("DISK_MAP = {}\nPROBLEM_CATEGORIES_DISABLED = []\n")
+        try:
+            r = self._run('--complete', 'genres', MY_PLEX_CONFIG=conf)
+            self.assertNotEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn('Legacy config key', r.stderr, r.stderr[-500:])
+            self.assertNotIn('~/.my-plex.conf', r.stderr, r.stderr[-500:])
+            lines = r.stderr.splitlines()
+            for key in ('DISK_MAP', 'PROBLEM_CATEGORIES_DISABLED'):
+                idx = next((i for i, l in enumerate(lines)
+                            if l.lstrip().startswith(f'- {key}:')), -1)
+                self.assertGreaterEqual(idx, 0, f"no line for {key}:\n{r.stderr[-500:]}")
+                self.assertIn(f"set in named: {conf}", lines[idx + 1], r.stderr[-500:])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_a_run_that_only_prints_is_not_stopped_by_a_bad_variable(self):
         """--help reads no config, so a stale variable must not hide the help.
         The tool already answers this question once, in _PRINT_ONLY_RUN, and a
