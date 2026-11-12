@@ -12364,6 +12364,35 @@ class TestBareLibraryScope(unittest.TestCase):
         self.assertNotIn('Traceback', out)
         self.assertIn("Search token 'Kids'", out)
 
+    def _scan_conf(self, with_cache: bool) -> str:
+        """A config of its own for one --scan run: the scan updates the cache
+        it finds, and must touch neither the class's cache nor another run's."""
+        import atexit
+        d = tempfile.mkdtemp(prefix='my-plex-scan-')
+        atexit.register(shutil.rmtree, d, True)
+        src = os.path.dirname(self._conf)
+        with open(self._conf) as f:
+            conf = f.read().replace(src, d)
+        if with_cache:
+            shutil.copy(os.path.join(src, 'cache.pkl'), os.path.join(d, 'cache.pkl'))
+        path = os.path.join(d, 'my-plex.conf')
+        with open(path, 'w') as f:
+            f.write(conf)
+        return path
+
+    def test_beside_scan_a_library_the_cache_does_not_know_is_scanned_alone(self):
+        """--scan names libraries of the SERVER: a library added in Plex is in
+        no cache before its first scan, and neither is any library before the
+        first cache is built.  Taken for a title search, the word left
+        SCAN_LIBRARIES empty, and the run scanned and refreshed every library."""
+        for with_cache in (True, False):
+            for argv in (('-D', 'Newlib', '--scan'), ('-D', '--scan', 'Newlib')):
+                r, out = self._run(*argv, conf=self._scan_conf(with_cache))
+                where = f"{' '.join(argv)} ({'with' if with_cache else 'no'} cache)"
+                self.assertFalse("Search token 'Newlib'" in out, f"{where}: searched in the titles")
+                self.assertFalse('SCAN_LIBRARIES=None' in out, f"{where}: every library was scanned")
+                self.assertTrue("SCAN_LIBRARIES=['Newlib'" in out, f"{where}:\n{out[-1500:]}")
+
 
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my-plex.py, under pyrightconfig.json.

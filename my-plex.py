@@ -30835,7 +30835,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("TARGETS:")
             print()
             print("  --scan                       Scan ALL libraries")
-            print("  <library_name> --scan        Scan a specific library")
+            print("  <library_name> --scan        Scan a specific library -- also one the cache")
+            print("                               does not hold yet (added in Plex since)")
             print("  ID:<plex_id> --scan          Scan the library containing that Plex item")
             print()
             print("EXAMPLES:")
@@ -44478,6 +44479,12 @@ def main():
     # title-search instead.  Lets users search for titles like 'lib5'
     # or 'lib8' by saying e.g. `library:lib3 lib5`.
     _explicit_library_used = any(re.match(r'^library:.+', _a, re.IGNORECASE) for _a in sys.argv[1:])
+    # --scan's bare words name libraries of the SERVER, which the cache may
+    # not know yet: a library added in Plex is in no cache before its first
+    # scan.  So beside --scan a bare word is a scan target, never a title
+    # search -- searched, it left no target and every library was scanned.
+    # update_cache() checks it against the server's libraries.
+    _scan_targets = '--scan' in sys.argv[1:]
     # v2.11: when AND / OR / NOT / parens appear anywhere in argv, promote
     # the matching --<flag> listing commands (e.g. `--unmatched`,
     # `--no-audio-language`, `--broken`) into compound-filter atoms instead
@@ -44746,6 +44753,7 @@ def main():
                           and not re.match(r'^\d+$', arg)  # bare number = potential Plex ID
                           and arg not in ('--', 'all', 'ALL')
                           and _prev_arg not in _VALUE_FLAGS  # skip values of --type, --info, etc.
+                          and not _scan_targets
                           and (_explicit_library_used or not is_library_name(arg)))
             if _is_search and not arg.startswith('-'):
                 # v2.56: avoid double-prefix when user already typed `title~…`.
