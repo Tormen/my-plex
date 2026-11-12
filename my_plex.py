@@ -45573,14 +45573,20 @@ def run() -> None:
               "  resume checkpoint are both written whole or not at all.", file=sys.stderr)
         sys.exit(130)
     except Exception as unexpected:
-        # A bug.  One line here, the trace in a file -- it is still what fixes
-        # the bug, it is just not the user's screen.  70 is EX_SOFTWARE.
-        err("00186",
-            f"my-plex stopped on a bug -- this is not something you did wrong.\n"
-            f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
-            f"  full trace:    {_write_crash_trace()}\n"
-            f"Possible reasons:\n"
-            f"  - a file or library changed under a run that was already going\n"
-            f"  - a cache written by an older version (my-plex --update-cache --force-plex)\n"
-            f"  - a genuine defect: the trace file above is what to report",
-            exit_code=70)
+        report_bug(unexpected)
+
+
+def report_bug(unexpected: Exception) -> NoReturn:
+    """A bug: ONE line on the screen, the trace in a file -- it is still what
+    fixes the bug, it is just not the user's screen -- and exit 70
+    (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
+    and the root half of --install, which runs outside run()."""
+    err("00186",
+        f"my-plex stopped on a bug -- this is not something you did wrong.\n"
+        f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
+        f"  full trace:    {_write_crash_trace()}\n"
+        f"Possible reasons:\n"
+        f"  - a file or library changed under a run that was already going\n"
+        f"  - a cache written by an older version (my-plex --update-cache --force-plex)\n"
+        f"  - a genuine defect: the trace file above is what to report",
+        exit_code=70)
