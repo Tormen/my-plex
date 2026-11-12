@@ -12697,6 +12697,24 @@ class TestLauncherAndModules(unittest.TestCase):
             self.assertIn(sys.executable, out, f"{what}: the python3 it found is not named")
             self.assertIn(f"`{what.strip()}`", out, f"{what}: the command run is not named")
 
+    def test_ctrl_c_while_the_modules_load_is_one_line_and_130(self):
+        """The tool's SIGINT handler exists only once its module has run, so
+        Ctrl-C in the launcher's `import my_plex_boot` or in the boot
+        module's `import my_plex` (the first ~0.35 s of every start) had
+        the default handler: a KeyboardInterrupt traceback.  The import
+        raising it stands in for the signal arriving there."""
+        for module in ('my_plex_boot.py', 'my_plex.py'):
+            d = os.path.join(self.d, module)
+            launcher = _tool_copy(d)
+            with open(os.path.join(d, module), 'w', encoding='utf-8') as f:
+                f.write('raise KeyboardInterrupt\n')
+            r = subprocess.run([sys.executable, launcher, '--help'], capture_output=True,
+                               text=True, timeout=60, env=self.env)
+            self.assertNotIn('Traceback', r.stderr, f"{module}: a traceback:\n{r.stderr[-900:]}")
+            self.assertEqual(r.returncode, 130, f"{module}: rc {r.returncode}\n{r.stderr}")
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1, f"{module}: not one line:\n{r.stderr}")
+            self.assertIn('interrupted (Ctrl-C)', r.stderr, module)
+
 
 class TestDeployedCopyWithItsSuite(unittest.TestCase):
     """A copy made by my-rollout is bin/my-plex plus lib/my-plex/ holding the

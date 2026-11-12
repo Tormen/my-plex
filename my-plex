@@ -24,5 +24,9 @@ except ModuleNotFoundError as e:
     # err() lives in the module that is missing: one line, exit 1.
     sys.exit(f"my-plex: my_plex_boot.py is in neither {_dir} nor {_lib} -- "
              f"this launcher was copied without its modules")
+except KeyboardInterrupt:
+    # No SIGINT handler exists yet: one line and 130, never a traceback.
+    sys.stderr.write("my-plex: interrupted (Ctrl-C) while starting -- nothing ran.\n")
+    sys.exit(130)
 
 my_plex_boot.main(_self)

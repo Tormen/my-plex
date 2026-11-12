@@ -72,7 +72,8 @@ def main(launcher: str) -> None:
          over, when it was built from another Python minor -- then re-exec
          the launcher inside it.  A run that only prints skips this -- see
          print_only_run();
-      4. import the tool and run it.
+      4. import the tool and run it.  Ctrl-C while the tool imports is
+         caught here too: its own SIGINT handler exists only once it has.
     """
     global LAUNCHER
     LAUNCHER = launcher
@@ -126,7 +127,13 @@ def main(launcher: str) -> None:
     # not hypothetical: the suite spawns my-plex constantly.
     os.environ.pop(_VENV_REEXEC_MARK, None)
 
-    _import_tool().run()
+    try:
+        tool = _import_tool()
+    except KeyboardInterrupt:
+        print("\nmy-plex: interrupted (Ctrl-C) while loading the tool -- nothing ran.",
+              file=sys.stderr)
+        sys.exit(130)
+    tool.run()
 
 
 def _import_tool():
