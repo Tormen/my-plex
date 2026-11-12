@@ -1056,6 +1056,10 @@ def config_layers(config_file=None):
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
     alone, or the site files then the user's -- none in a test run.
 
+    A default name that is a dangling link is passed over -- the search goes
+    on to the next name, so a real file behind it is read -- and stays in
+    the list, in its place, for the loader to skip and name.
+
     Refuses here, where the search is decided, what no later step can
     repair: a NAMED file that is not there (no fallback -- a run pointed at
     its own config must not read another one), and two different user files
@@ -1090,10 +1094,11 @@ def config_layers(config_file=None):
                   f"for real): {', '.join(found)}", file=sys.stderr)
         return []
 
-    in_farm =[p + sfx for p in _site_farm_paths() for sfx in ('.GLOBAL', '')]
-    site = _global_first([q for q in in_farm if os.path.lexists(q)])
-    if not site:
-        site = next(([q] for q in SYSTEM_CONFIG_PATHS if os.path.lexists(q)), [])
+    in_farm = [p + sfx for p in _site_farm_paths() for sfx in ('.GLOBAL', '')]
+    site = ([q for q in in_farm if _dangling(q)]
+            + _global_first([q for q in in_farm if os.path.exists(q)]))
+    if not any(os.path.exists(q) for q in site):
+        site += _first_real(SYSTEM_CONFIG_PATHS)
     # Root reads the site config alone: it cannot know whose home to look in
     # (RUN_AS_USER comes from the site config).  Every file root reads -- a
     # site file as much as a named one -- must be root's alone: load_config_file
@@ -1102,17 +1107,35 @@ def config_layers(config_file=None):
         return [('site', s) for s in site]
 
     users = [os.path.join(_home(), n) for n in USER_CONFIG_NAMES]
-    found = [u for u in users if os.path.lexists(u)]
-    distinct = {os.path.realpath(u) for u in found if os.path.exists(u)}
+    found = [u for u in users if os.path.exists(u)]
+    distinct = {os.path.realpath(u) for u in found}
     if len(distinct) > 1:
         msg = ("two different user configs -- my-plex will not guess which one you edit:\n"
                + "".join(f"  {u} -> {os.path.realpath(u)}\n" for u in found)
                + "  Merge them into one, and make the other a link to it or remove it.")
         if _config_must_stop(msg):
             err("00025", msg)
-    user = found[:1]
-    user = [u + '.GLOBAL' for u in user if os.path.lexists(u + '.GLOBAL')] + user
+    user = _first_real(users)
+    if user and os.path.exists(user[-1]) and os.path.lexists(user[-1] + '.GLOBAL'):
+        user.insert(-1, user[-1] + '.GLOBAL')
     return [('site', s) for s in site] + [('user', u) for u in user]
+
+
+def _dangling(path) -> bool:
+    """True when PATH is a link that points nowhere."""
+    return os.path.lexists(path) and not os.path.exists(path)
+
+
+def _first_real(paths) -> list[str]:
+    """The first of PATHS that is there, after every dangling link the search
+    passed on the way to it -- only those links when none is there."""
+    out = []
+    for p in paths:
+        if os.path.exists(p):
+            return out + [p]
+        if _dangling(p):
+            out.append(p)
+    return out
 
 
 def _config_must_stop(msg=''):
@@ -1130,8 +1153,8 @@ def _config_must_stop(msg=''):
 # 'set_by' lists, per key, every file that set it, in read order; 'origin'
 # is the last of them, the one whose value wins.
 # 'skipped' holds the files config_layers() chose that were not read, each
-# with why: a dangling link, or (in a run that only prints) a file that
-# failed to run.
+# with why: a dangling link the search passed over, or (in a run that only
+# prints) a file that failed to run, or (as root) one not root's alone.
 CONFIG_RECORD = {'files': [], 'skipped': [], 'origin': {}, 'set_by': {}}
 
 
@@ -3009,7 +3032,8 @@ def load_config_file(config_file=None):
     A file that cannot be read or fails to run stops the run, naming the
     file and the reason: two layers half-loaded -- the site's server without
     your token -- are worse than none.  A link that points nowhere is
-    skipped with a warning.  A key in the wrong layer is refused.  As root,
+    skipped with a warning naming it; config_layers() already went on to
+    the next name.  A key in the wrong layer is refused.  As root,
     each file is read through _config_text_as_root(): root's alone, or not
     run at all.
     """
@@ -3032,9 +3056,9 @@ def load_config_file(config_file=None):
     skipped = []
     for layer, path in config_layers(config_file):
         if not os.path.exists(path):
-            print(f"Warning: Config file symlink '{path}' is broken - points to "
-                  f"non-existent target: {os.readlink(path)}", file=sys.stderr)
-            skipped.append((layer, path, 'points nowhere'))
+            print(f"Warning: config link {path} -> {os.readlink(path)} points nowhere "
+                  f"-- skipped, the search goes on", file=sys.stderr)
+            skipped.append((layer, path, 'points nowhere -- skipped'))
             continue
         before = snap(ns)
         try:
@@ -3042,7 +3066,7 @@ def load_config_file(config_file=None):
                 src = _config_text_as_root(f"{config_search_paths(config_file)[0][0]} names"
                                            if layer == 'named' else f"the {layer} config", path)
                 if src is None:
-                    skipped.append((layer, path, "not root's alone"))
+                    skipped.append((layer, path, "not root's alone -- not read"))
                     continue
             else:
                 with open(path, 'r') as f:
@@ -3059,7 +3083,7 @@ def load_config_file(config_file=None):
                    + f"\n  {where}{type(e).__name__}: {e}")
             if _config_must_stop(msg):
                 err("00026", msg)
-            skipped.append((layer, path, 'did not run'))
+            skipped.append((layer, path, 'did not run -- not read'))
             continue
         files.append((layer, path))
         after = snap(ns)
@@ -4583,7 +4607,7 @@ def config_report(conf, config_file=None) -> str:
     def chosen(layer: str) -> list[str]:
         # Every file the search chose for LAYER, read or not, in read order.
         out = [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}" for l, p in files if l == layer]
-        return out + [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}   ({why} -- not read)"
+        return out + [f"#   {_LAYER_LABEL[layer]:<6} {_config_path_text(p)}   ({why})"
                       for l, p, why in skipped if l == layer]
 
     source = config_search_paths(config_file)[0][0]
@@ -33406,6 +33430,8 @@ def main_print_help(args, remaining_args, main_parser):
                 if _l == 'user':
                     print(f"       {_p}")
             print( "     two different files there are an ERROR: merge them into one.")
+            print( "  A name that is a link pointing nowhere is skipped, with a warning")
+            print( "  naming it, and the search goes on to the next name.")
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
             print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
             print( "  every my-plex that run starts (a pipeline's phases): --config is")
@@ -33428,9 +33454,11 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("  A bare --config prints the files read, in order, then one line per")
             print("  key they SET, with the layer that set it (site / yours / named).  A")
-            print("  file chosen but not read says why: (points nowhere -- not read).  It")
-            print("  never prints a secret: a secret-named key shows only its length, and")
-            print("  the X-Plex-Token in a URL is cut out.  -DD names each key's file too.")
+            print("  file not read says why: a dangling link (points nowhere -- skipped),")
+            print("  a file that failed in a run that only prints (did not run -- not")
+            print("  read).  It never prints a secret: a secret-named key shows only its")
+            print("  length, and the X-Plex-Token in a URL is cut out.  -DD names each")
+            print("  key's file too.")
             print()
             print("  A key my-plex no longer reads (DISK_MAP, PROBLEM_CATEGORIES_DISABLED,")
             print("  ...) stops every run, naming each file that sets it, a link with its")

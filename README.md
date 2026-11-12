@@ -514,6 +514,9 @@ two, the later winning for a key both set:
 2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf`. Two
    different files there are an error -- merge them into one.
 
+A name that is a link pointing nowhere is skipped, with a warning naming
+it, and the search goes on to the next name.
+
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The
 Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
@@ -549,7 +552,7 @@ TMDB_API_KEY               = <redacted, 32 chars>         (yours)
 ```
 
 A link shows its own target, as `ls -l` does. A file the search chose but
-did not read says why, e.g. `(points nowhere -- not read)` for a dangling
+did not read says why, e.g. `(points nowhere -- skipped)` for a dangling
 link. It never prints a secret: a secret-named key shows only its length, and
 the token in a URL is cut out, whatever its case.
 

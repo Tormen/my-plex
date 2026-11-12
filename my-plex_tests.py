@@ -15663,11 +15663,44 @@ class TestConfigLayers(unittest.TestCase):
         self.assertNotIn('BROKEN', conf)
 
     def test_a_dangling_site_link_is_skipped_with_a_warning(self):
-        os.symlink(os.path.join(self.d, 'gone.conf'), os.path.join(self.links, 'default', 'my-plex.conf'))
+        link = os.path.join(self.links, 'default', 'my-plex.conf')
+        os.symlink(os.path.join(self.d, 'gone.conf'), link)
         self.user("DEFAULT_SCOPE = 'user-scope'\n")
         conf, err = self.load()
-        self.assertIn('broken', err)
+        self.assertIn(f'config link {link} -> ', err)
+        self.assertIn('points nowhere -- skipped', err)
         self.assertEqual(conf['DEFAULT_SCOPE'], 'user-scope')
+
+    def test_a_dangling_user_name_is_passed_over_for_the_real_file_behind_it(self):
+        """ADVERSARIAL (#39): the search stopped at the first user name that
+        was THERE, a dangling link included, and the loader then skipped the
+        link -- so a real ~/.my-plex.conf behind a dangling
+        ~/.my-plex/my-plex.conf was never read, and the run went on without
+        your token.  The link is still named: it is a mistake worth seeing."""
+        link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        os.symlink('../gone.conf', link)
+        real = self.user("DEFAULT_SCOPE = 'real-user-file'\n")
+        conf, err = self.load()
+        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'real-user-file', err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('user', real)])
+        self.assertIn(f'config link {link} -> ../gone.conf points nowhere -- skipped', err)
+
+    def test_a_dangling_site_name_is_passed_over_for_the_system_file_behind_it(self):
+        """ADVERSARIAL (#39): a dangling farm name counted as 'the site config
+        is there', so /etc/my-plex.conf was never consulted; and a dangling
+        /etc/my-plex.conf hid /usr/local/etc/my-plex.conf the same way."""
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        os.symlink('../global/etc/default/gone.conf', farm)
+        etc = os.path.join(self.d, 'etc', 'my-plex.conf')
+        os.symlink('gone.conf', etc)
+        os.makedirs(os.path.join(self.d, 'usr-local-etc'))
+        usr = self.write('usr-local-etc/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'usr-local-host'\n")
+        self.mp.SYSTEM_CONFIG_PATHS = (etc, usr)
+        conf, err = self.load()
+        self.assertEqual(conf.get('PLEX_DB_REMOTE_HOST'), 'usr-local-host', err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('site', usr)])
+        self.assertIn(f'config link {farm} -> ', err)
+        self.assertIn(f'config link {etc} -> ', err)
 
     def test_the_global_file_is_read_before_the_local_one(self):
         """Told by where the link points, not by the name: the farm may give
@@ -15872,22 +15905,25 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn('X-Plex-Token=<redacted>', lines['PLEX_XML_URL'])
         self.assertIn('TMDB_API_KEY = <redacted, 12 chars>', lines['TMDB_API_KEY'])
 
-    def test_bare_config_names_a_dangling_link_it_skipped_instead_of_none(self):
-        """ADVERSARIAL: the search takes the first name that is there, a
-        dangling link included, and the loader skips that link -- but the
-        report built its 'none' line from the whole search list, and so
-        called a real file behind the link absent."""
+    def test_bare_config_lists_the_file_read_and_the_dangling_link_it_skipped(self):
+        """ADVERSARIAL: the report called a real file behind a dangling link
+        absent ('none of: ...'), and then (#39) named the link alone, 'not
+        read', while the real file behind it was not read either.  Now the
+        file read is listed, and the link beside it as skipped."""
         user_link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
         os.symlink('../gone.conf', user_link)
-        self.user("DEFAULT_SCOPE = 'real-user-file'\n")
+        real = self.user("DEFAULT_SCOPE = 'real-user-file'\n")
         farm = os.path.join(self.links, 'default', 'my-plex.conf')
         os.symlink('../global/etc/default/gone.conf', farm)
-        self.write('etc/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'etc-host'\n")
+        etc = self.write('etc/my-plex.conf', "PLEX_DB_REMOTE_HOST = 'etc-host'\n")
         conf, _ = self.load()
         out = self.mp.config_report(conf)
         self.assertNotIn('(none of:', out, out)
-        self.assertIn(f'#   yours  {user_link} -> ../gone.conf   (points nowhere -- not read)', out)
-        self.assertIn(f'#   site   {farm} -> ../global/etc/default/gone.conf   (points nowhere -- not read)', out)
+        self.assertIn(f'#   yours  {real}\n', out)
+        self.assertIn(f'#   yours  {user_link} -> ../gone.conf   (points nowhere -- skipped)', out)
+        self.assertIn(f'#   site   {etc}\n', out)
+        self.assertIn(f'#   site   {farm} -> ../global/etc/default/gone.conf   (points nowhere -- skipped)', out)
+        self.assertNotIn('-- not read', out)
 
     def test_bare_config_shows_the_links_own_target_and_no_arrow_on_a_file(self):
         """ADVERSARIAL: the arrow showed os.path.realpath(), which resolves
