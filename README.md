@@ -386,6 +386,9 @@ did not read says why, e.g. `(points nowhere -- not read)` for a dangling
 link. It never prints a secret: a secret-named key shows only its length, and
 the token in a URL is cut out, whatever its case.
 
+A key my-plex no longer reads (`DISK_MAP`, `PROBLEM_CATEGORIES_DISABLED`, ...)
+stops every run, naming each file that sets it -- delete it from all of them.
+
 ```python
 # Required in the site config: the Plex server as you would ssh to it
 PLEX_DB_REMOTE = 'user@192.0.2.10'

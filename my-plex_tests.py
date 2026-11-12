@@ -14251,6 +14251,36 @@ class TestConfigLayers(unittest.TestCase):
         self.assertEqual([l for l, _p in self.mp.CONFIG_RECORD['files']], ['site', 'user'])
         self.assertNotEqual(site, user)
 
+    def legacy_refusal(self) -> str:
+        """The legacy-key refusal for the files loaded now, as printed."""
+        conf, _ = self.load()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            self.mp.refuse_legacy_keys(conf)
+        return err.getvalue()
+
+    def test_a_legacy_key_in_both_files_names_both(self):
+        """ADVERSARIAL: the loader recorded a key's file only where its value
+        CHANGED, so a legacy key set to the same value in both files named
+        only the site file -- the user deleted it there and was refused
+        again, now for their own file."""
+        site = self.site("DISK_MAP = {}\n")
+        user = self.user("DISK_MAP = {}\n")
+        out = self.legacy_refusal()
+        self.assertIn(f"set in site: {site}\n", out)
+        self.assertIn(f"set in yours: {user}\n", out)
+        # The later file wins even with the same value: it is the origin.
+        self.assertEqual(self.mp.CONFIG_RECORD['origin']['DISK_MAP'], user)
+
+    def test_a_legacy_key_set_differently_in_both_files_names_both(self):
+        """ADVERSARIAL: with two different values only the LATER file was
+        recorded, so the site file's line was never mentioned."""
+        site = self.site("DISK_MAP = {'a': 1}\n")
+        user = self.user("DISK_MAP = {'b': 2}\n")
+        out = self.legacy_refusal()
+        self.assertIn(f"set in site: {site}\n", out)
+        self.assertIn(f"set in yours: {user}\n", out)
+
     def test_an_empty_user_value_still_overrides_the_site(self):
         """A merge that treats a falsy value as 'not set' answers wrongly here."""
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")

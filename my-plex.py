@@ -1246,10 +1246,12 @@ def _config_must_stop(msg=''):
 
 # Which file set each config key, filled by load_config_file() -- the one
 # record --config, -DD and the error texts ask, so none of them guesses.
+# 'set_by' lists, per key, every file that set it, in read order; 'origin'
+# is the last of them, the one whose value wins.
 # 'skipped' holds the files config_layers() chose that were not read, each
 # with why: a dangling link, or (in a run that only prints) a file that
 # failed to run.
-CONFIG_RECORD = {'files': [], 'skipped': [], 'origin': {}}
+CONFIG_RECORD = {'files': [], 'skipped': [], 'origin': {}, 'set_by': {}}
 
 
 # Default configuration values
@@ -3104,6 +3106,7 @@ def load_config_file(config_file=None):
     skipped with a warning.  A key in the wrong layer is refused.
     """
     import copy
+    import dis
     def snap(ns):
         out = {}
         for k, v in ns.items():
@@ -3116,6 +3119,7 @@ def load_config_file(config_file=None):
 
     ns = {k: copy.deepcopy(v) for k, v in CONFIG_DEFAULTS.items()}
     origin = {}
+    set_by = {}
     files = []
     skipped = []
     for layer, path in config_layers(config_file):
@@ -3128,7 +3132,8 @@ def load_config_file(config_file=None):
         try:
             with open(path, 'r') as f:
                 src = f.read()
-            exec(compile(src, path, 'exec'), ns)
+            code = compile(src, path, 'exec')
+            exec(code, ns)
         except Exception as e:
             where = f"line {e.lineno}: " if isinstance(e, SyntaxError) and e.lineno else ""
             if isinstance(e, Exception) and e.__traceback__ is not None and not where:
@@ -3143,7 +3148,12 @@ def load_config_file(config_file=None):
             continue
         files.append((layer, path))
         after = snap(ns)
-        set_here = [k for k, v in after.items() if k not in before or before[k] != v]
+        # A file SETS a key when it changes the value or assigns it at all --
+        # the same value as an earlier file is still a line in this one.
+        assigned = {i.argval for i in dis.get_instructions(code)
+                    if i.opname in ('STORE_NAME', 'STORE_GLOBAL')}
+        set_here = [k for k, v in after.items()
+                    if k not in before or before[k] != v or k in assigned]
         wrong = [k for k in set_here
                  if (layer == 'site' and k in USER_ONLY_KEYS)
                  or (layer == 'user' and k in SITE_ONLY_KEYS)]
@@ -3159,9 +3169,11 @@ def load_config_file(config_file=None):
                 err("00021", msg)
         for k in set_here:
             origin[k] = path
+            set_by.setdefault(k, []).append(path)
     CONFIG_RECORD['files'] = files
     CONFIG_RECORD['skipped'] = skipped
     CONFIG_RECORD['origin'] = origin
+    CONFIG_RECORD['set_by'] = set_by
     return {k: ns[k] for k in origin}
 
 def generate_default_config():
@@ -4411,13 +4423,16 @@ def _install_ssh_entry(remote):
 _LAYER_LABEL = {'site': 'site', 'user': 'yours', 'named': 'named'}
 
 
+def _config_file_label(path):
+    """A config file as a message names it: its layer, then the path."""
+    layer = next((l for l, p in CONFIG_RECORD['files'] if p == path), '?')
+    return f"{_LAYER_LABEL.get(layer, layer)}: {path}"
+
+
 def _config_origin(key):
     """Where KEY's value came from, for a message: the file, or 'default'."""
     path = CONFIG_RECORD['origin'].get(key)
-    if not path:
-        return 'default'
-    layer = next((l for l, p in CONFIG_RECORD['files'] if p == path), '?')
-    return f"{_LAYER_LABEL.get(layer, layer)}: {path}"
+    return _config_file_label(path) if path else 'default'
 
 
 def _config_value_text(key, value) -> str:
@@ -33310,6 +33325,10 @@ def main_print_help(args, remaining_args, main_parser):
             print("  never prints a secret: a secret-named key shows only its length, and")
             print("  the X-Plex-Token in a URL is cut out.  -DD names each key's file too.")
             print()
+            print("  A key my-plex no longer reads (DISK_MAP, PROBLEM_CATEGORIES_DISABLED,")
+            print("  ...) stops every run, naming each file that sets it -- delete it from")
+            print("  all of them.")
+            print()
             print("KEY SETTINGS:")
             print("  PLEX_DB_REMOTE_HOST          SSH host for Plex server")
             print("  PLEX_DB_PATH                 Path to Plex database on server")
@@ -44042,10 +44061,10 @@ def _resolve_secret_arg(flag: str, value):
 
 def refuse_legacy_keys(loaded_config) -> None:
     """Stop the run when a config file still sets a key that is no longer
-    recognised (a hard cutover): one migration hint per key, and the file
-    that set it -- with layered configs that may be the site config or a
-    named one, not the user's own.  LOADED_CONFIG is load_config_file()'s
-    return."""
+    recognised (a hard cutover): one migration hint per key, and EVERY file
+    that sets it -- with layered configs that may be the site config or a
+    named one as well as the user's own, and deleting it from one file only
+    would be refused again.  LOADED_CONFIG is load_config_file()'s return."""
     legacy_keys = ('DISK_MAP', 'DISK_MAP_MOVIE_DIR', 'DISK_MAP_SERIES_DIR',
                    'DISK_MAP_SEASON_DIR', 'DISK_MAP_MERGE', 'DISK_MAP_PUSH',
                    'AUTO_RESOLVE_AUDIO_LANGUAGE_BY_FILEPATH_PATTERN',
@@ -44067,8 +44086,9 @@ def refuse_legacy_keys(loaded_config) -> None:
             "is '--cleanup' (junk + orphaned).  Add your own "
             "PIPELINES['--clean'] in CONF for the bundle you want.",
     }
-    lines = [f"  - {k}: {hints.get(k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}\n"
-             f"      set in {_config_origin(k)}"
+    lines = [f"  - {k}: {hints.get(k, 'removed — see DISK_PLEX_MAP / --help plex2disk')}"
+             + "".join(f"\n      set in {_config_file_label(p)}"
+                       for p in CONFIG_RECORD['set_by'][k])
              for k in legacy_set]
     err("00163", "Legacy config key(s) found:\n" + "\n".join(lines) +
            "\n  Delete each from the file that sets it to continue.")
