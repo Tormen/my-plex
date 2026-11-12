@@ -1907,8 +1907,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # my-plex has TWO data paths:
 #
 #   • CACHE UPDATES (--update-cache, --scan) — direct DB access via SSH.
-#       Configure PLEX_DB_REMOTE_HOST + PLEX_DB_PATH.  No API credentials
-#       needed for this path.
+#       Needs PLEX_DB_REMOTE (site config) + PLEX_DB_PATH; `my-plex
+#       --install` writes the ssh alias from PLEX_DB_REMOTE.  No API
+#       credentials needed for this path.
 #
 #   • PLEX API OPERATIONS (delete, markWatched, label edits, library
 #     refresh trigger, collection edits, …) — still go through plexapi
@@ -1918,7 +1919,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #     command line override the config.
 #
 # Most users want BOTH paths configured:
-#   - PLEX_DB_REMOTE_HOST + PLEX_DB_PATH   (for fast cache updates)
+#   - PLEX_DB_REMOTE + PLEX_DB_PATH        (for fast cache updates)
 #   - PLEX_XML_URL                          (for write operations)
 
 # --- Direct DB access (cache updates) ---
@@ -1999,8 +2000,6 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
 #
 # Example (uncomment + customize to use):
-# PLEX_DB_REMOTE_HOST = 'my-plex'
-# PLEX_DB_PATH = '/Users/me/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
 # PLEX_XML_URL = 'https://<server>.plex.direct:32400/library/metadata/<id>?X-Plex-Token=<token>'
 
 # NOTE: SSH access to the Plex server is required for cache updates.
@@ -33420,7 +33419,7 @@ def main_print_help(args, remaining_args, main_parser):
             print( "  pointed at its own config can never silently read another one.")
             print()
             print("  The Plex token and API keys (" + ", ".join(sorted(USER_ONLY_KEYS)) + ")")
-            print("  belong in YOUR config only, and the keys root reads for --install")
+            print("  belong in YOUR config only, and the keys of --install")
             print("  (" + ", ".join(sorted(SITE_ONLY_KEYS)) + ")")
             print("  in the site config only: my-plex refuses them in the other.  As root")
             print(f"  (--install) it reads the site config alone, or a file named by ${CONFIG_ENV}")
@@ -33651,7 +33650,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("~/.ssh/config. ssh reads no other file in ~/.ssh by itself, so")
             print("that line is what makes the block count. With")
             print("PLEX_DB_REMOTE_IDENTITY set, the block names that key as its")
-            print("IdentityFile -- a missing file is an ERROR and nothing is written;")
+            print("IdentityFile -- a missing file is an ERROR, and no ssh file is")
+            print("written (root's rules, written before the hand-over, stay);")
             print("without it, ssh offers your default keys.")
             print()
             print("`ssh -G <alias>` decides what happens (it connects to nothing):")

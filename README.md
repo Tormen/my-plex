@@ -263,14 +263,10 @@ server's own LAN IP, so a rule naming the host would stop matching -- back
 into an alert -- the next time that IP changes. A bare IP becomes an
 address rule, any other name a host rule.
 
-**What root reads.** A config is Python, run by `exec()`: as root, a file
-another user can change would run that user's code as root. So root reads
-the site config alone, or a file named by `$MY_PLEX_CONFIG` or `--config` --
-each only when root owns it and every directory above it, and neither group
-nor others can write them (a config under `/tmp` is refused). The keys of
-`--install` -- `RUN_AS_USER`, `LITTLE_SNITCH_CLI`, `PLEX_DB_REMOTE`,
-`PLEX_DB_REMOTE_IDENTITY` and `PLEX_API_REMOTE` -- are site keys, the same
-for every user of a machine: my-plex refuses them in a user's own config.
+**What root reads.** The site config alone, or a file named by
+`$MY_PLEX_CONFIG` or `--config` -- each only as [Configuration](#configuration)
+says root reads a file (a config under `/tmp` is refused). The keys of
+`--install` belong in the site config; Configuration names them.
 
 **Then, as that user: the ssh `Host` entry**, and nothing else. Every DB
 query, file move and ffprobe runs `ssh <PLEX_DB_REMOTE_HOST>`, an alias; on
@@ -292,8 +288,9 @@ PLEX_DB_REMOTE_IDENTITY = '~/.ssh/keys/plex-server,id_ed25519'  # optional
   it is not one of ssh's default keys (`~/.ssh/id_ed25519`, `id_rsa`, ...):
   the block names it as its `IdentityFile`. `~` is each user's own home, so
   one value serves every user of the site. A key file that is not there
-  stops `--install` before anything is written; unset, the block names no
-  key and ssh offers yours.
+  stops the ssh half before any ssh file is written -- root's rules, written
+  before the hand-over, stay; unset, the block names no key and ssh offers
+  yours.
 - `PLEX_DB_REMOTE_HOST` is the alias's name, `my-plex` by default -- the
   same on every machine, the entry `--install` wrote. Change it only if that
   name is already yours for something else.

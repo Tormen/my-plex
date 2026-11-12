@@ -14315,6 +14315,16 @@ class TestInstallFirewallRules(unittest.TestCase):
         for key in ('RUN_AS_USER', 'PLEX_API_REMOTE'):
             self.assertIn(key, r.stdout, f"the page does not name {key}")
 
+    def test_help_config_does_not_say_root_reads_the_users_key(self):
+        """--help config called the site-only keys "the keys root reads for
+        --install" and listed PLEX_DB_REMOTE_IDENTITY among them -- a key
+        only the ssh half, run as the user, reads.  README says "the keys of
+        --install"; the help page must not keep the old claim."""
+        r = self._run('--help', 'config')
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertIn('PLEX_DB_REMOTE_IDENTITY', r.stdout, r.stdout[-800:])
+        self.assertNotIn('keys root reads', r.stdout)
+
 
 def _firewall_stub(d: str) -> str:
     """A my-little-snitch in directory D that answers as the real one does
@@ -15066,6 +15076,25 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
         stray = sorted(e for e in emitted - keys if not e.startswith('EXAMPLE'))
         self.assertEqual(stray, [],
                          f"the template assigns keys the tool does not have: {stray}")
+
+    def test_no_key_line_is_shown_twice_and_the_alias_is_not_a_chore(self):
+        """A `# KEY = value` line repeated word for word says nothing new, and
+        the closing "Example" block repeated PLEX_DB_REMOTE_HOST's default --
+        under a head that called the alias REQUIRED to configure, while its
+        own entry says --install writes it and to leave it alone.  So a
+        reader set the alias by hand.  The head names what a reader sets for
+        the DB path: PLEX_DB_REMOTE and PLEX_DB_PATH."""
+        r = subprocess.run([MAIN_SCRIPT, '--create-config'],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        lines = [ln for ln in r.stdout.splitlines() if re.match(r'#\s?[A-Z_][A-Z_0-9]+\s*=', ln)]
+        twice = sorted({ln for ln in lines if lines.count(ln) > 1})
+        self.assertEqual(twice, [], "template lines shown twice, word for word")
+        head = r.stdout.split('# --- Direct DB access', 1)[0]
+        self.assertIn('PLEX_DB_REMOTE ', head, head[-900:])
+        self.assertNotIn('PLEX_DB_REMOTE_HOST', head,
+                         "the head asks for the alias --install writes")
 
 
 class TestCreateConfig(unittest.TestCase):
