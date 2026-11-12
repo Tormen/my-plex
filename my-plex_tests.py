@@ -13942,8 +13942,10 @@ class TestNeverRunsAsRoot(unittest.TestCase):
                        "sys.argv = sys.argv[1:]\n"
                        "runpy.run_path(sys.argv[0], run_name='__main__')\n")
 
-    def _run_print_only(self, home: str, argv: list[str], as_root: bool) -> 'subprocess.CompletedProcess[str]':
-        env = dict(os.environ, HOME=home, PYTHONDONTWRITEBYTECODE='1')
+    def _run_print_only(self, home: str, argv: list[str], as_root: bool,
+                        base_env: dict[str, str] | None = None) -> 'subprocess.CompletedProcess[str]':
+        env = dict(base_env if base_env is not None else os.environ,
+                   HOME=home, PYTHONDONTWRITEBYTECODE='1')
         env.pop('MY_PLEX_TEST_EUID', None)
         if as_root:
             env['MY_PLEX_TEST_EUID'] = '0'
@@ -13983,6 +13985,42 @@ class TestNeverRunsAsRoot(unittest.TestCase):
                                  f"{what} as root wrote into HOME")
                 with open(zshrc) as f:
                     self.assertEqual(f.read(), '# root zshrc\n', f"{what} as root patched ~/.zshrc")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_as_root_only_the_help_flags_the_parser_defines_are_print_only(self):
+        """The root rule lets a run through when argv asks for help -- so the
+        flags it counts must be the ones the parser answers with help: `-H`
+        and `--help`.  It counted `-h`, which my-plex does not define: as
+        root, `my-plex -h` passed the refusal and went on to read the cache
+        and query the Plex DB over ssh (a playlist named '-h'), while `-H`,
+        the real short help, was refused.
+
+        `-H` comes first: in a copy that still counts `-h` it is refused and
+        the test stops there, before the `-h` run.  That run gets a fake ssh
+        and a cache of its own anyway, so even a regression reaches no host."""
+        d = tempfile.mkdtemp(prefix='my-plex-roothelpflags-')
+        try:
+            home = os.path.join(d, 'root-upper-H')
+            os.makedirs(home)
+            r = self._run_print_only(home, ['-H'], as_root=True)
+            self.assertNotIn('00001', r.stderr, f"-H as root was refused:\n{r.stderr[-400:]}")
+            self.assertEqual(r.returncode, 0, f"-H as root: exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertIn('usage:', r.stdout, "-H as root printed no usage")
+            self.assertEqual(os.listdir(home), [], "-H as root wrote into HOME")
+
+            conf = os.path.join(d, 'my-plex.conf')
+            with open(conf, 'w') as f:
+                f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"
+                        f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n"
+                        + _install_lines(d))
+            home = os.path.join(d, 'root-lower-h')
+            os.makedirs(home)
+            r = self._run_print_only(home, ['--config', conf, '-h'], as_root=True,
+                                     base_env=_fake_ssh_env())
+            self.assertEqual(r.returncode, 1, f"-h as root: exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertRegex(r.stderr, r'ERROR 00001 \[1\]:',
+                             f"-h as root was not refused:\n{r.stderr[-400:]}")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

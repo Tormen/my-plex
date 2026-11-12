@@ -126,9 +126,12 @@ def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
 # config -- so there is nothing for root to put in the wrong home, and
 # refusing it would only hide the help from whoever is in a root shell.
 # It is answered HERE, this early, because it reads nothing but argv.
+# The help flags are the ones main_parser answers with help, `-H` and
+# `--help`: `-h` is not one of them, and counting it let a root `my-plex -h`
+# past the refusal into a real run.
 _VERSION_ASKED = any(a in ('--version', '-version') for a in sys.argv[1:])
 _PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
-                   or any(a in ('--help', '-h') for a in sys.argv[1:]))
+                   or any(a in ('--help', '-H') for a in sys.argv[1:]))
 
 # my-plex runs as the user whose Plex and whose media files these are, and as
 # nobody else.  ROOT is refused for every command that DOES anything, because
