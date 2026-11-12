@@ -7,6 +7,9 @@ venv when it is missing and re-executes the launcher inside it, and only then
 imports the tool, my_plex.  So this module may import nothing beyond the
 stdlib: on a fresh machine it runs before any package is installed.
 
+As root, main() runs one command alone, --install: the firewall rules,
+then the drop to the user the rest runs as (_root_install).
+
 It is a module of its own, rather than part of the launcher or of the tool,
 for three reasons: the launcher stays a few lines (CPython caches bytecode
 for IMPORTED modules only); this code must import before the venv exists,
@@ -61,19 +64,30 @@ def main(launcher: str) -> None:
 
     In this order, each for a reason:
       1. the ROOT refusal -- first, because a refusal that fires after the
-         bootstrap has built /var/root/.python.venv is too late to be one;
+         bootstrap has built /var/root/.python.venv is too late to be one.
+         --install is the one command root runs: its firewall half, then
+         the drop to the user (_root_install), never past this point;
       2. -Q, so the bootstrap's own output is silenced too;
-      3. the venv: build it when missing, then re-exec the launcher inside
+      3. the venv: build it when missing -- or, for --install, when it was
+         built from another Python minor -- then re-exec the launcher inside
          it.  A run that only prints skips this -- see print_only_run();
       4. import the tool and run it.
     """
     global LAUNCHER
     LAUNCHER = launcher
     argv = sys.argv
-    if as_root() and not print_only_run(argv):
+    if as_root() and not print_only_run(argv) and not install_asked(argv):
         err("00001", root_refusal())
     if quiet_argv(argv):
         go_quiet()
+    if as_root() and not print_only_run(argv):
+        try:
+            _root_install(launcher, argv)
+        except KeyboardInterrupt:
+            print("\nmy-plex: interrupted (Ctrl-C) in --install's firewall half -- nothing was\n"
+                  "  handed over; the rules written so far stay, and a second run writes the rest.",
+                  file=sys.stderr)
+            sys.exit(130)
 
     # Ctrl-C is caught HERE because the tool's own SIGINT handler
     # (_graceful_shutdown_handler) exists only once the tool is imported and
@@ -85,8 +99,13 @@ def main(launcher: str) -> None:
     # line, and 130.
     try:
         if not print_only_run(argv) and not _inside_our_venv():
-            if not _venv_has_deps():
-                _bootstrap_venv()
+            # --install rebuilds a venv of another Python minor: the firewall
+            # rules name THIS python3, and to the firewall another minor is
+            # another program.  Only --install: a minor upgrade is its cue.
+            built_from = _venv_minor() if install_asked(argv) else None
+            stale = built_from is not None and built_from != _this_minor()
+            if stale or not _venv_has_deps():
+                _bootstrap_venv(rebuilt_from=built_from if stale else None)
             # Venv exists and has deps -- re-exec inside it
             _exec_in_venv()
     except KeyboardInterrupt:
@@ -103,6 +122,11 @@ def main(launcher: str) -> None:
     # not hypothetical: the suite spawns my-plex constantly.
     os.environ.pop(_VENV_REEXEC_MARK, None)
 
+    _import_tool().run()
+
+
+def _import_tool():
+    """my_plex, the tool -- an ERROR naming the directory it is missing from."""
     try:
         import my_plex
     except ModuleNotFoundError as e:
@@ -110,7 +134,7 @@ def main(launcher: str) -> None:
             raise
         err("00002", f"my_plex.py is not beside my_plex_boot.py in "
                      f"{os.path.dirname(os.path.realpath(__file__))} -- a copy of part of my-plex")
-    my_plex.run()
+    return my_plex
 
 
 def argv_options(argv: "list[str]") -> "list[str]":
@@ -166,13 +190,14 @@ def as_root() -> bool:
     reads, the zsh completion it installs -- lands in /var/root instead of
     that user's home, and everything it says about "the Python that runs
     my-plex" (the firewall rule --install names) would name root's
-    interpreter, a process that never runs.  Nothing here needs privilege:
-    where a step genuinely does, --install prints the command for a root
-    shell and this tool writes nothing itself.
+    interpreter, a process that never runs.  The one step that needs
+    privilege is --install's firewall half: root runs that command alone, and
+    hands the rest over to the user (_root_install).
 
-    Past the refusal in main(), root is only ever on a print-only run, and
-    such a run writes nothing into root's home either: the tool skips the zsh
-    completion and ~/.my-plex, which every run of an ordinary user writes.
+    Past the refusal in main(), root is only ever on a print-only run or in
+    that firewall half, and neither writes into root's home: the tool skips
+    the zsh completion and ~/.my-plex, which every run of an ordinary user
+    writes, and root builds no venv.
     """
     return os.geteuid() == 0
 
@@ -184,8 +209,8 @@ def root_refusal() -> str:
             "Possible reasons:\n"
             "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
             "  - a rollout step: give it `# user: <that user>` instead of root\n"
-            "  - the firewall rules: run `my-plex --install` as that user -- it\n"
-            "    prints the root commands that write them, and writes none itself\n"
+            "  - `--install` is the one command that runs as root: it writes the\n"
+            "    firewall rules, then hands the rest over to RUN_AS_USER itself\n"
             "  - only READING what this tool is: `my-plex`, `--help [WHAT]` (or\n"
             "    `-H`) and `--version` print and touch nothing, so they work as root")
 
@@ -314,11 +339,37 @@ def _venv_has_deps():
     return found == set(VENV_DEPS)
 
 
-def _bootstrap_venv():
-    """Create venv, install deps, and re-exec."""
-    print(f"\n >>> Creating python virtualenv '{VENV_DIR}'...\n", file=sys.stderr)
+def _this_minor() -> str:
+    """The Python minor running this, "3.15"."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
 
-    rc = subprocess.call([sys.executable, "-m", "venv", VENV_DIR])
+
+def _venv_minor() -> "str | None":
+    """The Python minor VENV_DIR was built from ("3.14"), from its
+    pyvenv.cfg; None when there is none to read."""
+    try:
+        with open(os.path.join(VENV_DIR, "pyvenv.cfg")) as f:
+            for line in f:
+                key, _eq, value = line.partition("=")
+                if key.strip() in ("version", "version_info"):
+                    return ".".join(value.strip().split(".")[:2])
+    except OSError:
+        pass
+    return None
+
+
+def _bootstrap_venv(rebuilt_from: "str | None" = None):
+    """Create the venv -- emptied first when REBUILT_FROM names the other
+    Python minor it was built from -- install deps, and re-exec."""
+    if rebuilt_from:
+        print(f"\n >>> rebuilding python virtualenv '{VENV_DIR}': it was built from python "
+              f"{rebuilt_from}, and this python3 is {_this_minor()} -- the firewall rules name "
+              f"this one\n", file=sys.stderr)
+    else:
+        print(f"\n >>> Creating python virtualenv '{VENV_DIR}'...\n", file=sys.stderr)
+
+    rc = subprocess.call([sys.executable, "-m", "venv"] + (["--clear"] if rebuilt_from else [])
+                         + [VENV_DIR])
     if rc != 0:
         err("00004", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
 
@@ -333,3 +384,106 @@ def _bootstrap_venv():
 
     # Re-exec with venv python, preserving all arguments
     _exec_in_venv()
+
+
+# ---------------------------------------------------------------------------
+# --install as ROOT: the firewall half, then the drop to the user.
+# ---------------------------------------------------------------------------
+# The oldest python3 the tool runs on (it uses match/case).  Asked here, as
+# root, before the tool is imported: an older python3 would stop on the
+# tool's first `match` with a SyntaxError traceback instead of a sentence.
+MIN_PYTHON = (3, 10)
+
+# Set in the command root hands over with, so the run as the user knows the
+# firewall half is done: there, a firewall tool that exists would otherwise
+# send it back to root ("--install needs root").  An environment variable
+# because `su -l` passes nothing else but the command line itself.
+INSTALL_FROM_ROOT_ENV = "MY_PLEX_INSTALL_FROM_ROOT"
+
+# What root's --install takes beside --install: the config to read, and -Q.
+# Anything else would be dropped without a word -- the run as the user is
+# `--install` and nothing more -- so it is refused instead.
+_ROOT_CONFIG_FLAGS = ("--config", "--config-file", "-C")
+
+
+def install_asked(argv: "list[str]") -> bool:
+    """True when argv asks for --install (an attached `--install=X` too: the
+    tool refuses that one with its own error, which names the X)."""
+    return any(a == "--install" or a.startswith("--install=") for a in argv_options(argv))
+
+
+def _root_install_config(argv: "list[str]") -> "str | None":
+    """The config file a root --install names (--config FILE, -C FILE,
+    --config-file FILE, or the `=FILE` forms), or None.  Any other token is
+    refused: root hands over `--install` alone, so whatever else was asked
+    would silently not happen."""
+    config = None
+    rest = argv_options(argv)
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        name, eq, value = a.partition("=")
+        if a in ("--install", "-Q", "--quiet") or a.startswith("--install="):
+            pass
+        elif name in _ROOT_CONFIG_FLAGS and eq and value:
+            config = value
+        elif a in _ROOT_CONFIG_FLAGS and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            config = rest[i + 1]
+            i += 1
+        else:
+            err("00006", f"as root, --install takes only --config FILE (and -Q) beside it, "
+                         f"and got {a!r}\n"
+                         f"  root writes the firewall rules and hands over `my-plex --install`,\n"
+                         f"  nothing more -- anything else would silently not run.\n"
+                         f"Possible reasons:\n"
+                         f"  - another command: run it as the user whose Plex this is, not as root")
+        i += 1
+    return config
+
+
+def _root_install(launcher: str, argv: "list[str]") -> "NoReturn":
+    """--install as root: the firewall half, then the drop.
+
+    The python3 check comes first (#35): every step after it imports the
+    tool.  The tool owns what --install needs to know -- the config, the
+    remotes, the user -- and writes the rules (install_firewall()); THIS
+    module owns who runs next and in what interpreter, so the drop is here.
+    No venv is built and none is entered: root runs nothing but the stdlib,
+    and the rules name the python3 that runs this, which exists before any
+    venv does.
+    """
+    if sys.version_info < MIN_PYTHON:
+        v = sys.version_info
+        err("00007", f"--install needs python3 >= {MIN_PYTHON[0]}.{MIN_PYTHON[1]}, and the python3 "
+                     f"found here is {v.major}.{v.minor}.{v.micro}: {sys.executable}\n"
+                     f"Possible reasons:\n"
+                     f"  - root's PATH finds an older python3 before the one my-plex's users run:\n"
+                     f"    put the newer one first in root's PATH, or install it")
+    config = _root_install_config(argv)
+    tool = _import_tool()
+    user = tool.install_firewall(config)
+    _drop_to(user, launcher, config)
+
+
+def _drop_to(user: str, launcher: str, config: "str | None") -> "NoReturn":
+    """Hand this --install over to USER, as a fresh login: `su -l` gives the
+    run that user's HOME, USER, LOGNAME and PATH and nothing of root's
+    environment -- every per-user path my-plex computes comes from HOME, so a
+    run that kept root's would build the venv and write ~/.ssh in /var/root.
+
+    The run names the python3 root ran under: the venv is then built from the
+    Python the rules name.  The config root read travels as --config, since
+    su keeps no environment."""
+    import shlex
+    cmd = [sys.executable, "-I", "-S", launcher, "--install"]
+    if config:
+        cmd += ["--config", os.path.abspath(config)]
+    line = f"{INSTALL_FROM_ROOT_ENV}=1 exec {shlex.join(cmd)}"
+    print(f"\n >>> dropping to {user} for the rest -- nothing below this line runs as root\n",
+          flush=True)
+    sys.stderr.flush()
+    try:
+        os.execvp("su", ["su", "-l", user, "-c", line])
+    except OSError as e:
+        err("00008", f"could not hand over to {user}: su: {e.strerror}\n"
+                     f"  the firewall rules are written; run `my-plex --install` as {user} for the rest")

@@ -13261,7 +13261,8 @@ class TestTopLevelHandlers(unittest.TestCase):
         d = tempfile.mkdtemp(prefix='my-plex-bootstrap-int-')
         try:
             copy = _tool_copy(d, {'boot': [
-                ('def _bootstrap_venv():', 'def _bootstrap_venv():\n    import time; time.sleep(30)'),
+                ('def _bootstrap_venv(rebuilt_from: "str | None" = None):',
+         'def _bootstrap_venv(rebuilt_from: "str | None" = None):\n    import time; time.sleep(30)'),
                 ('def _inside_our_venv():', 'def _inside_our_venv():\n    return False'),
                 ('def _venv_has_deps():', 'def _venv_has_deps():\n    return False')]})
             p = subprocess.Popen([sys.executable, copy, '--list-libraries'],
@@ -13843,6 +13844,67 @@ class TestVenvDetection(unittest.TestCase):
                       f"not the loop guard's error:\n{r.stderr[-900:]}")
 
 
+class TestVenvRebuildOnPythonMinor(unittest.TestCase):
+    """#34: --install rebuilds the venv when its Python minor differs from
+    the launcher's python3.  The firewall rules name that python3, and a
+    venv built from another minor is another program to the firewall; the
+    bootstrap otherwise rebuilds only a venv that is missing or lacks a
+    package, never one of the wrong version.
+
+    The boot module runs in a child with venv's and pip's calls and the
+    re-exec replaced by recorders, so nothing is built and nothing fetched."""
+
+    def _boot(self, argv: 'list[str]', venv_minor: str) -> 'tuple[list[list[str]], str]':
+        d = tempfile.mkdtemp(prefix='my-plex-venvminor-')
+        try:
+            venv = os.path.join(d, 'venv')
+            os.makedirs(os.path.join(venv, 'bin'))
+            open(os.path.join(venv, 'bin', 'python3'), 'w').close()
+            for dep in ('plexapi', 'readchar'):
+                os.makedirs(os.path.join(venv, 'lib', f'python{venv_minor}', 'site-packages', dep))
+            with open(os.path.join(venv, 'pyvenv.cfg'), 'w') as f:
+                f.write(f"home = /nowhere\nversion = {venv_minor}.1\n")
+            snippet = _tool_import_snippet(argv, path=BOOT_SOURCE) + (
+                "mp.VENV_DIR = %r\n"
+                "mp.VENV_PYTHON = os.path.join(mp.VENV_DIR, 'bin', 'python3')\n"
+                "calls = []\n"
+                "def _call(a, **k):\n"
+                "    calls.append(list(a)); return 0\n"
+                "mp.subprocess.call = _call\n"
+                "def _execv(p, a):\n"
+                "    sys.stderr.write('CALLS=%%r\\n' %% (calls,)); sys.stderr.flush(); os._exit(0)\n"
+                "mp.os.execv = _execv\n"
+                "mp.main('/the/launcher')\n") % (venv,)
+            env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+            env.pop('MY_PLEX_VENV_REEXEC', None)
+            r = subprocess.run([sys.executable, '-B', '-c', snippet], capture_output=True,
+                               text=True, timeout=60, env=env)
+            m = re.search(r'CALLS=(.*)', r.stderr)
+            self.assertTrue(m, f"the probe did not reach the re-exec:\n{r.stderr[-900:]}")
+            assert m is not None
+            return ast.literal_eval(m.group(1)), r.stderr
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_install_rebuilds_a_venv_of_another_minor_and_says_so(self):
+        here = f"{sys.version_info.major}.{sys.version_info.minor}"
+        calls, stderr = self._boot(['my-plex', '--install'], '3.9')
+        self.assertTrue(calls, f"a 3.9 venv was kept under python {here}:\n{stderr[-600:]}")
+        self.assertEqual(calls[0][:4], [sys.executable, '-m', 'venv', '--clear'], calls)
+        self.assertEqual(calls[1][1:], ['install', 'plexapi', 'readchar'], calls)
+        self.assertRegex(stderr, rf'rebuilding .*3\.9.*{re.escape(here)}')
+
+    def test_only_install_rebuilds_and_only_on_another_minor(self):
+        """The rebuild is --install's (#34), never every run's; and a venv of
+        this very minor is left as it is -- a rebuild there would be pip on
+        every --install."""
+        here = f"{sys.version_info.major}.{sys.version_info.minor}"
+        calls, stderr = self._boot(['my-plex', '--list-libraries'], '3.9')
+        self.assertEqual(calls, [], f"a run that is not --install rebuilt the venv:\n{stderr[-600:]}")
+        calls, stderr = self._boot(['my-plex', '--install'], here)
+        self.assertEqual(calls, [], f"a venv of this minor was rebuilt:\n{stderr[-600:]}")
+
+
 class TestReadmeFlagsExist(unittest.TestCase):
     """Every flag the README names must be one the parser accepts.
 
@@ -14110,55 +14172,6 @@ class TestInstallFirewallRules(unittest.TestCase):
                          f"not list them, so --install writes no rule for "
                          f"them: {missing}")
 
-    def test_every_remote_gets_BOTH_rule_forms(self):
-        """A rule naming Python as the PROCESS does not match a real run.
-
-        Little Snitch attributes the connection to the app ABOVE Python and
-        calls Python the VIA program. The user's alerts read "Terminal via
-        Python" and "claude via Python", with "an existing rule for any
-        via-process was not applied to Python" -- while process rules for all
-        three scraper hosts had been stored on every machine since
-        2026-11-01. Stored is not matching, and four popups are what the
-        difference cost.
-
-        So each remote needs the via form beside the process form, and this
-        is what stops a later edit quietly dropping one of them. The hosts
-        come from NETWORK_HOSTS in the source, not from the output, or the
-        test would only check that the output agrees with itself."""
-        with open(TOOL_SOURCE) as f:
-            src = f.read()
-        block = src.split('NETWORK_HOSTS = (', 1)[1].split('\n)', 1)[0]
-        hosts = re.findall(r"\('([a-z0-9.-]+)',", block)
-        self.assertGreater(len(hosts), 1, f"NETWORK_HOSTS not parsed:\n{block[:200]}")
-
-        d, conf = self._conf('/bin/true')
-        stub = os.path.join(d, 'my-little-snitch')
-        with open(stub, 'w') as f:
-            f.write('#!/bin/dash\nexit 0\n')
-        os.chmod(stub, 0o755)
-        with open(conf, 'a') as f:
-            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
-        try:
-            r = self._run('--config', conf, '--install')
-            self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            lines = [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
-            for host in hosts:
-                for_host = [ln for ln in lines if f' {host} ' in ln or ln.rstrip().endswith(f' {host}')]
-                process_form = [ln for ln in for_host if ' allow go /' in ln
-                                and '--via' not in ln]
-                via_form = [ln for ln in for_host if ' allow go any ' in ln
-                            and '--via' in ln]
-                self.assertTrue(process_form,
-                                f"{host}: no rule for the Python as the process:"
-                                f"\n" + "\n".join(for_host))
-                self.assertTrue(via_form,
-                                f"{host}: no VIA rule -- the form the alerts "
-                                f"showed is the one that was missing:\n"
-                                + "\n".join(for_host))
-                self.assertIn('--owner', via_form[0], via_form[0])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
     def test_without_the_firewall_tool_it_says_so_and_writes_nothing(self):
         """my-plex is published: on anyone else's machine the integration is
         absent, and --install must then be a clean no-op that still tells the
@@ -14167,19 +14180,14 @@ class TestInstallFirewallRules(unittest.TestCase):
         try:
             r = self._run('--config', conf, '--install')
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            self.assertIn('no rules written', r.stdout, r.stdout[-500:])
+            self.assertIn('no rule written', r.stdout, r.stdout[-500:])
             for host, _why in (('api.themoviedb.org', 0), ('www.fernsehserien.de', 0)):
                 self.assertIn(host, r.stdout, "it must still name the hosts")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_it_never_runs_the_firewall_tool_itself(self):
-        """THE test for the shape: writing a rule is root's, and my-plex does
-        not run as root, so --install PRINTS the commands and calls nothing.
-
-        Adversarial by construction: LITTLE_SNITCH_CLI points at a script
-        that leaves a file behind if it is ever executed. The earlier shape
-        (`--install go`, which called the tool) leaves that file."""
+    def _sentinel_conf(self):
+        """A config whose firewall tool leaves a file behind if it is ever run."""
         d, conf = self._conf('/bin/true')       # replaced just below
         sentinel = os.path.join(d, 'it-was-run')
         stub = os.path.join(d, 'my-little-snitch')
@@ -14188,128 +14196,43 @@ class TestInstallFirewallRules(unittest.TestCase):
         os.chmod(stub, 0o755)
         with open(conf, 'a') as f:
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+        return d, conf, stub, sentinel
+
+    def test_with_the_firewall_tool_there_it_needs_root(self):
+        """#32: --install needs root exactly when LITTLE_SNITCH_CLI exists --
+        writing the rules is root's, and littlesnitch refuses anyone else even
+        to list.  It printed the root commands and exited 0 instead.
+
+        Adversarial by construction: the firewall tool leaves a file behind if
+        it is ever run, and the refusal comes before anything is written."""
+        d, conf, stub, sentinel = self._sentinel_conf()
         try:
             r = self._run('--config', conf, '--install')
-            self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            self.assertFalse(os.path.exists(sentinel),
-                             "--install executed the firewall tool -- it must only print")
-            self.assertIn('AS ROOT', r.stdout, r.stdout[-600:])
-            for host, _why in (('api.themoviedb.org', 0), ('www.fernsehserien.de', 0)):
-                self.assertIn(f'{stub} allow go ', r.stdout,
-                              "the printed line must be the paste-ready command")
-                self.assertIn(host, r.stdout, "...one per host")
+            self.assertEqual(r.returncode, 1, r.stdout[-600:] + r.stderr[-600:])
+            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: --install needs root')
+            self.assertIn(stub, r.stderr, "the error does not say which file made root necessary")
+            self.assertFalse(os.path.exists(sentinel), "it ran the firewall tool")
+            self.assertFalse(os.path.exists(os.path.join(d, 'ssh', 'config')),
+                             "it wrote the ssh Host entry before refusing")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_the_printed_command_names_the_owner(self):
-        """A rule has an owner, and the printed command runs as ROOT -- so an
-        unnamed owner is read in root's context, from the firewall tool's own
-        configured default.  One machine's default named a user that does not
-        exist there, and all three calls failed with "no such user"
-        (2026-11-02).  The owner is this user, whose Python the rule names.
-
-        Adversarial: the assertion is not that `--owner` appears, but that it
-        carries THIS user -- a hard-coded name passes the first and fails
-        this."""
-        import pwd
-        me = pwd.getpwuid(os.geteuid()).pw_name
-        d, conf = self._conf('/bin/true')
-        stub = os.path.join(d, 'my-little-snitch')
-        with open(stub, 'w') as f:
-            f.write('#!/bin/dash\nexit 0\n')
-        os.chmod(stub, 0o755)
-        with open(conf, 'a') as f:
-            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
+    def test_after_roots_half_the_user_run_writes_the_ssh_entry(self):
+        """The run root hands over to is a user's --install with the firewall
+        tool there -- and must not be sent back to root.  The command root
+        hands over with says so (MY_PLEX_INSTALL_FROM_ROOT=1); su passes
+        nothing else."""
+        d, conf, _stub, sentinel = self._sentinel_conf()
         try:
-            r = self._run('--config', conf, '--install')
-            self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            lines = [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
-            self.assertTrue(lines, f"no printed command:\n{r.stdout[-600:]}")
-            for ln in lines:
-                self.assertIn(f'--owner {me}', ln,
-                              f"the command leaves the owner to root's default: {ln}")
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_the_deny_clear_line_does_nothing_when_no_deny_matches(self):
-        """The printed deny-clear lines are RUN, by dash and by zsh, against a
-        stub firewall tool whose `remove` fails on an empty stdin as the real
-        one does (err 00036).
-
-        The normal case is that no deny stands, so awk prints nothing -- and
-        the line printed until now piped that nothing into `remove go`, which
-        failed: a root shell or a rollout step that checks rc saw an error on
-        a machine that needed nothing cleared.  Adversarial on both sides: a
-        line that never calls remove passes (a) and fails (b); one that
-        swallows a failed listing passes (a) and (b) and fails (c)."""
-        d, conf = self._conf('/bin/true')       # replaced just below
-        calls = os.path.join(d, 'calls')
-        listing = os.path.join(d, 'listing')
-        stub = os.path.join(d, 'my-little-snitch')
-        with open(stub, 'w') as f:
-            f.write("#!/bin/dash\n"
-                    "case \"$1\" in\n"
-                    f"  list) echo \"list $2\" >> {calls!r}\n"
-                    f"        [ -f {listing!r} ] || {{ echo 'ERROR 00099 [1]: needs root' >&2; exit 1; }}\n"
-                    f"        cat {listing!r};;\n"
-                    "  remove) ids=$(cat)\n"
-                    f"          [ -n \"$ids\" ] || {{ echo 'remove (empty)' >> {calls!r}; "
-                    "echo 'ERROR 00036 [1]: remove [go] <ID>..' >&2; exit 1; }\n"
-                    f"          for i in $ids; do echo \"remove $i\" >> {calls!r}; done;;\n"
-                    "esac\n")
-        os.chmod(stub, 0o755)
-        with open(conf, 'a') as f:
-            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
-        py = ('/opt/homebrew/Cellar/python@3.14/*/Frameworks/Python.framework/'
-              'Versions/3.14/Resources/Python.app/Contents/MacOS/Python')
-
-        def rule(rid, process, action):
-            return f"{rid}\t{process}  {action}  api.themoviedb.org  any  me\n"
-
-        def run(shell, line, rules):
-            for p in (calls, listing):
-                if os.path.exists(p):
-                    os.remove(p)
-            if rules is not None:
-                with open(listing, 'w') as f:
-                    f.writelines(rules)
-            r = subprocess.run([*shell, line], capture_output=True, text=True, timeout=30)
-            with open(calls) as f:
-                return r, f.read().split('\n')
-
-        try:
-            r = self._run('--config', conf, '--install')
-            self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            lines = [ln.split('> ', 1)[1] for ln in r.stdout.splitlines()
-                     if ' remove go' in ln]
-            self.assertTrue(lines, f"no deny-clear line printed:\n{r.stdout[-800:]}")
-            tmdb = [ln for ln in lines if re.search(r' list api\.themoviedb\.org\b', ln)]
-            self.assertEqual(len(tmdb), 1, "\n".join(lines))
-            shells = [['/bin/dash', '-c']]
-            if os.path.exists('/bin/zsh'):
-                shells.append(['/bin/zsh', '-f', '-c'])
-            for shell in shells:
-                # (a) no deny for my-plex: every line exits 0, remove is never called
-                for ln in lines:
-                    res, log = run(shell, ln, [rule('ddd444', py, 'allow'),
-                                               rule('eee555', '/usr/bin/curl', 'allow')])
-                    self.assertEqual(res.returncode, 0,
-                                     f"{shell[0]}: nothing to clear must exit 0: {ln}\n{res.stderr}")
-                    self.assertFalse([c for c in log if c.startswith('remove')],
-                                     f"{shell[0]}: remove was called with nothing to remove: {log}")
-                # (b) Python's deny and an `any` deny go; curl's deny stays
-                res, log = run(shell, tmdb[0], [rule('aaa111', py, 'deny'),
-                                                rule('bbb222', 'any', 'deny'),
-                                                rule('ccc333', '/usr/bin/curl', 'deny'),
-                                                rule('ddd444', py, 'allow')])
-                self.assertEqual(res.returncode, 0, f"{shell[0]}: {res.stderr}")
-                self.assertEqual(sorted(c for c in log if c.startswith('remove')),
-                                 ['remove aaa111', 'remove bbb222'], f"{shell[0]}: {log}")
-                # (c) a listing that fails is a failure, not "nothing to clear"
-                res, log = run(shell, tmdb[0], None)
-                self.assertNotEqual(res.returncode, 0,
-                                    f"{shell[0]}: a failed `list` read as nothing to clear")
-                self.assertFalse([c for c in log if c.startswith('remove')], f"{shell[0]}: {log}")
+            r = subprocess.run([MAIN_SCRIPT, '--config', conf, '--install'], capture_output=True,
+                               text=True, timeout=120,
+                               env=dict(_fake_ssh_env(), MY_PLEX_INSTALL_FROM_ROOT='1'))
+            self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
+            self.assertNotIn('needs root', r.stderr)
+            self.assertIn('written by root', r.stdout, r.stdout[-600:])
+            self.assertFalse(os.path.exists(sentinel), "the user's run ran the firewall tool")
+            self.assertTrue(os.path.exists(os.path.join(d, 'ssh', 'config')),
+                            "the ssh Host entry was not written")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -14368,6 +14291,273 @@ class TestInstallFirewallRules(unittest.TestCase):
         self.assertIn('INSTALL HELP', r.stdout, r.stdout[:300])
         self.assertIn('www.fernsehserien.de', r.stdout,
                       "the page must name the hosts it allows")
+        for key in ('RUN_AS_USER', 'PLEX_API_REMOTE'):
+            self.assertIn(key, r.stdout, f"the page does not name {key}")
+
+
+def _firewall_stub(d: str) -> str:
+    """A my-little-snitch in directory D that answers as the real one does
+    and logs every call to D/calls (`cli <argv>`), so a test reads what root
+    asked of it.  `list R` prints the lines of D/listing that name R -- no
+    D/listing is the real one's refusal of anyone but root; `remove` takes
+    IDs on stdin and fails on none (the real err 00036); `allow` fails while
+    D/fail-allow exists, and says "already there" while D/already does."""
+    stub = os.path.join(d, 'my-little-snitch')
+    with open(stub, 'w') as f:
+        f.write("#!/bin/dash\n"
+                f"D='{d}'\n"
+                'printf "cli %s\\n" "$*" >> "$D/calls"\n'
+                'case "$1" in\n'
+                '  list) [ -f "$D/listing" ] || { echo "ERROR 00099 [1]: needs root" >&2; exit 1; }\n'
+                '        grep -F -- "  $2  " "$D/listing"; exit 0;;\n'
+                '  remove) ids=$(cat)\n'
+                '          [ -n "$ids" ] || { echo "ERROR 00036 [1]: remove [go] <ID>.." >&2; exit 1; }\n'
+                '          for i in $ids; do echo "removed $i" >> "$D/calls"; done;;\n'
+                '  allow) [ -f "$D/fail-allow" ] && { echo "ERROR 00050 [1]: refused" >&2; exit 1; }\n'
+                '         [ -f "$D/already" ] && echo " >>> already there: x";;\n'
+                'esac\n'
+                'exit 0\n')
+    os.chmod(stub, 0o755)
+    return stub
+
+
+def _su_stub(d: str) -> None:
+    """An `su` in directory D that switches to nobody: it writes its argv,
+    one per line, to D/su-argv and exits 0.  A test puts D first on PATH, so
+    a root --install's drop is seen and never happens."""
+    stub = os.path.join(d, 'su')
+    with open(stub, 'w') as f:
+        f.write(f"#!/bin/dash\nprintf '%s\\n' \"$@\" > '{d}/su-argv'\nexit 0\n")
+    os.chmod(stub, 0o755)
+
+
+class _RootRun:
+    """What one root --install left: the run, and what it asked of the
+    firewall tool and of su."""
+
+    def __init__(self, r: 'subprocess.CompletedProcess[str]', d: str, home: str, conf: str, python3: str):
+        self.r, self.d, self.home, self.conf, self.python3 = r, d, home, conf, python3
+        self.calls = self._lines('calls')
+        self.su = self._lines('su-argv')
+
+    def _lines(self, name: str) -> 'list[str]':
+        p = os.path.join(self.d, name)
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return f.read().splitlines()
+
+    def allows(self) -> 'list[str]':
+        return [c for c in self.calls if c.startswith('cli allow go ')]
+
+    def text(self) -> str:
+        return self.r.stdout[-1500:] + self.r.stderr[-1500:]
+
+
+class _RootInstallCase(unittest.TestCase):
+    """The harness for --install as root.
+
+    Never real root, never the real firewall tool, never a real su: a copy of
+    the tool whose root check alone is forced true -- os.geteuid() stays this
+    suite's own, so the files a test writes count as root's -- started by its
+    own shebang, so the base python3 runs it as it would for root; a stub
+    my-little-snitch that logs its calls; a stub su first on PATH; HOME a
+    temp directory, which root must leave empty."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix='my-plex-rootinstall-')
+        cls.copy = _tool_copy(os.path.join(cls.tmp, 'tool'),
+                              {'boot': [('os.geteuid() == 0', 'True')]})
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv=('--install',),
+                 env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
+                 copy: 'str | None' = None, firewall: bool = True,
+                 touch: 'tuple[str, ...]' = ()) -> _RootRun:
+        d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
+        stub = _firewall_stub(d) if firewall else os.path.join(d, 'no-such-firewall-tool')
+        _su_stub(d)
+        for name in touch:
+            open(os.path.join(d, name), 'w').close()
+        if listing is not None:
+            with open(os.path.join(d, 'listing'), 'w') as f:
+                f.write(listing)
+        home = os.path.join(d, 'home')
+        os.makedirs(home)
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n" + _install_lines(d) + conf_lines)
+        e = dict(_fake_ssh_env(), HOME=home)
+        e['PATH'] = d + os.pathsep + e['PATH']
+        e.pop('SUDO_USER', None)
+        e.update(env or {})
+        r = subprocess.run([copy or self.copy, '--config', conf, *argv], capture_output=True,
+                           text=True, timeout=120, env=e, stdin=subprocess.DEVNULL)
+        return _RootRun(r, d, home, conf, shutil.which('python3', path=e['PATH']) or '?')
+
+
+class TestInstallAsRoot(_RootInstallCase):
+    """--install as root: the firewall rules, through my-little-snitch, then
+    a drop to RUN_AS_USER for the rest."""
+
+    def test_every_remote_gets_BOTH_rule_forms(self):
+        """A rule naming Python as the PROCESS does not match a real run.
+
+        Little Snitch attributes the connection to the app ABOVE Python and
+        calls Python the VIA program. The user's alerts read "Terminal via
+        Python" and "claude via Python", with "an existing rule for any
+        via-process was not applied to Python" -- while process rules for all
+        three scraper hosts had been stored on every machine since
+        2026-11-01. Stored is not matching, and four popups are what the
+        difference cost.
+
+        So each remote needs the via form beside the process form. The hosts
+        come from NETWORK_HOSTS in the source, not from the output, or the
+        test would only check that the output agrees with itself."""
+        with open(TOOL_SOURCE) as f:
+            src = f.read()
+        block = src.split('NETWORK_HOSTS = (', 1)[1].split('\n)', 1)[0]
+        hosts = re.findall(r"\('([a-z0-9.-]+)',", block)
+        self.assertGreater(len(hosts), 1, f"NETWORK_HOSTS not parsed:\n{block[:200]}")
+        run = self.run_root()
+        self.assertEqual(run.r.returncode, 0, run.text())
+        for host in hosts:
+            for_host = [a for a in run.allows() if f' {host} ' in a]
+            self.assertTrue([a for a in for_host if ' allow go /' in a and '--via' not in a],
+                            f"{host}: no rule for the Python as the process:\n" + "\n".join(for_host))
+            self.assertTrue([a for a in for_host if ' allow go any ' in a and '--via' in a],
+                            f"{host}: no VIA rule -- the form the alerts showed is the one "
+                            f"that was missing:\n" + "\n".join(for_host))
+
+    def test_it_writes_the_rules_for_RUN_AS_USER_then_hands_over_to_that_user(self):
+        """THE root run.  Before, root was refused outright (err 00001) and
+        --install only printed commands for a root shell.  Adversarial on the
+        owner: RUN_AS_USER is `nobody`, neither root nor the user running this
+        suite -- the owner the old code named (the euid's) fails it."""
+        run = self.run_root()
+        self.assertEqual(run.r.returncode, 0, run.text())
+        allows = run.allows()
+        self.assertGreaterEqual(len(allows), 12, run.text() + "\n" + "\n".join(run.calls))
+        for a in allows:
+            self.assertTrue(a.endswith(' --owner nobody'), f"not RUN_AS_USER's rule: {a}")
+        self.assertEqual(run.su[:3], ['-l', 'nobody', '-c'], f"su argv: {run.su}")
+        line = run.su[3] if len(run.su) > 3 else ''
+        self.assertIn(self.copy, line, "the drop does not run the launcher")
+        self.assertIn('--install', line)
+        self.assertIn(f"--config {run.conf}", line, "the config root read does not travel")
+        self.assertIn('MY_PLEX_INSTALL_FROM_ROOT=1', line, "the user's run cannot tell root's half is done")
+        self.assertIn('dropping to nobody', run.r.stdout)
+        self.assertEqual(os.listdir(run.home), [], "root wrote into HOME")
+
+    def test_the_rules_name_the_base_python3_and_root_builds_no_venv(self):
+        """The rule names the python3 the launcher runs under, which exists
+        before any venv (#10: a rule for a path that does not exist is
+        refused).  A root run that built a venv and re-executed into it would
+        name HOME's .python.venv -- and leave it behind."""
+        run = self.run_root()
+        self.assertEqual(run.r.returncode, 0, run.text())
+        process = [a.split()[3] for a in run.allows() if ' allow go any ' not in a]
+        self.assertTrue(process, run.text())
+        for p in process:
+            if p != 'ssh':
+                self.assertEqual(p, run.python3, f"not the base python3: {p}")
+        self.assertNotIn('.python.venv', "\n".join(run.calls))
+        self.assertFalse(os.path.exists(os.path.join(run.home, '.python.venv')),
+                         "root built a venv")
+
+    def test_a_deny_is_removed_only_when_one_names_my_plex(self):
+        """No deny is the normal case, and `remove go` with no ID is an
+        error (err 00036): it must not be called then.  A deny naming
+        my-plex's Python, or `any`, goes; curl's deny for the same host
+        stays -- it is somebody else's decision."""
+        run = self.run_root()
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertFalse([c for c in run.calls if c.startswith('cli remove')],
+                         f"remove called with nothing to remove: {run.calls}")
+        self.assertIn('none found', run.r.stdout)
+
+        py = ('/opt/homebrew/Cellar/python@3.15/*/Frameworks/Python.framework/'
+              'Versions/3.15/Resources/Python.app/Contents/MacOS/Python')
+
+        def rule(rid: str, process: str, action: str) -> str:
+            return f"{rid}\t{process}  {action}  api.themoviedb.org  tcp/443  me\n"
+        run = self.run_root(listing=rule('aaa111', py, 'deny') + rule('bbb222', 'any', 'deny')
+                            + rule('ccc333', '/usr/bin/curl', 'deny') + rule('ddd444', py, 'allow'))
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
+                         ['removed aaa111', 'removed bbb222'], "\n".join(run.calls))
+        self.assertLess(run.calls.index('cli remove go'),
+                        run.calls.index(run.allows()[0]), "the allow came before the deny went")
+
+    def test_a_listing_that_fails_is_an_error_not_nothing_to_clear(self):
+        run = self.run_root(listing=None)
+        self.assertNotEqual(run.r.returncode, 0, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]:.* list ')
+        self.assertEqual(run.allows(), [], "it wrote rules past a deny it could not read")
+        self.assertEqual(run.su, [], "it handed over after a failure")
+
+    def test_a_failed_rule_stops_before_the_drop(self):
+        """A rule the firewall tool refuses is an ERROR, and nothing is
+        handed over: the run as the user must not start on rules that are
+        not there."""
+        run = self.run_root(touch=('fail-allow',))
+        self.assertEqual(run.r.returncode, 1, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]:.* allow go ')
+        self.assertEqual(run.su, [], "it handed over after a failure")
+
+    def test_without_RUN_AS_USER_it_takes_the_sudo_user_or_stops(self):
+        """Empty RUN_AS_USER: the user who ran sudo.  No sudo either -- a
+        rollout daemon -- is an ERROR naming the key, before any rule."""
+        run = self.run_root(conf_lines='')
+        self.assertEqual(run.r.returncode, 1, run.text())
+        self.assertIn('RUN_AS_USER', run.r.stderr)
+        self.assertEqual(run.calls, [], "it called the firewall tool without knowing whose rule")
+        run = self.run_root(conf_lines='', env={'SUDO_USER': 'nobody'})
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('SUDO_USER', run.r.stdout)
+        self.assertTrue(all(a.endswith(' --owner nobody') for a in run.allows()), run.calls)
+
+    def test_RUN_AS_USER_must_be_a_user_here_and_not_root(self):
+        for name in ('root', 'no-such-user-of-this-machine'):
+            run = self.run_root(conf_lines=f"RUN_AS_USER = {name!r}\n")
+            self.assertEqual(run.r.returncode, 1, f"{name}: " + run.text())
+            self.assertIn(name, run.r.stderr)
+            self.assertEqual(run.calls, [], f"{name}: the firewall tool was called")
+            self.assertEqual(run.su, [], f"{name}: it handed over")
+
+    def test_a_python3_older_than_3_10_is_named_and_nothing_runs(self):
+        """#35: as root the version is checked first, naming the python3
+        found.  The copy raises the bar out of reach, so the message and the
+        order are tested with the python3 at hand."""
+        copy = _tool_copy(os.path.join(self.tmp, 'tool-old'),
+                          {'boot': [('os.geteuid() == 0', 'True'),
+                                    ('MIN_PYTHON = (3, 10)', 'MIN_PYTHON = (99, 0)')]})
+        run = self.run_root(copy=copy)
+        self.assertEqual(run.r.returncode, 1, run.text())
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]: --install needs python3 >= 99\.0')
+        self.assertIn(run.python3, run.r.stderr, "the error does not name the python3 it found")
+        self.assertEqual(run.calls, [])
+
+    def test_as_root_install_takes_no_other_command(self):
+        """Root hands over `--install` alone, so another command beside it
+        would silently not run: refused, naming it."""
+        run = self.run_root(argv=('--install', '--list-libraries'))
+        self.assertEqual(run.r.returncode, 1, run.text())
+        self.assertIn('--list-libraries', run.r.stderr)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(run.su, [])
+
+    def test_as_root_without_the_firewall_tool_no_rule_but_the_drop(self):
+        """#32: without my-little-snitch there is nothing for root to write;
+        the run as the user still writes the ssh Host entry."""
+        run = self.run_root(firewall=False)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('no rule written', run.r.stdout)
+        self.assertEqual(run.su[:2], ['-l', 'nobody'], run.text())
 
 
 class TestNeverRunsAsRoot(unittest.TestCase):
@@ -14387,9 +14577,9 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         created /var/root/.python.venv is too late to be one."""
         with open(BOOT_SOURCE) as f:
             src = f.read()
-        refusal = src.find('if as_root() and not print_only_run(argv):')
+        refusal = src.find('if as_root() and not print_only_run(argv)')
         self.assertGreater(refusal, -1, "the root refusal is gone")
-        bootstrap = src.find('                _bootstrap_venv()\n')
+        bootstrap = src.find('                _bootstrap_venv(')
         self.assertGreater(bootstrap, -1, "the venv bootstrap call is gone")
         self.assertLess(refusal, bootstrap,
                         "the root refusal must come BEFORE the venv bootstrap")
@@ -14876,6 +15066,58 @@ class TestConfigLayers(unittest.TestCase):
             self.mp.load_config_file(config_file)
         return err.getvalue()
 
+    def test_RUN_AS_USER_and_PLEX_API_REMOTE_in_your_own_config_are_refused(self):
+        """#25, #33: root reads them from the site config alone, so in a
+        user's own file they would mean something else in the run after the
+        drop -- and win there."""
+        for key, value in (('RUN_AS_USER', 'me'), ('PLEX_API_REMOTE', 'plex.example.net')):
+            self.site('')
+            user = self.user(f"{key} = {value!r}\n")
+            out = self.refused()
+            self.assertIn(key, out)
+            self.assertIn(user, out)
+            self.assertIn('the site config', out)
+
+    def test_as_root_your_own_config_is_not_read(self):
+        """Root reads the site config alone: it cannot know whose home to
+        look in before RUN_AS_USER, and a config is run by exec() -- a file
+        a user can write would run their code as root."""
+        self.site("PLEX_DB_REMOTE = 'me@192.0.2.10'\n")
+        self.user("DEFAULT_SCOPE = 'user-scope'\n")
+        conf, _ = self.load()
+        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'user-scope', "control: a user reads it")
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        try:
+            conf, _ = self.load()
+        finally:
+            self.mp._AS_ROOT = saved
+        self.assertEqual(conf.get('PLEX_DB_REMOTE'), 'me@192.0.2.10')
+        self.assertNotIn('DEFAULT_SCOPE', conf, "as root, the user's own config was read")
+
+    def test_as_root_a_named_config_must_be_roots_and_writable_by_root_alone(self):
+        """#26: as root, a file named by --config / $MY_PLEX_CONFIG that root
+        does not own, or that group or others can write, is refused.  The
+        file here is this suite's: owned by the euid it runs as -- the control
+        -- and not root's once the euid reads 0."""
+        from unittest import mock
+        named = self.write('named.conf', "RUN_AS_USER = 'me'\n")
+        os.chmod(named, 0o644)
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        try:
+            conf, _ = self.load(named)
+            self.assertEqual(conf.get('RUN_AS_USER'), 'me', "control: its own file is read")
+            with mock.patch('os.geteuid', return_value=0):
+                out = self.refused(named)
+            self.assertIn(named, out)
+            self.assertIn('root does not own', out)
+            os.chmod(named, 0o664)
+            out = self.refused(named)
+            self.assertIn('0664', out)
+        finally:
+            self.mp._AS_ROOT = saved
+
     def test_a_key_only_in_the_user_file_survives_the_site_file(self):
         """First-wins keeps only the site file's keys -- the bug layering fixes."""
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
@@ -14988,7 +15230,7 @@ class TestConfigLayers(unittest.TestCase):
     def test_a_named_file_that_is_absent_is_refused(self):
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
         out = self.refused(os.path.join(self.d, 'absent.conf'))
-        self.assertIn('ERROR 00020', out)
+        self.assertIn('ERROR 00024', out)
         self.assertIn('absent.conf', out)
 
     def test_two_different_user_files_are_an_error(self):
@@ -15837,7 +16079,7 @@ class TestInstallSshEntry(unittest.TestCase):
         self.assertIn('192.0.2.42', r.stdout)
 
 
-class TestInstallPlexRule(unittest.TestCase):
+class TestInstallPlexRule(_RootInstallCase):
     """--install must write a rule for the PLEX SERVER too.
 
     It did not, and the user hit the consequence: a Little Snitch alert for
@@ -15852,36 +16094,29 @@ class TestInstallPlexRule(unittest.TestCase):
     my-plex just stops talking with no error of its own.
     """
 
-    def _conf(self, **keys):
-        """A config with a firewall stub, a cache of its own, and whatever
-        Plex URL the test wants. The cache paths matter: without them
-        --install waits on the REAL cache lock, which another process can
-        hold for minutes."""
-        d = tempfile.mkdtemp(prefix='my-plex-plexrule-')
-        stub = os.path.join(d, 'my-little-snitch')
-        with open(stub, 'w') as f:
-            f.write('#!/bin/dash\nexit 0\n')
-        os.chmod(stub, 0o755)
-        c = os.path.join(d, 'my-plex.conf')
-        with open(c, 'w') as f:
-            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n")
-            f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n")
-            f.write(f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
-            f.write(_install_lines(d))
-            for k, v in keys.items():
-                f.write(f"{k} = {v!r}\n")
-        return d, c
-
     def _install(self, **keys):
-        d, c = self._conf(**keys)
-        try:
-            r = subprocess.run([MAIN_SCRIPT, '--config', c, '--install'],
-                               capture_output=True, text=True, timeout=180,
-                               env=_fake_ssh_env())
-            self.assertEqual(r.returncode, 0, r.stderr[-500:])
-            return [ln for ln in r.stdout.splitlines() if ' allow go ' in ln]
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        """The `allow go` calls a root --install makes with KEYS in its config."""
+        run = self.run_root("RUN_AS_USER = 'nobody'\n"
+                            + "".join(f"{k} = {v!r}\n" for k, v in keys.items()))
+        self.assertEqual(run.r.returncode, 0, run.text())
+        return run.allows()
+
+    def test_PLEX_API_REMOTE_names_the_server_without_its_token(self):
+        """#29: root reads the site config alone, and the token -- in
+        PLEX_XML_URL -- belongs in the user's; so the API rule takes the
+        server from PLEX_API_REMOTE, 'host[:port]', 32400 by default.  It
+        wins over PLEX_URL: another server must not get the rule."""
+        lines = self._install(PLEX_API_REMOTE='plex.example.net')
+        own = [ln for ln in lines if ' plex.example.net ' in ln]
+        self.assertEqual(len(own), 2, "\n".join(lines))
+        self.assertIn('--host', own[0], own[0])
+        self.assertIn('--port 32400', own[0], own[0])
+        lines = self._install(PLEX_API_REMOTE='192-168-1-5.abc.plex.direct:32401',
+                              PLEX_URL='https://other.example.net:32400')
+        own = [ln for ln in lines if 'plex.direct' in ln]
+        self.assertEqual(len(own), 2, "\n".join(lines))
+        self.assertIn('--port 32401', own[0], own[0])
+        self.assertFalse([ln for ln in lines if 'other.example.net' in ln], "\n".join(lines))
 
     def test_a_plex_direct_server_gets_a_domain_rule_with_its_port(self):
         """THE missing rule. A domain, not the host: the per-server label
@@ -16198,8 +16433,8 @@ _UNITTEST_SCOPES = {
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
     'quiet':      [TestQuiet],
-    'venv':       [TestVenvDetection],
-    'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry],
+    'venv':       [TestVenvDetection, TestVenvRebuildOnPythonMinor],
+    'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry, TestInstallAsRoot],
     'conf-template': [TestConfigTemplateCoversEveryKey, TestCreateConfig],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
     'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,

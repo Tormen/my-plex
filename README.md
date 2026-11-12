@@ -157,16 +157,27 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   takes its host and port from `PLEX_DB_REMOTE` -- not from the ssh alias,
   which a firewall cannot resolve and which does not exist yet on a fresh
   machine.
-- The **Plex server's** rule comes from your config (`PLEX_URL`, or the host
-  in `PLEX_XML_URL`) and carries its port, because 32400 is not the default
-  a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
+- The **Plex server's** rule comes from the config -- `PLEX_API_REMOTE`,
+  `host[:port]` in the site config, the address without the token; else
+  `PLEX_URL` or the host in `PLEX_XML_URL` -- and carries its port, because
+  32400 is not the default a rule assumes. For a `*.plex.direct` server the rule names the **domain**:
   that host name carries the server's own LAN IP, so a rule naming the host
   would stop matching — back into an alert — the next time that IP changes.
   A bare IP becomes an address rule, any other name a host rule. With no Plex
   server configured, no rule is invented for one.
-- **`--install`** prints the root commands that write them: `littlesnitch`
-  refuses anyone but root, even to list, and my-plex does not run as root.
-  Run them in a root shell, or let a rollout step do it.
+- **`--install`, as root,** writes them through `my-little-snitch`:
+  `littlesnitch` refuses anyone but root, even to list. So when
+  `LITTLE_SNITCH_CLI` exists, `--install` needs root and refuses any other
+  user; every other command refuses root. As root it reads the site config
+  alone -- a file named by `$MY_PLEX_CONFIG` or `--config` only when root
+  owns it and neither group nor others can write it -- and, in this order:
+  checks that `python3` is 3.10 or newer; removes a stored deny for a remote
+  that names my-plex's Python, `ssh` or `any`, because a deny beats an
+  allow (one naming another program stays); writes the rules, owned by
+  `RUN_AS_USER` from the site config, else the user who ran sudo, else an
+  ERROR; and hands over with `su -l <that user>`, so the rest of `--install`
+  runs as that user, in a fresh login. A failure is an ERROR, and nothing is
+  handed over. It builds no venv and writes nothing into root's home.
 
 ### The ssh Host entry (`--install`)
 - Every DB query, file move and ffprobe runs `ssh <PLEX_DB_REMOTE_HOST>`.
@@ -192,7 +203,10 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - The rules name the Python that runs my-plex, because the fetches use
   `urllib.request` and the interpreter is what opens the socket; one
   consequence is that they also cover other scripts run by that same Python,
-  and there is no narrower form for a Python script.
+  and there is no narrower form for a Python script. It is the base
+  `python3` the launcher runs under, which exists before any venv does. A
+  Python minor upgrade needs `--install` again: the rules name that minor,
+  and `--install` rebuilds a venv built from another minor with it.
 - **Each remote gets two rules.** Little Snitch attributes a connection to
   the app *above* Python and calls Python the **via** program, so a rule
   naming Python as the process does not match a run started from a shell, a
@@ -202,8 +216,9 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   `any` process connecting *via* that Python — `any` rather than a list of
   apps, because my-plex is run from all of them and enumerating them never
   ends. `my-plex --help install` prints both commands in full.
-- Without the firewall tool it prints no commands and just names the hosts,
-  so it is safe to run anywhere. See `my-plex --help install`.
+- Without the firewall tool there is nothing for root to write: `--install`
+  runs as you, writes no rule and names the hosts, so it is safe to run
+  anywhere. See `my-plex --help install`.
 
 ### Output control
 - **`-V` / `-VV`** — more detail for the reader; **`-D` / `-DD`** — diagnostics
@@ -243,8 +258,9 @@ my-plex --create-config ~/.my-plex.conf      # Write default config to file: mod
 # See the files read and each key they set:  my-plex --config
 ```
 
-my-plex refuses to run as root for every command that *does* anything. As
-root its venv, cache, config and zsh completion would all land in `/var/root`
+my-plex refuses to run as root for every command that *does* anything but
+`--install`, which writes the firewall rules as root and hands the rest
+over to `RUN_AS_USER` (see "Firewall rules" above). As root its venv, cache, config and zsh completion would all land in `/var/root`
 instead of your home, and nothing it does needs privilege. The runs that only
 PRINT work as root, because they touch none of that: a bare `my-plex`,
 `--help [WHAT]` (also `--help=WHAT`, `-H`, `-HWHAT`) and `--version`. A help
@@ -369,9 +385,10 @@ two, the later winning for a key both set:
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The
 Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
-`TMDB_API_KEY`) belong in your config only, `PLEX_DB_REMOTE`,
-`PLEX_DB_REMOTE_IDENTITY` and `LITTLE_SNITCH_CLI` in the site config only:
-my-plex refuses them in the other. A config file that cannot be read or fails to run stops the run;
+`TMDB_API_KEY`) belong in your config only, and the keys root reads for
+`--install` -- `PLEX_DB_REMOTE`, `PLEX_DB_REMOTE_IDENTITY`,
+`LITTLE_SNITCH_CLI`, `RUN_AS_USER` and `PLEX_API_REMOTE` -- in the site
+config only: my-plex refuses them in the other. A config file that cannot be read or fails to run stops the run;
 `--help` and a bare `my-plex` only warn.
 
 `$MY_PLEX_CONFIG` (a config for ONE run: a test, a CI job, a one-off), else
@@ -412,6 +429,10 @@ PLEX_DB_REMOTE = 'user@192.0.2.10'
 PLEX_DB_REMOTE_IDENTITY = '~/.ssh/keys/plex-server,id_ed25519'
 # The ssh alias --install writes from it (the default)
 PLEX_DB_REMOTE_HOST = 'my-plex'
+# Site config, for --install as root: the user it hands over to (else the
+# user who ran sudo), and the Plex server's API address, without the token
+RUN_AS_USER = 'plexuser'
+PLEX_API_REMOTE = '192.0.2.10:32400'
 
 # Required: Path to Plex database on the server
 PLEX_DB_PATH = '/path/to/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
