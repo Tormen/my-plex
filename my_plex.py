@@ -3000,6 +3000,32 @@ def load_config_file(config_file=None):
     CONFIG_RECORD['set_by'] = set_by
     return {k: ns[k] for k in origin}
 
+def apply_config(loaded_config) -> None:
+    """Set this module's globals from LOADED_CONFIG (load_config_file()'s
+    return), each key it does not set back to its default.  The one place
+    a loaded config becomes the values the tool runs with: main() calls it,
+    and so does --install's root half, which never runs main()."""
+    for key in CONFIG_DEFAULTS:
+        try:
+            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+
+            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+                if value and not str(value).startswith('< PLEASE CONFIGURE'):
+                    globals()[key] = value
+                    if DEEPDBG and key in loaded_config:
+                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
+                continue
+
+            # For other config values, apply normally
+            globals()[key] = value
+            if DEEPDBG and key in loaded_config:
+                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
+        except Exception as e:
+            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
 def generate_default_config():
     """Generate a default config file content with all available options.
 
@@ -44152,26 +44178,7 @@ def main():
         print(f"{DBGPFX}Loaded {len(loaded_config)} config values from file", file=sys.stderr)
 
     # Apply config values (config file overrides defaults, command-line will override config file)
-    for key in CONFIG_DEFAULTS:
-        try:
-            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
-
-            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
-            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
-                if value and not str(value).startswith('< PLEASE CONFIGURE'):
-                    globals()[key] = value
-                    if DEEPDBG and key in loaded_config:
-                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-                continue
-
-            # For other config values, apply normally
-            globals()[key] = value
-            if DEEPDBG and key in loaded_config:
-                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-        except Exception as e:
-            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+    apply_config(loaded_config)
 
     # Validate DISK_PLEX_MAP.  Empty config validates trivially.
     _dpm_errors = validate_disk_plex_map(globals().get('DISK_PLEX_MAP', {}))
