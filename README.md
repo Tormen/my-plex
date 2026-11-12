@@ -421,7 +421,8 @@ already there`, the ssh half prints the values it compared with `[nothing
 written]`, and the summary ends `ssh Host entry unchanged`.
 
 ### Requirements
-- Python 3.10+ (uses `match/case`)
+- Python 3.10+ (uses `match/case`): under an older `python3` every command,
+  `--help` and `--version` included, ends in one ERROR line naming it
 - SSH access to the Plex server (for database and file operations)
 - SQLite3 on the Plex server
 

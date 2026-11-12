@@ -12676,6 +12676,27 @@ class TestLauncherAndModules(unittest.TestCase):
         self.assertRegex(out, r'ERROR \d{5} \[1\]: ', f"not the house error:\n{out}")
         self.assertIn('launcher', out)
 
+    def test_a_python3_too_old_for_the_tool_is_named_on_a_print_only_run(self):
+        """A run that only prints -- bare, --help, --version -- imports the
+        tool in the python3 that started the launcher, with no venv between:
+        under one older than MIN_PYTHON (Apple's 3.9 first in a root shell's
+        or a job's PATH) the tool's first `match` stopped the import with a
+        SyntaxError traceback.  Every route into the tool asks the version
+        first.  The copy raises the bar out of reach, so the python3 at hand
+        is "too old"."""
+        launcher = _tool_copy(os.path.join(self.d, 'tool'),
+                              {'boot': [('MIN_PYTHON = (3, 10)', 'MIN_PYTHON = (99, 0)')]})
+        for argv in ([], ['--help'], ['--version']):
+            r = subprocess.run([sys.executable, launcher, *argv], capture_output=True, text=True,
+                               timeout=60, env=self.env)
+            what = 'my-plex ' + ' '.join(argv)
+            out = self._one_line_error(r, what)
+            self.assertEqual(r.returncode, 1, f"{what}: rc {r.returncode}\n{out}")
+            self.assertRegex(out, r'ERROR \d{5} \[1\]: my-plex needs python3 >= 99\.0',
+                             f"{what}: not the version error:\n{out}")
+            self.assertIn(sys.executable, out, f"{what}: the python3 it found is not named")
+            self.assertIn(f"`{what.strip()}`", out, f"{what}: the command run is not named")
+
 
 class TestDeployedCopyWithItsSuite(unittest.TestCase):
     """A copy made by my-rollout is bin/my-plex plus lib/my-plex/ holding the
@@ -14598,7 +14619,8 @@ class TestInstallAsRoot(_RootInstallCase):
                                     ('MIN_PYTHON = (3, 10)', 'MIN_PYTHON = (99, 0)')]})
         run = self.run_root(copy=copy)
         self.assertEqual(run.r.returncode, 1, run.text())
-        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]: --install needs python3 >= 99\.0')
+        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]: my-plex needs python3 >= 99\.0')
+        self.assertRegex(run.r.stderr, r'running `my-plex [^`]*--install`', "the command run is not named")
         self.assertIn(run.python3, run.r.stderr, "the error does not name the python3 it found")
         self.assertEqual(run.calls, [])
 

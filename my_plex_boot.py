@@ -130,13 +130,27 @@ def main(launcher: str) -> None:
 
 
 def _import_tool():
-    """my_plex, the tool -- an ERROR naming the directory it is missing from."""
+    """my_plex, the tool -- the one place every run imports it, so the one
+    place that asks for MIN_PYTHON: an older python3 would stop on the tool's
+    first `match` with a SyntaxError traceback instead of a sentence.  A run
+    that only prints imports it in the python3 that started the launcher,
+    with no venv between.  An ERROR, too, naming the directory my_plex.py is
+    missing from."""
+    if sys.version_info < MIN_PYTHON:
+        import shlex
+        v = sys.version_info
+        err("00002", f"my-plex needs python3 >= {MIN_PYTHON[0]}.{MIN_PYTHON[1]}, and the python3 "
+                     f"running `{shlex.join(['my-plex'] + sys.argv[1:])}` is "
+                     f"{v.major}.{v.minor}.{v.micro}: {sys.executable}\n"
+                     f"Possible reasons:\n"
+                     f"  - this PATH (a root shell's, a job's) finds an older python3 before\n"
+                     f"    the one my-plex's users run: put the newer one first, or install it")
     try:
         import my_plex
     except ModuleNotFoundError as e:
         if e.name != "my_plex":
             raise
-        err("00002", f"my_plex.py is not beside my_plex_boot.py in "
+        err("00003", f"my_plex.py is not beside my_plex_boot.py in "
                      f"{os.path.dirname(os.path.realpath(__file__))} -- a copy of part of my-plex")
     return my_plex
 
@@ -318,7 +332,7 @@ def _exec_in_venv():
     pyvenv.cfg), and an error naming it beats spawning for ever.
     """
     if os.environ.get(_VENV_REEXEC_MARK):
-        err("00003", f"re-executed into '{VENV_DIR}' and still landed outside it.\n"
+        err("00004", f"re-executed into '{VENV_DIR}' and still landed outside it.\n"
                  f"  Its pyvenv.cfg is missing or unreadable -- remove the\n"
                  f"  directory and run my-plex again to have it rebuilt.")
     os.environ[_VENV_REEXEC_MARK] = "1"
@@ -375,12 +389,12 @@ def _bootstrap_venv(rebuilt_from: "str | None" = None):
     rc = subprocess.call([sys.executable, "-m", "venv"] + (["--clear"] if rebuilt_from else [])
                          + [VENV_DIR])
     if rc != 0:
-        err("00004", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
+        err("00005", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
 
     pip = os.path.join(VENV_DIR, "bin", "pip")
     rc = subprocess.call([pip, "install"] + VENV_DEPS)
     if rc != 0:
-        err("00005", f"failed to install the dependencies {', '.join(VENV_DEPS)} "
+        err("00006", f"failed to install the dependencies {', '.join(VENV_DEPS)} "
                  f"into {VENV_DIR} [rc {rc}]")
 
     print(f"\n >>> DONE creating python virtualenv '{VENV_DIR}'.", file=sys.stderr)
@@ -393,9 +407,8 @@ def _bootstrap_venv(rebuilt_from: "str | None" = None):
 # ---------------------------------------------------------------------------
 # --install as ROOT: the firewall half, then the drop to the user.
 # ---------------------------------------------------------------------------
-# The oldest python3 the tool runs on (it uses match/case).  Asked here, as
-# root, before the tool is imported: an older python3 would stop on the
-# tool's first `match` with a SyntaxError traceback instead of a sentence.
+# The oldest python3 the tool runs on (it uses match/case) -- asked by
+# _import_tool(), before every import of the tool.
 MIN_PYTHON = (3, 10)
 
 # Set in the command root hands over with, so the run as the user knows the
@@ -435,7 +448,7 @@ def _root_install_config(argv: "list[str]") -> "str | None":
             config = rest[i + 1]
             i += 1
         else:
-            err("00006", f"as root, --install takes only --config FILE (and -Q) beside it, "
+            err("00007", f"as root, --install takes only --config FILE (and -Q) beside it, "
                          f"and got {a!r}\n"
                          f"  root writes the firewall rules and hands over `my-plex --install`,\n"
                          f"  nothing more -- anything else would silently not run.\n"
@@ -448,23 +461,17 @@ def _root_install_config(argv: "list[str]") -> "str | None":
 def _root_install(launcher: str, argv: "list[str]") -> "NoReturn":
     """--install as root: the firewall half, then the drop.
 
-    The python3 check comes first (#35): every step after it imports the
-    tool.  The tool owns what --install needs to know -- the config, the
-    remotes, the user -- and writes the rules (install_firewall()); THIS
-    module owns who runs next and in what interpreter, so the drop is here.
+    The python3 check comes first (#35): importing the tool asks it, and
+    every step after it needs the tool.  The tool owns what --install needs
+    to know -- the config, the remotes, the user -- and writes the rules
+    (install_firewall()); THIS module owns who runs next and in what
+    interpreter, so the drop is here.
     No venv is built and none is entered: root runs nothing but the stdlib,
     and the rules name the python3 that runs this, which exists before any
     venv does.
     """
-    if sys.version_info < MIN_PYTHON:
-        v = sys.version_info
-        err("00007", f"--install needs python3 >= {MIN_PYTHON[0]}.{MIN_PYTHON[1]}, and the python3 "
-                     f"found here is {v.major}.{v.minor}.{v.micro}: {sys.executable}\n"
-                     f"Possible reasons:\n"
-                     f"  - root's PATH finds an older python3 before the one my-plex's users run:\n"
-                     f"    put the newer one first in root's PATH, or install it")
-    config = _root_install_config(argv)
     tool = _import_tool()
+    config = _root_install_config(argv)
     try:
         user, named = tool.install_firewall(config)
     except Exception as unexpected:
