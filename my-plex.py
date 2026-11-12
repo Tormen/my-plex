@@ -995,7 +995,7 @@ else:
 #      read alone.  config_layers() owns which files; --help config prints it.
 #      - Values in config files override CONFIG_DEFAULTS
 #      - Use --config-file | -C to specify a custom config file path
-#      - Use --create with --config-file to generate a config file with default values
+#      - Use --create-config FILE to write a config file with default values
 #
 #   3. COMMAND-LINE (highest priority)
 #      - Command-line arguments override both CONFIG_FILE and CONFIG_DEFAULTS
@@ -2795,7 +2795,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # Applies to: --list, --filter, --duplicates, --broken, --reencode, etc.
 # Does NOT apply to: --update-cache, --problems, --info, --help, --run-tests
 #
-DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
+# Default:
+# DEFAULT_SCOPE = {CONFIG_DEFAULTS['DEFAULT_SCOPE']!r}
 
 ###############################################################################
 # CLI Free-Text Normalization (CLI_TEXT_NORMALIZE_REGEX)
@@ -3959,7 +3960,16 @@ _RENAMED_FLAGS = {
     # retired in v3, not renamed: the backfill it did runs at the tail of
     # every --update-cache now, which is what to run instead
     '--original-languages': '--update-cache',
+    # `--config-file FILE --create`: one file, one flag that names the action
+    '--create': '--create-config FILE',
 }
+
+def _flag_hint(arg):
+    """What to say after "Invalid flag ARG": the name that replaced it, or
+    where to look."""
+    if arg in _RENAMED_FLAGS:
+        return f"\n  You mean '{_RENAMED_FLAGS[arg]}'."
+    return " Use --help to see available options."
 
 def _little_snitch_owner() -> str:
     """Whose rule: this user, whose Python the rule names.
@@ -33321,8 +33331,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --config-file FILE         # Same as --config FILE")
             print("       my-plex -C FILE                    # Same (short form)")
             print("       my-plex --create-config            # Print default config to stdout")
-            print("       my-plex --create-config FILE       # Write default config to FILE (refuses overwrite)")
-            print("       my-plex --config-file FILE --create  # Legacy: same as --create-config FILE")
+            print("       my-plex --create-config FILE       # Write default config to FILE: mode 0600, never over")
+            print("                                          #   an existing file or a link")
             print()
             print("Config file: Python syntax, loaded via exec().")
             print()
@@ -33396,7 +33406,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("  my-plex --config                       # The files read, then each key they set")
             print("  my-plex -C ~/alt-config.conf           # Use alternate config")
             print("  my-plex --create-config                # Print default config to stdout")
-            print("  my-plex --create-config ~/.my-plex.conf  # Write default config to file")
+            print("  my-plex --create-config ~/.my-plex.conf  # Write default config to file (mode 0600)")
             print("  my-plex --create-config > my.conf      # Pipe default config into a file")
             print()
             print("=" * 76)
@@ -43995,8 +44005,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     if cmd_args is not None and arg in unparsed:
                         # The flag wasn't recognized - it's an invalid flag
                         err("00157", f"Invalid flag '{arg}'. Not a recognized global command flag."
-                                     + (f"\n  You mean '{_RENAMED_FLAGS[arg]}'." if arg in _RENAMED_FLAGS
-                                        else " Use --help to see available options."))
+                                     + _flag_hint(arg))
                     if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
                         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
                         # Update remaining_args to only contain unparsed args
@@ -44675,13 +44684,17 @@ def main():
     # Early argument parsing for --config / --config-file / --create-config options
     _CFG_PRINT_SENTINEL = '<__PRINT_CURRENT_CONFIG__>'
     _CREATE_STDOUT_SENTINEL = '<__CREATE_CONFIG_STDOUT__>'
+    # `--create` is gone, and would otherwise be read below as an abbreviation
+    # of --create-config -- printing the template instead of naming the flag.
+    _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
+    if '--create' in _before_dashdash:
+        err("00164", "Invalid flag '--create'." + _flag_hint('--create'))
     config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config). Use with --create to generate a new config file with default values.")
+    config_parser.add_argument('-C', '--config-file', metavar="FILE", help=f"Config file path, read alone (default: ${CONFIG_ENV}, else the site config then yours -- --help config).")
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print default config to stdout. With FILE: write default config to FILE (refuses to overwrite).")
-    config_parser.add_argument('--create', action='store_true', help=argparse.SUPPRESS)  # Hidden legacy: use with --config-file
+                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link.")
     config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
     config_args, _ = config_parser.parse_known_args()
     if getattr(config_args, 'print_problem_categories_md', False):
@@ -44709,38 +44722,25 @@ def main():
             sys.stdout.write(config_content)
             sys.exit(0)
         target = os.path.expanduser(config_args.create_config)
-        if os.path.exists(target):
-            print(f"Error: refusing to overwrite existing file: {target}", file=sys.stderr)
-            sys.exit(1)
+        # One step that creates or fails: O_EXCL refuses anything already at
+        # the path, a link included, so nothing is written over or through.
+        # 0600 because the file is where PLEX_TOKEN goes.
         try:
-            with open(target, 'w') as f:
-                f.write(config_content)
-            print(f"Created config file: {target}")
-            print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
-            sys.exit(0)
-        except Exception as e:
-            print(f"Error creating config file '{target}': {e}", file=sys.stderr)
-            sys.exit(1)
-
-    # Handle legacy --create option (requires --config-file)
-    if not _asking_help and config_args.create:
-        if not config_args.config_file:
-            print("Error: --create requires --config-file <path> to be specified (or use --create-config FILE)", file=sys.stderr)
-            sys.exit(1)
-        target = os.path.expanduser(config_args.config_file)
-        if os.path.exists(target):
-            print(f"Error: refusing to overwrite existing file: {target}", file=sys.stderr)
-            sys.exit(1)
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            err("00165", f"refusing to write the config: {target} exists (a file or a link)")
+        except OSError as e:
+            err("00166", f"cannot create the config {target}: {e.strerror}")
         try:
-            config_content = generate_default_config()
-            with open(target, 'w') as f:
+            os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
+            with os.fdopen(fd, 'w') as f:
                 f.write(config_content)
-            print(f"Created config file: {target}")
-            print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
-            sys.exit(0)
-        except Exception as e:
-            print(f"Error creating config file '{target}': {e}", file=sys.stderr)
-            sys.exit(1)
+        except OSError as e:
+            os.unlink(target)  # created by this run a moment ago: no half config left
+            err("00167", f"cannot write the config {target}: {e.strerror}")
+        print(f"Created config file: {target} (mode 0600)")
+        print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
+        sys.exit(0)
 
     # Load configuration file
     loaded_config = load_config_file(config_args.config_file)
@@ -45069,14 +45069,14 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00164", f"{e}\nUse --help to see available options.")
+        err("00168", f"{e}\nUse --help to see available options.")
     # The second root check.  The first one, at the top of the file, judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00165", _root_refusal())
+        err("00169", _root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -45108,11 +45108,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00166", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00170", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00167", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00171", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -45591,7 +45591,7 @@ if __name__ == '__main__':
     except Exception as unexpected:
         # A bug.  One line here, the trace in a file -- it is still what fixes
         # the bug, it is just not the user's screen.  70 is EX_SOFTWARE.
-        err("00168",
+        err("00172",
             f"my-plex stopped on a bug -- this is not something you did wrong.\n"
             f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
             f"  full trace:    {_write_crash_trace()}\n"

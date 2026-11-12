@@ -14169,6 +14169,88 @@ class TestConfigTemplateCoversEveryKey(unittest.TestCase):
                          f"the template assigns keys the tool does not have: {stray}")
 
 
+class TestCreateConfig(unittest.TestCase):
+    """`--create-config FILE` writes the template, 0600, never over anything.
+
+    The template is read as a config: a key it sets is a key the user set
+    without meaning to -- it then shadows the site config for every key it
+    names.  And the file holds PLEX_TOKEN once edited, so it is created
+    private, and in one step that fails on anything already at the path --
+    a file, or a link pointing somewhere else (where a test-then-open would
+    write through it).
+    """
+
+    def _run(self, *argv: str, umask: int = 0o022) -> 'subprocess.CompletedProcess[str]':
+        # umask 022 is what a careless default gives: a file created through
+        # the umask alone comes out 0644, readable by everyone.
+        return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True, text=True,
+                              timeout=120, preexec_fn=lambda: os.umask(umask),
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_the_template_sets_no_key(self):
+        r = self._run('--create-config')
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        ns: dict[str, Any] = {}
+        exec(r.stdout, ns)  # how load_config_file reads a config
+        keys = sorted(k for k in ns if not k.startswith('__'))
+        self.assertEqual(keys, [], f"the template, read as a config, sets {keys}")
+
+    def test_a_new_file_is_private(self):
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            r = self._run('--create-config', target)
+            self.assertEqual(r.returncode, 0, r.stderr[-400:])
+            self.assertEqual(oct(os.stat(target).st_mode & 0o777), oct(0o600))
+            with open(target) as f:
+                self.assertEqual(f.read(), self._run('--create-config').stdout)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_an_existing_file_is_refused_and_kept(self):
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            with open(target, 'wb') as f:
+                f.write(b"PLEX_TOKEN = 'mine'\n")
+            r = self._run('--create-config', target)
+            self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+            self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: .*exists')
+            with open(target, 'rb') as f:
+                self.assertEqual(f.read(), b"PLEX_TOKEN = 'mine'\n")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_link_at_the_path_is_refused_and_not_followed(self):
+        """A dangling link: `os.path.exists` says no, and an open() through it
+        creates the file it points at -- somewhere the user never named."""
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            elsewhere = os.path.join(d, 'elsewhere.conf')
+            os.symlink(elsewhere, target)
+            r = self._run('--create-config', target)
+            self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+            self.assertFalse(os.path.lexists(elsewhere),
+                             "the config was written through the link")
+            self.assertTrue(os.path.islink(target))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_old_create_spelling_names_the_new_one_and_writes_nothing(self):
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            r = self._run('--config-file', target, '--create')
+            self.assertEqual(r.returncode, 1, r.stdout[-400:])
+            self.assertRegex(r.stderr, r"ERROR \d{5} \[1\]: .*'--create'.*"
+                                       r"\n  You mean '--create-config FILE'\.")
+            self.assertEqual(r.stdout, '', "the old spelling printed something")
+            self.assertEqual(os.listdir(d), [], "the old spelling wrote a file")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestConfigLayers(unittest.TestCase):
     """The site config, then the user's, the later winning per key.
 
@@ -15559,7 +15641,7 @@ _UNITTEST_SCOPES = {
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection],
     'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry],
-    'conf-template': [TestConfigTemplateCoversEveryKey],
+    'conf-template': [TestConfigTemplateCoversEveryKey, TestCreateConfig],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
     'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,

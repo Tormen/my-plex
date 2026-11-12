@@ -237,7 +237,7 @@ git clone https://github.com/Tormen/my-plex.git
 ln -s "$(pwd)/my-plex/my-plex.py" /usr/local/bin/my-plex   # or anywhere in your PATH
 
 # Configure
-my-plex --create-config ~/.my-plex.conf      # Write default config to file
+my-plex --create-config ~/.my-plex.conf      # Write default config to file: mode 0600, never over an existing file
 # Or: my-plex --create-config > ~/.my-plex.conf   # Same via stdout
 # Edit ~/.my-plex.conf with your Plex DB path and SSH host
 # See the files read and each key they set:  my-plex --config
