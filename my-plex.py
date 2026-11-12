@@ -146,7 +146,13 @@ _PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
 # and `err` codes run in FILE ORDER, so 00001 has to be the first one here.
 # (Moving this block below the --version answer put 00001 after 00015 and
 # broke that order -- caught by the full suite on ada, 2026-11-03.)
-if os.geteuid() == 0 and not _PRINT_ONLY_RUN:
+#
+# _AS_ROOT is asked ONCE, here.  Past the refusal, root is only ever on a
+# print-only run, and such a run writes nothing into root's home either: the
+# zsh completion and ~/.my-plex, which every run of an ordinary user writes,
+# are skipped on it (their two call sites read this).
+_AS_ROOT = os.geteuid() == 0
+if _AS_ROOT and not _PRINT_ONLY_RUN:
     err("00001",
         "my-plex does not run as root -- run it as the user whose Plex this is.\n"
         f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
@@ -871,7 +877,10 @@ _my-plex "$@"
             f.write(f"\n# my-plex zsh completions\nfpath=({completion_dir} $fpath)\nautoload -Uz compinit && compinit\n")
 
 
-_install_zsh_completions()
+# Every run of an ordinary user installs it.  Root gets here only on a
+# print-only run, whose ~ is /var/root: nothing of this tool belongs there.
+if not _AS_ROOT:
+    _install_zsh_completions()
 
 # ---------------------------------------------------------------------------
 # From here on we are guaranteed to run inside the venv with all deps
@@ -19546,13 +19555,24 @@ def update_series_library_objs(library, library_idx=0, total_libraries=0, start_
 def init(args):
     global CACHE_FILE, LOCK_FILE, DISK_MAP_FILE
 
-    # Ensure ~/.my-plex/ directory exists
+    # Root reaches init() only on a print-only run (the refusal at the top
+    # stops every other one), and that run writes nothing into /var/root.
+    if not _AS_ROOT:
+        _init_my_plex_dir()
+
+    # Resolve relative paths to absolute (relative to home directory)
+    CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+    LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
+    DISK_MAP_FILE = os.path.join(Path.home(), DISK_MAP_FILE)
+
+
+def _init_my_plex_dir():
+    """Create ~/.my-plex/ and move the legacy ~/.plex_media_cache.* into it."""
     plex_dir = os.path.join(Path.home(), '.my-plex')
     if not os.path.isdir(plex_dir):
         os.makedirs(plex_dir, exist_ok=True)
         if VRB: print(f"{VRBPFX}Created directory: {plex_dir}")
 
-    # Migrate legacy cache files from ~/.plex_media_cache.* to ~/.my-plex/
     legacy_cache = os.path.join(Path.home(), '.plex_media_cache.pkl')
     new_cache = os.path.join(Path.home(), '.my-plex', 'cache.pkl')
     if os.path.isfile(legacy_cache) and not os.path.isfile(new_cache):
@@ -19564,11 +19584,6 @@ def init(args):
     if os.path.isfile(legacy_lock) and not os.path.isfile(new_lock):
         import shutil
         shutil.move(legacy_lock, new_lock)
-
-    # Resolve relative paths to absolute (relative to home directory)
-    CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
-    LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
-    DISK_MAP_FILE = os.path.join(Path.home(), DISK_MAP_FILE)
 
 
 def init_plex(args=None, all=True, server=False, library=False, media=False):

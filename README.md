@@ -247,7 +247,9 @@ my-plex refuses to run as root for every command that *does* anything. As
 root its venv, cache, config and zsh completion would all land in `/var/root`
 instead of your home, and nothing it does needs privilege. The runs that only
 PRINT work as root, because they touch none of that: a bare `my-plex`,
-`--help` and `--version`. Reading what a tool is, is not using it.
+`--help` and `--version`. As root they write nothing into `/var/root` either
+-- no completion, no `~/.my-plex` -- while every run as a user installs the
+completion. Reading what a tool is, is not using it.
 
 That's it. There is no wrapper script and nothing to install by hand:
 `my-plex.py` is the whole tool, and on its first run it

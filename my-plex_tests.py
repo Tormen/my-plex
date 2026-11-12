@@ -13859,7 +13859,7 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         created /var/root/.python.venv is too late to be one."""
         with open(MAIN_SCRIPT) as f:
             src = f.read()
-        refusal = src.find('if os.geteuid() == 0 and not _PRINT_ONLY_RUN:')
+        refusal = src.find('if _AS_ROOT and not _PRINT_ONLY_RUN:')
         self.assertGreater(refusal, -1, "the root refusal is gone")
         bootstrap = src.find('_bootstrap_venv()\n')
         self.assertGreater(bootstrap, -1, "the venv bootstrap call is gone")
@@ -13929,6 +13929,60 @@ class TestNeverRunsAsRoot(unittest.TestCase):
                               f"{what} as root printed nothing of its own:\n{r.stdout[:200]!r}")
                 self.assertFalse(os.path.exists(os.path.join(home, '.python.venv')),
                                  f"{what} built a venv just to print")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # The euid is forced through os.geteuid itself, in the interpreter that
+    # runs the real file: every root check the script makes sees 0, and the
+    # script is not edited.  The venv's python runs it, and a print-only run
+    # never re-execs, so the patch is still in place when the script asks.
+    _AS_ROOT_RUNNER = ("import os, runpy, sys\n"
+                       "if os.environ.get('MY_PLEX_TEST_EUID') == '0':\n"
+                       "    os.geteuid = lambda: 0\n"
+                       "sys.argv = sys.argv[1:]\n"
+                       "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+
+    def _run_print_only(self, home: str, argv: list[str], as_root: bool) -> 'subprocess.CompletedProcess[str]':
+        env = dict(os.environ, HOME=home, PYTHONDONTWRITEBYTECODE='1')
+        env.pop('MY_PLEX_TEST_EUID', None)
+        if as_root:
+            env['MY_PLEX_TEST_EUID'] = '0'
+        return subprocess.run([sys.executable, '-c', self._AS_ROOT_RUNNER, MAIN_SCRIPT, *argv],
+                              capture_output=True, text=True, timeout=60,
+                              env=env, stdin=subprocess.DEVNULL)
+
+    def test_as_root_a_print_only_run_writes_nothing_into_home(self):
+        """A root shell's `my-plex --help` must leave /var/root as it found
+        it: no ~/.zsh/completions/_my-plex, no patched ~/.zshrc, no
+        ~/.my-plex.  The completion installer ran at import, before any
+        command was looked at, and init() made ~/.my-plex for the help page.
+
+        Positive control first: the very same run as an ordinary user DOES
+        write the completion (every run installs it) -- so an empty root HOME
+        means root skipped it, not that the run never got that far."""
+        d = tempfile.mkdtemp(prefix='my-plex-rootwrites-')
+        try:
+            user_home = os.path.join(d, 'user')
+            os.makedirs(user_home)
+            r = self._run_print_only(user_home, ['--help'], as_root=False)
+            self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertTrue(os.path.isfile(os.path.join(user_home, '.zsh', 'completions', '_my-plex')),
+                            "control: as a user, --help no longer installs the completion")
+            for argv, what in (([], 'the bare run'), (['--help'], '--help')):
+                home = os.path.join(d, 'root' + (argv[0] if argv else 'bare'))
+                os.makedirs(home)
+                zshrc = os.path.join(home, '.zshrc')
+                with open(zshrc, 'w') as f:
+                    f.write('# root zshrc\n')
+                r = self._run_print_only(home, argv, as_root=True)
+                self.assertEqual(r.returncode, 0,
+                                 f"{what} as root: exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertNotIn('00001', r.stderr, f"{what} as root was refused")
+                self.assertIn('usage:', r.stdout, f"{what} as root printed no usage")
+                self.assertEqual(sorted(os.listdir(home)), ['.zshrc'],
+                                 f"{what} as root wrote into HOME")
+                with open(zshrc) as f:
+                    self.assertEqual(f.read(), '# root zshrc\n', f"{what} as root patched ~/.zshrc")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
