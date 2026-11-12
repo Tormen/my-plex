@@ -3898,10 +3898,13 @@ def _ssh_remote():
     """The Plex server's SSH endpoint, as a rule needs it: (remote, kind, port).
 
     my-plex runs ssh for every direct DB read and every file operation on the
-    server, so a firewall sees `<parent> via ssh`.  PLEX_DB_REMOTE_HOST is
-    normally an ssh ALIAS, which no firewall can resolve, so `ssh -G` is
-    asked what it stands for: that reads ~/.ssh/config and connects to
-    nothing.
+    server, so a firewall sees `<parent> via ssh`.  The host and port are
+    PLEX_DB_REMOTE's, which --install requires: PLEX_DB_REMOTE_HOST is an ssh
+    ALIAS, which no firewall can resolve, and which root's ssh would look up
+    in root's own ssh config -- on a fresh machine it is written only after
+    root hands over.  Without PLEX_DB_REMOTE (--help install, say) `ssh -G`
+    is asked what the alias stands for: that reads ~/.ssh/config and
+    connects to nothing.
 
     None when nothing is configured, or when ssh cannot be asked -- my-plex
     is published, and a machine without ssh is a machine with no rule to
@@ -33538,13 +33541,16 @@ def main_print_help(args, remaining_args, main_parser):
             for _prog, _tail, _why in _little_snitch_remotes():
                 print(f"   > {_tail[0]:24s} {_why}")
             print()
-            print('The last two come from the CONFIG, not from a constant in the')
-            print("tool: the Plex server's API from PLEX_API_REMOTE ('host[:port]',")
-            print('32400 when no port is given) -- root reads no other key for it,')
-            print("since a PLEX_URL may be a user's own; without a firewall tool, the")
-            print('run as you names PLEX_URL or the host in PLEX_XML_URL too. The ssh')
-            print('endpoint comes from PLEX_DB_REMOTE. With no Plex server configured')
-            print('it gets no rule, and nothing is invented.')
+            print("The Plex server's two -- its API and its ssh endpoint -- come from")
+            print("the CONFIG, not from a constant in the tool: the API from")
+            print("PLEX_API_REMOTE ('host[:port]', 32400 when no port is given) --")
+            print("root reads no other key for it, since a PLEX_URL may be a user's")
+            print('own; without a firewall tool, the run as you names PLEX_URL or the')
+            print('host in PLEX_XML_URL too. The ssh endpoint comes from')
+            print('PLEX_DB_REMOTE, never from the ssh alias: root would look that up')
+            print("in root's ssh config, and on a fresh machine it is written only")
+            print('after root hands over. With no Plex server configured it gets no')
+            print('rule, and nothing is invented.')
             print()
             print("On a machine with an interactive firewall (Little Snitch), the")
             print("first connection to each is held behind an alert. A scheduled or")
@@ -33596,6 +33602,9 @@ def main_print_help(args, remaining_args, main_parser):
             print('      read when one was named')
             print('A failure in 1-3 is an ERROR, and nothing is handed over. A second')
             print('run writes nothing: its verdict counts every rule "already there".')
+            print('Beside --install, root takes only --config FILE and -Q: it hands')
+            print('over --install alone, so anything else would silently not run, and')
+            print('is an ERROR instead.')
             print()
             print("The PLEX SERVER's rule carries its port: 32400 is not the default")
             print('a rule assumes. For a *.plex.direct server the rule names the')
@@ -33618,7 +33627,10 @@ def main_print_help(args, remaining_args, main_parser):
             print(":port when it is not 22. PLEX_DB_REMOTE_IDENTITY is the key that")
             print("logs in there, when it is not one of ssh's default keys")
             print("(~/.ssh/id_ed25519, id_rsa, ...); `~` is each user's own home, so")
-            print("one value serves every user. Both belong in the site config.")
+            print("one value serves every user. The last two belong in the site")
+            print("config, and my-plex refuses them in yours. Without PLEX_DB_REMOTE,")
+            print("both halves of --install stop with an ERROR naming the config")
+            print("files read, before any rule or ssh file is written.")
             print()
             print("my-plex writes that as a Host block in ~/.ssh/my-plex.conf, a")
             print("file it owns entirely, and adds one Include line at the top of")
@@ -33630,17 +33642,20 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("`ssh -G <alias>` decides what happens (it connects to nothing):")
             print("   no HostName          the file and the Include are written")
+            print("   older values         ~/.ssh/my-plex.conf is rewritten, keeping")
+            print("                        the options carried over into it")
             print("   matches the config   nothing written; the values are printed")
             print("   a block of yours     those lines MOVE into ~/.ssh/my-plex.conf,")
             print("                        keeping every option my-plex does not")
             print("                        generate (IdentityFile, ProxyJump); the")
             print("                        old lines stay there as a dated comment")
             print("   it disagrees         ERROR, nothing moved: the block and the")
-            print("                        config name a different host or key, and")
-            print("                        only you know which is right")
+            print("                        config name another host, user, port or")
+            print("                        key, and only you know which is right")
             print("A block naming other aliases too, or one my-plex cannot find")
             print("(another Include, /etc/ssh/ssh_config, a Match block), is an")
-            print("ERROR too: moving it would change more than my-plex's alias.")
+            print("ERROR too, and nothing is moved or written: my-plex edits its own")
+            print("file, the Include line and that one block of yours, nothing else.")
             print()
             print("It ends with one real login, `ssh <alias> true` in BatchMode, and")
             print('its exit code: resolving proves nothing about a key. A failed')

@@ -16501,6 +16501,79 @@ class TestReadmeIsFound(unittest.TestCase):
                          "found a different README than the checkout's own")
 
 
+class TestReadmeInstallOutput(_RootInstallCase):
+    """The README's "What it prints" blocks are what `--install` prints.
+
+    A README example is not executed, so it rots silently -- and the install
+    section shows two runs line by line: root's firewall half, and the ssh
+    half root hands over to.  Each block is compared, line by line, with a
+    real run configured as the README says (the site config's RUN_AS_USER,
+    PLEX_DB_REMOTE and PLEX_API_REMOTE), through the root harness: a stub
+    firewall tool, a stub su, an ssh whose login is a stub.  What legitimately
+    differs is made equal on both sides and nothing else: every absolute path
+    (the python3, the config, HOME), the config's layer label, and the README's
+    user `plexuser` -- RUN_AS_USER here is `nobody`, the ssh half runs as
+    whoever runs this suite."""
+
+    README_USER = 'plexuser'
+
+    @staticmethod
+    def _norm(text: str) -> 'list[str]':
+        out: 'list[str]' = []
+        for line in text.splitlines():
+            line = re.sub(r'\b(site|named|yours): ', '<layer>: ', line)
+            line = re.sub(r"/[^\s)'\":]*", '<path>', line)
+            line = re.sub(r'\s+', ' ', line).strip()
+            if line:
+                out.append(line)
+        return out
+
+    def _block(self, marker: str) -> str:
+        """The one fenced block of the README holding MARKER, its prompt
+        line (`# my-plex ...`) left out."""
+        path = _readme_path()
+        if path is None:
+            self.skipTest(_NO_README)
+        with open(path) as f:
+            blocks = [b for b in re.findall(r'```[^\n]*\n(.*?)```', f.read(), re.DOTALL)
+                      if marker in b]
+        self.assertEqual(len(blocks), 1, f"README blocks holding {marker!r}: {len(blocks)}")
+        return "\n".join(ln for ln in blocks[0].splitlines() if not ln.startswith('# '))
+
+    @staticmethod
+    def _site() -> str:
+        return ("RUN_AS_USER = 'nobody'\n"
+                "PLEX_DB_REMOTE = 'user@192.0.2.10'\n"
+                "PLEX_API_REMOTE = '192.0.2.10'\n")
+
+    def test_the_root_half_prints_what_the_readme_shows(self):
+        shown = self._block('(root: the firewall half)').replace(self.README_USER, 'nobody')
+        run = self.run_root(conf_lines=self._site())
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual(self._norm(run.r.stdout), self._norm(shown),
+                         "README.md, 'What it prints': root's block is not what root prints")
+
+    def test_the_ssh_half_prints_what_the_readme_shows(self):
+        """The run root hands over to (MY_PLEX_INSTALL_FROM_ROOT=1), started
+        with the venv's own python -- the suite's -- so it is inside the venv
+        and never rebuilds the real one."""
+        import getpass
+        shown = self._block('(as plexuser: the ssh half)').replace(self.README_USER, getpass.getuser())
+        d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
+        stub = _firewall_stub(d)
+        conf = os.path.join(d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n" + _install_lines(d) + self._site()
+                    + f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"
+                    + f"LOCK_FILE = {os.path.join(d, 'cache.lock')!r}\n")
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', conf, '--install'],
+                           capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+                           env=dict(_fake_ssh_env(), MY_PLEX_INSTALL_FROM_ROOT='1'))
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        self.assertEqual(self._norm(r.stdout), self._norm(shown),
+                         "README.md, 'What it prints': the ssh half's block is not what it prints")
+
+
 class TestBadStructureResolve(unittest.TestCase):
     """cmd_bad_structure_resolve() had no test, and its resolve log raised
     NameError (plan_movie) for as long as it existed: the except around the
@@ -16659,7 +16732,7 @@ _UNITTEST_SCOPES = {
     'venv':       [TestVenvDetection, TestVenvRebuildOnPythonMinor],
     'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry, TestInstallAsRoot],
     'conf-template': [TestConfigTemplateCoversEveryKey, TestCreateConfig],
-    'readme':     [TestReadmeFlagsExist, TestReadmeIsFound],
+    'readme':     [TestReadmeFlagsExist, TestReadmeIsFound, TestReadmeInstallOutput],
     'config':     [TestConfigLayers, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
                    TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
