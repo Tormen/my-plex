@@ -12621,6 +12621,62 @@ class TestDeployedCopy(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0, "a missing test suite is a failure")
 
 
+class TestLauncherAndModules(unittest.TestCase):
+    """my-plex is three files -- the launcher and two modules -- so a copy can
+    hold only part of it, and my_plex.py can be started by mistake as the old
+    single file was.  Each of those ends in one line on stderr that says so
+    and a non-zero exit: never a traceback, never a silent success."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix='my-plex-parts-')
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.env = dict(os.environ, HOME=os.path.join(self.d, 'home'),
+                        PYTHONDONTWRITEBYTECODE='1')
+        os.makedirs(self.env['HOME'])
+
+    def _one_line_error(self, r: 'subprocess.CompletedProcess[str]', what: str) -> str:
+        self.assertNotIn('Traceback', r.stderr, f"{what}: a traceback:\n{r.stderr[-900:]}")
+        self.assertNotEqual(r.returncode, 0, f"{what}: exit 0")
+        self.assertEqual(r.stdout, '', f"{what}: printed on stdout")
+        return r.stderr
+
+    def test_a_launcher_deployed_without_its_modules_says_so(self):
+        """bin/my-plex alone -- a copy of bin/ without lib/my-plex/."""
+        bin_dir = os.path.join(self.d, 'bin')
+        os.makedirs(bin_dir)
+        launcher = os.path.join(bin_dir, 'my-plex')
+        shutil.copy2(MAIN_SCRIPT, launcher)
+        r = subprocess.run([launcher, '--help'], capture_output=True, text=True,
+                           timeout=60, env=self.env)
+        out = self._one_line_error(r, 'the launcher alone')
+        self.assertEqual(len(out.strip().splitlines()), 1, f"not one line:\n{out}")
+        self.assertIn('my_plex_boot.py', out)
+        real = os.path.realpath(self.d)
+        self.assertIn(os.path.join(real, 'bin'), out, "the launcher's directory is not named")
+        self.assertIn(os.path.join(real, 'lib', 'my-plex'), out, "lib/my-plex/ is not named")
+
+    def test_a_boot_module_without_the_tool_beside_it_says_so(self):
+        """lib/my-plex/ with my_plex_boot.py but no my_plex.py."""
+        launcher = _deployed_copy(self.d, with_suite=False)
+        os.remove(os.path.join(self.d, 'lib', 'my-plex', 'my_plex.py'))
+        r = subprocess.run([launcher, '--help'], capture_output=True, text=True,
+                           timeout=60, env=self.env)
+        out = self._one_line_error(r, 'no my_plex.py')
+        self.assertRegex(out, r'ERROR \d{5} \[1\]: ', f"not the house error:\n{out}")
+        self.assertIn('my_plex.py', out)
+        self.assertIn(os.path.join(os.path.realpath(self.d), 'lib', 'my-plex'), out,
+                      "the directory it looked in is not named")
+
+    def test_the_tool_module_started_directly_refuses(self):
+        """`python3 my_plex.py <command>` -- how the old my-plex.py was run --
+        printed nothing and exited 0 without running the command."""
+        r = subprocess.run([sys.executable, TOOL_SOURCE, '--list-libraries'],
+                           capture_output=True, text=True, timeout=120, env=self.env)
+        out = self._one_line_error(r, 'python3 my_plex.py')
+        self.assertRegex(out, r'ERROR \d{5} \[1\]: ', f"not the house error:\n{out}")
+        self.assertIn('launcher', out)
+
+
 class TestDeployedCopyWithItsSuite(unittest.TestCase):
     """A copy made by my-rollout is bin/my-plex plus lib/my-plex/ holding the
     two modules and the suite -- one request, `++my-plex + my_plex_boot.py
@@ -14932,7 +14988,7 @@ class TestConfigLayers(unittest.TestCase):
     def test_a_named_file_that_is_absent_is_refused(self):
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
         out = self.refused(os.path.join(self.d, 'absent.conf'))
-        self.assertIn('ERROR 00018', out)
+        self.assertIn('ERROR 00020', out)
         self.assertIn('absent.conf', out)
 
     def test_two_different_user_files_are_an_error(self):
@@ -16176,6 +16232,7 @@ _UNITTEST_SCOPES = {
     'root':               [TestNeverRunsAsRoot],
     'typecheck':          [TestTypeCheck],
     'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
+    'launcher':           [TestLauncherAndModules],
 }
 
 # List of all unittest classes for run_regression_tests()

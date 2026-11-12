@@ -103,7 +103,13 @@ def main(launcher: str) -> None:
     # not hypothetical: the suite spawns my-plex constantly.
     os.environ.pop(_VENV_REEXEC_MARK, None)
 
-    import my_plex
+    try:
+        import my_plex
+    except ModuleNotFoundError as e:
+        if e.name != "my_plex":
+            raise
+        err("00002", f"my_plex.py is not beside my_plex_boot.py in "
+                     f"{os.path.dirname(os.path.realpath(__file__))} -- a copy of part of my-plex")
     my_plex.run()
 
 
@@ -283,7 +289,7 @@ def _exec_in_venv():
     pyvenv.cfg), and an error naming it beats spawning for ever.
     """
     if os.environ.get(_VENV_REEXEC_MARK):
-        err("00002", f"re-executed into '{VENV_DIR}' and still landed outside it.\n"
+        err("00003", f"re-executed into '{VENV_DIR}' and still landed outside it.\n"
                  f"  Its pyvenv.cfg is missing or unreadable -- remove the\n"
                  f"  directory and run my-plex again to have it rebuilt.")
     os.environ[_VENV_REEXEC_MARK] = "1"
@@ -314,12 +320,12 @@ def _bootstrap_venv():
 
     rc = subprocess.call([sys.executable, "-m", "venv", VENV_DIR])
     if rc != 0:
-        err("00003", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
+        err("00004", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
 
     pip = os.path.join(VENV_DIR, "bin", "pip")
     rc = subprocess.call([pip, "install"] + VENV_DEPS)
     if rc != 0:
-        err("00004", f"failed to install the dependencies {', '.join(VENV_DEPS)} "
+        err("00005", f"failed to install the dependencies {', '.join(VENV_DEPS)} "
                  f"into {VENV_DIR} [rc {rc}]")
 
     print(f"\n >>> DONE creating python virtualenv '{VENV_DIR}'.", file=sys.stderr)

@@ -14,7 +14,15 @@ import sys
 
 _self = os.path.realpath(__file__)
 _dir = os.path.dirname(_self)
-sys.path[:0] = [_dir, os.path.join(os.path.dirname(_dir), "lib", "my-plex")]
-import my_plex_boot  # noqa: E402
+_lib = os.path.join(os.path.dirname(_dir), "lib", "my-plex")
+sys.path[:0] = [_dir, _lib]
+try:
+    import my_plex_boot
+except ModuleNotFoundError as e:
+    if e.name != "my_plex_boot":
+        raise
+    # err() lives in the module that is missing: one line, exit 1.
+    sys.exit(f"my-plex: my_plex_boot.py is in neither {_dir} nor {_lib} -- "
+             f"this launcher was copied without its modules")
 
 my_plex_boot.main(_self)
