@@ -14191,9 +14191,10 @@ class TestConfigLayers(unittest.TestCase):
         for sub in ('LINKS/default', 'LINKS/global/etc/default', 'LINKS/local/etc/default',
                     'home/.my-plex', 'etc'):
             os.makedirs(os.path.join(self.d, sub))
-        self.env = {k: os.environ.get(k) for k in ('HOME', 'MY_PLEX_CONFIG')}
+        self.env = {k: os.environ.get(k) for k in ('HOME', 'MY_PLEX_CONFIG', 'MY_PLEX_CONFIG_INHERITED')}
         os.environ['HOME'] = self.home
         os.environ.pop('MY_PLEX_CONFIG', None)
+        os.environ.pop('MY_PLEX_CONFIG_INHERITED', None)
         self.saved_sys = self.mp.SYSTEM_CONFIG_PATHS
         self.mp.SYSTEM_CONFIG_PATHS = (os.path.join(self.d, 'etc', 'my-plex.conf'),)
         self.saved_site = self.mp.SITE_CONF
@@ -14755,6 +14756,64 @@ class TestConfigEnvVar(unittest.TestCase):
             self.assertTrue(host.endswith('(named)'), host)
             self.assertNotIn('(site)', r.stdout, "the phase read the site config")
             self.assertNotIn('(yours)', r.stdout, "the phase read your config")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_phase_that_names_its_own_config_reads_it(self):
+        """ADVERSARIAL: -C FILE reached the phases as $MY_PLEX_CONFIG, which
+        ranks ABOVE --config -- so a phase naming its own config (-C OTHER)
+        silently read the pipeline's file instead.  The second phase names
+        none: the control, it must still read the pipeline's file."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgown-')
+        own, piped = os.path.join(d, 'own.conf'), os.path.join(d, 'pipeline.conf')
+        with open(own, 'w') as f:
+            f.write("PLEX_DB_REMOTE_HOST = 'fixture-host-OWN'\n")
+        with open(piped, 'w') as f:
+            f.write(f"PIPELINES = {{'--probe': [['-C', {own!r}, '--config'], ['--config']]}}\n"
+                    "PLEX_DB_REMOTE_HOST = 'fixture-host-PIPELINE'\n")
+        try:
+            r = self._run('-C', piped, '--probe')
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            hosts = [l for l in r.stdout.splitlines() if l.startswith('PLEX_DB_REMOTE_HOST ')]
+            self.assertEqual(len(hosts), 2, f"two phases, two reports:\n{r.stdout[-800:]}")
+            self.assertIn("'fixture-host-OWN'", hosts[0],
+                          f"the phase's own -C lost to the pipeline's file:\n{r.stdout[-800:]}")
+            self.assertIn("'fixture-host-PIPELINE'", hosts[1],
+                          "control: a phase naming no config reads the pipeline's")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _marker_conf(d: str) -> tuple[str, str]:
+        """A config that, each time a my-plex reads it, appends that run's
+        argv to a marker file -- the evidence of WHO read it."""
+        conf, marker = os.path.join(d, 'marker.conf'), os.path.join(d, 'marker')
+        with open(conf, 'w') as f:
+            f.write("import sys as _sys\n"
+                    f"with open({marker!r}, 'a') as _f:\n"
+                    "    _f.write(repr(_sys.argv[1:]) + '\\n')\n")
+        return conf, marker
+
+    def test_a_config_named_for_a_test_run_is_not_passed_to_its_runs(self):
+        """ADVERSARIAL: `-C FILE --run-tests` passed FILE on to every my-plex
+        the suite starts, so it steered each test's own runs -- and a test
+        run naming its own config with --config read FILE instead (28 of 34
+        install tests failed).  The inner test's run is `--help missing`,
+        started with the suite's own environment.  The suite itself reads
+        FILE (it was named for it): that line is the control that the marker
+        works."""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgsuite-')
+        conf, marker = self._marker_conf(d)
+        inner = 'test_missing_help_shows_library_usage'
+        try:
+            r = self._run('-C', conf, '--run-tests', inner)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            with open(marker) as f:
+                reads = f.read().splitlines()
+            self.assertTrue(any('--run-tests' in l for l in reads),
+                            f"control: the suite did not read the file named for it: {reads}")
+            self.assertEqual([l for l in reads if '--run-tests' not in l], [],
+                             "a run the suite started read the file named for the suite")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

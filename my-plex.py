@@ -1114,6 +1114,13 @@ def _home() -> str:
 # to run against a cache that does not exist.
 CONFIG_ENV = 'MY_PLEX_CONFIG'
 
+# The file a run was given with --config, passed on to every my-plex that run
+# starts (a pipeline's phases).  A variable of its own, read AFTER --config:
+# a phase that names its own config keeps it, which $MY_PLEX_CONFIG -- first
+# in the search -- would override.
+CONFIG_INHERITED_ENV = 'MY_PLEX_CONFIG_INHERITED'
+CONFIG_INHERITED_SOURCE = 'the --config of the my-plex that started this one'
+
 
 # A TEST RUN takes no config from the environment.  $MY_PLEX_CONFIG is the
 # hatch for ONE run, and a stray one left in a shell would otherwise point the
@@ -1124,25 +1131,31 @@ CONFIG_ENV = 'MY_PLEX_CONFIG'
 # the same way; its runner unsets $MY_GIT_CONFIG.)
 _TEST_RUN = any(a == '--run-tests' or a.startswith('--run-tests=')
                 or a in ('--unittest', '--test') for a in sys.argv[1:])
-if _TEST_RUN and os.environ.pop(CONFIG_ENV, None) is not None:
+_dropped = [v for v in (CONFIG_ENV, CONFIG_INHERITED_ENV)
+            if _TEST_RUN and os.environ.pop(v, None) is not None]
+if _dropped:
     # An action nobody asked for says what it did and why.
-    print(f" >>> ${CONFIG_ENV} ignored for this test run -- it would point the "
-          f"suite at another config", file=sys.stderr)
+    print(f" >>> {', '.join('$' + v for v in _dropped)} ignored for this test run -- "
+          f"it would point the suite at another config", file=sys.stderr)
 
 
 def config_search_paths(config_file=None):
     """Every place a config can come from, in read order, as (source, path).
 
-    SOURCE is '$MY_PLEX_CONFIG' or '--config' for a file someone named --
-    then that file is the only entry -- and 'site' or 'user' for the default
-    locations.  Messages and --help config read this, so what the tool says
-    about its search cannot drift from the search.
+    SOURCE is '$MY_PLEX_CONFIG', '--config' or CONFIG_INHERITED_SOURCE for
+    a file someone named -- then that file is the only entry -- and 'site'
+    or 'user' for the default locations.  Messages and --help config read
+    this, so what the tool says about its search cannot drift from the
+    search.
     """
     env_path = os.environ.get(CONFIG_ENV, '').strip()
     if env_path:
         return [(f'${CONFIG_ENV}', os.path.expanduser(env_path))]
     if config_file:
         return [('--config', os.path.expanduser(config_file))]
+    inherited = os.environ.get(CONFIG_INHERITED_ENV, '').strip()
+    if inherited:
+        return [(CONFIG_INHERITED_SOURCE, inherited)]
     return default_config_paths()
 
 
@@ -1212,7 +1225,10 @@ def config_layers(config_file=None):
                              f"  - a typo in the path\n"
                              f"  - it was never written -- my-plex --create-config {first}"
                              + (f"\n  - {CONFIG_ENV} is left over from an earlier shell -- unset {CONFIG_ENV}"
-                                if source.startswith('$') else ''))
+                                if source.startswith('$') else '')
+                             + (f"\n  - ${CONFIG_INHERITED_ENV} carries it -- unset it if no my-plex"
+                                f" started this one"
+                                if source == CONFIG_INHERITED_SOURCE else ''))
             return []
         return [('named', first)]
 
@@ -33324,7 +33340,8 @@ def main_print_help(args, remaining_args, main_parser):
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
             print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
             print( "  every my-plex that run starts (a pipeline's phases): --config is")
-            print(f"  passed on to them as ${CONFIG_ENV}.")
+            print(f"  passed on to them as ${CONFIG_INHERITED_ENV}, read after their")
+            print( "  own --config, so a phase that names its own config keeps it.")
             print( "  A test run (--run-tests) reads neither the site config nor yours.")
             print()
             print(f"  A path named by ${CONFIG_ENV} or --config that is not there is")
@@ -44720,11 +44737,13 @@ def main():
     loaded_config = load_config_file(config_args.config_file)
 
     # A file named with --config is the file for every my-plex this run
-    # starts too -- a pipeline's phases, the cache refresh -- through the
-    # variable they inherit, so no child reads the site config and yours.
+    # starts too -- a pipeline's phases -- through the variable they inherit,
+    # so no phase reads the site config and yours; a phase that names its own
+    # config still reads that one.  Never from a test run: the file named for
+    # the suite is not the file of the runs each test starts.
     _source, _path = config_search_paths(config_args.config_file)[0]
-    if _source == '--config':
-        os.environ[CONFIG_ENV] = os.path.abspath(_path)
+    if _source == '--config' and not _TEST_RUN:
+        os.environ[CONFIG_INHERITED_ENV] = os.path.abspath(_path)
 
     # Bare --config: the files read, then each key they set and where from.
     if _print_current_config and not _asking_help:
