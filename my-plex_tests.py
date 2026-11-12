@@ -12169,7 +12169,57 @@ class TestVersionAndStamp(unittest.TestCase):
         after = self.run_tool('--version').stdout.splitlines()[0]
         self.assertNotEqual(before, after, "two different files must not report the same --version")
 
+    def test_a_change_to_the_launcher_or_the_boot_module_alone_is_a_new_build(self):
+        """The build is three files, and each one runs: an install whose
+        launcher or boot module differs is a different build, and has to
+        say so -- the id once hashed my_plex.py alone."""
+        before = self.run_tool('--version').stdout.splitlines()[0]
+        for name in ('my-plex', 'my_plex_boot.py'):
+            with self.subTest(file=name):
+                with open(os.path.join(self.work, name), 'a') as f:
+                    f.write('\n# changed\n')
+                after = self.run_tool('--version').stdout.splitlines()[0]
+                self.assertNotEqual(before, after, f"a change to {name} alone kept the build id")
+                before = after
+
     # --- --stamp-version guards -------------------------------------------
+    def test_refuses_an_uncommitted_edit_of_the_launcher(self):
+        """The amend would release a build whose launcher is not the one
+        committed: an edit to ANY of the three files refuses, by name."""
+        self.new_commit()
+        with open(self.launcher, 'a') as f:
+            f.write('\n# not committed\n')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('my-plex: uncommitted edits', r.stderr)
+        self.assertEqual(self.stamped(), '')
+
+    def test_a_commit_of_the_boot_module_alone_is_this_tools_commit(self):
+        """HEAD touching only my_plex_boot.py is a release of this tool, not
+        somebody else's commit: it is stamped."""
+        with open(os.path.join(self.work, 'my_plex_boot.py'), 'a') as f:
+            f.write('\n# a boot change worth stamping\n')
+        self.git('add', 'my_plex_boot.py'); self.git('commit', '-q', '-m', 'boot')
+        short = self.git('rev-parse', '--short', 'HEAD')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.stamped(), short)
+
+    def test_a_launcher_change_since_the_stamp_is_something_to_do(self):
+        """"Unchanged since the stamp" must ask all three files: a release that
+        changed only the launcher was answered "nothing to do", and went out
+        carrying the previous release's stamp."""
+        self.new_commit()
+        self.assertEqual(self.run_tool('--stamp-version', 'go').returncode, 0)
+        with open(self.launcher, 'a') as f:
+            f.write('\n# a launcher change worth stamping\n')
+        self.git('add', 'my-plex'); self.git('commit', '-q', '-m', 'launcher')
+        short = self.git('rev-parse', '--short', 'HEAD')
+        r = self.run_tool('--stamp-version', 'go')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('nothing to do', r.stdout)
+        self.assertEqual(self.stamped(), short)
+
     def test_refuses_pushed_commit(self):
         head = self.git('rev-parse', 'HEAD')
         r = self.run_tool('--stamp-version', 'go')

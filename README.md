@@ -550,13 +550,14 @@ my-plex --stamp-version        # analyze: what would be stamped
 my-plex --stamp-version go     # record HEAD in SCRIPT_COMMIT, amend HEAD
 ```
 
-- The **build id** is a hash of the file itself, so two installs that differ
-  never report the same `--version`; compare installs by diffing it.
+- The **build id** is a hash of the launcher `my-plex`, `my_plex_boot.py` and
+  `my_plex.py` together, so two installs that differ in any of them never
+  report the same `--version`; compare installs by diffing it.
 - `SCRIPT_COMMIT` names the commit the file was released from. It lags HEAD
   by one, because the stamp amends HEAD and a commit cannot contain its own sha.
 - Release order: commit, `--stamp-version go`, push. The stamp refuses a
-  commit that is already pushed, anything staged, or uncommitted edits to
-  `my_plex.py` itself.
+  commit that is already pushed, a HEAD that touches none of the three files,
+  anything staged, or uncommitted edits to any of the three.
 - A tagged version number is never reused: once HEAD has moved past the tag
   for `SCRIPT_VERSION`, bump it (`my-plex --run-tests version` enforces this).
 

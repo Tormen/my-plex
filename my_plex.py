@@ -95,15 +95,29 @@ _AS_ROOT = _boot.as_root()
 
 
 # --- Early --version / --stamp-version handling (no venv / no Plex needed) ---
+def _tool_files() -> "list[str]":
+    """The files this build IS, in the order they run: the launcher, the boot
+    module, this module.  The launcher is the one main() was given; a module
+    imported without it (a test) has none, and its build reads 'unknown'."""
+    return [_boot.LAUNCHER, os.path.realpath(_boot.__file__), os.path.realpath(__file__)]
+
+
 def _script_build_id() -> str:
-    """Hash of this file's own bytes: the authoritative identity of the build.
-    It cannot be stale -- two copies that differ report different ids."""
+    """Hash of the bytes of all three files: the authoritative identity of the
+    build.  It cannot be stale -- two copies that differ in any of them report
+    different ids.  Each file is length-prefixed, so a byte moved across a
+    file boundary is a new build too."""
     import hashlib
+    h = hashlib.sha256()
     try:
-        with open(os.path.realpath(__file__), 'rb') as f:
-            return hashlib.sha256(f.read()).hexdigest()[:12]
+        for path in _tool_files():
+            with open(path, 'rb') as f:
+                data = f.read()
+            h.update(len(data).to_bytes(8, 'big'))
+            h.update(data)
     except OSError:
         return 'unknown'
+    return h.hexdigest()[:12]
 
 def _script_describe() -> str:
     """git's own `describe --tags --long` for this checkout, else the stamped
@@ -179,17 +193,20 @@ def _print_version_and_exit():
     sys.exit(0)
 
 def _stamp_fail(code: str, msg: str) -> NoReturn:
-    # err() is defined further down; this runs before the venv bootstrap, so
-    # the shape is repeated here rather than shared -- same format, same reason.
+    # err()'s shape with a `--stamp-version:` prefix; a caller of its own so
+    # the renumber command and TestErrCodes count these lines too.
     print(f"\nERROR {code} [1]: --stamp-version: {msg}\n", file=sys.stderr)
     sys.exit(1)
 
 def _stamp_version_and_exit(go: bool) -> NoReturn:
-    """--stamp-version [go] -- record the commit this file is released from.
+    """--stamp-version [go] -- record the commit this build is released from.
+
+    The stamp is written into this module, but the build is all three files
+    (_tool_files()), so every guard below asks about all three.
 
     Four guards, each for a failure that has actually happened somewhere:
-      * refuse when anything is STAGED, or this file has edits of its own --
-        the amend below would fold them into the release commit;
+      * refuse when anything is STAGED, or one of the tool's files has edits
+        of its own -- the amend below would fold them into the release commit;
       * refuse when HEAD is already PUSHED -- an amend rewrites published
         history and the next push is rejected as non-fast-forward;
       * idempotent, by asking "has anything changed since the stamp was
@@ -210,6 +227,7 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
     if not top:
         _stamp_fail("00005", f"'{self_path}' is not inside a git checkout -- there is no commit to stamp from.")
     rel = os.path.relpath(self_path, top)
+    rels = [os.path.relpath(os.path.realpath(p), top) for p in _tool_files()]
     sha = git('rev-parse', '--short', 'HEAD').stdout.strip()
     if not sha:
         _stamp_fail("00006", f"'{top}' has no commit to stamp from.")
@@ -223,18 +241,22 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
     with open(self_path, 'r') as f:
         src = f.read()
     if SCRIPT_COMMIT:
-        was = git('show', f'{SCRIPT_COMMIT}:{rel}')
-        if was.returncode == 0 and stamp_re.sub('', was.stdout) == stamp_re.sub('', src):
-            print(f"--stamp-version: '{rel}' is unchanged since it was stamped ({SCRIPT_COMMIT}) -- nothing to do.")
+        def unchanged(r: str) -> bool:
+            was = git('show', f'{SCRIPT_COMMIT}:{r}')
+            with open(os.path.join(top, r), 'r') as f:
+                now = f.read()
+            return was.returncode == 0 and stamp_re.sub('', was.stdout) == stamp_re.sub('', now)
+        if all(unchanged(r) for r in rels):
+            print(f"--stamp-version: {', '.join(rels)} unchanged since the stamp ({SCRIPT_COMMIT}) -- nothing to do.")
             sys.exit(0)
 
     # `git commit --amend` folds in what is STAGED and nothing else, so that
     # is exactly the guard.  Unstaged work elsewhere is no concern of the amend.
     # The repo may be SHARED -- other sessions commit here too -- and an amend
-    # rewrites whatever HEAD happens to be.  Stamp only the commit that carries
-    # THIS file: if HEAD does not touch it, HEAD is somebody else's work.
-    if not git('show', '--name-only', '--format=', 'HEAD', '--', rel).stdout.strip():
-        _stamp_fail("00008", f"HEAD does not touch '{rel}' -- it is not this file's commit "
+    # rewrites whatever HEAD happens to be.  Stamp only a commit that carries
+    # one of the tool's files: if HEAD touches none, HEAD is somebody else's work.
+    if not git('show', '--name-only', '--format=', 'HEAD', '--', *rels).stdout.strip():
+        _stamp_fail("00008", f"HEAD touches none of {', '.join(rels)} -- it is not this tool's commit "
                              "(commit it first; in a shared repo the amend would rewrite someone else's).")
     staged = git('diff', '--cached', '--name-only').stdout.split()
     if staged:
@@ -242,8 +264,9 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
         for p in staged:
             print(f"    > {p}", file=sys.stderr)
         _stamp_fail("00009", "commit or unstage it first.")
-    if git('diff', '--quiet', '--', rel).returncode != 0:
-        _stamp_fail("00010", f"'{rel}' has uncommitted edits -- commit them first, the stamp amends the commit they belong to.")
+    edited = [r for r in rels if git('diff', '--quiet', '--', r).returncode != 0]
+    if edited:
+        _stamp_fail("00010", f"{', '.join(edited)}: uncommitted edits -- commit them first, the stamp amends the commit they belong to.")
 
     head = git('log', '-1', '--format=%h %s').stdout.strip()
     print(f" >>> stamp SCRIPT_COMMIT={sha} (currently {SCRIPT_COMMIT or '<unstamped>'}), then amend {head}")
@@ -532,7 +555,7 @@ _my-plex() {
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--run-tests[Run the test suite: FILTER is a scope or part of a test title]:filter:'
         '--install[Print the firewall commands for root, then write the ssh Host entry]'
-        '--version[Print version, released commit and a build id hashed from this file]'
+        '--version[Print version, released commit and a build id hashed from the launcher and both modules]'
         '--stamp-version[Record the commit this file is released from; analyze only unless go]:go:(go)'
         '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
         '--config[Print current config (no arg) or use FILE (with arg)]::file:_files'
@@ -44688,7 +44711,7 @@ def main():
     main_parser.add_argument('--plex-xml-url', metavar="XML_URL", help=f"Plex XML URL from 'View XML' (extracts server URL and token automatically; the URL CONTAINS the token, so '-' and '@FILE' work here too). Overrides --plex-url and --plex-token. Default: {'<set>' if PLEX_XML_URL else '<not set>'}", default=PLEX_XML_URL)
     # --version / --stamp-version are handled before the venv bootstrap and exit
     # there; they are declared here only so --help lists them.
-    main_parser.add_argument('--version', action='store_true', help="Print version, released commit and a build id hashed from this file itself. Comparing two installs: run it on each and diff the output.")
+    main_parser.add_argument('--version', action='store_true', help="Print version, released commit and a build id hashed from the launcher and both modules. Comparing two installs: run it on each and diff the output.")
     main_parser.add_argument('--stamp-version', nargs='?', const='', metavar='go', help="Record the commit this file is released from, then amend that commit. Run it BEFORE pushing a release. Analyze only, unless followed by 'go'.")
     main_parser.add_argument('--plex-url', metavar="URL", help=f"Plex server URL - defaults to '{PLEX_URL}'", default=PLEX_URL)
     main_parser.add_argument('--plex-token', metavar="TOKEN", help=f"Plex authentication token. '-' reads it from stdin, '@FILE' from a file; a literal lands in your shell history. Defaults to {'<set>' if PLEX_TOKEN else '<not set>'}", default=PLEX_TOKEN)
