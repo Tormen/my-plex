@@ -14522,6 +14522,92 @@ class TestInstallSshEntry(unittest.TestCase):
         self.assertIn('the login through', r.stderr)
         self.assertIn('[rc 255]', r.stdout + r.stderr)
 
+    def key(self, name: str = 'ada,id_rsa') -> str:
+        """A stand-in key file in the test's own directory: --install checks
+        that the configured key exists, never what is in it."""
+        p = os.path.join(self.d, name)
+        with open(p, 'w') as f:
+            f.write('not a real key\n')
+        return p
+
+    def identities(self) -> list[str]:
+        out = subprocess.run([shutil.which('ssh') or '/usr/bin/ssh', '-G', '-F', self.ssh_conf, 'my-plex'],
+                             capture_output=True, text=True).stdout
+        return [v for k, _s, v in (ln.partition(' ') for ln in out.splitlines()) if k == 'identityfile']
+
+    def test_the_configured_key_is_the_one_ssh_offers(self):
+        """macado: no IdentityFile in the entry, so ssh offered the user's
+        default ~/.ssh/id_ed25519 and ada refused it -- the house key is
+        ~/.ssh/keys.mine/ada,id_rsa, a place ssh never looks by itself."""
+        k = self.key()
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        self.assertEqual(self.identities(), [k], "ssh would offer another key than the configured one")
+        self.assertIn(f"IdentityFile {k}", self.read(self.ours))
+
+    def test_without_the_key_no_identity_is_written(self):
+        """The key is optional: a site whose users log in with their default
+        keys sets none, and the entry names none."""
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertNotIn('IdentityFile', self.read(self.ours))
+
+    def test_a_missing_key_file_writes_nothing(self):
+        """Writing an entry for a key that is not there would only move the
+        failure to the login, with a message about the server."""
+        missing = os.path.join(self.d, 'no-such-key')
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {missing!r}\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('PLEX_DB_REMOTE_IDENTITY', r.stderr)
+        self.assertIn(missing, r.stderr)
+        self.assertFalse(os.path.exists(self.ours))
+        self.assertFalse(os.path.exists(self.ssh_conf))
+
+    def test_a_block_with_the_same_key_migrates_to_ONE_identity(self):
+        """horse: the hand-written block already names the house key.  Carried
+        over AND generated, it would be written twice."""
+        k = self.key()
+        with open(self.ssh_conf, 'w') as f:
+            f.write(f"Host my-plex\n    HostName 192.0.2.10\n    User me\n    IdentityFile {k}\n")
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        body = [ln for ln in self.read(self.ours).splitlines() if not ln.startswith('#')]
+        self.assertEqual(sum(1 for ln in body if 'IdentityFile' in ln), 1, "\n".join(body))
+        self.assertIn('ssh Host entry migrated', r.stdout)
+
+    def test_a_block_with_another_key_is_left_alone(self):
+        """Two answers for the key: my-plex picks neither."""
+        k, other = self.key(), self.key('other,id_rsa')
+        text = f"Host my-plex\n    HostName 192.0.2.10\n    User me\n    IdentityFile {other}\n"
+        with open(self.ssh_conf, 'w') as f:
+            f.write(text)
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('two answers', r.stderr)
+        self.assertIn(other, r.stderr)
+        self.assertEqual(self.read(self.ssh_conf), text)
+        self.assertFalse(os.path.exists(self.ours))
+
+    def test_its_own_file_takes_the_configured_key_over_a_carried_one(self):
+        """horse after the first rollout: my-plex.conf carries the migrated
+        IdentityFile.  Once the site names the key, the config is the one
+        answer -- 'edit the config, not this' -- and the line is not doubled."""
+        k, old = self.key(), self.key('old,id_rsa')
+        with open(self.ssh_conf, 'w') as f:
+            f.write(f"Host my-plex\n    HostName 192.0.2.10\n    User me\n    IdentityFile {old}\n")
+        self.install()
+        self.assertIn(f"IdentityFile {old}", self.read(self.ours))
+        r = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
+        self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-800:])
+        self.assertEqual(self.identities(), [k])
+        r2 = self.install(extra=f"PLEX_DB_REMOTE_IDENTITY = {k!r}\n")
+        self.assertIn('ssh Host entry unchanged', r2.stdout, r2.stdout[-800:])
+
+    def test_the_identity_is_a_site_key(self):
+        main_mod = _main_module()
+        self.assertIn('PLEX_DB_REMOTE_IDENTITY', main_mod.SITE_ONLY_KEYS)
+        self.assertEqual(main_mod.CONFIG_DEFAULTS['PLEX_DB_REMOTE_IDENTITY'], '')
+
     def test_the_ssh_rule_takes_its_host_from_PLEX_DB_REMOTE(self):
         """As root, `ssh -G` reads root's ssh config, and on a fresh machine
         the alias does not exist yet: the rule must not depend on it."""

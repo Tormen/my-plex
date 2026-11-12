@@ -173,12 +173,19 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   `--install` writes that alias from `PLEX_DB_REMOTE` -- the Plex server as
   you would reach it with ssh, `user@host[:port]`, set in the site config --
   as a Host block in `~/.ssh/my-plex.conf`, plus one `Include` line at the
-  top of `~/.ssh/config`. No key path: ssh finds your own key.
+  top of `~/.ssh/config`.
+- **The key.** `PLEX_DB_REMOTE_IDENTITY`, also site config only, names the
+  key that logs in there when it is not one of ssh's default keys
+  (`~/.ssh/id_ed25519`, `id_rsa`, ...): the block names it as its
+  `IdentityFile`. `~` is each user's own home, so one value serves every
+  user of the site. A key file that is not there stops `--install` before
+  anything is written. Unset, the block names no key and ssh offers yours.
 - A Host block you wrote by hand for that alias is **moved** into
   `~/.ssh/my-plex.conf`, keeping every option my-plex does not generate
   (`IdentityFile`, `ProxyJump`), with the old lines kept there as a dated
-  comment. One that names a different host is left alone with an error
-  naming both; so is one that names other aliases too.
+  comment. One that names a different host -- or, with
+  `PLEX_DB_REMOTE_IDENTITY` set, a different key -- is left alone with an
+  error naming both; so is one that names other aliases too.
 - It ends with one real login, `ssh <alias> true` in BatchMode, and prints
   its exit code. Run `--install` once per machine and user; a second run
   changes nothing.
@@ -348,9 +355,9 @@ two, the later winning for a key both set:
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The
 Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
-`TMDB_API_KEY`) belong in your config only, `PLEX_DB_REMOTE` and
-`LITTLE_SNITCH_CLI` in the site config only: my-plex refuses them in the
-other. A config file that cannot be read or fails to run stops the run;
+`TMDB_API_KEY`) belong in your config only, `PLEX_DB_REMOTE`,
+`PLEX_DB_REMOTE_IDENTITY` and `LITTLE_SNITCH_CLI` in the site config only:
+my-plex refuses them in the other. A config file that cannot be read or fails to run stops the run;
 `--help` and a bare `my-plex` only warn.
 
 `$MY_PLEX_CONFIG` (a config for ONE run: a test, a CI job, a one-off), else
@@ -361,6 +368,8 @@ prints the read order from the same code that reads.
 ```python
 # Required in the site config: the Plex server as you would ssh to it
 PLEX_DB_REMOTE = 'user@192.0.2.10'
+# Optional, site config: the key that logs in there, when not a default one
+PLEX_DB_REMOTE_IDENTITY = '~/.ssh/keys/plex-server,id_ed25519'
 # The ssh alias --install writes from it (the default)
 PLEX_DB_REMOTE_HOST = 'my-plex'
 
