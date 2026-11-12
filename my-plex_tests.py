@@ -27,10 +27,16 @@ import importlib.machinery
 import importlib.util
 from typing import Any
 
-# The tool overrides this when it loads the suite (_load_test_mod): only it
-# knows its own file, which on a deployed copy is bin/my-plex.  This value is
-# the fallback for running the suite straight out of a checkout.
-MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex.py')
+# The tool's files.  The tool overrides all three when it loads the suite
+# (_load_test_mod): only it knows them -- on a deployed copy the launcher is
+# bin/my-plex and the modules sit in lib/my-plex/.  These values are the
+# fallback for running the suite straight out of a checkout.
+#   MAIN_SCRIPT  the LAUNCHER: what a test RUNS
+#   TOOL_SOURCE  my_plex.py, the tool: what most tests READ or import
+#   BOOT_SOURCE  my_plex_boot.py: the root refusal, -Q, the venv, err()
+MAIN_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex')
+TOOL_SOURCE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my_plex.py')
+BOOT_SOURCE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my_plex_boot.py')
 
 # No README beside a DEPLOYED copy: that is bin/my-plex, and the suite beside
 # it is lib/my-plex_tests.py.  "Absent" is therefore a real answer -- but it
@@ -88,10 +94,8 @@ def _readme_path() -> str | None:
 def _main_module() -> Any:
     """The tool, as the module this suite was loaded from.
 
-    Typed Any on purpose: my-plex.py is a script, not an importable module
-    with a type of its own, and the tests set its globals (CACHE,
-    DISK_PLEX_MAP, PLEX_DB_REMOTE_HOST, ...), which a ModuleType does not
-    declare."""
+    Typed Any on purpose: the tests set its globals (CACHE, DISK_PLEX_MAP,
+    PLEX_DB_REMOTE_HOST, ...), which a ModuleType does not declare."""
     return sys.modules[resolve_disk_map_variables.__module__]
 
 
@@ -102,27 +106,25 @@ def _must(match: 're.Match[str] | None', what: str) -> 're.Match[str]':
 
 
 def _import_tool(module_name='mp', argv=None, path=None) -> Any:
-    """Import my-plex itself as a module, whatever its file is CALLED.
+    """Import one of my-plex's modules afresh, under `module_name`: the tool
+    (TOOL_SOURCE, the default) or the boot module (path=BOOT_SOURCE).
     (Any for the same reason as _main_module: the tests set its globals.)
 
-    spec_from_file_location() chooses a loader from the FILE NAME and answers
-    None for a name it cannot place.  The deployed copy is `bin/my-plex` with
-    no extension, so it answered None there and module_from_spec() raised
-    AttributeError on it: `my-plex --run-tests` failed in seven scopes on
-    every machine while every gate run stayed green, because the gate tests a
-    pending copy still called my-plex.py.  Naming the loader is what makes
-    the file name irrelevant.
-
-    The file is MAIN_SCRIPT -- which the tool overrides to its own realpath
-    -- and never a path rebuilt from THIS file's directory: beside the
-    deployed suite in global/lib there is no my-plex.py to find.
+    The file is TOOL_SOURCE -- which the tool overrides to its own realpath
+    -- and never a path rebuilt from THIS file's directory.  Its directory
+    goes on sys.path, so the tool's `import my_plex_boot` finds the boot
+    module beside it.  The loader is named, so the file name decides
+    nothing.
 
     `argv` is what the module body sees while it runs, restored afterwards:
-    the body acts on argv (-Q, --version, the venv re-exec), and the default
+    the body acts on argv (--version, the print-only rule), and the default
     is a bare run, the quietest import there is.  A SystemExit from the body
-    is the script answering that argv, not a failure to import.
+    is the module answering that argv, not a failure to import.
     """
-    path = path or MAIN_SCRIPT
+    path = path or TOOL_SOURCE
+    _d = os.path.dirname(os.path.realpath(path))
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
     spec = importlib.util.spec_from_file_location(
         module_name, path,
         loader=importlib.machinery.SourceFileLoader(module_name, path))
@@ -143,19 +145,56 @@ def _tool_import_snippet(argv, path=None):
     """The same import, written out for the probes that run in a CHILD
     interpreter: it binds `mp`, with sys.argv set before the module body runs.
 
-    A child cannot call _import_tool, so the two lines that make an
-    extensionless file loadable are spelled out once here -- two forms of one
-    rule, rather than nine copies of it.
+    A child cannot call _import_tool, so its lines are spelled out once here
+    -- two forms of one rule, rather than nine copies of it.
     """
     return (
         "import sys, os, importlib.util, importlib.machinery\n"
         "sys.argv = %r\n"
         "_p = %r\n"
+        "sys.path.insert(0, os.path.dirname(os.path.realpath(_p)))\n"
         "_spec = importlib.util.spec_from_file_location('mp', _p,\n"
         "    loader=importlib.machinery.SourceFileLoader('mp', _p))\n"
         "mp = importlib.util.module_from_spec(_spec)\n"
         "_spec.loader.exec_module(mp)\n"
-    ) % (list(argv), path or MAIN_SCRIPT)
+    ) % (list(argv), path or TOOL_SOURCE)
+
+
+def _tool_copy(d: str, edits: 'dict[str, list[tuple[str, str]]] | None' = None) -> str:
+    """Copy the tool -- launcher, boot module, tool module -- into directory
+    `d`, laid out as a checkout, and return the copy's launcher.
+
+    `edits` maps 'launcher', 'boot' or 'tool' to (old, new) replacements made
+    in that file's copy, each of which must match exactly once: a test that
+    injects a defect must know it injected it.  Everything else is byte for
+    byte, and the launcher keeps its mode.
+    """
+    os.makedirs(d, exist_ok=True)
+    for key, path in (('launcher', MAIN_SCRIPT), ('boot', BOOT_SOURCE), ('tool', TOOL_SOURCE)):
+        dst = os.path.join(d, os.path.basename(path))
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        for old, new in (edits or {}).get(key, []):
+            assert text.count(old) == 1, f"{key}: {old!r} is not in it exactly once"
+            text = text.replace(old, new, 1)
+        with open(dst, 'w', encoding='utf-8') as f:
+            f.write(text)
+        shutil.copymode(path, dst)
+    return os.path.join(d, os.path.basename(MAIN_SCRIPT))
+
+
+def _deployed_copy(root: str, with_suite: bool) -> str:
+    """Lay the tool out under `root` as my-rollout deploys it -- the launcher
+    in bin/, its modules (and, `with_suite`, the suite) in lib/my-plex/ --
+    and return the launcher.  The suite copied is THIS file."""
+    os.makedirs(os.path.join(root, 'bin'), exist_ok=True)
+    lib = os.path.join(root, 'lib', 'my-plex')
+    os.makedirs(lib, exist_ok=True)
+    launcher = os.path.join(root, 'bin', 'my-plex')
+    shutil.copy2(MAIN_SCRIPT, launcher)
+    for path in (BOOT_SOURCE, TOOL_SOURCE) + ((os.path.realpath(__file__),) if with_suite else ()):
+        shutil.copy2(path, os.path.join(lib, os.path.basename(path)))
+    return launcher
 
 
 def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
@@ -466,7 +505,7 @@ class TestDuplicateKeyGeneration(unittest.TestCase):
 
     @staticmethod
     def generate_duplicate_keys(obj):
-        """Local copy of the logic from my-plex.py for isolated testing."""
+        """Local copy of the logic from my_plex.py for isolated testing."""
         obj_type = obj.get('type')
         if obj_type == 'Movie':
             title = obj['title'].lower().strip()
@@ -581,7 +620,7 @@ class TestInitLoopRobustness(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# classify_multi_version — copied from my-plex.py for standalone testing
+# classify_multi_version — copied from my_plex.py for standalone testing
 # ---------------------------------------------------------------------------
 def _test_classify_multi_version(obj):
     """Classify a multi-version item (single Plex entry with multiple files)."""
@@ -839,7 +878,7 @@ class TestRunToolOnPLEXServer(unittest.TestCase):
     """Tests for run_tool_on_PLEX_server() concept."""
 
     def _script_lines(self):
-        path = MAIN_SCRIPT
+        path = TOOL_SOURCE
         with open(path, encoding='utf-8') as f:
             return f.read().splitlines()
 
@@ -856,7 +895,7 @@ class TestISO639Mapping(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import re
-        script_path = MAIN_SCRIPT
+        script_path = TOOL_SOURCE
         with open(script_path, 'r') as f:
             content = f.read()
         match = re.search(r'ISO_639_1_TO_2\s*=\s*\{([^}]+)\}', content)
@@ -969,7 +1008,7 @@ class TestLongHelp(unittest.TestCase):
 
     def test_all_help_topics_have_match_case(self):
         """All help topics should have a match case in main_print_help()."""
-        script_path = MAIN_SCRIPT
+        script_path = TOOL_SOURCE
         with open(script_path, 'r') as f:
             content = f.read()
         for topic in self.HELP_TOPICS:
@@ -981,7 +1020,7 @@ class TestPlexUpdatedAtTracking(unittest.TestCase):
     """Tests for plexUpdatedAt field in EMPTY_LIBRARY_STATS."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_empty_library_stats_has_plexUpdatedAt(self):
@@ -1006,7 +1045,7 @@ class TestCacheSkipLogic(unittest.TestCase):
     """Tests for cache update skip logic — file path changes must trigger updates."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_episode_skip_checks_file_paths(self):
@@ -1319,7 +1358,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
     """API fallbacks must be removed — DB is the only data source for --update-cache."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_no_api_fallback_in_movie_processing(self):
@@ -1399,7 +1438,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
     """verify_cache must perform comprehensive data integrity checks."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_verify_checks_file_metadata_coverage(self):
@@ -1648,7 +1687,7 @@ class TestCacheFormatValidation(unittest.TestCase):
     """load_media_cache() must detect outdated cache format and error with rebuild instructions."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_outdated_cache_detected(self):
@@ -1669,7 +1708,7 @@ class TestCacheStructureParity(unittest.TestCase):
     """DB-based cache building must produce the same structure as old API-based code."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_series_objects_created_by_db_path(self):
@@ -1709,7 +1748,7 @@ class TestDbQueriesUseLibraryName(unittest.TestCase):
     """DB queries must use library name (JOIN library_sections) instead of internal IDs."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_no_sectionId_in_cache(self):
@@ -1760,7 +1799,7 @@ class TestResolveMediaByNumericID(unittest.TestCase):
     """resolve_plex_media_obj must resolve numeric IDs ('18349' or 'ID:18349') from cache."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_resolve_requires_id_prefix(self):
@@ -1835,7 +1874,7 @@ class TestRefactoredMethodNames(unittest.TestCase):
     """Verify method name fixes and dead code removal from refactoring session."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_set_watched_exists(self):
@@ -1880,7 +1919,7 @@ class TestDeadCodeRemoval(unittest.TestCase):
     """Verify removed dead functions stay removed."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_get_mkv_header_duration_removed(self):
@@ -1903,7 +1942,7 @@ class TestMediaApiActionConsolidation(unittest.TestCase):
     """Verify _media_api_action helper and all 9 wrapper methods."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_media_api_action_exists(self):
@@ -1955,7 +1994,7 @@ class TestListMethodSplit(unittest.TestCase):
     """Verify PLEX_Media.list() was properly split into helper methods."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_normalize_list_args_exists(self):
@@ -2043,7 +2082,7 @@ class TestExecuteTrashAndMoveSplit(unittest.TestCase):
     """Verify execute_resolution_action choices 5/6 were unified into _execute_trash_and_move."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_execute_trash_and_move_exists(self):
@@ -2079,7 +2118,7 @@ class TestVerifyCacheSplit(unittest.TestCase):
     """Verify verify_cache() was split: data integrity checks moved to _verify_data_integrity."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_verify_data_integrity_exists(self):
@@ -2122,7 +2161,7 @@ class TestUpdateCacheSplit(unittest.TestCase):
     """Verify PLEX_Library.update_cache() finalize code was extracted to _finalize_and_save_cache."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_finalize_and_save_cache_exists(self):
@@ -2203,7 +2242,7 @@ class TestBrokenHeaderOrder(unittest.TestCase):
     """Verify --broken output has DURATION before LIBRARY in header."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_header_duration_before_library(self):
@@ -2232,7 +2271,7 @@ class TestExcessVersions(unittest.TestCase):
     """Verify --excess-versions feature."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_list_excess_versions_exists(self):
@@ -2329,7 +2368,7 @@ class TestProblems(unittest.TestCase):
     """Verify --problems flag runs all problem checks with summary."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_problems_arg_defined(self):
@@ -2419,7 +2458,7 @@ class TestReencode(unittest.TestCase):
     """Tests for --reencode: high-bitrate file detection with episode/season/series rollup."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_reencode_method_exists(self):
@@ -2669,7 +2708,7 @@ class TestOndiskLabels(unittest.TestCase):
     """Tests for on-disk label parsing, collection, indexing, and related config."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     # --- parse_ondisk_labels ---
@@ -2861,7 +2900,7 @@ class TestExcessVersionsMainParser(unittest.TestCase):
     """--excess-versions LIMIT must be consumed by main_parser to prevent LIMIT being eaten as CMD_OR_PLEXOBJECT."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_excess_versions_in_main_parser(self):
@@ -2883,7 +2922,7 @@ class TestRemoveCommand(unittest.TestCase):
     """Verify --remove/--rm command and its interaction with --delete."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_remove_arg_defined(self):
@@ -3108,7 +3147,7 @@ class TestListMethodsGuardMissingKeys(unittest.TestCase):
     """
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_list_broken_files_uses_get(self):
@@ -3153,7 +3192,7 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
     """Verify wait_for_plex_scan_complete() exists and uses plex.activities (not just lib.refreshing)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_functions_exist(self):
@@ -3578,7 +3617,7 @@ class TestEndToEnd(unittest.TestCase):
         detailed page (`--excess-versions LIMIT`), the parser's own help and
         the zsh completion (`:limit:`) all said the value is required. The
         test above pins the behaviour; nothing pinned the sentence."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         self.assertNotIn('--excess-versions [N]', src,
                          "a compact help line still shows the value as optional")
         stale = [ln.strip() for ln in src.splitlines()
@@ -4010,7 +4049,7 @@ class TestDefaultScope(unittest.TestCase):
                               capture_output=True, text=True, timeout=30)
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def _skip_if_no_lib(self):
@@ -4353,7 +4392,7 @@ class TestErrorOutputConventions(unittest.TestCase):
     """Ensure ERROR output conventions: ERROR=fatal with verbose guidance, WARNING only for benign cases."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_print_ssh_error_uses_error_not_warning(self):
@@ -4439,7 +4478,7 @@ class TestErrorOutputConventions(unittest.TestCase):
         m = re.search(r'ERROR (\d{5}) ', r.stderr)
         self.assertIsNotNone(m)
         assert m is not None
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         self.assertIn(f'"{m.group(1)}"', src,
                       f"code {m.group(1)} is printed but is in no err() call")
@@ -4466,7 +4505,7 @@ class TestObjByLibraryDedup(unittest.TestCase):
     """Ensure OBJ_BY_LIBRARY appends have dedup checks to prevent duplicate keys."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_show_episode_season_appends_have_dedup_check(self):
@@ -4520,7 +4559,7 @@ class TestDeleteRequiresRemove(unittest.TestCase):
     """Ensure --del refuses to run without --rm, and help text warns about file deletion."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_del_without_rm_is_rejected(self):
@@ -4577,7 +4616,7 @@ class TestScan(unittest.TestCase):
     """Tests for --scan command."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def _run_cmd(self, *extra_args):
@@ -4652,7 +4691,7 @@ class TestScan(unittest.TestCase):
         """--scan must be in zsh completion script."""
         src = self._read_script()
         self.assertIn("'--scan[", src,
-            "--scan not found in zsh completion script in my-plex.py")
+            "--scan not found in zsh completion script in my_plex.py")
 
     def test_scan_libraries_global_exists(self):
         """SCAN_LIBRARIES global variable must be declared."""
@@ -4722,7 +4761,7 @@ class TestBrokenCrossValidation(unittest.TestCase):
     """Tests for cross-validation of container vs video stream duration in broken detection."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_collector_collects_video_duration(self):
@@ -4909,7 +4948,7 @@ class TestCacheUpdateLog(unittest.TestCase):
     """Tests for the JSON cache update log feature (CACHE_UPDATES_FILE)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_cache_updates_file_config_exists(self):
@@ -5084,7 +5123,7 @@ class TestEpisodesTSV(unittest.TestCase):
             self.assertTrue(os.path.isfile(tsv + '.2025-01-02'), sorted(os.listdir(d)))
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_write_and_read_roundtrip(self):
@@ -5233,7 +5272,7 @@ class TestMissingEpisodes(unittest.TestCase):
     """Test --missing command source inspection."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_missing_flag_in_media_argparser(self):
@@ -5273,7 +5312,7 @@ class TestSortNew(unittest.TestCase):
     """Test --sort-new command source inspection."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_sort_new_flag_in_global_parser(self):
@@ -5498,7 +5537,7 @@ class TestEpisodeSourceSelection(unittest.TestCase):
     """Test multi-source episode scraping architecture."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_source_flag_in_media_argparser(self):
@@ -5578,7 +5617,7 @@ class TestExternalIdsInCache(unittest.TestCase):
     """Test external IDs (tvdb/tmdb/imdb) storage in cache."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_external_ids_in_series_dict(self):
@@ -5722,7 +5761,7 @@ class TestRename(unittest.TestCase):
         self.assertIn('[DRY-RUN]', result.stdout)
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_rename_config_default_exists(self):
@@ -5809,7 +5848,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_rename_single_episode_uses_shared_primitive(self):
         """_rename_single_episode should delegate to _rename_episode_file (code structure check)."""
-        src_path = MAIN_SCRIPT
+        src_path = TOOL_SOURCE
         with open(src_path, 'r') as f:
             src = f.read()
         # Find _rename_single_episode body and verify it calls _rename_episode_file
@@ -5821,7 +5860,7 @@ class TestRenameShared(unittest.TestCase):
 
     def test_sort_new_uses_build_sxex_filename(self):
         """cmd_sort_new should use _build_sxex_filename instead of hardcoded f-strings."""
-        src_path = MAIN_SCRIPT
+        src_path = TOOL_SOURCE
         with open(src_path, 'r') as f:
             src = f.read()
         # Find cmd_sort_new and verify no hardcoded S{season:02d}E{ep_num:02d} in new_name assignments
@@ -6043,7 +6082,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_episodes_err_functions_exist(self):
         """Source must define episodes.err functions."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         for func_name in ('write_episodes_err', 'read_episodes_err',
                           'clear_episodes_err', 'get_episodes_err_path'):
@@ -6052,7 +6091,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_scrape_episodes_has_fallback(self):
         """scrape_episodes must contain fallback chain logic."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         import re
         match = re.search(r'def scrape_episodes\(.*?\ndef ', content, re.DOTALL)
@@ -6064,7 +6103,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_problems_includes_tsv_section(self):
         """--problems must run TSV detection via the registry's 'tsv' category (v3)."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         import re
         reg = _registry_entry_block(content, 'tsv')
@@ -6076,7 +6115,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_problems_summary_includes_tsv_count(self):
         """--problems summary must surface the tsv count via the registry-driven warnings."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         import re
         # The shared warning printer iterates the registry, which carries the
@@ -6116,13 +6155,13 @@ class TestEpisodesErrClassification(unittest.TestCase):
 
     def test_classify_no_external_ids(self):
         """Empty external_ids should classify as no_external_ids."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         self.assertIn('def _classify_tsv_error(', content)
 
     def test_classify_function_checks_title_length(self):
         """_classify_tsv_error must check for suspicious (short) titles."""
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
         import re
         match = re.search(r'def _classify_tsv_error\(.*?\n(?=def )', content, re.DOTALL)
@@ -6138,7 +6177,7 @@ class TestUnmatched(unittest.TestCase):
     """Test --unmatched flag and guid-based detection."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_unmatched_arg_defined_global(self):
@@ -6304,7 +6343,7 @@ class TestUnsorted(unittest.TestCase):
     """Test --unsorted flag and season directory detection."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_unsorted_arg_defined_global(self):
@@ -6459,7 +6498,7 @@ class TestVersionStringCollision(unittest.TestCase):
     """Test version string uniqueness (filesize + part_id collision handling)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_build_version_string_exists(self):
@@ -6535,7 +6574,7 @@ class TestForceTsv(unittest.TestCase):
     """Tests for --force-tsv flag."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_force_tsv_arg_defined(self):
@@ -6752,7 +6791,7 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
                 f"{scraper} scraper must print summary: 'N episodes in M seasons for'")
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
 
@@ -6760,7 +6799,7 @@ class TestMismatched(unittest.TestCase):
     """Test --mismatched command integration (title-vs-dir + multi-version grouping)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_function_exists(self):
@@ -6878,7 +6917,7 @@ class TestJunk(unittest.TestCase):
     """Test --junk command + auto-detection helper."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_functions_exist(self):
@@ -7011,7 +7050,7 @@ class TestShowDirDerivation(unittest.TestCase):
     """Test series_dir derivation uses PATHS_DICT (library root from section_locations)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_section_locations_queried(self):
@@ -7062,7 +7101,7 @@ class TestObjByShowScraped(unittest.TestCase):
     """Test OBJ_BY_SERIES_SCRAPED cache structure and --episode-numbering-issues."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_cache_dict_declared(self):
@@ -7173,7 +7212,7 @@ class TestS0XE0XPadding(unittest.TestCase):
     based on the max season/episode numbers in the show."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_pad_widths_stored_on_series_obj(self):
@@ -7257,7 +7296,7 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
     _format_episode_range()."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_update_cache_groups_by_filepath(self):
@@ -7427,7 +7466,7 @@ class TestAbsEpIdx(unittest.TestCase):
     counter across all seasons. Stored on episode, season, and show objects."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_abs_ep_idx_computed_in_update_cache(self):
@@ -7489,7 +7528,7 @@ class TestRenumber(unittest.TestCase):
                           "test -- run `my-plex --update-cache` here")
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_a_missing_series_skips_instead_of_failing(self):
@@ -7760,7 +7799,7 @@ class TestEpisodeNumberingIssues(unittest.TestCase):
     """Test --episode-numbering-issues command integration (12 integration points)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_function_exists(self):
@@ -7843,7 +7882,7 @@ class TestInfoScrapedData(unittest.TestCase):
     """Test --info output includes scraped info for shows."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_info_shows_scraped_title(self):
@@ -7893,7 +7932,7 @@ class TestDiskMap(unittest.TestCase):
     """Tests for --plex2disk / --disk2plex disk marker system."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def _mock_obj(self, **overrides):
@@ -9308,7 +9347,7 @@ class TestMove(unittest.TestCase):
     """Tests for --mv / --move: cross-library file move with cache update."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_cmd_move_function_exists(self):
@@ -9529,7 +9568,7 @@ class TestUniversalScope(unittest.TestCase):
     """
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_universal_scope_helper_exists(self):
@@ -9709,7 +9748,7 @@ class TestCompoundFilter(unittest.TestCase):
     """Tests for v2.1 AND/OR/parens grammar in scope filter expressions."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_compound_parser_exists(self):
@@ -9809,7 +9848,7 @@ class TestUncataloguedFolderMove(unittest.TestCase):
     were never in the cache to begin with)."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_resolve_scope_emits_folder_entries(self):
@@ -9878,7 +9917,7 @@ class TestLayoutFilter(unittest.TestCase):
     """
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_layout_in_scope_filter_fields(self):
@@ -9956,7 +9995,7 @@ class TestUnrecognized(unittest.TestCase):
     """Tests for --unrecognized / --alien: top-level entries Plex DB doesn't index."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_cmd_unrecognized_exists(self):
@@ -10030,7 +10069,7 @@ class TestOriginalLanguages(unittest.TestCase):
     """Tests for --original-languages backfill + country: / originallang: filter tokens."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_iso639_helper_exists(self):
@@ -10392,7 +10431,7 @@ class TestAudioLangPureVsCompleted(unittest.TestCase):
     """
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_pure_plex_view_assigned_in_cache_build(self):
@@ -10465,7 +10504,7 @@ class TestAudioLangCacheBuildFallback(unittest.TestCase):
     Plex's metadata is empty or 'unknown'."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_fallback_called_during_cache_build(self):
@@ -10503,7 +10542,7 @@ class TestSyncDispatchAndDoubleMarkerFix(unittest.TestCase):
     """Regression coverage for the v2.69 sync-S26 bug investigation."""
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_sync_dispatch_falls_back_to_args_namespace(self):
@@ -10628,7 +10667,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         cls.m = _import_tool('_myplex_v269')
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     # ---- State preservation (cmd_move + _sort_new_movies) ----
@@ -11882,7 +11921,7 @@ class TestNaming(unittest.TestCase):
     # --- 5b: CLI wiring ----------------------------------------------------
 
     def _read_script(self):
-        with open(MAIN_SCRIPT, 'r') as f:
+        with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
     def test_cli_registration(self):
@@ -12067,7 +12106,8 @@ class TestPlexConnectNotRequired(unittest.TestCase):
 class TestVersionAndStamp(unittest.TestCase):
     """--version identifies the exact build; --stamp-version [go] records the
     release commit and refuses every amend that would do harm.  Each stamp
-    test runs a COPY of my-plex.py in a throwaway repo with a bare remote."""
+    test runs a COPY of the tool -- launcher and both modules -- in a
+    throwaway repo with a bare remote."""
 
     GIT_ENV = {'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
                'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
@@ -12082,8 +12122,9 @@ class TestVersionAndStamp(unittest.TestCase):
         self.work = os.path.join(self.root, 'work')
         self.git('init', '-q', '--bare', self.remote, cwd=self.root)
         self.git('init', '-q', '-b', 'main', self.work, cwd=self.root)
-        self.script = os.path.join(self.work, 'my-plex.py')
-        with open(MAIN_SCRIPT) as f:
+        self.launcher = _tool_copy(self.work)
+        self.script = os.path.join(self.work, 'my_plex.py')    # the stamp's file
+        with open(self.script) as f:
             src = f.read()
         with open(self.script, 'w') as f:   # start unstamped, whatever the real file says
             f.write(re.sub(r'^SCRIPT_COMMIT\s*=.*$', 'SCRIPT_COMMIT  = ""', src, count=1, flags=re.M))
@@ -12103,13 +12144,13 @@ class TestVersionAndStamp(unittest.TestCase):
         return r.stdout.strip()
 
     def run_tool(self, *a):
-        return subprocess.run([sys.executable, self.script, *a], cwd=self.work, env=self.env,
+        return subprocess.run([sys.executable, self.launcher, *a], cwd=self.work, env=self.env,
                               capture_output=True, text=True, timeout=60)
 
     def new_commit(self):
         with open(self.script, 'a') as f:
             f.write('\n# a change worth stamping\n')
-        self.git('add', 'my-plex.py'); self.git('commit', '-q', '-m', 'second')
+        self.git('add', 'my_plex.py'); self.git('commit', '-q', '-m', 'second')
 
     def stamped(self):
         with open(self.script) as f:
@@ -12201,7 +12242,7 @@ class TestVersionNamesItsRelease(unittest.TestCase):
 
     def test_script_version_names_the_nearest_tag(self):
         here = os.path.dirname(MAIN_SCRIPT)
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             version = _must(re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M), 'SCRIPT_VERSION').group(1)
         def git(*a):
             return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
@@ -12224,19 +12265,25 @@ class TestVersionNamesItsRelease(unittest.TestCase):
 
 
 class TestRunViaSymlink(unittest.TestCase):
-    """my-plex is deployed as a symlink (/LINKS/bin/my-plex -> .../my-plex.py).
-    Everything it loads from beside itself must be found next to the REAL
-    file, not next to the link."""
+    """/LINKS/bin/my-plex may be a symlink to the launcher.  Everything it
+    loads from beside itself -- the modules, the suite -- must be found next
+    to the REAL file, not next to the link."""
 
     def test_runs_through_a_symlink_in_another_directory(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             link = os.path.join(d, 'my-plex')
             os.symlink(MAIN_SCRIPT, link)
-            r = subprocess.run([sys.executable, link, '--help'],
-                               capture_output=True, text=True, timeout=60)
+            # run BY NAME, as /LINKS/bin/my-plex is: the shebang's -I keeps the
+            # link's directory off sys.path, so only the launcher's own
+            # realpath can find the modules.  (`python3 link` would put the
+            # resolved directory on sys.path itself and prove nothing.)
+            r = subprocess.run([link, '--help'],
+                               capture_output=True, text=True, timeout=60,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
         out = r.stdout + r.stderr
         self.assertNotIn('my-plex_tests.py', out, f"looked for a sibling next to the link:\n{out[-600:]}")
+        self.assertNotIn('No module named', out, f"the modules were not found through the link:\n{out[-600:]}")
         self.assertEqual(r.returncode, 0, out[-600:])
 
 
@@ -12434,7 +12481,8 @@ class TestBareLibraryScope(unittest.TestCase):
 
 
 class TestTypeCheck(unittest.TestCase):
-    """pyright must report NOTHING about my-plex.py, under pyrightconfig.json.
+    """pyright must report NOTHING about my_plex_boot.py and my_plex.py, under
+    pyrightconfig.json.
 
     What a type check is worth here, concretely: four NameErrors sat in
     shipped commands until one was first run -- plan_movie and libs_affected
@@ -12453,12 +12501,12 @@ class TestTypeCheck(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('pyright'), "pyright is not installed")
     def test_main_script_is_clean(self):
-        project = os.path.dirname(os.path.realpath(MAIN_SCRIPT))
+        project = os.path.dirname(os.path.realpath(TOOL_SOURCE))
         cmd = [shutil.which('pyright') or 'pyright', '--outputjson', '-p', project]
         venv_python = os.path.join(os.path.expanduser('~/.python.venv/my-plex'), 'bin', 'python3')
         if os.path.isfile(venv_python):
             cmd += ['--pythonpath', venv_python]
-        r = subprocess.run([*cmd, MAIN_SCRIPT], capture_output=True, text=True, timeout=300)
+        r = subprocess.run([*cmd, BOOT_SOURCE, TOOL_SOURCE], capture_output=True, text=True, timeout=300)
         # pyright exits 1 whenever it reports anything, so the verdict is the
         # JSON, not the exit status; a crash prints no JSON at all.
         try:
@@ -12471,22 +12519,23 @@ class TestTypeCheck(unittest.TestCase):
                 for d in report.get('generalDiagnostics', [])
                 if d.get('severity') == 'error'
                 and d.get('rule') not in self.ENVIRONMENT_RULES
-                and os.path.realpath(d.get('file', '')) == os.path.realpath(MAIN_SCRIPT)]
-        self.assertEqual(hits, [], f"pyright reports {len(hits)} finding(s) in my-plex.py:\n  "
+                and os.path.realpath(d.get('file', '')) in (os.path.realpath(BOOT_SOURCE),
+                                                            os.path.realpath(TOOL_SOURCE))]
+        self.assertEqual(hits, [], f"pyright reports {len(hits)} finding(s) in the modules:\n  "
                                    + "\n  ".join(hits))
 
 
 class TestDeployedCopy(unittest.TestCase):
-    """my-plex is deployed as a COPY of the tool file alone -- my-plex_tests.py
-    is not beside it.  The suite is therefore loaded on demand: every ordinary
-    command must run without it, and --run-tests / --unittest must say in one
-    line that it is missing instead of dying in an import traceback."""
+    """A deployed copy may come without its suite -- my-plex_tests.py is not
+    beside the modules.  The suite is therefore loaded on demand: every
+    ordinary command must run without it, and --run-tests / --unittest must
+    say in one line that it is missing instead of dying in an import
+    traceback."""
 
     @classmethod
     def setUpClass(cls):
         cls._dir = tempfile.mkdtemp(prefix='my-plex-deployed-')
-        cls.copy = os.path.join(cls._dir, 'my-plex')
-        shutil.copy2(MAIN_SCRIPT, cls.copy)
+        cls.copy = _deployed_copy(cls._dir, with_suite=False)
 
     @classmethod
     def tearDownClass(cls):
@@ -12497,9 +12546,10 @@ class TestDeployedCopy(unittest.TestCase):
                               capture_output=True, text=True, timeout=180)
 
     def test_fixture_reproduces_a_deployed_copy(self):
-        """The fixture is only meaningful while the sidecar is genuinely absent."""
-        self.assertFalse(os.path.exists(os.path.join(self._dir, 'my-plex_tests.py')),
-                         "the fixture must hold the tool file alone")
+        """The fixture is only meaningful while the suite is genuinely absent."""
+        for sub in ('bin', os.path.join('lib', 'my-plex')):
+            self.assertFalse(os.path.exists(os.path.join(self._dir, sub, 'my-plex_tests.py')),
+                             "the fixture must hold the tool without its suite")
 
     def test_help_runs_without_the_test_suite(self):
         r = self._run('--help')
@@ -12522,23 +12572,17 @@ class TestDeployedCopy(unittest.TestCase):
 
 
 class TestDeployedCopyWithItsSuite(unittest.TestCase):
-    """A copy made by my-rollout is bin/my-plex plus lib/my-plex_tests.py,
-    and my-rollout's gate runs the PENDING COPY's own --run-tests: the suite
-    has to be found from there, or a copy is never offered again.
-
-    Flat and tool-prefixed, because my-rollout places a file but does not
-    create its parent: a request naming lib/my-plex/ fails with ERROR 00031.
-    It is also what global/lib already holds (my-rollout_steps-lib.sh)."""
+    """A copy made by my-rollout is bin/my-plex plus lib/my-plex/ holding the
+    two modules and the suite -- one request, `++my-plex + my_plex_boot.py
+    my_plex.py my-plex_tests.py`, deploys them together -- and my-rollout's
+    gate runs the PENDING COPY's own --run-tests: the suite has to be found
+    from there, or a copy is never offered again."""
 
     @classmethod
     def setUpClass(cls):
         cls._dir = tempfile.mkdtemp(prefix='my-plex-deployed-lib-')
-        os.makedirs(os.path.join(cls._dir, 'bin'))
-        os.makedirs(os.path.join(cls._dir, 'lib'))
-        cls.copy = os.path.join(cls._dir, 'bin', 'my-plex')
-        shutil.copy2(MAIN_SCRIPT, cls.copy)
-        shutil.copy2(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my-plex_tests.py'),
-                     os.path.join(cls._dir, 'lib', 'my-plex_tests.py'))
+        cls.copy = _deployed_copy(cls._dir, with_suite=True)
+        cls.lib = os.path.realpath(os.path.join(cls._dir, 'lib', 'my-plex'))
 
     @classmethod
     def tearDownClass(cls):
@@ -12547,6 +12591,7 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
     def test_fixture_has_no_suite_beside_the_tool(self):
         """Otherwise the test would pass through the checkout path instead."""
         self.assertFalse(os.path.exists(os.path.join(self._dir, 'bin', 'my-plex_tests.py')))
+        self.assertFalse(os.path.exists(os.path.join(self._dir, 'bin', 'my_plex.py')))
 
     def test_the_suite_is_found_in_lib(self):
         r = subprocess.run([sys.executable, '-B', self.copy, '--run-tests', 'errcodes'],
@@ -12555,70 +12600,66 @@ class TestDeployedCopyWithItsSuite(unittest.TestCase):
         self.assertNotIn('test suite not found', out, out[-800:])
         self.assertRegex(out, r'(?m)^1\.\.\d+$', "no TAP plan from the deployed copy")
         # Not just "it ran": the tests that read the tool's own source must
-        # find bin/my-plex, which is what MAIN_SCRIPT is overridden for.
+        # find lib/my-plex/, which is what the tool overrides the paths for.
         self.assertNotIn('FileNotFoundError', out, out[-1500:])
         self.assertEqual(r.returncode, 0, out[-1500:])
 
-    def test_the_copy_imports_itself_although_its_file_has_no_py(self):
-        """THE adversarial case, and the one the gate cannot see.
-
-        Seven scopes import my-plex as a module.  The gate runs a pending
-        copy whose file is still called my-plex.py, so they pass there; a
-        DEPLOYED copy is `bin/my-plex`, and spec_from_file_location() answers
-        None for a name with no extension.  Measured on horse 2026-11-03,
-        the same bytes both times: 4 ok as my-plex.py, 2 of 4 not ok as
-        my-plex.
-
-        So the probe runs against THIS fixture's extensionless copy, through
-        the one helper all nine sites now use -- take the explicit loader out
-        of it and this test is the first thing that says so.
-        """
-        snippet = _tool_import_snippet(['my-plex', '--help'], path=self.copy) + (
-            "os.write(2, b'IMPORTED ' + mp.__file__.encode())\n"
+    def test_the_deployed_module_imports_with_its_own_boot_module(self):
+        """Seven scopes import the tool as a module through one helper, in a
+        child interpreter too.  The tool's `import my_plex_boot` must find
+        the boot module BESIDE the file imported -- lib/my-plex/ here --
+        and not the one a child finds first on its own path: started in a
+        checkout, that is the checkout's, so the probe would pass while
+        testing the wrong bytes."""
+        snippet = _tool_import_snippet(['my-plex', '--help'],
+                                       path=os.path.join(self.lib, 'my_plex.py')) + (
+            "import my_plex_boot\n"
+            "os.write(2, ('IMPORTED ' + os.path.realpath(mp.__file__)\n"
+            "             + ' BOOT ' + os.path.realpath(my_plex_boot.__file__)).encode())\n"
         )
-        r = subprocess.run([sys.executable, '-B', '-c', snippet],
+        r = subprocess.run([sys.executable, '-B', '-c', snippet], cwd=os.path.dirname(TOOL_SOURCE),
                            capture_output=True, text=True, timeout=300)
         out = r.stdout + r.stderr
-        self.assertNotIn("has no attribute 'loader'", out,
-                         "spec_from_file_location() answered None for "
-                         f"{self.copy}:\n{out[-900:]}")
-        self.assertIn('IMPORTED', r.stderr,
-                      f"the copy did not import:\n{out[-1200:]}")
-        self.assertIn(self.copy, r.stderr,
+        self.assertIn('IMPORTED', r.stderr, f"the copy did not import:\n{out[-1200:]}")
+        self.assertIn(f"IMPORTED {self.lib}/my_plex.py", r.stderr,
                       "it imported something other than the copy")
+        self.assertIn(f"BOOT {self.lib}/my_plex_boot.py", r.stderr,
+                      "the copy's tool imported a boot module from elsewhere")
         self.assertEqual(r.returncode, 0, out[-900:])
 
     def test_only_main_script_knows_where_the_tool_is(self):
-        """MAIN_SCRIPT is the one owner of "where is the tool", because only
-        the tool can answer it: it overrides MAIN_SCRIPT with its own realpath
-        when it loads this suite.  A site that rebuilds the path from THIS
-        file's directory instead gets <tests dir>/my-plex.py -- right in a
-        checkout by accident, and absent beside the deployed suite in
-        global/lib, where there is no my-plex.py at all.
+        """MAIN_SCRIPT, TOOL_SOURCE and BOOT_SOURCE are the one owner of
+        "where is the tool", because only the tool can answer it: it
+        overrides all three with its own paths when it loads this suite.  A
+        site that rebuilds a path from THIS file's directory instead is right
+        in a checkout by accident, and wrong for a deployed copy, whose
+        launcher sits in bin/ while the suite sits in lib/my-plex/.
 
         Five sites had leaked that way (two _read_script copies against ~70
         correct ones, and three inline), so the convention is now grepped
         rather than remembered.  Fixture paths like os.path.join(d,
-        'my-plex.py') are a COPY this suite makes, not a guess at where the
+        'my_plex.py') are a COPY this suite makes, not a guess at where the
         tool lives, so they are not matched.
         """
-        tool_file = 'my-plex' + '.py'   # split, so this test cannot match itself
+        # split, so this test cannot match itself
+        names = ("'my-" + "plex'", "'my_plex" + ".py'", "'my_plex_boot" + ".py'")
+        owners = ('MAIN_SCRIPT =', 'TOOL_SOURCE =', 'BOOT_SOURCE =')
         with open(os.path.realpath(__file__)) as f:
             lines = f.read().splitlines()
         leaks = [f"{n}: {l.strip()}" for n, l in enumerate(lines, 1)
-                 if '__file__' in l and tool_file in l
-                 and not l.startswith('MAIN_SCRIPT =')]
+                 if '__file__' in l and any(name in l for name in names)
+                 and not l.startswith(owners)]
         self.assertEqual(leaks, [],
                          "these derive the tool's path from this file instead "
-                         "of using MAIN_SCRIPT:\n  " + "\n  ".join(leaks))
+                         "of using MAIN_SCRIPT / TOOL_SOURCE / BOOT_SOURCE:\n  " + "\n  ".join(leaks))
 
     def test_help_answers_without_a_venv_and_does_not_build_one(self):
         """The gate asks `--help` to find out what a tool can do, on a machine
         that may have neither the venv nor the network to make one, with
         nobody at the screen to answer for it. Building an environment to
         answer that question is how --help comes back empty and the copy goes
-        out untested. --version is already answered before the venv block;
-        --help now is too.
+        out untested. A run that only prints skips the venv in the boot
+        module: --version and --help alike.
 
         The script is run DIRECTLY, so its shebang picks the interpreter the
         gate's run gets -- not sys.executable, which is the venv this suite
@@ -12803,7 +12844,7 @@ class TestTrashNotRemove(unittest.TestCase):
     def _body(self):
         """The function's CODE, with comment lines dropped: a comment that
         NAMES what was banned must not fail the check."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         m = re.search(r'def my_plex_file_operation\(.*?\n(.*?)(?=\n################################)',
                       src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
@@ -12820,7 +12861,7 @@ class TestTrashNotRemove(unittest.TestCase):
         is not recoverable. The confirmation prompt two lines further down
         had the three verbs right all along; it is the analogue this copies.
         """
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         # Two commands print a "--try: would trash" line; the orphaned one is
         # the one that also rmdirs.
         preview = ''
@@ -12876,7 +12917,7 @@ class TestTrashNotRemove(unittest.TestCase):
 
     def test_an_overwrite_trashes_what_it_replaces(self):
         """Both --move --overwrite paths: the wrapper, and the bare file."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         self.assertIn("my_plex_file_operation('TRASH', dst_wrapper", src,
                       "an overwrite must trash the destination wrapper")
         self.assertIn("my_plex_file_operation('TRASH', new_path", src,
@@ -12885,7 +12926,7 @@ class TestTrashNotRemove(unittest.TestCase):
                          "no caller may ask for a plain remove any more")
 
     def test_the_emptied_subdirectory_is_an_rmdir(self):
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         self.assertIn("my_plex_file_operation('RMDIR', file1_dir", src,
                       "removing an emptied subdirectory is exactly what RMDIR is for")
 
@@ -12900,7 +12941,7 @@ class TestAtomicPickleWrites(unittest.TestCase):
 
     def test_no_pickle_dump_outside_the_atomic_helper(self):
         import ast
-        tree = ast.parse(io.open(MAIN_SCRIPT, encoding='utf-8').read())
+        tree = ast.parse(io.open(TOOL_SOURCE, encoding='utf-8').read())
         offenders = []
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -12918,7 +12959,7 @@ class TestAtomicPickleWrites(unittest.TestCase):
                          + ", ".join(offenders))
 
     def test_the_checkpoint_uses_the_helper(self):
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         self.assertIn("_atomic_pickle_dump(partial_cache_file, checkpoint_data)", src,
                       "the resume checkpoint must be written atomically")
 
@@ -12934,12 +12975,8 @@ class TestTopLevelHandlers(unittest.TestCase):
     @staticmethod
     def _copy_with(first_line_of_main):
         d = tempfile.mkdtemp(prefix='my-plex-handler-')
-        dst = os.path.join(d, 'my-plex.py')
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
-        assert src.count('\ndef main():\n') == 1, "main() is not where this test thinks"
-        src = src.replace('\ndef main():\n',
-                          f'\ndef main():\n    {first_line_of_main}\n', 1)
-        io.open(dst, 'w', encoding='utf-8').write(src)
+        dst = _tool_copy(d, {'tool': [('\ndef main():\n',
+                                       f'\ndef main():\n    {first_line_of_main}\n')]})
         return d, dst
 
     def test_the_status_it_prints_is_the_one_it_exits_with(self):
@@ -13036,23 +13073,12 @@ class TestTopLevelHandlers(unittest.TestCase):
         instead of calling pip, so the interrupt lands exactly where it did
         then. Nothing else is changed."""
         import signal, tempfile, shutil, time
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
         d = tempfile.mkdtemp(prefix='my-plex-bootstrap-int-')
         try:
-            copy = os.path.join(d, 'my-plex.py')
-            with open(copy, 'w') as f:
-                f.write(src
-                        .replace('def _bootstrap_venv():',
-                                 'def _bootstrap_venv():\n'
-                                 '    import time; time.sleep(30)', 1)
-                        .replace('def _inside_our_venv():',
-                                 'def _inside_our_venv():\n'
-                                 '    return False', 1)
-                        .replace('def _venv_has_deps():',
-                                 'def _venv_has_deps():\n'
-                                 '    return False', 1))
-            os.chmod(copy, 0o755)
+            copy = _tool_copy(d, {'boot': [
+                ('def _bootstrap_venv():', 'def _bootstrap_venv():\n    import time; time.sleep(30)'),
+                ('def _inside_our_venv():', 'def _inside_our_venv():\n    return False'),
+                ('def _venv_has_deps():', 'def _venv_has_deps():\n    return False')]})
             p = subprocess.Popen([sys.executable, copy, '--list-libraries'],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True,
@@ -13118,7 +13144,7 @@ class TestTopLevelHandlers(unittest.TestCase):
         path -- the one a long rebuild actually hits -- passed 0 as well, so a
         wrapper that checked the status was told the run had done its job."""
         import ast
-        tree = ast.parse(io.open(MAIN_SCRIPT, encoding='utf-8').read())
+        tree = ast.parse(io.open(TOOL_SOURCE, encoding='utf-8').read())
         offenders = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
@@ -13134,7 +13160,7 @@ class TestTopLevelHandlers(unittest.TestCase):
     def test_err_still_exits_one_by_default(self):
         """err() gained an exit code for the handler above; the everyday call
         must be unchanged -- every other caller relies on 1."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(BOOT_SOURCE, encoding='utf-8').read()
         self.assertIn('def err(err_code: str, err_msg: str = "", exit_code: int = 1)', src)
         self.assertIn('sys.exit(exit_code)', src)
 
@@ -13214,7 +13240,7 @@ class TestSshOptions(unittest.TestCase):
         -- has nothing to act on. _ssh_remote() asks it what an ssh alias
         stands for, which is config reading, not talking to a host. Any ssh
         that could connect is still an offender."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         lines = src.splitlines()
         offenders = [f"line {n}" for n, line in enumerate(lines, 1)
                      if "['ssh'," in line.replace(" ", "")
@@ -13300,7 +13326,7 @@ class TestSecretArgs(unittest.TestCase):
 
     def test_the_xml_url_is_treated_as_a_secret_too(self):
         """Its value carries X-Plex-Token=... inside it."""
-        src = io.open(MAIN_SCRIPT, encoding='utf-8').read()
+        src = io.open(TOOL_SOURCE, encoding='utf-8').read()
         self.assertIn("_resolve_secret_arg('--plex-xml-url'", src)
         self.assertIn("_resolve_secret_arg('--plex-token'", src)
 
@@ -13308,7 +13334,16 @@ class TestSecretArgs(unittest.TestCase):
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
-    message greps to exactly one line."""
+    message greps to exactly one line.  ONE numbering across the two modules,
+    my_plex_boot.py first, then my_plex.py, as the renumber command runs."""
+
+    @staticmethod
+    def _source() -> str:
+        """The two modules as one text, in numbering order."""
+        with open(BOOT_SOURCE) as f:
+            boot = f.read()
+        with open(TOOL_SOURCE) as f:
+            return boot + f.read()
 
     # [ \t]*\( -- a call written `err (1008, ...)` is a call: it escaped both this
     # check and the renumber one-liner for as long as the pattern demanded `err(`.
@@ -13316,21 +13351,46 @@ class TestErrCodes(unittest.TestCase):
     BARE = re.compile(r'\berr[ \t]*\(\s*(?!"\d{5}"|err_code\b)[^\s)]')
 
     def test_codes_are_unique_and_in_file_order(self):
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
+        src = self._source()
         found = [m.group(0) for m in self.CALL.finditer(src)]
         codes = [m.group(2) for m in self.CALL.finditer(src)]
         self.assertGreater(len(codes), 100, "the pattern no longer finds the err() calls")
         bad = [f for f in found if not re.search(r'"\d{5}"$', f)]
         self.assertEqual(bad, [], "every code is a quoted five-digit string")
         self.assertEqual(codes, [f"{i:05d}" for i in range(1, len(codes) + 1)],
-                         "codes must run 00001.. in file order: renumber with the one-liner in the header")
+                         "codes must run 00001.. in file order: renumber with the one-liner in my_plex_boot.py")
 
     def test_every_err_call_carries_a_code(self):
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
+        src = self._source()
         self.assertEqual(self.BARE.findall(src), [],
                          "an err() call without a five-digit code")
+
+    def test_the_renumber_command_numbers_both_files_as_one(self):
+        """The command in my_plex_boot.py's header is what a person runs after
+        adding a call, so it is run here, on copies whose codes are all
+        wrong.  It must give back exactly the files as they are -- one
+        counter across both, boot first.  A command that starts its count
+        again in the second file numbers my_plex.py from 00001 a second time."""
+        with open(BOOT_SOURCE) as f:
+            boot = f.read()
+        cmd = _must(re.search(r'^#   (perl .*)$', boot, re.M), 'the renumber command').group(1)
+        d = tempfile.mkdtemp(prefix='my-plex-renumber-')
+        try:
+            originals = {}
+            for path in (BOOT_SOURCE, TOOL_SOURCE):
+                with open(path) as f:
+                    text = f.read()
+                originals[os.path.basename(path)] = text
+                with open(os.path.join(d, os.path.basename(path)), 'w') as f:
+                    f.write(self.CALL.sub(lambda m: m.group(1) + '"00000"', text))
+            r = subprocess.run(['sh', '-c', cmd], cwd=d, capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name, text in originals.items():
+                with open(os.path.join(d, name)) as f:
+                    self.assertTrue(f.read() == text,
+                                    f"{name}: the renumber command does not give back its codes")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_a_call_written_with_a_space_is_still_seen(self):
         """A space before the paren must not hide a call from either check.
@@ -13391,8 +13451,8 @@ class TestQuiet(unittest.TestCase):
                            "-V did not override -Q")
 
     def test_version_is_silenced_too_so_everything_means_everything(self):
-        """--version is answered at module level, above the venv bootstrap, and
-        so was printing straight past -Q.  The help page claims EVERYTHING on
+        """--version is answered when the tool is imported, and so was printing
+        straight past -Q.  The help page claims EVERYTHING on
         stdout; an exception here would make that claim false."""
         r = self._run('-Q', '--version')
         self.assertEqual(r.stdout, '', "--version printed past -Q")
@@ -13405,9 +13465,11 @@ class TestQuiet(unittest.TestCase):
         would still pass, because they only exercise Python's own print().
         Redirecting the descriptor is what makes the claim true, and this is
         the test that can tell the two apart."""
-        snippet = _tool_import_snippet(['my-plex.py', '-Q']) + (   # -Q acts at module level
+        snippet = _tool_import_snippet(['my-plex', '-Q'], path=BOOT_SOURCE) + (
             "import subprocess\n"
-            "assert mp._QUIET_ACTIVE, 'the module did not go quiet'\n"
+            "assert mp.quiet_argv(sys.argv), '-Q was not read as quiet'\n"
+            "mp.go_quiet()\n"
+            "assert mp.QUIET_ACTIVE, 'the module did not go quiet'\n"
             "subprocess.run(['/bin/echo', 'LEAKED_FROM_CHILD'])\n"
             "os.write(2, b'child-ran\\n')\n"
         )
@@ -13423,8 +13485,8 @@ class TestQuiet(unittest.TestCase):
         stdin -- a hang with nothing on screen to explain it.  Under -Q the
         one place that asks refuses instead, and names the flags that answer
         in advance."""
-        snippet = _tool_import_snippet(['my-plex.py']) + (
-            "mp._QUIET_ACTIVE = True\n"
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "import my_plex_boot; my_plex_boot.QUIET_ACTIVE = True\n"
             "mp.prompt_yes_no('Trash 400 files?')\n"
         )
         r = subprocess.run([sys.executable, '-B', '-c', snippet],
@@ -13436,8 +13498,8 @@ class TestQuiet(unittest.TestCase):
     def test_an_answer_given_in_advance_is_still_honoured_under_Q(self):
         """-Y/--yes is the tool's own answer for an unattended run, so -Q must
         not turn a pre-answered question into a refusal."""
-        snippet = _tool_import_snippet(['my-plex.py']) + (
-            "mp._QUIET_ACTIVE = True\n"
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "import my_plex_boot; my_plex_boot.QUIET_ACTIVE = True\n"
             "mp.AUTO_YES = True\n"
             "assert mp.prompt_yes_no('Trash 400 files?') is True\n"
             "os.write(2, b'answered\\n')\n"
@@ -13454,7 +13516,7 @@ class TestQuiet(unittest.TestCase):
         self.assertIn('-Q, --quiet', r.stdout, "the summary does not name -Q")
         page = self._run('--help', 'quiet')
         self.assertIn('QUIET HELP', page.stdout, "there is no --help quiet page")
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         self.assertIn("{-Q,--quiet}", src, "the zsh completion has no -Q")
         self.assertIn("'QUIET': False", src, "QUIET is not a config key")
@@ -13494,10 +13556,10 @@ class TestVenvDetection(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _ask(self, interpreter, expected):
-        """Import my-plex under `interpreter`, point it at the temp venv, and
-        have it answer _inside_our_venv().  --help in argv keeps the module's
-        own venv block from re-execing while we are asking."""
-        snippet = _tool_import_snippet(['my-plex.py', '--help']) + (
+        """Import the boot module under `interpreter`, point it at the temp
+        venv, and have it answer _inside_our_venv().  Importing it decides
+        nothing -- its main() does -- so nothing re-execs while we ask."""
+        snippet = _tool_import_snippet(['my-plex', '--help'], path=BOOT_SOURCE) + (
             "mp.VENV_DIR = %r\n"
             "mp.VENV_PYTHON = os.path.join(mp.VENV_DIR, 'bin', 'python3')\n"
             "os.write(2, (b'ANSWER=' + str(mp._inside_our_venv()).encode()))\n"
@@ -13583,7 +13645,7 @@ class TestReadmeFlagsExist(unittest.TestCase):
         """Every option string the tool's parsers accept, read from the
         add_argument() calls themselves rather than from --help, which hides
         the ones carrying argparse.SUPPRESS."""
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             tree = ast.parse(f.read())
         flags = set()
         for node in ast.walk(tree):
@@ -13695,7 +13757,7 @@ class TestReadmeFlagsExist(unittest.TestCase):
         # as usable is exactly the defect this test exists for.  Subtracting
         # them is how the first version of this test passed against a README
         # that still documented `--mv`.
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         retired = set(re.findall(r"'(--[a-z][a-z0-9-]*)':\s*'--", src))
         missing = sorted(named - registered - self.HANDLED_OUTSIDE_ARGPARSE)
@@ -13809,7 +13871,7 @@ class TestInstallFirewallRules(unittest.TestCase):
         for urlopen. themoviedb.org, thetvdb.com and imdb.com also appear in
         the source, as links in --help text and in a display column, and
         allowing those would widen the rules for nothing."""
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         # A FETCHED url is BUILT -- `url = f'https://host/...{id}'` -- because
         # it interpolates an id or a query. A url that is a plain constant is a
@@ -13846,7 +13908,7 @@ class TestInstallFirewallRules(unittest.TestCase):
         is what stops a later edit quietly dropping one of them. The hosts
         come from NETWORK_HOSTS in the source, not from the output, or the
         test would only check that the output agrees with itself."""
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         block = src.split('NETWORK_HOSTS = (', 1)[1].split('\n)', 1)[0]
         hosts = re.findall(r"\('([a-z0-9.-]+)',", block)
@@ -14106,11 +14168,11 @@ class TestNeverRunsAsRoot(unittest.TestCase):
     def test_the_refusal_comes_before_the_venv_bootstrap(self):
         """Order is the whole point: a refusal after the bootstrap has already
         created /var/root/.python.venv is too late to be one."""
-        with open(MAIN_SCRIPT) as f:
+        with open(BOOT_SOURCE) as f:
             src = f.read()
-        refusal = src.find('if _AS_ROOT and not _PRINT_ONLY_RUN:')
+        refusal = src.find('if as_root() and not print_only_run(argv):')
         self.assertGreater(refusal, -1, "the root refusal is gone")
-        bootstrap = src.find('_bootstrap_venv()\n')
+        bootstrap = src.find('                _bootstrap_venv()\n')
         self.assertGreater(bootstrap, -1, "the venv bootstrap call is gone")
         self.assertLess(refusal, bootstrap,
                         "the root refusal must come BEFORE the venv bootstrap")
@@ -14118,16 +14180,15 @@ class TestNeverRunsAsRoot(unittest.TestCase):
     def test_it_refuses_with_the_house_error_and_says_what_to_do(self):
         """Run for real -- the suite is not root, so the one token that decides
         it is forced true in a copy that differs in nothing else."""
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
-        self.assertEqual(src.count('os.geteuid() == 0'), 1,
+        srcs = ''
+        for path in (MAIN_SCRIPT, BOOT_SOURCE, TOOL_SOURCE):
+            with open(path) as f:
+                srcs += f.read()
+        self.assertEqual(srcs.count('os.geteuid() == 0'), 1,
                          "more than one root check: this test neuters the wrong one")
         d = tempfile.mkdtemp(prefix='my-plex-asroot-')
         try:
-            copy = os.path.join(d, 'my-plex.py')
-            with open(copy, 'w') as f:
-                f.write(src.replace('os.geteuid() == 0', 'True', 1))
-            os.chmod(copy, 0o755)
+            copy = _tool_copy(d, {'boot': [('os.geteuid() == 0', 'True')]})
             home = os.path.join(d, 'home')
             os.makedirs(home)
             r = subprocess.run([sys.executable, copy, '--list-libraries'],
@@ -14154,14 +14215,9 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         a venv appearing in that HOME.  Put the refusal back above them and
         all three come back as ERROR 00001.
         """
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
         d = tempfile.mkdtemp(prefix='my-plex-rootprint-')
         try:
-            copy = os.path.join(d, 'my-plex.py')
-            with open(copy, 'w') as f:
-                f.write(src.replace('os.geteuid() == 0', 'True', 1))
-            os.chmod(copy, 0o755)
+            copy = _tool_copy(d, {'boot': [('os.geteuid() == 0', 'True')]})
             for argv, what in (([], 'the bare run'), (['--help'], '--help'),
                                (['--version'], '--version')):
                 home = os.path.join(d, 'home' + (argv[0] if argv else 'bare'))
@@ -14331,15 +14387,10 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         A copy whose early rule calls EVERY run print-only stands in for any
         argv it misjudges: as root, `--list-libraries` must still end in the
         refusal, not in the command."""
-        with open(MAIN_SCRIPT) as f:
-            src = f.read()
-        early = '_PRINT_ONLY_RUN = (len(sys.argv) == 1'
-        self.assertEqual(src.count(early), 1, "the early print-only rule moved: this test neuters nothing")
+        early = '    return (len(argv) == 1 or version_asked(argv)'
         d = tempfile.mkdtemp(prefix='my-plex-rootbackstop-')
         try:
-            copy = os.path.join(d, 'my-plex.py')
-            with open(copy, 'w') as f:
-                f.write(src.replace(early, '_PRINT_ONLY_RUN = True or (len(sys.argv) == 1', 1))
+            copy = _tool_copy(d, {'boot': [(early, '    return True or (len(argv) == 1 or version_asked(argv)')]})
             conf = os.path.join(d, 'my-plex.conf')
             with open(conf, 'w') as f:
                 f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"
@@ -15879,7 +15930,7 @@ class TestLegacyInlineBlock(unittest.TestCase):
             self.assertIn(key, d)
         self.assertNotIn('obj_by_filepath', m.build_media_cache_dict(include_paths=False))
         self.assertEqual(m.build_media_cache_dict(library_stats={'t': 1})['library_stats'], {'t': 1})
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         inline = re.findall(r"'obj_by_id':\s*PLEX_Media\.OBJ_BY_ID,\s*\n\s*'obj_by_movie'", src)
         self.assertLessEqual(len(inline), 1, "a cache dict built by hand beside build_media_cache_dict()")
@@ -15887,7 +15938,7 @@ class TestLegacyInlineBlock(unittest.TestCase):
     def test_argv_normalisation_and_global_list_go_through_their_helpers(self):
         import inspect
         m = self._mod()
-        with open(MAIN_SCRIPT) as f:
+        with open(TOOL_SOURCE) as f:
             src = f.read()
         self.assertIn('def inject_before_first_match(', src)
         self.assertGreaterEqual(len(re.findall(r'inject_before_first_match\(', src)), 3)
@@ -16107,9 +16158,9 @@ def _run_unittest_only(unittest_classes):
 def run_regression_tests(scope=None):
     """Run the suite: all of it, one scope, or the tests whose title matches.
 
-    Usage: my-plex.py --run-tests          (the whole suite)
-           my-plex.py --run-tests <scope>  (one scope: see describe_test_scopes())
-           my-plex.py --run-tests <title>  (the tests whose title contains it)
+    Usage: my-plex --run-tests          (the whole suite)
+           my-plex --run-tests <scope>  (one scope: see describe_test_scopes())
+           my-plex --run-tests <title>  (the tests whose title contains it)
     Output is TAP: the plan first, then one line per test (_run_unittest_only).
     Exit codes: 0 = every test passed, 1 = a failure, or nothing matched.
     """

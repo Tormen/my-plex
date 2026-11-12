@@ -234,7 +234,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 ```bash
 # Clone and add to PATH
 git clone https://github.com/Tormen/my-plex.git
-ln -s "$(pwd)/my-plex/my-plex.py" /usr/local/bin/my-plex   # or anywhere in your PATH
+ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex      # or anywhere in your PATH
 
 # Configure
 my-plex --create-config ~/.my-plex.conf      # Write default config to file: mode 0600, never over an existing file
@@ -253,8 +253,10 @@ with others (`-VH`) is refused as root. As root they write nothing into
 `/var/root` either -- no completion, no `~/.my-plex` -- while every run as a
 user installs the completion. Reading what a tool is, is not using it.
 
-That's it. There is no wrapper script and nothing to install by hand:
-`my-plex.py` is the whole tool, and on its first run it
+That's it. Nothing to install by hand: `my-plex` is a launcher of a few
+lines that finds its two modules beside itself -- `my_plex_boot.py`, which
+decides who runs and in what interpreter, and `my_plex.py`, the tool -- and
+on its first run it
 - creates its own virtualenv (`~/.python.venv/my-plex/`) with the stdlib
   `venv` module and re-executes itself inside it,
 - installs its two dependencies there (`plexapi`, `readchar`),
@@ -517,13 +519,13 @@ so a copy that fails its tests is never promoted.
 
 The suite lives in `my-plex_tests.py` and is loaded only by `--run-tests` /
 `--unittest` -- never at import time, which is what once killed every command
-on a deployed copy. It is looked for beside the tool file (a checkout), then in
-`../lib/` (deployed: `bin/my-plex` + `lib/my-plex_tests.py`, which is how
-`.my-rollout.local` requests it -- flat and tool-prefixed, like the
-`my-rollout_steps-lib.sh` already sitting there, because my-rollout places a
-file but does not create its parent directory). The tool tells the suite its own
-path as it loads it, because a third of the tests read the tool's source and on
-a deployed copy that file is `bin/my-plex`.
+on a deployed copy. It is looked for beside the modules: a checkout holds the
+launcher, the modules and the suite side by side, and a deployed copy is
+`bin/my-plex` with `my_plex_boot.py`, `my_plex.py` and `my-plex_tests.py` in
+`lib/my-plex/` -- one request in `.my-rollout.local`, `++my-plex +
+my_plex_boot.py my_plex.py my-plex_tests.py`, deploys them as one copy. The tool
+tells the suite where the launcher and the modules are as it loads it, because
+the tests run the one and read the others.
 
 ### Type checking
 
@@ -536,7 +538,7 @@ inside its own venv, and without it pyright cannot resolve `plexapi` or
 `readchar` and reports those imports as errors.
 
 `my-plex --run-tests typecheck` runs the part of this that is already green -- no
-undefined and no possibly-unbound name in `my-plex.py` -- and is skipped when
+undefined and no possibly-unbound name in `my_plex_boot.py` and `my_plex.py` -- and is skipped when
 pyright is not installed.  The remaining findings are listed in the project's
 TODO.
 
@@ -554,7 +556,7 @@ my-plex --stamp-version go     # record HEAD in SCRIPT_COMMIT, amend HEAD
   by one, because the stamp amends HEAD and a commit cannot contain its own sha.
 - Release order: commit, `--stamp-version go`, push. The stamp refuses a
   commit that is already pushed, anything staged, or uncommitted edits to
-  `my-plex.py` itself.
+  `my_plex.py` itself.
 - A tagged version number is never reused: once HEAD has moved past the tag
   for `SCRIPT_VERSION`, bump it (`my-plex --run-tests version` enforces this).
 

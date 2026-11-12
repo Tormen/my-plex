@@ -4,9 +4,11 @@
   // No path is recorded here -- run pyright with the venv active, or pass
   // --pythonpath; README, "Type checking", has the command.
   //
-  // standard, not strict: strict reports 23540 findings on my-plex.py, which
+  // standard, not strict: strict reports 23540 findings on my_plex.py, which
   // is a wall rather than a gate.  Strict is the goal; TODO.local.md tracks it.
-  "include": ["my-plex.py", "my-plex_tests.py"],
+  // The launcher `my-plex` is no .py file, so pyright does not read it;
+  // it is a few lines that import my_plex_boot and call its main().
+  "include": ["my_plex_boot.py", "my_plex.py", "my-plex_tests.py"],
   "exclude": ["playground", "__pycache__"],
   "typeCheckingMode": "standard"
 }

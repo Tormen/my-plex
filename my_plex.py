@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # =============================================================================
 # MY-PLEX GLOSSARY
 # Terms used in my-plex that differ from or extend Plex's own naming.
@@ -57,12 +55,8 @@
 # =============================================================================
 
 # Coding guidelines, architecture docs, and test policies: see README.md
-# Error codes: err() takes a five-digit string code ("00042"), UNIQUE per source line,
-# numbered from 00001 in file order with no gap, so grepping a code lands on
-# the one line that raised it.  _stamp_fail() and the _media_api_action()
-# callers share the numbering.  After adding a call (any placeholder code),
-# renumber the whole file (`my-plex --run-tests errcodes` checks the result):
-#   perl -0pi -e '$n=0; s/(\b(?:err|_stamp_fail)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my-plex.py
+# Error codes: one numbering across my_plex_boot.py and this file -- the rule
+# and the renumber command are in my_plex_boot.py, beside err().
 
 # ---------------------------------------------------------------------------
 # Version / license constants.
@@ -82,186 +76,22 @@ SCRIPT_LICENSE_SHORT = "GPL-3.0-or-later (copyleft)"
 SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 
 # ---------------------------------------------------------------------------
-# Venv bootstrap: ensure we run inside a venv with plexapi+readchar installed.
-# If not, create the venv, install deps, and re-exec ourselves in it.
+# The boot module ran before this one was imported: it refused root, applied
+# -Q, and re-executed the launcher inside the venv when this run needs it.
+# It owns err() and the predicates; this module asks them, never a copy.
 # ---------------------------------------------------------------------------
 import os
 import subprocess
 import sys
 from typing import Any, Callable, NoReturn, TYPE_CHECKING
 
+import my_plex_boot as _boot
+from my_plex_boot import err
 
-def err(err_code: str, err_msg: str = "", exit_code: int = 1) -> NoReturn:
-    """Report and stop.  exit_code is for the few callers that must exit with
-    something other than 1 -- the top-level bug handler exits 70.
-
-    `ERROR <code> [<exit>]: <text>` is the house shape.  The CODE is there to
-    be grepped for: it identifies the source line that raised this, and
-    nothing else in the message does.  The EXIT STATUS is printed beside it
-    because the code holds both and a caller sees only one of them -- so a
-    message claiming [1] while the process exits 70 is visible in ordinary
-    output instead of having to be debugged.
-
-    Defined HERE, above everything, because the first things that can fail
-    are the venv bootstrap and the refusal below -- and an error from those
-    is an error like any other.  They used to print their own `ERROR: ...`
-    with no code, which is the one thing a code exists to prevent.
-    """
-    if len( err_msg )==0: err_msg = "This error should not be. Please contact the maintainer of this software. Thank you!"
-    print(f"\nERROR {err_code} [{exit_code}]: {err_msg}\n", file=sys.stderr)
-    sys.exit(exit_code)
-
-
-# A run that only PRINTS needs nothing from the venv, and must never build
-# one.  A deployment gate asks `my-plex --help` to find out what this tool
-# can do -- on a machine that may have neither the venv nor the network to
-# make one, and with nobody at the screen to answer for it.  Building an
-# environment in order to answer that question is how `--help` comes back
-# empty and a copy goes out untested.  The bare run is one of these: it
-# prints the usage, so it must not build an environment to do it either.
-#
-# The ROOT rule below reads this same predicate, because it is the same
-# question asked twice: does this run need anything of the user's?  A run
-# that only prints needs nothing -- not the venv, not the cache, not the
-# config -- so there is nothing for root to put in the wrong home, and
-# refusing it would only hide the help from whoever is in a root shell.
-# It is answered HERE, this early, because it reads nothing but argv.
-# It reads argv the way main_parser will: only the tokens before a `--`,
-# after which every token is a positional (`-U -Y -- --help` asks for no
-# help -- matched anyway, it ran --update-cache as root).  The help flags
-# are main_parser's `-H` / `--help`, in every spelling it accepts with a
-# WHAT: `--help WHAT`, `--help=WHAT`, `-HWHAT`.  `-h` is no flag of
-# my-plex, and counting it let a root `my-plex -h` into a real run.
-# Bundled into other short flags (`-VH`) it is not counted: as root that is
-# refused, like any argv this misjudges -- the parser has the last word
-# (the second root check in main).
-_ARGV_OPTIONS = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
-_VERSION_ASKED = any(a in ('--version', '-version') for a in _ARGV_OPTIONS)
-_PRINT_ONLY_RUN = (len(sys.argv) == 1 or _VERSION_ASKED
-                   or any(a == '--help' or a.startswith('--help=') or a.startswith('-H')
-                          for a in _ARGV_OPTIONS))
-
-# my-plex runs as the user whose Plex and whose media files these are, and as
-# nobody else.  ROOT is refused for every command that DOES anything, because
-# as root this tool is wrong in two directions at once: everything it keeps
-# -- the venv it builds on first use, the cache, the config it reads, the zsh
-# completion it installs -- lands in /var/root instead of that user's home,
-# and everything it says about "the Python that runs my-plex" (the firewall
-# rule --install names) would name root's interpreter, a process that never
-# runs.  Nothing here needs privilege: where a step genuinely does, --install
-# prints the command for a root shell and this tool writes nothing itself.
-#
-# It stays the FIRST decision in the file, and the predicate moved up to meet
-# it rather than the other way round, for two reasons: a refusal that fires
-# after the bootstrap has built /var/root/.python.venv is too late to be one,
-# and `err` codes run in FILE ORDER, so 00001 has to be the first one here.
-# (Moving this block below the --version answer put 00001 after 00015 and
-# broke that order -- caught by the full suite on ada, 2026-11-03.)
-#
-# _AS_ROOT is asked ONCE, here.  Past the refusal, root is only ever on a
-# print-only run, and such a run writes nothing into root's home either: the
-# zsh completion and ~/.my-plex, which every run of an ordinary user writes,
-# are skipped on it (their two call sites read this).
-_AS_ROOT = os.geteuid() == 0
-
-
-def _root_refusal():
-    """The text of the root refusal -- one text, said at both root checks."""
-    return ("my-plex does not run as root -- run it as the user whose Plex this is.\n"
-            f"  (this run: euid 0, HOME={os.environ.get('HOME', '?')})\n"
-            "Possible reasons:\n"
-            "  - sudo, or a root shell: drop it, my-plex needs no privilege at all\n"
-            "  - a rollout step: give it `# user: <that user>` instead of root\n"
-            "  - the firewall rules: run `my-plex --install` as that user -- it\n"
-            "    prints the root commands that write them, and writes none itself\n"
-            "  - only READING what this tool is: `my-plex`, `--help [WHAT]` (or\n"
-            "    `-H`) and `--version` print and touch nothing, so they work as root")
-
-
-if _AS_ROOT and not _PRINT_ONLY_RUN:
-    err("00001", _root_refusal())
-
-VENV_DIR = os.path.expanduser("~/.python.venv/my-plex")
-VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3")
-VENV_DEPS = ["plexapi", "readchar"]
-
-# Set on the re-exec below, so a second one that lands nowhere is an error
-# rather than an endless loop.
-_VENV_REEXEC_MARK = "MY_PLEX_VENV_REEXEC"
-
-
-def _inside_our_venv():
-    """True when the interpreter running this IS the one in VENV_DIR.
-
-    sys.prefix is the venv's own directory inside a venv, and the base
-    installation's prefix outside it.  That is the only thing that answers
-    this question.
-
-    Comparing sys.executable with VENV_PYTHON does NOT answer it, which is
-    how this was wrong: a venv's bin/python3 is a symlink to the interpreter
-    the venv was built FROM, so os.path.realpath() of both sides yields that
-    same base interpreter whenever the venv was built from the python3 the
-    shebang picks.  The comparison then says "already inside", nothing
-    re-execs, and the run continues with none of the venv's site-packages --
-    a ModuleNotFoundError on the first `import readchar`.  It stayed hidden
-    because a machine whose venv is a DIFFERENT python version from its
-    python3 compares two different paths and works by accident.
-    """
-    return os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
-
-
-def _exec_in_venv():
-    """Hand this run over to the venv's interpreter, with the same arguments.
-
-    Refuses a second attempt: if we re-exec and still do not land inside,
-    something is wrong with the venv itself (a missing or unreadable
-    pyvenv.cfg), and an error naming it beats spawning for ever.
-    """
-    if os.environ.get(_VENV_REEXEC_MARK):
-        err("00002", f"re-executed into '{VENV_DIR}' and still landed outside it.\n"
-                 f"  Its pyvenv.cfg is missing or unreadable -- remove the\n"
-                 f"  directory and run my-plex again to have it rebuilt.")
-    os.environ[_VENV_REEXEC_MARK] = "1"
-    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
-
-
-def _venv_has_deps():
-    """Check if venv exists and has required packages."""
-    if not os.path.isfile(VENV_PYTHON):
-        return False
-    site_packages = os.path.join(VENV_DIR, "lib")
-    if not os.path.isdir(site_packages):
-        return False
-    # Check for plexapi AND readchar in site-packages
-    found = set()
-    for d in os.listdir(site_packages):
-        pkg_dir = os.path.join(site_packages, d, "site-packages")
-        if os.path.isdir(pkg_dir):
-            for dep in VENV_DEPS:
-                if os.path.isdir(os.path.join(pkg_dir, dep)):
-                    found.add(dep)
-    return found == set(VENV_DEPS)
-
-
-def _bootstrap_venv():
-    """Create venv, install deps, and re-exec."""
-    print(f"\n >>> Creating python virtualenv '{VENV_DIR}'...\n", file=sys.stderr)
-
-    rc = subprocess.call([sys.executable, "-m", "venv", VENV_DIR])
-    if rc != 0:
-        err("00003", f"failed to create the venv at {VENV_DIR} [rc {rc}]")
-
-    pip = os.path.join(VENV_DIR, "bin", "pip")
-    rc = subprocess.call([pip, "install"] + VENV_DEPS)
-    if rc != 0:
-        err("00004", f"failed to install the dependencies {', '.join(VENV_DEPS)} "
-                 f"into {VENV_DIR} [rc {rc}]")
-
-    print(f"\n >>> DONE creating python virtualenv '{VENV_DIR}'.", file=sys.stderr)
-    print("=" * 64, file=sys.stderr)
-
-    # Re-exec with venv python, preserving all arguments
-    _exec_in_venv()
+# Answered for THIS module's argv: the boot module owns the rule, and a test
+# that imports this module with an argv of its own gets that argv's answer.
+_PRINT_ONLY_RUN = _boot.print_only_run(sys.argv)
+_AS_ROOT = _boot.as_root()
 
 
 # --- Early --version / --stamp-version handling (no venv / no Plex needed) ---
@@ -448,49 +278,6 @@ def _stamp_version_and_exit(go: bool) -> NoReturn:
     print("    > the stamp lags HEAD by one amend: a commit cannot contain its own sha")
     sys.exit(0)
 
-# -Q / --quiet: nothing on stdout at all -- not a summary, not a result.  It
-# is for a crontab, a LaunchDaemon or a wrapper, where narration is mailed to
-# nobody's benefit and only a failure is worth waking someone for.  Errors and
-# warnings are on stderr throughout, so they still come through: that is what
-# makes "quiet except errors" true here rather than hoped for.
-#
-# -V and -D ask for MORE output, so either of them beats -Q.  That precedence
-# is decided HERE, once, and main() applies the same rule to the config value.
-_QUIET_ARGV = (any(a in ('-Q', '--quiet') for a in sys.argv[1:])
-               and not any(a in ('-V', '--verbose', '-VV', '--very-verbose',
-                                 '-D', '--debug', '-DD', '--deepdebug')
-                           for a in sys.argv[1:]))
-_QUIET_ACTIVE = False
-
-
-def _go_quiet() -> None:
-    """Silence this run's stdout for good.  Idempotent.
-
-    FILE DESCRIPTOR 1 is what gets redirected, not sys.stdout: 22 of this
-    tool's 67 subprocess calls inherit fd 1 (ssh, ffmpeg), so a Python-level
-    swap would claim silence while letting their output through.  Replacing
-    the descriptor covers both, and covers every one of the 5894 bare print()
-    calls here without any of them having to know about -Q -- so no print site
-    can ever drift out of it.
-    """
-    global _QUIET_ACTIVE
-    if _QUIET_ACTIVE:
-        return
-    try:
-        sys.stdout.flush()
-    except (ValueError, OSError):
-        pass          # already closed by a caller; the redirect is still wanted
-    _sink = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(_sink, 1)
-    finally:
-        os.close(_sink)
-    _QUIET_ACTIVE = True
-
-
-if _QUIET_ARGV:
-    _go_quiet()
-
 # --install takes no argument, and RAW ARGV is the only place that can say so:
 # further down, the key:value normalization rewrites a bare trailing word into
 # a title filter, so `--install go` arrived as `--install --list=title~go` and
@@ -512,42 +299,11 @@ if any(a == '--install' or a.startswith('--install=') for a in _argv_rest):
                  f"  - `--install go` was the earlier shape -- drop the `go`\n"
                  f"  - a scope or a value was meant for another option")
 
-if _VERSION_ASKED:
+if _boot.version_asked(sys.argv):
     _print_version_and_exit()
 if '--stamp-version' in sys.argv[1:]:
     _i = sys.argv.index('--stamp-version')
     _stamp_version_and_exit(go=sys.argv[_i + 1:_i + 2] == ['go'])
-
-# If we're not already running inside our venv, bootstrap it.
-#
-# Ctrl-C is caught HERE because the real SIGINT handler
-# (_graceful_shutdown_handler) is installed much further down and cannot be
-# moved up -- it reads FORCE_CACHE_UPDATE and PLEX_Media, neither of which
-# exists yet.  So this window has the default handler, and an interrupt in it
-# ends in a KeyboardInterrupt traceback on the screen.  That is not
-# hypothetical: `pip install` hung on a held connection while building the
-# venv, and the Ctrl-C that stopped it printed nine frames of subprocess
-# internals (ada, 2026-11-01).  Same answer as the backstop at the top of
-# main: one line, and 130.
-try:
-    if not _PRINT_ONLY_RUN and not _inside_our_venv():
-        if not _venv_has_deps():
-            _bootstrap_venv()
-        # Venv exists and has deps — re-exec inside it
-        _exec_in_venv()
-except KeyboardInterrupt:
-    print(f"\nmy-plex: interrupted (Ctrl-C) while setting up '{VENV_DIR}' -- "
-          f"nothing after that ran.\n"
-          f"  The directory may be half-built; the next run takes it up from "
-          f"there (remove it to start over).", file=sys.stderr)
-    sys.exit(130)
-# Reaching this line means we are where we need to be: _exec_in_venv() never
-# returns.  So no re-exec is in flight any more and the marker goes -- left
-# set it is INHERITED by every child process this run starts, and one of
-# those children is another my-plex, which would then read a marker that was
-# never about it and refuse to re-exec at all.  That is not hypothetical:
-# the suite spawns my-plex constantly.
-os.environ.pop(_VENV_REEXEC_MARK, None)
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +689,7 @@ from pathlib import Path
 from pprint import pprint, pformat
 import threading
 #
-# The venv's own packages.  A print-only run skipped the venv above, so it
+# The venv's own packages.  A print-only run skipped the venv (my_plex_boot.main), so it
 # reaches this with the system interpreter and none of them installed -- and
 # needs none of them: every use of these names is inside a function body,
 # and printing help calls none of those functions.  Any other run got
@@ -943,7 +699,7 @@ import threading
 #
 # EVERY third-party import of this module belongs in this one block, and a
 # new one goes here rather than below it: a --help run skips the venv (see
-# _PRINT_ONLY_RUN above), so an import left outside dies under the shebang's
+# my_plex_boot.print_only_run()), so an import left outside dies under the shebang's
 # python, and the rollout gate reads that empty --help as "no suite" and
 # ships the copy untested.  Each is used only inside a function body, which
 # is what makes tolerating its absence safe here.
@@ -3620,7 +3376,7 @@ CACHE_CHECKPOINT_INTERVAL = CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']  # Save
 
 #######################################################
 
-US=os.path.basename(__file__); # "my-plex-api.py"
+US = "my-plex"  # the command's name in usage lines: the launcher's, whatever file holds this code
 
 CACHE = {} # global cache object - content written to / read from CACHE_FILE
 CACHE_LOADED = False # to know if we already loaded the cache
@@ -3908,7 +3664,7 @@ def prompt_yes_no(question):
     elif AUTO_NO:
         print(f"{question} (yes/no): no (auto-answered with --no flag)")
         return False
-    elif _QUIET_ACTIVE:
+    elif _boot.QUIET_ACTIVE:
         # stdout is a sink, so the question would be invisible and input()
         # would block on it for ever.  -Q is for an unattended caller, and
         # this tool already has the way to answer in advance.
@@ -5282,18 +5038,13 @@ from types import ModuleType
 _test_mod: ModuleType | None = None
 
 def _test_mod_paths() -> "list[str]":
-    """Where the test suite may sit, nearest first: beside this file (a
-    checkout), then ../lib/ (deployed: bin/my-plex + lib/my-plex_tests.py,
-    which is where a tool's companion files go -- flat and tool-prefixed,
-    like my-rollout_steps-lib.sh beside it).
-
-    Every symlink is followed first -- /LINKS/bin/my-plex is one -- so the
-    search starts at the real file, not at the link that reached it.
+    """Where the test suite sits: beside this module, after every symlink is
+    followed.  That is one place in both layouts -- the checkout holds the
+    launcher, the modules and the suite side by side, and a deployed copy is
+    bin/my-plex with the modules AND the suite in lib/my-plex/ (my-rollout's
+    "+" clause puts the parts of one launcher there together).
     """
-    _self = os.path.realpath(__file__)
-    _dir = os.path.dirname(_self)
-    return [os.path.join(_dir, "my-plex_tests.py"),
-            os.path.join(os.path.dirname(_dir), "lib", "my-plex_tests.py")]
+    return [os.path.join(os.path.dirname(os.path.realpath(__file__)), "my-plex_tests.py")]
 
 
 def _load_test_mod() -> ModuleType:
@@ -5314,14 +5065,16 @@ def _load_test_mod() -> ModuleType:
                      + "".join(f"    {c}\n" for c in _tried)
                      + "Possible reasons:\n"
                      "  - this copy of my-plex was deployed without its suite; a copy made by\n"
-                     "    my-rollout carries it in ../lib/\n"
+                     "    my-rollout carries it beside the modules, in lib/my-plex/\n"
                      "  - my-plex_tests.py was moved, renamed or deleted")
     _test_mod = _mfs(_spec)
     _spec.loader.exec_module(_test_mod)
-    # Many tests read the tool's own source.  Only the tool knows which file
-    # that is: on a deployed copy it is bin/my-plex, not a my-plex.py beside
-    # the suite, so the suite's own guess would point at nothing.
-    setattr(_test_mod, "MAIN_SCRIPT", os.path.realpath(__file__))
+    # Many tests run the tool or read its source.  Only the tool knows which
+    # files those are -- the launcher it was started through, and the two
+    # modules -- so the suite's own guesses are overridden here.
+    setattr(_test_mod, "MAIN_SCRIPT", _boot.LAUNCHER)
+    setattr(_test_mod, "TOOL_SOURCE", os.path.realpath(__file__))
+    setattr(_test_mod, "BOOT_SOURCE", os.path.realpath(_boot.__file__))
     return _test_mod
 
 # Episode TSV functions are defined later in this file, so they are injected
@@ -14940,7 +14693,7 @@ def update_cache_for_library(library_name):
     Returns: int (count of items in cache after reload), or None on error.
     """
     import subprocess as _sp, sys as _sys, os as _os
-    script = _os.path.abspath(__file__)
+    script = _boot.LAUNCHER   # this module is no script: the launcher runs the tool
     try:
         # Inherit stdio so the operator sees update-cache progress live.
         # check=False — we'll inspect returncode ourselves.
@@ -45127,13 +44880,13 @@ def main():
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
         err("00168", f"{e}\nUse --help to see available options.")
-    # The second root check.  The first one, at the top of the file, judged
+    # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00169", _root_refusal())
+        err("00169", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -45149,12 +44902,12 @@ def main():
     if DEEPDBG: VERYVRB = True
 
     # -Q asks for less, -V and -D for more, so either of them wins.  The CLI
-    # flag already acted at import time (_QUIET_ARGV, before anything could
+    # flag already acted in my_plex_boot.main() (before anything could
     # print); this is what makes a config-set QUIET take effect, and it is
     # idempotent, so the two triggers cannot fight.
     QUIET = args.quiet
     if VRB: QUIET = False
-    if QUIET: _go_quiet()
+    if QUIET: _boot.go_quiet()
 
     # Print DEFAULT_SCOPE notice with -V so users know a default filter is active
     if VRB and DEFAULT_SCOPE and DEFAULT_SCOPE.strip():
@@ -45614,7 +45367,9 @@ def main():
 
     sys.exit(0)
 
-if __name__ == '__main__':
+def run() -> None:
+    """The tool's entry: my_plex_boot.main() calls it once this run is in the
+    right interpreter.  Everything above ran at import."""
     # Reset SIGPIPE to OS default so piping to head/grep/etc. terminates us silently.
     # (without this, Python converts SIGPIPE → BrokenPipeError and prints "Exception ignored")
     # In -D / --debug mode: keep Python's default SIGPIPE handling so BrokenPipeError

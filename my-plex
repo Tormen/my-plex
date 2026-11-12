@@ -1,0 +1,20 @@
+#!/usr/bin/env -S python3 -I -S
+# my-plex -- the LAUNCHER. The tool is in the modules my_plex_boot.py (who runs,
+# in what interpreter) and my_plex.py (everything else): CPython caches
+# bytecode for IMPORTED modules only, so the file that is started is kept to
+# these few lines.
+#
+# The modules are found beside this file (a checkout) or in ../lib/my-plex
+# (deployed: global/bin/my-plex + global/lib/my-plex/), after every symlink is
+# followed -- /LINKS/bin/my-plex is one. -I keeps PYTHONPATH and the user's
+# site out, -S skips site: until my_plex_boot has re-executed this file inside
+# the venv, the stdlib is all that runs.
+import os
+import sys
+
+_self = os.path.realpath(__file__)
+_dir = os.path.dirname(_self)
+sys.path[:0] = [_dir, os.path.join(os.path.dirname(_dir), "lib", "my-plex")]
+import my_plex_boot  # noqa: E402
+
+my_plex_boot.main(_self)
