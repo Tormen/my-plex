@@ -6990,15 +6990,20 @@ class TestJunk(unittest.TestCase):
     # The Plex server's files, as the junk walk's remote `find ... -exec stat
     # -f "%z %N"` prints them -- SIZE, one space, PATH -- under the fixture
     # library's three roots.  The paths carry spaces, as real ones do.
-    # JUNK: one per default pattern it hits.  NOT junk: the three videos --
-    # one in a FOLDER whose name the 'samples' regexp matches, because a
-    # pattern judges the file's name, never its folder's.
+    # JUNK: each hits one default pattern; one sits directly in a root, so a
+    # depth-1 walk finds it too.  NOT junk: the three videos -- one in a
+    # FOLDER whose name the 'samples' regexp matches, because a pattern judges
+    # the file's name, never its folder's -- and a sample inside a hidden
+    # folder, which the walk does not enter.
     _JUNK = (('sidecars', '/lib/library1/Some Movie (2001)/Some Movie (2001).nfo'),
              ('samples',  '/lib/library_de/Irgendein Film (2010)/sample-irgendein.film.mkv'),
-             ('os_index', '/lib/library_fr/Une Serie/S01/Thumbs.db'))
+             ('os_index', '/lib/library_fr/Une Serie/S01/Thumbs.db'),
+             ('os_index', '/lib/library_de/Thumbs.db'))
+    _DEPTH_ONE = ('/lib/library_de/Thumbs.db',)
     _NOT_JUNK = ('/lib/library1/Some Movie (2001)/some.movie.2001.mkv',
                  '/lib/library1/Free-Sample-Story (2004)/free.story.2004.mkv',
-                 '/lib/library_fr/Une Serie/S01/une.serie.s01e01.mkv')
+                 '/lib/library_fr/Une Serie/S01/une.serie.s01e01.mkv',
+                 '/lib/library1/.Trashes/501/sample-old.movie.mkv')
     _ROOTS = ('/lib/library1', '/lib/library_de', '/lib/library_fr')
 
     @classmethod
@@ -7039,14 +7044,31 @@ class TestJunk(unittest.TestCase):
         """--junk walks every library root on the Plex server, over ssh, and
         counts what it found: exit 0, one walk per pattern and root, all of
         them to the configured host."""
+        import ast
+        from collections import Counter
         r, calls = self._junk()
         out = r.stdout + r.stderr
         self.assertEqual(r.returncode, 0, out[-1500:])
         self.assertIn(f"{len(self._JUNK)} junk file(s) found across {len(self._ROOTS)} root(s).",
                       r.stdout, out[-1500:])
-        walked = sorted({_must(re.search(r'find "([^"]+)"', c), c).group(1) for c in calls})
-        self.assertEqual(walked, sorted(self._ROOTS), calls)
+        patterns = ast.literal_eval(_must(re.search(r'Patterns selected: (\[.*\])', r.stdout),
+                                          r.stdout).group(1))
+        walked = Counter(_must(re.search(r'find "([^"]+)"', c), c).group(1) for c in calls)
+        self.assertEqual(walked, Counter({root: len(patterns) for root in self._ROOTS}), calls)
         self.assertTrue(all(' fixture-server find "' in c for c in calls), calls)
+
+    def test_no_recursive_walks_depth_one_only(self):
+        """--no-recursive reports only what lies directly in a library root:
+        the server's find gets -maxdepth 1, and a deeper junk file is not
+        counted."""
+        r, calls = self._junk('--no-recursive', '-V')
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn(f"{len(self._DEPTH_ONE)} junk file(s) found across {len(self._ROOTS)} root(s).",
+                      r.stdout, out[-1500:])
+        for fp in self._DEPTH_ONE:
+            self.assertIn(fp, r.stdout, out[-1500:])
+        self.assertTrue(calls and all(' -maxdepth 1 ' in c for c in calls), calls)
 
     def test_a_junk_file_in_the_listing_is_reported(self):
         """Each junk file the server lists is counted under its pattern, and
@@ -7054,9 +7076,11 @@ class TestJunk(unittest.TestCase):
         r, _calls = self._junk('-V')
         out = r.stdout + r.stderr
         self.assertEqual(r.returncode, 0, out[-1500:])
+        from collections import Counter
+        per_pattern = Counter(pattern for pattern, _fp in self._JUNK)
         for pattern, fp in self._JUNK:
             with self.subTest(fp=fp):
-                self.assertRegex(r.stdout, rf"(?m)^\s+1\s+{pattern}\s", out[-1500:])
+                self.assertRegex(r.stdout, rf"(?m)^\s+{per_pattern[pattern]}\s+{pattern}\s", out[-1500:])
                 self.assertRegex(r.stdout, rf"(?m)^\s+{pattern}\s.*\s{re.escape(fp)}$", out[-1500:])
 
     def test_a_non_junk_file_is_not_reported(self):
@@ -14231,30 +14255,49 @@ def _fake_ssh_env(login_rc=0, find_listing=None, log=None):
 
     FIND_LISTING is a file of the server's files as `find ... -exec stat -f
     "%z %N"` prints them (SIZE PATH): a remote `find "ROOT" ...` is answered
-    with its lines under ROOT.  LOG gets one line per ssh started, its
-    arguments as given."""
+    with its lines under ROOT, filtered as that find's own words filter them
+    -- `-maxdepth 1` keeps what lies directly in ROOT, `-type d -name ".*"
+    -prune` drops what sits in a hidden folder, `-name ".*" -prune` also
+    every hidden file.  LOG gets one line per ssh started, its arguments as
+    given."""
     global _FAKE_SSH_DIR
     if _FAKE_SSH_DIR is None:
         real = shutil.which('ssh') or '/usr/bin/ssh'
         _FAKE_SSH_DIR = tempfile.mkdtemp(prefix='my-plex-fake-ssh-')
         import atexit
         atexit.register(shutil.rmtree, _FAKE_SSH_DIR, True)
+        find_awk = os.path.join(_FAKE_SSH_DIR, 'find.awk')
+        with open(find_awk, 'w') as f:
+            f.write(r"""{ path = substr($0, index($0, " ") + 1) }
+index(path, ENVIRON["ROOT"]) != 1 { next }
+{ rest = substr(path, length(ENVIRON["ROOT"]) + 1) }
+ENVIRON["DEPTH"] == "1" && index(rest, "/") { next }
+ENVIRON["PRUNE"] == "all" && rest ~ /(^|\/)\./ { next }
+ENVIRON["PRUNE"] == "dirs" && rest ~ /(^|\/)\.[^\/]*\// { next }
+{ print }
+""")
         stub = os.path.join(_FAKE_SSH_DIR, 'ssh')
         with open(stub, 'w') as f:
-            f.write("#!/bin/dash\n"
-                    "# -G only prints the effective config: the real ssh does that\n"
-                    f'case " $* " in *" -G "*) exec {real} "$@";; esac\n'
-                    '[ -z "${FAKE_SSH_LOG:-}" ] || printf \'%s\\n\' "$*" >> "$FAKE_SSH_LOG"\n'
-                    '# the remote command is the last argument\n'
-                    'for cmd do :; done\n'
-                    'if [ -n "${FAKE_SSH_FIND_LISTING:-}" ]; then\n'
-                    '  case $cmd in \'find "\'*)\n'
-                    '    root=${cmd#find \\"}; root=${root%%\\"*}\n'
-                    '    ROOT="$root/" awk \'index(substr($0, index($0, " ") + 1), ENVIRON["ROOT"]) == 1\' \\\n'
-                    '      "$FAKE_SSH_FIND_LISTING";;\n'
-                    '  esac\n'
-                    'fi\n'
-                    'exit "${FAKE_SSH_LOGIN_RC:-0}"\n')
+            f.write(r"""#!/bin/dash
+# -G only prints the effective config: the real ssh does that
+case " $* " in *" -G "*) exec @REAL@ "$@";; esac
+[ -z "${FAKE_SSH_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+# the remote command is the last argument
+for cmd do :; done
+if [ -n "${FAKE_SSH_FIND_LISTING:-}" ]; then
+  case $cmd in 'find "'*)
+    root=${cmd#find \"}; root=${root%%\"*}
+    depth=; prune=
+    case $cmd in *' -maxdepth 1 '*) depth=1;; esac
+    case $cmd in
+      *' -type d -name ".*" -prune '*) prune=dirs;;
+      *' -name ".*" -prune '*) prune=all;;
+    esac
+    ROOT="$root/" DEPTH=$depth PRUNE=$prune awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
+  esac
+fi
+exit "${FAKE_SSH_LOGIN_RC:-0}"
+""".replace('@REAL@', real).replace('@AWK@', find_awk))
         os.chmod(stub, 0o755)
     return dict(os.environ, PYTHONDONTWRITEBYTECODE='1', FAKE_SSH_LOGIN_RC=str(login_rc),
                 FAKE_SSH_FIND_LISTING=find_listing or '', FAKE_SSH_LOG=log or '',
