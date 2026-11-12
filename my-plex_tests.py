@@ -14425,7 +14425,7 @@ class TestInstallSshEntry(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def install(self, remote='me@192.0.2.10', login_rc=0, extra=''):
+    def install(self, remote: str | None = 'me@192.0.2.10', login_rc: int = 0, extra: str = ''):
         c = os.path.join(self.d, 'my-plex.conf')
         with open(c, 'w') as f:
             f.write(f"LITTLE_SNITCH_CLI = '/nonexistent/my-little-snitch'\n")
