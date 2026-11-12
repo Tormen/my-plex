@@ -14183,6 +14183,9 @@ class TestConfigLayers(unittest.TestCase):
     def setUpClass(cls):
         cls.mp = _import_tool('mp_layers')
         cls.mp._PRINT_ONLY_RUN = False
+        # The loader is tested as an ordinary run; the suite's marker in the
+        # environment made this import a test run, which reads no layer.
+        cls.mp._TEST_RUN = False
 
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix='my-plex-layers-')
@@ -14669,9 +14672,14 @@ class TestConfigEnvVar(unittest.TestCase):
         return d, c
 
     def _run(self, *argv, **env):
+        """MAIN_SCRIPT with ARGV; a variable given as None is removed."""
         e = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         e.pop('MY_PLEX_CONFIG', None)
-        e.update({k: v for k, v in env.items() if v is not None})
+        for k, v in env.items():
+            if v is None:
+                e.pop(k, None)
+            else:
+                e[k] = v
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
                               text=True, timeout=120, env=e)
 
@@ -14814,6 +14822,37 @@ class TestConfigEnvVar(unittest.TestCase):
                             f"control: the suite did not read the file named for it: {reads}")
             self.assertEqual([l for l in reads if '--run-tests' not in l], [],
                              "a run the suite started read the file named for the suite")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_runs_a_test_starts_read_neither_the_site_nor_the_user_config(self):
+        """ADVERSARIAL: only the suite's own process skipped the site config
+        and yours -- it knew from its argv -- while every my-plex a test
+        starts (`--list`, `--info`, `--help missing`, ...) read both, with
+        this machine's DEFAULT_SCOPE, roots and keys.  HOME here is a temp
+        dir whose ~/.my-plex.conf records each run that reads it.  The
+        control, the same `--help missing` started outside a test run, must
+        be recorded, or the marker proves nothing.  (The site config is
+        skipped by the same branch; TestConfigLayers poisons it in-process.)"""
+        d = tempfile.mkdtemp(prefix='my-plex-cfgtestrun-')
+        home = os.path.join(d, 'home')
+        os.makedirs(home)
+        # The fake home needs the tool's own venv, or the run bootstraps one.
+        os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
+        conf, marker = self._marker_conf(d)
+        os.rename(conf, os.path.join(home, '.my-plex.conf'))
+        env = {'HOME': home, 'MY_PLEX_TEST_RUN': None}
+        try:
+            r = self._run('--help', 'missing', **env)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            with open(marker) as f:
+                self.assertIn("['--help', 'missing']", f.read(),
+                              "control: an ordinary run did not read the user config")
+            os.remove(marker)
+            r = self._run('--run-tests', 'test_missing_help_shows_library_usage', **env)
+            self.assertEqual(r.returncode, 0, r.stdout[-500:] + r.stderr[-500:])
+            self.assertIn('ok 1 - TestMissingE2E.test_missing_help_shows_library_usage', r.stdout)
+            self.assertFalse(os.path.exists(marker), "a run the suite started read your config")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

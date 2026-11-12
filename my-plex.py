@@ -1083,7 +1083,8 @@ def read_site() -> Site:
 #   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf, from the run's
 #      HOME when read -- never once at import, which as root is /var/root.
 # A file named for one run ($MY_PLEX_CONFIG, else --config) is read ALONE,
-# by that run and every my-plex it starts.  A test run reads neither layer.
+# by that run and every my-plex it starts.  A test run, and every my-plex it
+# starts, reads neither layer.
 SITE_CONFIG_NAMES = ('my-plex.conf', 'my-plex')
 SYSTEM_CONFIG_PATHS = ('/etc/my-plex.conf', '/usr/local/etc/my-plex.conf')
 USER_CONFIG_NAMES = ('.my-plex/my-plex.conf', '.my-plex.conf')
@@ -1129,10 +1130,17 @@ CONFIG_INHERITED_SOURCE = 'the --config of the my-plex that started this one'
 # covers all of them at once, because the children inherit this environment.
 # Answered from argv, before any config is read.  (my-git guards its own suite
 # the same way; its runner unsets $MY_GIT_CONFIG.)
-_TEST_RUN = any(a == '--run-tests' or a.startswith('--run-tests=')
-                or a in ('--unittest', '--test') for a in sys.argv[1:])
+_SUITE_RUN = any(a == '--run-tests' or a.startswith('--run-tests=')
+                 or a in ('--unittest', '--test') for a in sys.argv[1:])
+# Every my-plex the suite starts belongs to the test run too, and its argv
+# does not say so: the suite marks the environment they inherit, so none of
+# them reads the site config or yours either -- only a file a test names.
+TEST_RUN_ENV = 'MY_PLEX_TEST_RUN'
+_TEST_RUN = _SUITE_RUN or os.environ.get(TEST_RUN_ENV) == '1'
+if _SUITE_RUN:
+    os.environ[TEST_RUN_ENV] = '1'
 _dropped = [v for v in (CONFIG_ENV, CONFIG_INHERITED_ENV)
-            if _TEST_RUN and os.environ.pop(v, None) is not None]
+            if _SUITE_RUN and os.environ.pop(v, None) is not None]
 if _dropped:
     # An action nobody asked for says what it did and why.
     print(f" >>> {', '.join('$' + v for v in _dropped)} ignored for this test run -- "
@@ -33342,7 +33350,8 @@ def main_print_help(args, remaining_args, main_parser):
             print( "  every my-plex that run starts (a pipeline's phases): --config is")
             print(f"  passed on to them as ${CONFIG_INHERITED_ENV}, read after their")
             print( "  own --config, so a phase that names its own config keeps it.")
-            print( "  A test run (--run-tests) reads neither the site config nor yours.")
+            print( "  A test run (--run-tests), and every my-plex it starts, reads")
+            print( "  neither the site config nor yours -- only a file a test names.")
             print()
             print(f"  A path named by ${CONFIG_ENV} or --config that is not there is")
             print( "  an ERROR: my-plex does not fall back to the defaults, so a run")
@@ -44739,10 +44748,10 @@ def main():
     # A file named with --config is the file for every my-plex this run
     # starts too -- a pipeline's phases -- through the variable they inherit,
     # so no phase reads the site config and yours; a phase that names its own
-    # config still reads that one.  Never from a test run: the file named for
-    # the suite is not the file of the runs each test starts.
+    # config still reads that one.  Never from the suite itself: the file
+    # named for it is not the file of the runs each test starts.
     _source, _path = config_search_paths(config_args.config_file)[0]
-    if _source == '--config' and not _TEST_RUN:
+    if _source == '--config' and not _SUITE_RUN:
         os.environ[CONFIG_INHERITED_ENV] = os.path.abspath(_path)
 
     # Bare --config: the files read, then each key they set and where from.
