@@ -13963,6 +13963,41 @@ class TestSecretArgs(unittest.TestCase):
         self.assertIn("_resolve_secret_arg('--plex-token'", src)
 
 
+class TestNearMissFlag(unittest.TestCase):
+    """A shortened flag is answered by the flag it misses.  `--creat FILE`
+    was refused for its FILE ("Invalid parameter 'FILE'"): the positional
+    word was judged before the flag beside it, and no parser of my-plex
+    takes an abbreviation, so the flag the user meant was never named."""
+
+    def _run(self, *argv):
+        return subprocess.run([MAIN_SCRIPT, '--config', _fixture_conf(), *argv],
+                              capture_output=True, text=True, timeout=E2E_TIMEOUT,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_a_shortened_flag_with_a_value_names_the_flag_not_the_value(self):
+        r = self._run('--creat', '/nonexistent/x.conf')
+        self.assertEqual(r.returncode, 1, r.stderr[-400:])
+        self.assertIn("Invalid flag '--creat'", r.stderr)
+        self.assertIn("You mean '--create-config'", r.stderr)
+        self.assertNotIn("Invalid parameter '/nonexistent/x.conf'", r.stderr)
+
+    def test_the_equals_form_too(self):
+        r = self._run('--creat=/nonexistent/x.conf')
+        self.assertIn("You mean '--create-config'", r.stderr, r.stderr[-400:])
+
+    def test_a_word_that_starts_several_flags_gets_no_guess(self):
+        """`--li` starts --list, --list-libraries, ...: no single flag is meant."""
+        r = self._run('--li')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn('You mean', r.stderr, r.stderr[-400:])
+
+    def test_the_whole_name_is_no_near_miss(self):
+        """The control: the full flag runs."""
+        r = self._run('--list-libraries')
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertNotIn('You mean', r.stderr)
+
+
 class TestStrayWordRefused(unittest.TestCase):
     """A word beside --info or --run-tests that is not their value is refused
     by name -- never re-aimed.
@@ -18107,7 +18142,7 @@ _UNITTEST_SCOPES = {
                    TestAbsEpIdx, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename, TestRenameShared],
-    'commands':   [TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
+    'commands':   [TestNearMissFlag, TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],

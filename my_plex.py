@@ -3949,6 +3949,17 @@ _RENAMED_FLAGS = {
     '--create': '--create-config FILE|--create-playlist',
 }
 
+def _meant_flag(word: str, known: "set[str]") -> "str | None":
+    """The one long option of KNOWN that WORD (or its part before '=') is the
+    start of, when WORD itself is none: `--creat` means --create-config.
+    None when it is an option, too short, or the start of several.  No parser
+    of my-plex takes an abbreviation, so such a word is never valid as it is."""
+    stem = word.split('=', 1)[0]
+    if not stem.startswith('--') or len(stem) < 4 or stem in known:
+        return None
+    hits = [k for k in known if k.startswith(stem)]
+    return hits[0] if len(hits) == 1 else None
+
 def _flag_hint(arg):
     """What to say after "Invalid flag ARG": the name that replaced it, or
     where to look."""
@@ -45446,13 +45457,21 @@ def main():
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
         err("00185", f"{e}\nUse --help to see available options.")
+    # A near-miss is answered by the flag it misses, before any positional
+    # word is judged: otherwise `--creat FILE` is refused for its FILE.
+    _known = {o for p in (main_parser, GLOBAL_CMD_PARSER)
+              for a in p._actions for o in a.option_strings if o.startswith('--')}  # pyright: ignore[reportPrivateUsage]
+    for _w in remaining_args:
+        _m = _meant_flag(_w, _known)
+        if _m is not None:
+            err("00186", f"Invalid flag '{_w}'.\n  You mean '{_m}' -- no option of my-plex takes a shortened name.")
     # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00186", _boot.root_refusal())
+        err("00187", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -45484,11 +45503,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00187", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00188", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00188", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00189", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -46005,7 +46024,7 @@ def report_bug(unexpected: Exception) -> NoReturn:
     fixes the bug, it is just not the user's screen -- and exit 70
     (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
     and the root half of --install, which runs outside run()."""
-    err("00189",
+    err("00190",
         f"my-plex stopped on a bug -- this is not something you did wrong.\n"
         f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
         f"  full trace:    {_write_crash_trace()}\n"
