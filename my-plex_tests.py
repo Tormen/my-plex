@@ -1082,6 +1082,37 @@ class TestHelpFlags(unittest.TestCase):
                 self.assertTrue(lower_h.stdout == other.stdout,
                                 f"-h printed something else than -x:\n{lower_h.stdout[:300]}")
 
+    def test_help_in_every_spelling_beside_create_config_prints_the_help(self):
+        """main() asks the same question as the boot's print-only check: every
+        spelling the parser takes with a WHAT (`--help=WHAT`, `-HWHAT`) is a
+        help request, so --create-config beside it prints the help, not the
+        template -- as `--help WHAT` beside it already did.  Each run has a
+        HOME of its own, which the help names: compared without it."""
+        alone, alone_home = self._run('--help', 'config')
+        self.assertEqual(alone.returncode, 0, f"control: --help config: exit {alone.returncode}\n{alone.stderr[-400:]}")
+        self.assertNotIn('# my-plex configuration file', alone.stdout, "control: --help config printed the template")
+        for spelling in (('--help', 'config'), ('--help=config',), ('-Hconfig',)):
+            with self.subTest(spelling=spelling):
+                r, home = self._run('--create-config', *spelling)
+                self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertNotIn('# my-plex configuration file', r.stdout,
+                                 f"{spelling} beside --create-config is no help request: the template was printed")
+                self.assertTrue(r.stdout.replace(home, 'HOME') == alone.stdout.replace(alone_home, 'HOME'),
+                                f"{spelling} beside --create-config printed something else than --help config:\n{r.stdout[:300]}")
+
+    def test_help_after_double_dash_asks_for_no_help(self):
+        """After `--` every token is a positional to the parser, so `--help`
+        there asks for no help -- beside --create-config it changes nothing
+        that `-x` there does not."""
+        other, _ = self._run('--create-config', '--', '-x')
+        self.assertEqual(other.returncode, 0, f"control: -- -x: exit {other.returncode}\n{other.stderr[-400:]}")
+        self.assertIn('# my-plex configuration file', other.stdout, "control: --create-config -- -x printed no config")
+        help_, _ = self._run('--create-config', '--', '--help')
+        self.assertEqual(help_.returncode, other.returncode,
+                         f"--help after -- is taken for a help request:\n{help_.stderr[-400:]}")
+        self.assertTrue(help_.stdout == other.stdout,
+                        f"--help after -- printed something else than -x there:\n{help_.stdout[:300]}")
+
     def test_upper_h_and_help_print_the_usage(self):
         for flag in ('-H', '--help'):
             with self.subTest(flag=flag):
@@ -15497,10 +15528,10 @@ class TestNeverRunsAsRoot(unittest.TestCase):
         A copy whose early rule calls EVERY run print-only stands in for any
         argv it misjudges: as root, `--list-libraries` must still end in the
         refusal, not in the command."""
-        early = '    return (len(argv) == 1 or version_asked(argv)'
+        early = '    return len(argv) == 1 or version_asked(argv) or help_asked(argv)'
         d = tempfile.mkdtemp(prefix='my-plex-rootbackstop-')
         try:
-            copy = _tool_copy(d, {'boot': [(early, '    return True or (len(argv) == 1 or version_asked(argv)')]})
+            copy = _tool_copy(d, {'boot': [(early, '    return True')]})
             conf = os.path.join(d, 'my-plex.conf')
             with open(conf, 'w') as f:
                 f.write(f"CACHE_FILE = {os.path.join(d, 'cache.pkl')!r}\n"

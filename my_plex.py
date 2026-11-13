@@ -44537,7 +44537,7 @@ def main():
             config_args.config_file = config_args.config
 
     # If user is asking for help, defer all early-exit config actions to the help dispatcher.
-    _asking_help = ('--help' in sys.argv) or ('-H' in sys.argv)
+    _asking_help = _boot.help_asked(sys.argv)
 
     # Handle --create-config (new flag, takes optional FILE)
     if not _asking_help and config_args.create_config is not None:

@@ -13,9 +13,9 @@ then the drop to the user the rest runs as (_root_install).
 It is a module of its own, rather than part of the launcher or of the tool,
 for three reasons: the launcher stays a few lines (CPython caches bytecode
 for IMPORTED modules only); this code must import before the venv exists,
-which the tool cannot; and err() and the print-only predicate are asked by
-both this code and the tool, so each has ONE owner here that the tool imports
-rather than a copy of its own.
+which the tool cannot; and err() and the argv predicates (help_asked,
+print_only_run) are asked by both this code and the tool, so each has ONE
+owner here that the tool imports rather than a copy of its own.
 """
 # Error codes: err() takes a five-digit string code ("00042"), UNIQUE per
 # source line, numbered from 00001 in file order with no gap across BOTH
@@ -173,6 +173,19 @@ def version_asked(argv: "list[str]") -> bool:
     return any(a in ('--version', '-version') for a in argv_options(argv))
 
 
+def help_asked(argv: "list[str]") -> bool:
+    """True when argv asks for help, read the way main_parser will: only the
+    tokens before a `--` (after it `--help` is a positional), and the help
+    flags `-H` / `--help` in every spelling the parser accepts with a WHAT:
+    `--help WHAT`, `--help=WHAT`, `-HWHAT`.  `-h` is no flag of my-plex.
+    Bundled into other short flags (`-VH`) it is not counted -- the parser
+    has the last word.  The print-only check below and the tool's main()
+    (which lets help win over --create-config and bare --config) both ask
+    this one question here, so the two cannot read argv differently."""
+    return any(a == '--help' or a.startswith('--help=') or a.startswith('-H')
+               for a in argv_options(argv))
+
+
 def print_only_run(argv: "list[str]") -> bool:
     """True for a run that only PRINTS: a bare `my-plex`, --help, --version.
 
@@ -190,19 +203,13 @@ def print_only_run(argv: "list[str]") -> bool:
     config -- so there is nothing for root to put in the wrong home, and
     refusing it would only hide the help from whoever is in a root shell.
     It reads nothing but argv, so it can be answered before anything else.
-    It reads argv the way main_parser will: only the tokens before a `--`
-    (`-U -Y -- --help` asks for no help -- matched anyway, it ran
-    --update-cache as root).  The help flags are main_parser's `-H` /
-    `--help`, in every spelling it accepts with a WHAT: `--help WHAT`,
-    `--help=WHAT`, `-HWHAT`.  `-h` is no flag of my-plex, and counting it let
-    a root `my-plex -h` into a real run.  Bundled into other short flags
-    (`-VH`) it is not counted: as root that is refused, like any argv this
-    misjudges -- the parser has the last word (the second root check in the
-    tool's main).
+    It reads argv the way main_parser will (help_asked): `-U -Y -- --help`
+    asks for no help -- matched anyway, it ran --update-cache as root; and
+    counting `-h` let a root `my-plex -h` into a real run.  What this
+    misjudges as root is refused -- the parser has the last word (the second
+    root check in the tool's main).
     """
-    return (len(argv) == 1 or version_asked(argv)
-            or any(a == '--help' or a.startswith('--help=') or a.startswith('-H')
-                   for a in argv_options(argv)))
+    return len(argv) == 1 or version_asked(argv) or help_asked(argv)
 
 
 def as_root() -> bool:
