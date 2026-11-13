@@ -15231,6 +15231,31 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertIn('SUDO_USER', run.r.stdout)
         self.assertTrue(all(a.endswith(' --owner nobody') for a in run.allows()), run.calls)
 
+    def _site(self, text: str) -> str:
+        d = tempfile.mkdtemp(prefix='site-', dir=self.tmp)
+        path = os.path.join(d, 'site.conf')
+        with open(path, 'w') as f:
+            f.write(text)
+        return path
+
+    def test_without_RUN_AS_USER_the_site_files_MY_USER_owns_the_rules(self):
+        """The site file names each machine's main user (MY_USER): an empty
+        RUN_AS_USER takes it, and the user line says where it came from."""
+        site = self._site('MY_USER="nobody"\n')
+        run = self.run_root(conf_lines='', env={'MY_PLEX_TEST_SITE_CONF': site})
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn(f'(MY_USER, {site})', run.r.stdout)
+        self.assertTrue(run.allows(), run.calls)
+        self.assertTrue(all(a.endswith(' --owner nobody') for a in run.allows()), run.calls)
+
+    def test_RUN_AS_USER_wins_over_MY_USER(self):
+        """A key the tool's own config sets still wins over the site file."""
+        site = self._site('MY_USER="daemon"\n')
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n",
+                            env={'MY_PLEX_TEST_SITE_CONF': site})
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertTrue(all(a.endswith(' --owner nobody') for a in run.allows()), run.calls)
+
     def test_RUN_AS_USER_must_be_a_user_here_and_not_root(self):
         for name in ('root', 'no-such-user-of-this-machine'):
             run = self.run_root(conf_lines=f"RUN_AS_USER = {name!r}\n")

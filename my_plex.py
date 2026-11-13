@@ -841,11 +841,12 @@ class Site:
     config_search_dir: str = ''     # searched for my-plex.conf, then my-plex
     config_offer_dir: str = ''      # "no config found" offers my-plex.conf here
     config_offer_note: str = ''     # said beside that offer
+    my_user: str = ''               # this machine's main user: RUN_AS_USER's default
 
 
 _SITE_KEYS = {'DATA_BASE_DIR': 'data_base_dir', 'LOG_BASE_DIR': 'log_base_dir',
               'CONFIG_SEARCH_DIR': 'config_search_dir', 'CONFIG_OFFER_DIR': 'config_offer_dir',
-              'CONFIG_OFFER_NOTE': 'config_offer_note'}
+              'CONFIG_OFFER_NOTE': 'config_offer_note', 'MY_USER': 'my_user'}
 # What a shell reads as the same plain value: no expansion, no escape.
 _SITE_LINE = re.compile(r'([A-Z_][A-Z0-9_]*)="([^"$`\\]*)"')
 
@@ -950,6 +951,11 @@ TEST_RUN_ENV = 'MY_PLEX_TEST_RUN'
 _TEST_RUN = _SUITE_RUN or os.environ.get(TEST_RUN_ENV) == '1'
 if _SUITE_RUN:
     os.environ[TEST_RUN_ENV] = '1'
+# A test run reads no site file installed for real either -- its MY_USER
+# would name this machine's user -- but the one a test names here, if any.
+TEST_SITE_ENV = 'MY_PLEX_TEST_SITE_CONF'
+if _TEST_RUN:
+    SITE_CONF = os.environ.get(TEST_SITE_ENV, '/nonexistent/site.conf')
 _dropped = [v for v in (CONFIG_ENV, CONFIG_INHERITED_ENV)
             if _SUITE_RUN and os.environ.pop(v, None) is not None]
 if _dropped:
@@ -2027,7 +2033,9 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 
 # RUN_AS_USER: the user whose Plex this is -- `my-plex --install`, run as
 # root, writes the firewall rules for that user, removes the denies that user
-# (or `anyone`) owns, and hands the rest of the install over to them.  Empty: the user who ran sudo; with neither, --install
+# (or `anyone`) owns, and hands the rest of the install over to them.  Empty:
+# MY_USER from the site file (/LINKS/default/site.conf), else the user who
+# ran sudo; with none of them, --install
 # as root stops and names this key.  Any spelling macOS accepts for the user
 # (another case, an alias) means that user, by its own name.  SITE config only.  The default is empty;
 # the value is an example.
@@ -4164,10 +4172,25 @@ def _install_db_remote():
     return remote
 
 
+def _run_as_user() -> "tuple[str, str]":
+    """Whose Plex this is, as configured, with where that came from:
+    RUN_AS_USER from the site config, else the site file's MY_USER (this
+    machine's main user), else the user who ran sudo; ('', '') for none.
+    Not checked here: _install_user does that, as root."""
+    if (RUN_AS_USER or '').strip():
+        return RUN_AS_USER.strip(), f"RUN_AS_USER, {_config_origin('RUN_AS_USER')}"
+    site_user = read_site().my_user.strip()
+    if site_user:
+        return site_user, f"MY_USER, {SITE_CONF}"
+    sudo_user = os.environ.get('SUDO_USER', '').strip()
+    if sudo_user:
+        return sudo_user, "SUDO_USER: the user who ran sudo"
+    return '', ''
+
+
 def _install_user() -> "tuple[str, str]":
     """The user --install's rules belong to and root hands over to, with
-    where that answer came from: RUN_AS_USER from the site config, else the
-    user who ran sudo (SUDO_USER).  Neither, a name that is no user here, or
+    where that answer came from (_run_as_user).  None, a name that is no user here, or
     root itself is an ERROR -- the venv and ~/.ssh would otherwise land in
     /var/root, which is what my-plex's refusal of root exists to prevent.
 
@@ -4179,14 +4202,11 @@ def _install_user() -> "tuple[str, str]":
     `my-little-snitch list` prints a rule's owner as the uid's own name -- so
     the deny owner check, the rules' --owner and the drop all use that."""
     import pwd
-    name = (RUN_AS_USER or '').strip()
-    source = f"RUN_AS_USER, {_config_origin('RUN_AS_USER')}"
-    if not name:
-        name = os.environ.get('SUDO_USER', '').strip()
-        source = "SUDO_USER: the user who ran sudo"
+    name, source = _run_as_user()
     if not name:
         err("00032", "--install as root needs RUN_AS_USER -- the user the firewall rules belong to,\n"
-                     "  and the one root hands the rest of --install to.  No sudo named one either.\n"
+                     "  and the one root hands the rest of --install to.  No MY_USER in the site file\n"
+                     f"  ({SITE_CONF}) and no sudo named one either.\n"
                      "  Set RUN_AS_USER = '<user>' in this machine's site config.")
     try:
         pw = pwd.getpwnam(name)
@@ -4790,15 +4810,15 @@ def cmd_install() -> NoReturn:
         # user, and says when it is not this one: asking root then gives the
         # rules to somebody else.
         import pwd
-        owner = (RUN_AS_USER or '').strip()
-        if not owner:
+        owner, source = _run_as_user()
+        if not owner or source.startswith('SUDO_USER'):
             whose = "RUN_AS_USER (unset: the user who runs sudo)"
         else:
             try:
                 mine = pwd.getpwnam(owner).pw_uid == os.getuid()
             except KeyError:
                 mine = False
-            whose = f"RUN_AS_USER {owner!r}" + ("" if mine else f" -- not for you ({_boot.caller_name()})")
+            whose = f"{source.split(',')[0]} {owner!r}" + ("" if mine else f" -- not for you ({_boot.caller_name()})")
         print(f" >>> no firewall rule written: they need root -- `my-plex --install` in a root"
               f" shell writes them for {whose}   (LITTLE_SNITCH_CLI {cli} is there)",
               file=sys.stderr, flush=True)
@@ -33847,8 +33867,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("      or owned by another user, is somebody else's and stays; one")
             print('      owned by `system` (root\'s own) stays too, and is named under')
             print('      KEPT: it may still stop my-plex')
-            print('   3. the two rules per remote, owned by RUN_AS_USER (else the user')
-            print('      who ran sudo; with neither, an ERROR) -- never root, who only')
+            print('   3. the two rules per remote, owned by RUN_AS_USER (else MY_USER')
+            print('      from the site file, else the user who ran sudo; with none, an')
+            print('      ERROR) -- never root, who only')
             print("      writes them -- under that user's own name, as the firewall")
             print("      lists it (`ME` or an alias names user `me`)")
             print('   4. `su -l <that user>`: the rest runs as that user, in a fresh')
