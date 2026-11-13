@@ -252,25 +252,6 @@ def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
     return best_name
 
 
-def _pick_any_series_key():
-    """A Series cache key that exists on THIS machine, or None.
-
-    Never hard-coded: `Series:5191` is one id in one person's cache, and
-    everywhere else --renumber answers "Invalid parameter 'Series:5191'"
-    (ada, 2026-11-01). Rows start with the cache key, so the first Series row
-    of the most populated Series library is one that is really there."""
-    import subprocess, re
-    libs = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
-                          capture_output=True, text=True, timeout=30)
-    lib = _pick_most_populated_library(libs.stdout, lib_type='Series')
-    if not lib:
-        return None
-    rows = subprocess.run([sys.executable, MAIN_SCRIPT, lib, '--list'],
-                          capture_output=True, text=True, timeout=120)
-    m = re.search(r'^(Series:\d+)', rows.stdout, re.MULTILINE)
-    return m.group(1) if m else None
-
-
 def _pick_any_title_word(lib):
     """A word from the title of an item that exists in LIB here, or None.
 
@@ -5879,6 +5860,49 @@ class TestSourceE2E(unittest.TestCase):
         self.assertIn('themoviedb.org', result.stdout, "--help missing should mention themoviedb.org")
 
 
+_FIXTURE_SERVER = None
+
+def _fixture_server():
+    """The fixture library behind a Plex server that only the suite's fake
+    ssh answers: (config, listing, log path).  Its files are the fixture's
+    episode files, so a command that probes the server (`[ -e ]`, `find`)
+    finds them, and every ssh it starts is logged -- a test can then say it
+    reached no other host.  Built once, read-only, like _fixture_conf()."""
+    global _FIXTURE_SERVER
+    if _FIXTURE_SERVER is None:
+        import atexit
+        d = tempfile.mkdtemp(prefix='my-plex-fixture-server-')
+        atexit.register(shutil.rmtree, d, True)
+        conf = _fixture_library(d)
+        ssh_config = os.path.join(d, 'ssh_config')
+        open(ssh_config, 'w').close()
+        with open(conf, 'a') as f:
+            f.write("PLEX_DB_REMOTE_HOST = 'fixture-server'\n")
+            f.write(f"SSH_CONFIG_FILE = {ssh_config!r}\n")
+        os.chmod(conf, 0o400)
+        listing = os.path.join(d, 'server-files')
+        with open(listing, 'w') as f:
+            for n in (1, 2):
+                f.write(f"1572864000 /lib/library_fr/Une Serie/S01/une.serie.s01e{n:02d}.mkv\n")
+            # a sidecar no cache knows of: only the server's answer names it
+            f.write("2048 /lib/library_fr/Une Serie/S01/une.serie.s01e01.srt\n")
+        _FIXTURE_SERVER = (conf, listing, os.path.join(d, 'ssh.log'))
+    return _FIXTURE_SERVER
+
+
+def _run_on_fixture_server(*argv, timeout=60):
+    """`my-plex ARGV` against _fixture_server(); returns the run and the ssh
+    command lines it started (the log is emptied first)."""
+    conf, listing, log = _fixture_server()
+    if os.path.exists(log):
+        os.remove(log)
+    r = subprocess.run([MAIN_SCRIPT, '--config', conf, *argv], capture_output=True, text=True,
+                       timeout=timeout, env=_fake_ssh_env(find_listing=listing, log=log),
+                       stdin=subprocess.DEVNULL)
+    calls = open(log).read().splitlines() if os.path.exists(log) else []
+    return r, calls
+
+
 class TestRename(unittest.TestCase):
     """Tests for --rename command and EPISODE_NAME_PATTERN config."""
 
@@ -5905,27 +5929,28 @@ class TestRename(unittest.TestCase):
         self.assertIn('ERROR', output)
         self.assertIn('--rename requires', output)
 
+    def _assert_dry_run(self, r, calls):
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn('[DRY-RUN]', r.stdout, out[-1500:])
+        self.assertIn('une.serie.s01e01.mkv', r.stdout, "the episode to rename is not named")
+        self.assertIn('une.serie.s01e01.srt', r.stdout,
+                      "the sidecar the server lists is not renamed with its episode")
+        self.assertNotIn('ERROR', out)
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertTrue(calls, "it probed no server: the fixture's files were never looked at")
+        self.assertTrue(all(' fixture-server ' in c for c in calls), calls)
+        self.assertFalse(any(c.split(' fixture-server ', 1)[1].startswith(('mv ', 'rmdir ')) for c in calls),
+                         f"a dry run moved or removed something: {calls}")
+
     def test_rename_dry_run_no_file_changes(self):
-        """--rename --dry-run should preview without changing files."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, '--rename', 'boston legal', '--dry-run'],
-            capture_output=True, text=True, timeout=60)
-        output = result.stdout + result.stderr
-        if result.returncode != 0 and 'No items found' not in output and 'Traceback' not in result.stderr:
-            self.skipTest("'boston legal' not in cache or cache empty — cannot test --rename dry-run")
-        self.assertEqual(result.returncode, 0, f"--rename --dry-run should succeed, stderr: {result.stderr}")
-        self.assertIn('[DRY-RUN]', result.stdout, "Dry run should show [DRY-RUN] prefix")
-        self.assertNotIn('ERROR', result.stdout + result.stderr, "Dry run should not have errors")
-        self.assertNotIn('Traceback', result.stderr, "Should not produce stack trace")
+        """--rename SERIES --dry-run previews, against the fixture server:
+        the episodes found there are named, nothing is moved."""
+        self._assert_dry_run(*_run_on_fixture_server('--rename', 'Une Serie', '--dry-run'))
 
     def test_rename_obj_form_dry_run(self):
-        """my-plex 'boston legal' --rename --dry-run should work."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--rename', '--dry-run'],
-            capture_output=True, text=True, timeout=60)
-        output = result.stdout + result.stderr
-        if result.returncode != 0 and 'No items found' not in output and 'Traceback' not in result.stderr:
-            self.skipTest("'boston legal' not in cache or cache empty — cannot test --rename obj form")
-        self.assertEqual(result.returncode, 0, f"obj form should succeed, stderr: {result.stderr}")
-        self.assertIn('[DRY-RUN]', result.stdout)
+        """The object form, `my-plex SERIES --rename --dry-run`, does the same."""
+        self._assert_dry_run(*_run_on_fixture_server('Une Serie', '--rename', '--dry-run'))
 
     def _read_script(self):
         with open(TOOL_SOURCE, 'r') as f:
@@ -6043,13 +6068,10 @@ class TestShowInfoSeasonTable(unittest.TestCase):
     """Tests for --info on Show objects showing season table."""
 
     def test_series_info_has_season_table(self):
-        """my-plex 'boston legal' --info should show a season table."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
-            capture_output=True, text=True, timeout=30)
-        output = result.stdout + result.stderr
-        if result.returncode != 0 and 'Traceback' not in result.stderr:
-            self.skipTest("'boston legal' not in cache or cache empty — cannot test show info season table")
-        self.assertEqual(result.returncode, 0)
+        """SERIES --info shows a season table (the fixture's one series)."""
+        result, calls = _run_on_fixture_server('Une Serie', '--info')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-1500:])
+        self.assertTrue(all(' fixture-server ' in c for c in calls), calls)
         self.assertIn('SEASON', result.stdout, "Should have SEASON header")
         self.assertIn('KEY', result.stdout, "Should have KEY header")
         self.assertIn('EPISODES', result.stdout, "Should have EPISODES header")
@@ -6057,35 +6079,19 @@ class TestShowInfoSeasonTable(unittest.TestCase):
         self.assertIn('Season:', result.stdout, "Should show Season: keys")
 
     def test_series_info_no_episode_table_without_verbose(self):
-        """my-plex 'boston legal' --info (without -V) should NOT show the episode table."""
-        result = subprocess.run([sys.executable, MAIN_SCRIPT, 'boston legal', '--info'],
-            capture_output=True, text=True, timeout=30)
-        if result.returncode != 0 and 'Traceback' not in result.stderr:
-            self.skipTest("'boston legal' not in cache or cache empty")
-        self.assertEqual(result.returncode, 0)
+        """SERIES --info (without -V) shows no episode table."""
+        result, _calls = _run_on_fixture_server('Une Serie', '--info')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-1500:])
         self.assertIn('SEASON', result.stdout, "Season table should still appear")
         self.assertNotIn('TITLE', result.stdout, "Episode table TITLE header should NOT appear without -V")
 
     def test_series_info_verbose_has_episode_table(self):
-        """my-plex <Series:KEY> --info -V should show an episode table.
-
-        Series picked dynamically from the cache (never a hard-coded local
-        title).  Episode IDs may be negative when Plex mis-parsed the
-        numbering, so match the S..E shape, not specific digits."""
-        list_result = subprocess.run([sys.executable, MAIN_SCRIPT, 'type:series', '--list'],
-            capture_output=True, text=True, timeout=60)
-        series_keys = [line.split()[0] for line in list_result.stdout.splitlines()
-                       if line.startswith('Series:')]
-        if not series_keys:
-            self.skipTest("No series in cache — cannot test series info episode table")
-        for series_key in series_keys[:5]:
-            result = subprocess.run([sys.executable, MAIN_SCRIPT, series_key, '--info', '-V'],
-                capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and 'EPISODE' in result.stdout:
-                self.assertIn('TITLE', result.stdout, "Should have TITLE header")
-                self.assertRegex(result.stdout, r'S\d+E', "Should show episode rows")
-                return
-        self.skipTest("No cached series produced an episode table (no episodes on disk)")
+        """<Series:KEY> --info -V shows an episode table, one row per episode."""
+        result, _calls = _run_on_fixture_server('Series:10', '--info', '-V')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-1500:])
+        self.assertIn('TITLE', result.stdout, "Should have TITLE header")
+        self.assertRegex(result.stdout, r'S01E01', "Should show episode rows")
+        self.assertRegex(result.stdout, r'S01E02', "Should show every episode")
 
 
 class TestEpisodesErr(unittest.TestCase):
@@ -7812,28 +7818,12 @@ class TestAbsEpIdx(unittest.TestCase):
 class TestRenumber(unittest.TestCase):
     """Test --renumber command: detection, command registration, help page."""
 
-    @classmethod
-    def setUpClass(cls):
-        """One lookup for the whole class: the scoped E2E tests need a series
-        that exists here, and asking my-plex twice costs a second run."""
-        cls._series_key = _pick_any_series_key()
-
-    def _skip_if_no_series(self):
-        if not getattr(self, '_series_key', None):
-            self.skipTest("no series in this machine's cache for a scoped "
-                          "test -- run `my-plex --update-cache` here")
+    # the fixture library's one series (_fixture_library), on its fake server
+    _series_key = 'Series:10'
 
     def _read_script(self):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
-
-    def test_a_missing_series_skips_instead_of_failing(self):
-        """Same guard, same reason: with no series here, the scoped E2E tests
-        must skip. They used to name `Series:5191` -- one id in one person's
-        cache -- and failed with "Invalid parameter" everywhere else."""
-        self._series_key = None
-        with self.assertRaises(unittest.SkipTest):
-            self._skip_if_no_series()
 
     def test_list_renumber_candidates_method_exists(self):
         """_list_renumber_candidates must exist as a static method on PLEX_Media."""
@@ -8011,21 +8001,14 @@ class TestRenumber(unittest.TestCase):
 
     def test_renumber_e2e(self):
         """--renumber runs without error (E2E)."""
-        result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, '--renumber'],
-            capture_output=True, text=True, timeout=60
-        )
+        result, calls = _run_on_fixture_server('--renumber')
         self.assertEqual(result.returncode, 0, f"--renumber failed: {result.stderr}")
+        self.assertTrue(all(' fixture-server ' in c for c in calls), calls)
         self.assertIn('renumber candidate', result.stdout.lower())
 
     def test_renumber_scoped_e2e(self):
         """<SHOW> --renumber runs without error (E2E)."""
-        self._skip_if_no_series()
-        assert self._series_key is not None
-        result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber'],
-            capture_output=True, text=True, timeout=60
-        )
+        result, _calls = _run_on_fixture_server(self._series_key, '--renumber')
         self.assertEqual(result.returncode, 0, f"Scoped --renumber failed: {result.stderr}")
         self.assertIn('renumber candidate', result.stdout.lower())
 
@@ -8036,12 +8019,9 @@ class TestRenumber(unittest.TestCase):
 
     def test_renumber_fix_dry_run_e2e(self):
         """<SHOW> --renumber --fix --try runs without error (E2E, scoped to one show)."""
-        self._skip_if_no_series()
-        assert self._series_key is not None
-        result = subprocess.run(
-            [sys.executable, MAIN_SCRIPT, self._series_key, '--renumber', '--fix', '--try'],
-            capture_output=True, text=True, timeout=60
-        )
+        result, calls = _run_on_fixture_server(self._series_key, '--renumber', '--fix', '--try')
+        self.assertFalse(any(c.split(' fixture-server ', 1)[-1].startswith(('mv ', 'rmdir ')) for c in calls),
+                         f"a dry run moved or removed something: {calls}")
         self.assertEqual(result.returncode, 0, f"--renumber --fix --try failed: {result.stderr}")
         output = result.stdout.lower()
         self.assertIn('renumber fix summary', output, "Should print summary")
@@ -14610,8 +14590,10 @@ def _fake_ssh_env(login_rc=0, find_listing=None, log=None):
     with its lines under ROOT, filtered as that find's own words filter them
     -- `-maxdepth 1` keeps what lies directly in ROOT, `-type d -name ".*"
     -prune` drops what sits in a hidden folder, `-name ".*" -prune` also
-    every hidden file.  LOG gets one line per ssh started, its arguments as
-    given."""
+    every hidden file.  Without `-exec stat` in it, the find prints the PATH
+    alone, as a plain `find -type f` does.  `[ -e "X" ]` answers EXISTS when
+    X is a listed file or a folder one lies in, NOTFOUND otherwise.  LOG gets
+    one line per ssh started, its arguments as given."""
     global _FAKE_SSH_DIR
     if _FAKE_SSH_DIR is None:
         real = shutil.which('ssh') or '/usr/bin/ssh'
@@ -14621,12 +14603,15 @@ def _fake_ssh_env(login_rc=0, find_listing=None, log=None):
         find_awk = os.path.join(_FAKE_SSH_DIR, 'find.awk')
         with open(find_awk, 'w') as f:
             f.write(r"""{ path = substr($0, index($0, " ") + 1) }
+ENVIRON["EXISTS"] != "" { if (path == ENVIRON["EXISTS"] || index(path, ENVIRON["EXISTS"] "/") == 1) f = 1; next }
 index(path, ENVIRON["ROOT"]) != 1 { next }
 { rest = substr(path, length(ENVIRON["ROOT"]) + 1) }
 ENVIRON["DEPTH"] == "1" && index(rest, "/") { next }
 ENVIRON["PRUNE"] == "all" && rest ~ /(^|\/)\./ { next }
 ENVIRON["PRUNE"] == "dirs" && rest ~ /(^|\/)\.[^\/]*\// { next }
+ENVIRON["BARE"] == "1" { print path; next }
 { print }
+END { if (ENVIRON["EXISTS"] != "") print (f ? "EXISTS" : "NOTFOUND") }
 """)
         stub = os.path.join(_FAKE_SSH_DIR, 'ssh')
         with open(stub, 'w') as f:
@@ -14645,7 +14630,12 @@ if [ -n "${FAKE_SSH_FIND_LISTING:-}" ]; then
       *' -type d -name ".*" -prune '*) prune=dirs;;
       *' -name ".*" -prune '*) prune=all;;
     esac
-    ROOT="$root/" DEPTH=$depth PRUNE=$prune awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
+    bare=1
+    case $cmd in *'-exec stat'*) bare=;; esac
+    ROOT="$root/" DEPTH=$depth PRUNE=$prune BARE=$bare awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
+  '[ -e "'*)
+    path=${cmd#\[ -e \"}; path=${path%%\"*}
+    EXISTS=$path awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
   esac
 fi
 exit "${FAKE_SSH_LOGIN_RC:-0}"
