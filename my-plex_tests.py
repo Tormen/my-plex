@@ -16457,6 +16457,29 @@ class TestConfigLayers(unittest.TestCase):
         finally:
             self.mp._AS_ROOT = saved
 
+    def test_as_root_a_config_in_a_sticky_directory_others_can_write_is_refused(self):
+        """#43, kept strict: a sticky directory such as /tmp (1777) is no
+        exception.  The sticky bit stops another user removing root's file,
+        but whoever writes the directory still plants names in it -- and a
+        root file on a path through it is refused like any other."""
+        saved = self.mp._AS_ROOT
+        self.mp._AS_ROOT = True
+        try:
+            sticky = os.path.join(self.d, 'sticky')
+            os.makedirs(sticky)
+            named = self.write('sticky/named.conf', "RUN_AS_USER = 'me'\n")
+            os.chmod(named, 0o644)
+            os.chmod(sticky, 0o1755)
+            conf, _ = self.load(named)
+            self.assertEqual(conf.get('RUN_AS_USER'), 'me',
+                             "control: a sticky directory root alone writes is read")
+            os.chmod(sticky, 0o1777)
+            out = self.refused(named)
+            self.assertIn(f"group or others can write {os.path.realpath(sticky)} (mode 1777)", out,
+                          "a sticky directory others can write was not refused")
+        finally:
+            self.mp._AS_ROOT = saved
+
     def test_as_root_the_file_checked_is_the_file_read(self):
         """A check on the PATH and a read of the PATH are two lookups, and
         whoever owns a link on it can re-point it in between.  The stat()
