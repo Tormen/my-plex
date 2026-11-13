@@ -355,7 +355,10 @@ root does not hand over to, gets the entry this way.
 **Which Python the rules name.** The fetches use `urllib.request`, so the
 interpreter opens the socket and is what a firewall sees. Root names the
 base `python3` the launcher runs under, never a venv's: it exists before
-any venv does, and a rule for a path that does not exist is refused. Two
+any venv does, and a rule for a path that does not exist is refused. It is
+the same rule either way: Little Snitch stores the Homebrew `Python.app` both
+paths resolve to, its version folder as a `*` (seen on horse, 2026-11-13: the
+base and the venv path both give the one stored rule). Two
 consequences: the rules also cover other scripts run by that Python -- there
 is no narrower form for a Python script -- and a Python minor upgrade needs
 `--install` again, because `python@3.16` is another program than
