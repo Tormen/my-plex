@@ -513,8 +513,8 @@ my-plex --disk2plex --dry-run
 
 ## Configuration
 
-Configuration files are Python, run with `exec()`. my-plex reads up to
-two, the later winning for a key both set:
+Configuration files are Python, run with `exec()`. my-plex reads two
+layers of them, the later winning for a key both set:
 
 1. **The site config**, the same for every user of a machine: every one of
    `<dir>/my-plex.conf` and `<dir>/my-plex` that exists, where `<dir>` is

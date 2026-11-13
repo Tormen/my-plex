@@ -894,10 +894,12 @@ SITE_ONLY_KEYS = frozenset({'LITTLE_SNITCH_CLI', 'PLEX_DB_REMOTE', 'PLEX_DB_REMO
 
 
 def _site_farm_paths() -> list[str]:
-    """The site's search directory's config names, in read order; none
-    without a search directory."""
+    """The site's search directory's config names, in read order -- each
+    name's <name>.GLOBAL, then the name -- or none without a search
+    directory.  The one list of them: the search, its messages and --help
+    config all read it."""
     d = read_site().config_search_dir
-    return [os.path.join(d, n) for n in SITE_CONFIG_NAMES] if d else []
+    return [os.path.join(d, n + sfx) for n in SITE_CONFIG_NAMES for sfx in ('.GLOBAL', '')] if d else []
 
 
 def _home() -> str:
@@ -1111,7 +1113,7 @@ def config_layers(config_file=None):
                   f"for real): {', '.join(found)}", file=sys.stderr)
         return []
 
-    in_farm = [p + sfx for p in _site_farm_paths() for sfx in ('.GLOBAL', '')]
+    in_farm = _site_farm_paths()
     site = ([q for q in in_farm if _dangling(q)]
             + _global_first([q for q in in_farm if os.path.exists(q)]))
     if not any(os.path.exists(q) for q in site):
@@ -33527,14 +33529,14 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("Config file: Python syntax, loaded via exec().")
             print()
-            print("READ ORDER -- for a key both files set, the later wins:")
+            print("READ ORDER -- for a key two files set, the later wins:")
             _defaults = default_config_paths()
             _farm = _site_farm_paths()
             print("  1. the site config, the same for every user of this machine:")
             if _farm:
-                print("       every one of these that exists, and its <name>.GLOBAL -- a name")
-                print("       only this farm has: my-rollout links both trees' files here --")
-                print("       the one linked from the global tree read first")
+                print("       every one of these that exists -- <name>.GLOBAL is a name only")
+                print("       this farm has: my-rollout links both trees' files here -- the")
+                print("       one linked from the global tree read first")
                 for _p in _farm:
                     print(f"         {_p}")
                 print("       else the first of")

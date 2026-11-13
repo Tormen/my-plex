@@ -16528,6 +16528,37 @@ class TestConfigLayers(unittest.TestCase):
         out = self.refused()
         self.assertIn('two different user configs', out)
 
+    def test_the_search_names_the_farms_GLOBAL_names_it_reads(self):
+        """ADVERSARIAL (#48 review): config_search_paths() claims every place
+        a config can come from, yet the farm's <name>.GLOBAL names were
+        added by config_layers() alone -- so a farm holding only
+        my-plex.conf.GLOBAL was read while the search never named it: a
+        test run's 'not read' notice left it out, and bare --config's
+        'none of' line listed the plain names only."""
+        farm = os.path.join(self.links, 'default')
+        names = [os.path.join(farm, n) for n in ('my-plex.conf.GLOBAL', 'my-plex.conf',
+                                                 'my-plex.GLOBAL', 'my-plex')]
+        site_paths = [p for l, p in self.mp.config_search_paths() if l == 'site']
+        self.assertEqual(site_paths[:4], names, "the farm's names, in read order")
+        # bare --config with no site file names every farm name it searched
+        self.user("DEFAULT_SCOPE = 'only-mine'\n")
+        conf, _ = self.load()
+        out = self.mp.config_report(conf)
+        self.assertIn(f"#   site   (none of: {', '.join(names)}, ", out, out)
+        # the farm holds only my-plex.conf.GLOBAL: read (the control), and a
+        # test run's notice names it
+        g = self.write('LINKS/global/etc/default/my-plex.conf', "EDITOR = 'farm-global'\n")
+        os.symlink(g, names[0])
+        conf, err = self.load()
+        self.assertEqual(conf.get('EDITOR'), 'farm-global', err)
+        self.mp._TEST_RUN = True
+        try:
+            _conf, out = self.load()
+        finally:
+            self.mp._TEST_RUN = False
+        self.assertIn('not read for this test run', out)
+        self.assertIn(names[0], out, "a test run's notice does not name the farm's .GLOBAL file")
+
     def test_the_global_file_is_read_before_the_local_one(self):
         """Told by where the link points, not by the name: the farm may give
         the global file the plain name and the local one .GLOBAL never."""
@@ -16705,7 +16736,7 @@ class TestConfigLayers(unittest.TestCase):
         conf, _ = self.load()
         out = self.mp.config_report(conf)
         farm = os.path.join(self.links, 'default', 'my-plex.conf')
-        self.assertIn(f'#   site   (none of: {farm}, ', out)
+        self.assertIn(f'#   site   (none of: {farm}.GLOBAL, {farm}, ', out)
         self.assertIn(f'#   yours  {user}', out)
 
     def test_bare_config_of_a_named_file_says_it_was_read_alone(self):
