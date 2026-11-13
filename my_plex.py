@@ -867,12 +867,16 @@ def read_site() -> Site:
 # Where configs come from -- TWO layers, read in this order, the later
 # winning for a key both set (the house rule: global first, then local):
 #   1. the SITE config, the same for every user of a machine: the files in
-#      the site file's CONFIG_SEARCH_DIR (both spellings, each with a .GLOBAL
-#      twin the farm may link beside it, global first), else the first of
-#      /etc/my-plex.conf and /usr/local/etc/my-plex.conf;
-#   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf (a .GLOBAL
-#      twin beside it first), from the run's HOME when read -- never once at
-#      import, which as root is /var/root.
+#      the site file's CONFIG_SEARCH_DIR (both spellings, each also as
+#      <name>.GLOBAL, the second name my-rollout links there when both trees
+#      have the file; the one linked from global/ first, told by the link's
+#      target), else the first of /etc/my-plex.conf and
+#      /usr/local/etc/my-plex.conf;
+#   2. YOUR config: ~/.my-plex/my-plex.conf or ~/.my-plex.conf, from the
+#      run's HOME when read -- never once at import, which as root is
+#      /var/root.
+# The .GLOBAL name exists in that farm directory only: nowhere else does
+# my-plex read one.
 # A file named for one run ($MY_PLEX_CONFIG, else --config) is read ALONE,
 # by that run and every my-plex it starts.  A test run, and every my-plex it
 # starts, reads neither layer.
@@ -1069,16 +1073,15 @@ def config_layers(config_file=None):
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
     alone, or the site files then the user's -- none in a test run.
 
-    A default name that is a dangling link does not end the search -- its
-    own .GLOBAL twin, then the next name, is looked at -- and stays in the
-    list, in its place, for the loader to skip and name.
+    A default name that is a dangling link does not end the search -- the
+    next name is looked at -- and stays in the list, in its place, for the
+    loader to skip and name.
 
     Refuses here, where the search is decided, what no later step can
     repair: a NAMED file that is not there (no fallback -- a run pointed at
-    its own config must not read another one), and two different user files,
-    a dangling name's real .GLOBAL twin counting as its file (which one you
-    edit is not for my-plex to guess).  A run that only prints is never
-    stopped by a config: it warns and goes on.
+    its own config must not read another one), and two different user files
+    (which one you edit is not for my-plex to guess).  A run that only
+    prints is never stopped by a config: it warns and goes on.
     """
     search = config_search_paths(config_file)
     source, first = search[0]
@@ -1121,10 +1124,7 @@ def config_layers(config_file=None):
         return [('site', s) for s in site]
 
     users = [os.path.join(_home(), n) for n in USER_CONFIG_NAMES]
-    # A name's file is the name itself, or -- when it points nowhere -- its
-    # real .GLOBAL twin, which the search below reads in its place.
-    found = [p for u in users if os.path.lexists(u)
-             for p in [u if os.path.exists(u) else u + '.GLOBAL'] if os.path.exists(p)]
+    found = [u for u in users if os.path.exists(u)]
     distinct = {os.path.realpath(u) for u in found}
     if len(distinct) > 1:
         msg = ("two different user configs -- my-plex will not guess which one you edit:\n"
@@ -1132,9 +1132,7 @@ def config_layers(config_file=None):
                + "  Merge them into one, and make the other a link to it or remove it.")
         if _config_must_stop(msg):
             err("00025", msg)
-    # A name's .GLOBAL twin goes with it, read first -- beside a dangling
-    # name too, which is then not passed over: its twin is a file to read.
-    user = _first_real([u + '.GLOBAL', u] if os.path.lexists(u) else [] for u in users)
+    user = _first_real([u] for u in users)
     return [('site', s) for s in site] + [('user', u) for u in user]
 
 
@@ -4683,7 +4681,8 @@ def config_report(conf, config_file=None) -> str:
     per_layer = {l: sum(1 for m, _p in files if m == l) for l, _p in files}
     for key, path in sorted(CONFIG_RECORD['origin'].items(), key=lambda kp: order.index(kp[1])):
         layer = next(l for l, p in files if p == path)
-        # A layer read from two files (a .GLOBAL beside the file) names the file.
+        # A layer read from two files (the farm's global and local one, or
+        # both spellings) names the file.
         origin = _LAYER_LABEL[layer] + (f": {path}" if per_layer[layer] > 1 else "")
         lines.append(f"{key:<26} = {_config_value_text(key, conf.get(key)):<28}   ({origin})")
     return "\n".join(lines)
@@ -33533,7 +33532,9 @@ def main_print_help(args, remaining_args, main_parser):
             _farm = _site_farm_paths()
             print("  1. the site config, the same for every user of this machine:")
             if _farm:
-                print("       every one of these that exists (a .GLOBAL twin beside it first)")
+                print("       every one of these that exists, and its <name>.GLOBAL -- a name")
+                print("       only this farm has: my-rollout links both trees' files here --")
+                print("       the one linked from the global tree read first")
                 for _p in _farm:
                     print(f"         {_p}")
                 print("       else the first of")
@@ -33542,13 +33543,13 @@ def main_print_help(args, remaining_args, main_parser):
             for _l, _p in _defaults:
                 if _l == 'site' and _p not in _farm:
                     print(f"         {_p}")
-            print("  2. your config, the first of  (a .GLOBAL twin beside it first)")
+            print("  2. your config, the first of")
             for _l, _p in _defaults:
                 if _l == 'user':
                     print(f"       {_p}")
             print( "     two different files there are an ERROR: merge them into one.")
             print( "  A name that is a link pointing nowhere is skipped, with a warning")
-            print( "  naming it; the search goes on with its .GLOBAL twin, then the next name.")
+            print( "  naming it; the search goes on with the next name.")
             print(f"  ${CONFIG_ENV}, else --config FILE | -C FILE: that file is read")
             print( "  ALONE -- a config for ONE run: a test, CI, a one-off -- and by")
             print( "  every my-plex that run starts (a pipeline's phases): --config is")

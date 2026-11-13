@@ -16425,18 +16425,59 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(f'config link {farm} -> ', err)
         self.assertIn(f'config link {etc} -> ', err)
 
-    def test_a_dangling_user_name_still_brings_its_real_GLOBAL_twin(self):
-        """ADVERSARIAL (#39 review): a user name's .GLOBAL twin is read before
-        it; when the name itself was a dangling link, the search passed the
-        name over and took its real twin along, so the run went on with no
-        user config -- the warning named only the link."""
-        link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
-        os.symlink('../gone.conf', link)
-        twin = self.write('home/.my-plex/my-plex.conf.GLOBAL', "DEFAULT_SCOPE = 'from-global-twin'\n")
+    def test_a_GLOBAL_name_beside_your_config_is_never_read(self):
+        """ADVERSARIAL: the .GLOBAL suffix belongs to the farm alone -- it is
+        how my-rollout links one name from both trees into the site's search
+        directory.  The user search read a ".GLOBAL twin" beside each of your
+        names as well: before a real name, in place of a dangling one, and
+        counted it in the two-configs refusal.  A poison value in
+        ~/.my-plex/my-plex.conf.GLOBAL and ~/.my-plex.conf.GLOBAL must reach
+        no run -- alone, beside a real name, beside a dangling one -- while
+        the farm's my-plex.conf.GLOBAL (the control) is still read."""
+        home_dir = os.path.join(self.home, '.my-plex', 'my-plex.conf')
+        home_dot = os.path.join(self.home, '.my-plex.conf')
+        poison = "DEFAULT_SCOPE = 'POISON-user-GLOBAL'\nEDITOR = 'POISON-user-GLOBAL'\n"
+        for name in (home_dir, home_dot):
+            with open(name + '.GLOBAL', 'w') as f:
+                f.write(poison)
+
+        def check(what: str, conf: dict[str, Any], err: str) -> None:
+            self.assertNotIn('POISON-user-GLOBAL', repr(conf), f"{what}: read\n{err}")
+            for _l, path, *_why in self.mp.CONFIG_RECORD['chosen']:
+                self.assertFalse(path.endswith('.GLOBAL') and path.startswith(self.home),
+                                 f"{what}: chosen {path}")
+
         conf, err = self.load()
-        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'from-global-twin', err)
-        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('user', twin)])
-        self.assertIn(f'config link {link} -> ../gone.conf points nowhere -- skipped', err)
+        check('alone', conf, err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [], err)
+
+        real = self.user("PLEX_DB_REMOTE_HOST = 'plain-name'\n")
+        conf, err = self.load()
+        check('beside a real name', conf, err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('user', real)], err)
+
+        os.symlink('../gone.conf', home_dir)
+        conf, err = self.load()
+        check('beside a dangling name, a real next name', conf, err)
+        self.assertEqual(conf.get('PLEX_DB_REMOTE_HOST'), 'plain-name', err)
+        self.assertIn(f'config link {home_dir} -> ../gone.conf points nowhere -- skipped', err)
+
+        os.unlink(real)
+        os.symlink('gone.conf', home_dot)
+        conf, err = self.load()
+        check('beside two dangling names', conf, err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [], err)
+
+        # control: the same file under the farm's .GLOBAL name IS read,
+        # before the farm's plain name, which wins a key both set
+        farm = os.path.join(self.links, 'default', 'my-plex.conf')
+        g = self.write('LINKS/global/etc/default/my-plex.conf', poison)
+        os.symlink(g, farm + '.GLOBAL')
+        self.site("DEFAULT_SCOPE = 'farm-local'\n")
+        conf, err = self.load()
+        self.assertEqual((conf.get('EDITOR'), conf.get('DEFAULT_SCOPE')),
+                         ('POISON-user-GLOBAL', 'farm-local'), err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('site', farm + '.GLOBAL'), ('site', farm)])
 
     def test_the_warning_for_the_last_dangling_name_claims_no_next_name(self):
         """ADVERSARIAL (#39 review): 'skipped, the search goes on' was said of
@@ -16465,24 +16506,27 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(read_line, out, out)
         self.assertLess(out.index(skipped_line), out.index(read_line), out)
 
-    def test_a_dangling_names_real_twin_and_a_real_second_name_are_two_configs(self):
-        """ADVERSARIAL (#39 review): a dangling ~/.my-plex/my-plex.conf whose
-        .GLOBAL twin is real ends the search at that twin, and the check for
-        two different user files counted the plain names only -- so a real,
-        different ~/.my-plex.conf was neither read, nor named, nor refused."""
+    def test_a_GLOBAL_name_beside_your_config_is_no_second_config(self):
+        """ADVERSARIAL: the two-configs refusal counted a dangling name's
+        real .GLOBAL file as that name's config, so a dangling
+        ~/.my-plex/my-plex.conf with a my-plex.conf.GLOBAL beside it and a
+        real ~/.my-plex.conf were refused as two configs.  Only plain names
+        are your config: the search passes the dangling one and reads
+        ~/.my-plex.conf.  Two real plain names stay an error (the control)."""
         link = os.path.join(self.home, '.my-plex', 'my-plex.conf')
         os.symlink('../gone.conf', link)
-        twin = self.write('home/.my-plex/my-plex.conf.GLOBAL', "DEFAULT_SCOPE = 'twin'\n")
+        self.write('home/.my-plex/my-plex.conf.GLOBAL', "DEFAULT_SCOPE = 'POISON-user-GLOBAL'\n")
         real = self.user("PLEX_DB_REMOTE_HOST = 'from-real-user-file'\n")
+        conf, err = self.load()
+        self.assertNotIn('two different user configs', err)
+        self.assertEqual(conf.get('PLEX_DB_REMOTE_HOST'), 'from-real-user-file', err)
+        self.assertNotIn('POISON-user-GLOBAL', repr(conf), err)
+        self.assertEqual(self.mp.CONFIG_RECORD['files'], [('user', real)], err)
+        # control: a real file in place of the link is a second config
+        os.unlink(link)
+        self.write('home/.my-plex/my-plex.conf', "DEFAULT_SCOPE = 'second'\n")
         out = self.refused()
         self.assertIn('two different user configs', out)
-        self.assertIn(twin, out)
-        self.assertIn(real, out)
-        # control: ~/.my-plex.conf linked to that twin is one config, read
-        os.unlink(real)
-        os.symlink(twin, real)
-        conf, err = self.load()
-        self.assertEqual(conf.get('DEFAULT_SCOPE'), 'twin', err)
 
     def test_the_global_file_is_read_before_the_local_one(self):
         """Told by where the link points, not by the name: the farm may give

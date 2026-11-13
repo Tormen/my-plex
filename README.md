@@ -518,16 +518,17 @@ two, the later winning for a key both set:
 
 1. **The site config**, the same for every user of a machine: every one of
    `<dir>/my-plex.conf` and `<dir>/my-plex` that exists, where `<dir>` is
-   `CONFIG_SEARCH_DIR` from the site file `/LINKS/default/site.conf` (a
-   `.GLOBAL` twin linked into a `global/` tree is read first), else the
-   first of `/etc/my-plex.conf` and `/usr/local/etc/my-plex.conf`. Without
-   a site file, only the latter two.
-2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf` (a
-   `.GLOBAL` twin beside it is read first). Two different files there are
-   an error -- merge them into one.
+   `CONFIG_SEARCH_DIR` from the site file `/LINKS/default/site.conf`, and
+   each name's `<name>.GLOBAL` there (my-rollout links both trees' files
+   into that directory; the one linked from the `global/` tree is read
+   first), else the first of `/etc/my-plex.conf` and
+   `/usr/local/etc/my-plex.conf`. Without a site file, only the latter two.
+2. **Your config**: `~/.my-plex/my-plex.conf` or `~/.my-plex.conf`. Two
+   different files there are an error -- merge them into one.
 
-A name that is a link pointing nowhere is skipped, with a warning naming
-it; the search goes on with its `.GLOBAL` twin, then the next name.
+The `.GLOBAL` name is read in the site's search directory only, nowhere
+else. A name that is a link pointing nowhere is skipped, with a warning
+naming it; the search goes on with the next name.
 
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The
