@@ -685,17 +685,15 @@ my-plex --run-tests TestRename.test_siblings
 # unittest's own output
 my-plex --unittest -v
 
-# The tests that really FETCH -- off unless you ask for them
-MY_PLEX_TEST_NETWORK=1 my-plex --run-tests TestTsvScrapersE2E
+# The tests that really FETCH
+my-plex --run-tests TestTsvScrapersE2E
 ```
 
-**A default run reaches no network.** Seven scraper tests fetch
-api.themoviedb.org and www.fernsehserien.de for real; they skip unless
-`MY_PLEX_TEST_NETWORK` is set, and each says so in its own skip line. Behind
-an interactive firewall an unapproved connection does not fail — it **hangs**,
-and a suite run under `my-rollout go` was killed at its 600s cap because of
-it, so the copy was never offered. Nothing is deleted: set the variable and
-they run exactly as before.
+**Seven scraper tests reach the network**, in every run: they fetch
+api.themoviedb.org and www.fernsehserien.de for real (the TMDB ones skip
+without a `TMDB_API_KEY` in your config). Behind an interactive firewall an
+unapproved connection does not fail — it **hangs** — so run `--install` first
+on a machine with one: the rules it writes name exactly these hosts.
 
 **Its temp files live in one private directory**, removed when the run ends,
 under the first of `$TMPDIR`, macOS's per-user temp dir and

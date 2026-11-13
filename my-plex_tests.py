@@ -49,29 +49,6 @@ BOOT_SOURCE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'my_plex
 _NO_README = ("no README.md beside the tool or the suite -- a deployed copy; "
               "the README claims are a source-tree check")
 
-# THE SUITE REACHES NO NETWORK UNLESS ASKED.
-#
-# What it cost to learn: `my-rollout go` on horse, 2026-11-05 22:09, ran this
-# suite as the user under Terminal -> login -> su -> my-rollout -- which is
-# exactly the "Terminal via Python" in the Little Snitch alerts the user
-# answered that evening.  A connection held behind an unanswered alert does
-# not fail: it HANGS.  That run was killed at its 600s cap after ok 930, with
-# `not ok 226 - TestTsvScrapersE2E.test_tmdb_different_shows_different_data`
-# already recorded, so the gate did not offer my-plex at all.  The class
-# docstring's "skip gracefully if network is unavailable" never covered being
-# HELD, which is the case that actually happens on a machine with a firewall.
-#
-# Nothing is deleted -- `MY_PLEX_TEST_NETWORK=1 my-plex --run-tests tsv` runs
-# them exactly as before.  The coverage stays reachable for whoever wants it,
-# while a default run of the suite depends on no remote host, which is what
-# the house asks of a suite in the first place.
-TEST_NETWORK_ENV = 'MY_PLEX_TEST_NETWORK'
-
-
-def _network_opted_in():
-    """True only when someone asked for the tests that really fetch."""
-    return bool(os.environ.get(TEST_NETWORK_ENV, '').strip())
-
 # How long a whole my-plex command may take against the FIXTURE library (see
 # _fixture_library) before a test calls it hung.  A SAFETY NET, not a
 # performance budget: a run there takes a few seconds, and the bound only
@@ -6778,22 +6755,13 @@ class TestTsvScrapersE2E(unittest.TestCase):
     These tests call the actual scraper functions via subprocess and verify
     the results are consistent (episode counts, season counts, data format).
 
-    They really FETCH, so they do not run unless $MY_PLEX_TEST_NETWORK is set
-    -- see TEST_NETWORK_ENV above for what that cost to learn. The old "skip
-    gracefully if network is unavailable" is still here for a fetch that
-    fails, but it never covered a connection HELD behind a firewall alert,
-    which hangs instead of failing.
+    They really FETCH api.themoviedb.org and www.fernsehserien.de, in a
+    default run (decided 2026-11-13: no opt-in flag). What makes that safe
+    under my-rollout's gate is the firewall rule `--install` writes for each
+    of those hosts: a connection held behind an unanswered alert does not
+    fail, it hangs, and a gate run was killed at its 600s cap that way on
+    2026-11-05. The "skip gracefully" below covers a fetch that FAILS.
     """
-
-    def setUp(self):
-        # setUp, not setUpClass: a class-level skip is ONE skip, so the TAP
-        # stream would announce `1..7` and then print no test lines at all --
-        # and my-rollout's gate reads those lines. Per test, each one reports
-        # `ok N - <name> # SKIP <reason>`, so the plan and the lines agree.
-        if not _network_opted_in():
-            self.skipTest(
-                f"fetches api.themoviedb.org and www.fernsehserien.de for "
-                f"real; set {TEST_NETWORK_ENV}=1 to run these")
 
     def _get_tmdb_api_key(self):
         """Read TMDB API key from config file, return None if not found."""
@@ -17799,50 +17767,6 @@ class TestInstallPlexRule(_RootInstallCase):
                          f"a Plex rule was invented with nothing configured:\n"
                          + "\n".join(lines))
 
-class TestSuiteReachesNoNetwork(unittest.TestCase):
-    """A default run of this suite fetches nothing.
-
-    It cannot live in TestTsvScrapersE2E -- that class's own setUp would skip
-    it. It spawns a child instead, which is also the only honest way to test
-    the DEFAULT: this process may well have the variable set.
-    """
-
-    def test_a_fetching_test_does_not_run_by_default(self):
-        """And the skip must SAY how to run it. A test skipped for some other
-        reason -- no config, no venv -- would otherwise pass this and leave
-        the suite reaching the network for real."""
-        e = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
-        e.pop(TEST_NETWORK_ENV, None)
-        r = subprocess.run([MAIN_SCRIPT, '--run-tests', 'test_tmdb_friends'],
-                           capture_output=True, text=True, timeout=180, env=e)
-        self.assertEqual(r.returncode, 0, r.stderr[-400:])
-        self.assertIn('1..1', r.stdout, r.stdout[-400:])
-        self.assertIn('# SKIP', r.stdout,
-                      f"it RAN -- the default suite reaches the network:"
-                      f"\n{r.stdout[-400:]}")
-        self.assertIn(TEST_NETWORK_ENV, r.stdout,
-                      f"the skip does not say how to run it:\n{r.stdout[-400:]}")
-
-    def test_the_variable_is_the_only_thing_that_opens_it(self):
-        """The predicate, directly: set and non-blank means opted in. Checked
-        here rather than by a run that fetches, which is the one thing this
-        suite must not do to prove a point."""
-        saved = os.environ.get(TEST_NETWORK_ENV)
-        try:
-            for value, expected in (('1', True), ('yes', True), ('', False),
-                                    ('   ', False)):
-                os.environ[TEST_NETWORK_ENV] = value
-                self.assertEqual(_network_opted_in(), expected,
-                                 f"{TEST_NETWORK_ENV}={value!r}")
-            os.environ.pop(TEST_NETWORK_ENV, None)
-            self.assertFalse(_network_opted_in(), "unset must mean no")
-        finally:
-            if saved is None:
-                os.environ.pop(TEST_NETWORK_ENV, None)
-            else:
-                os.environ[TEST_NETWORK_ENV] = saved
-
-
 class TestReadmeIsFound(unittest.TestCase):
     """The README claims may only go quiet where there IS no README.
 
@@ -18081,7 +18005,6 @@ _UNITTEST_SCOPES = {
                    TestEpisodesErr, TestEpisodesErrClassification,
                    TestForceTsv, TestTsvScrapersE2E,
                    TestEpisodeNumberingIssues, TestObjByShowScraped,
-                   TestSuiteReachesNoNetwork,
                    TestS0XE0XPadding, TestMultiEpisodeSiblings,
                    TestAbsEpIdx, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
