@@ -3359,13 +3359,18 @@ class TestWaitForPlexScanComplete(unittest.TestCase):
 _FIXTURE_CONF = None
 
 def _fixture_conf():
-    """The config of the process-wide fixture library, built on first use."""
+    """The config of the process-wide fixture library, built on first use.
+
+    Read-only: every later test reads this one file, so a test that changed
+    it changed what the tests after it see -- in the suite's order only, so
+    the test alone passed.  A test that needs another config writes its own."""
     global _FIXTURE_CONF
     if _FIXTURE_CONF is None:
         import atexit
         d = tempfile.mkdtemp(prefix='my-plex-fixture-')
         atexit.register(shutil.rmtree, d, True)
         _FIXTURE_CONF = _fixture_library(d)
+        os.chmod(_FIXTURE_CONF, 0o400)
     return _FIXTURE_CONF
 
 def _fixture_library(d):
@@ -16069,9 +16074,11 @@ class TestPlexDbPathRequired(unittest.TestCase):
             mod.PLEX_DB_PATH, mod.CACHE_FILE, mod.OFFLINE, mod.READ_ONLY_MODE = saved
 
     def test_a_cache_command_does_not_ask_for_it(self):
-        conf = _fixture_conf()
-        with open(conf, 'a') as f:
-            f.write("PLEX_DB_PATH = ''\n")
+        with open(_fixture_conf()) as f:
+            fixture = f.read()
+        conf = os.path.join(self.d, 'my-plex.conf')    # the fixture's cache, PLEX_DB_PATH emptied
+        with open(conf, 'w') as f:
+            f.write(fixture + "PLEX_DB_PATH = ''\n")
         r = self.run_cmd(conf, '--list-libraries')
         self.assertEqual(r.returncode, 0, r.stderr[-600:])
         self.assertNotIn('PLEX_DB_PATH', r.stderr)
