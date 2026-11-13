@@ -3944,14 +3944,18 @@ def _flag_hint(arg):
     return " Use --help to see available options."
 
 # What --create-config takes beside its FILE: the verbosity flags, which
-# change only what is printed, never what is written.
-_CREATE_CONFIG_COMPANIONS = ('-Q', '--quiet', '-V', '--verbose', '-VV', '--very-verbose',
+# change only what is printed, never what is written.  -Q only with a FILE:
+# without one the template on stdout is the run's only output, and -Q would
+# silence it -- `-Q --create-config > FILE` would leave FILE empty.
+_CREATE_CONFIG_COMPANIONS = ('-V', '--verbose', '-VV', '--very-verbose',
                              '-D', '--debug', '-DD', '--deepdebug')
+_CREATE_CONFIG_QUIET = ('-Q', '--quiet')
 
 def _words_beside_create_config(argv: 'list[str]', file: 'str | None') -> 'list[str]':
     """The words of ARGV (sys.argv[1:]) that --create-config does not take,
     in their order: every word but --create-config itself, the FILE the
-    parser gave it (None for none) and _CREATE_CONFIG_COMPANIONS.  A `--`
+    parser gave it (None for none), _CREATE_CONFIG_COMPANIONS and, with a
+    FILE, _CREATE_CONFIG_QUIET.  A `--`
     is a word like any other: --create-config ends the run before the main
     parser, so nothing after it would be read either."""
     beside: 'list[str]' = []
@@ -3962,7 +3966,8 @@ def _words_beside_create_config(argv: 'list[str]', file: 'str | None') -> 'list[
             i += 2
             continue
         if not (word == '--create-config' or (file is not None and word == f'--create-config={file}')
-                or word in _CREATE_CONFIG_COMPANIONS):
+                or word in _CREATE_CONFIG_COMPANIONS
+                or (file is not None and word in _CREATE_CONFIG_QUIET)):
             beside.append(word)
         i += 1
     return beside
@@ -33569,7 +33574,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --create-config            # Print default config to stdout")
             print("       my-plex --create-config FILE       # Write default config to FILE: mode 0600, never over")
             print("                                          #   an existing file or a link")
-            print("       Beside --create-config only -Q, -V, -VV, -D, -DD: any other word is refused.")
+            print("       Beside --create-config only -V, -VV, -D, -DD, and -Q only with FILE (without one,")
+            print("       -Q would silence the template): any other word is refused.")
             print()
             print("Config file: Python syntax, loaded via exec().")
             print()
@@ -44568,7 +44574,7 @@ def main():
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link. Beside it only -Q, -V, -VV, -D, -DD: any other word is refused.")
+                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link. Beside it only -V, -VV, -D, -DD, and -Q only with FILE: any other word is refused.")
     config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
     config_args, _ = config_parser.parse_known_args()
     if getattr(config_args, 'print_problem_categories_md', False):
@@ -44600,9 +44606,13 @@ def main():
             # removed `--config-file FILE --create` did
             _hint = ("\n  To write the template to a file: --create-config FILE."
                      if any(w.startswith(('-C', '--config')) for w in _beside) else "")
+            if any(w in _CREATE_CONFIG_QUIET for w in _beside):
+                _hint += ("\n  Without a FILE the template on stdout is this run's only output:"
+                          " -Q would silence it.")
             err("00180", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
                          + ", ".join(f"'{w}'" for w in _beside)
-                         + " beside --create-config, which takes only its FILE and -Q, -V, -VV, -D, -DD."
+                         + " beside --create-config, which takes only its FILE, -V, -VV, -D, -DD,"
+                           " and -Q only with a FILE."
                          + _hint)
         config_content = generate_default_config()
         if config_args.create_config == _CREATE_STDOUT_SENTINEL:

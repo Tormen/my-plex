@@ -179,7 +179,7 @@ ln -s "$(pwd)/my-plex/my-plex" /usr/local/bin/my-plex      # or anywhere in your
 # Configure
 my-plex --create-config ~/.my-plex.conf      # Write default config to file: mode 0600, never over an existing file
 # Or: my-plex --create-config > FILE   # the template on stdout: the redirect overwrites a file there, with the umask's mode
-# Beside --create-config only -Q, -V, -VV, -D, -DD: any other word is refused
+# Beside --create-config only -V, -VV, -D, -DD, and -Q only with FILE: any other word is refused
 # Edit ~/.my-plex.conf with the Plex token; the Plex server's ssh address
 # (see "Installing" below) and its database path, PLEX_DB_PATH
 # (see "Configuration"), go in the site config

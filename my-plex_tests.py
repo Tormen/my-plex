@@ -15791,10 +15791,27 @@ class TestCreateConfig(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_51_quiet_without_a_file_is_refused(self):
+        """ADVERSARIAL (#51 review): without a FILE the template on stdout is
+        the run's only result, and -Q silences stdout before the tool runs --
+        so `-Q --create-config > FILE` exited 0 and left FILE empty.  -Q is
+        taken only with a FILE: without one it is refused, named, nothing
+        printed -- also beside -V, which would have printed the template."""
+        for argv in (['-Q', '--create-config'], ['--create-config', '--quiet'],
+                     ['-Q', '-V', '--create-config']):
+            with self.subTest(argv=argv):
+                r = self._run(*argv)
+                self.assertEqual(r.returncode, 1, f"exit {r.returncode}, "
+                                 f"{len(r.stdout)} bytes on stdout\n{r.stderr[-400:]}")
+                self.assertRegex(r.stderr, r"ERROR \d{5} \[1\]: Invalid parameter ")
+                self.assertIn(f"'{argv[1] if argv[1] == '--quiet' else '-Q'}'", r.stderr)
+                self.assertIn("-Q only with a FILE", r.stderr)
+                self.assertEqual(r.stdout, '', "something was printed")
+
     def test_51_quiet_verbose_and_debug_are_taken_beside_it(self):
-        """-Q, -V, -VV, -D, -DD change only what is printed, so they are taken
+        """-V, -VV, -D, -DD change only what is printed, so they are taken
         beside --create-config: the template is printed, or FILE written
-        0600 -- under -Q with nothing on stdout."""
+        0600 -- and -Q only with FILE, then with nothing on stdout."""
         template = self._run('--create-config').stdout
         self.assertIn('# my-plex configuration file', template, "control: no template printed")
         for flag in ('-V', '-VV', '-D', '-DD', '--verbose', '--debug'):
