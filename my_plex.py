@@ -24382,7 +24382,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         broken_files.sort(key=lambda x: (severity_order.get(x[2], 4), x[1] if x[1] is not None else 0))
 
         print(f"\nDIFF% = (container_duration - plex_duration) / plex_duration. Negative = file shorter than expected.  V = number of file versions in Plex for this entry.")
-        print(f"\n{'PLEX-ID':<10} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':>10} | {'V':>4} | {'LIBRARY':<15} | FILEPATH")
+        # Rows start with the cache key (Movie:4), which every command takes.
+        key_w = max(len('KEY'), *(len(k) for k, _d, _s, _f in broken_files))
+        print(f"\n{'KEY':<{key_w}} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':>10} | {'V':>4} | {'LIBRARY':<15} | FILEPATH")
         print("-" * 155)
         for key, diff_pct, severity, filepath in broken_files:
             obj = PLEX_Media.OBJ_BY_ID.get(key, {})
@@ -24392,11 +24394,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             severity_str = severity.upper() if severity else 'BROKEN'
             diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
             dur_str = f"{plex_duration_min:.1f} min" if plex_duration_raw > 0 else "-1"
-            plex_id = obj.get('id', 'N/A')
-            plex_id_str = f"ID:{plex_id}" if plex_id != 'N/A' else 'N/A'
             ver_count = len(obj.get('files', {}))
             ver_str = f"{ver_count:>4}" if ver_count > 1 else "    "
-            print(f"{plex_id_str:<10} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
+            print(f"{key:<{key_w}} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
         print(f"Detection thresholds: duration mismatch > {TRUNCATION_THRESHOLD_PCT}%, "
               f"byte-rate < {BROKEN_MIN_BYTERATE_KBYTE_PER_S} KB/s")

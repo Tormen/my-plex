@@ -1994,11 +1994,6 @@ class TestResolveMediaByNumericID(unittest.TestCase):
         self.assertIn("[PLEX_Media.OBJ_BY_ID[ media_identifier ]]", func_body,
             "Full key path must wrap single obj in list before passing to get_media_list_from_PLEX_OBJ_list")
 
-    def test_broken_prints_id_prefix(self):
-        """--broken output must print PLEX-ID as 'ID:<num>' format."""
-        content = self._read_script()
-        self.assertIn('f"ID:{plex_id}"', content,
-            "--broken must format PLEX-ID column as ID:<num>")
 
     def test_resolve_cache_items_requires_id_prefix(self):
         """resolve_cache_items must REQUIRE 'ID:<num>' prefix — bare numbers must NOT match as Plex IDs."""
@@ -2413,7 +2408,7 @@ class TestBrokenHeaderOrder(unittest.TestCase):
         """--broken header must have DURATION before LIBRARY."""
         content = self._read_script()
         import re
-        match = re.search(r"'PLEX-ID'.*?'SEVERITY'.*?'DIFF%'.*?'(DURATION|LIBRARY)'.*?'(DURATION|LIBRARY)'", content)
+        match = re.search(r"'KEY':<\{key_w\}\}.*?'SEVERITY'.*?'DIFF%'.*?'(DURATION|LIBRARY)'.*?'(DURATION|LIBRARY)'", content)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --broken header line")
         self.assertEqual(match.group(1), 'DURATION', "DURATION must come before LIBRARY in --broken header")
@@ -2423,8 +2418,8 @@ class TestBrokenHeaderOrder(unittest.TestCase):
         """--broken data format must output dur_str before library."""
         content = self._read_script()
         import re
-        # Find the actual data print line (single line with plex_id_str, severity_str, diff_str)
-        match = re.search(r'print\(f".*plex_id_str.*severity_str.*diff_str.*(dur_str).*(library).*filepath', content)
+        # Find the actual data print line (single line with key, severity_str, diff_str)
+        match = re.search(r'print\(f"\{key:<\{key_w\}\}.*severity_str.*diff_str.*(dur_str).*(library).*filepath', content)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find --broken data print line")
         self.assertEqual(match.group(1), 'dur_str', "dur_str must come before library in data line")
@@ -3811,8 +3806,11 @@ class TestEndToEnd(unittest.TestCase):
         agreed within 2s -- the files were healthy."""
         result = self._run_cmd('--broken')
         self.assertEqual(result.returncode, 0, f"--broken failed: {result.stderr}")
-        flagged = {line.split()[0] for line in result.stdout.splitlines() if line.startswith('ID:')}
-        self.assertEqual(flagged, {'ID:4', 'ID:6'}, result.stdout)
+        # rows start with the cache key, the project's KEY-first rule
+        flagged = {line.split()[0] for line in result.stdout.splitlines()
+                   if re.match(r'(Movie|Episode):\d+ ', line)}
+        self.assertEqual(flagged, {'Movie:4', 'Movie:6'}, result.stdout)
+        self.assertRegex(result.stdout, r'(?m)^KEY +\| SEVERITY', "the header names the KEY column")
 
     # --- Filter: localized genre matching ---
 
