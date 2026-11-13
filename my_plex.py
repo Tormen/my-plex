@@ -34098,7 +34098,9 @@ EPISODES_TSV_MAX_AGE = 86400  # 1 day in seconds
 
 def _file_exists_local_or_remote(filepath):
     """Check if a file exists locally or on the remote server via SSH.
-    Returns True if the file exists in either location.
+    Returns True if the file exists in either location.  With no
+    PLEX_DB_REMOTE_HOST the server is this machine: its path is checked
+    locally, and no ssh is started.
     Note: For bulk checks, use _batch_file_exists_remote() instead to avoid N SSH calls."""
     import os, subprocess
     if os.path.isfile(filepath):
@@ -34106,6 +34108,8 @@ def _file_exists_local_or_remote(filepath):
     # Try SSH: translate to server path and check
     server_dir = get_server_path(os.path.dirname(filepath))
     server_file = os.path.join(server_dir, os.path.basename(filepath))
+    if not PLEX_DB_REMOTE_HOST:
+        return os.path.isfile(server_file)
     escaped = escape_path_for_ssh(server_file)
     try:
         r = subprocess.run(
@@ -34120,17 +34124,21 @@ def _file_exists_local_or_remote(filepath):
 def _batch_file_exists_remote(filepaths):
     """Check which files exist on the remote server in a single SSH call.
     Args: filepaths - list of local paths to check (translated to server paths)
-    Returns: set of local paths that exist on the server."""
+    Returns: set of local paths that exist on the server.  With no
+    PLEX_DB_REMOTE_HOST the server is this machine: the server paths are
+    checked locally, and no ssh is started."""
     import os, subprocess
     if not filepaths:
         return set()
+    server_files = {fp: os.path.join(get_server_path(os.path.dirname(fp)), os.path.basename(fp))
+                    for fp in filepaths}
+    if not PLEX_DB_REMOTE_HOST:
+        return {fp for fp, server_file in server_files.items() if os.path.isfile(server_file)}
     # Build a shell script that checks each file and prints the index if it exists
     checks = []
     path_map = {}  # index -> local_path
     for i, fp in enumerate(filepaths):
-        server_dir = get_server_path(os.path.dirname(fp))
-        server_file = os.path.join(server_dir, os.path.basename(fp))
-        escaped = escape_path_for_ssh(server_file)
+        escaped = escape_path_for_ssh(server_files[fp])
         checks.append(f'[ -f "{escaped}" ] && echo {i}')
         path_map[i] = fp
     cmd = '; '.join(checks)

@@ -13557,6 +13557,62 @@ class TestTopLevelHandlers(unittest.TestCase):
         self.assertIn('sys.exit(exit_code)', src)
 
 
+class TestNoSshWithoutAHost(unittest.TestCase):
+    """With PLEX_DB_REMOTE_HOST '' the Plex server is this machine: a file
+    existence check looks at the server path locally and starts no ssh --
+    it ran `ssh ... '' '[ -f ... ]'`, an ssh to an empty host name."""
+
+    def setUp(self):
+        from unittest import mock
+        self.m = _main_module()
+        g = self.m._batch_file_exists_remote.__globals__
+        self._saved_remote = g.get('PLEX_DB_REMOTE_HOST')
+        g['PLEX_DB_REMOTE_HOST'] = ''
+        self.calls: list[Any] = []
+        def _record(*a: Any, **k: Any) -> Any:
+            self.calls.append(a[0] if a else k)
+            raise AssertionError(f"ran a subprocess: {a[0] if a else k}")
+        self._patch = mock.patch('subprocess.run', side_effect=_record)
+        self._patch.start()
+        self.d = tempfile.mkdtemp(prefix='my-plex-nohost-')
+
+    def tearDown(self):
+        self._patch.stop()
+        self.m._batch_file_exists_remote.__globals__['PLEX_DB_REMOTE_HOST'] = self._saved_remote
+        shutil.rmtree(self.d, True)
+
+    def test_batch_check_is_local(self):
+        """The batch check answers from the local disk: the file that is
+        there is found, the one that is not is not, and no ssh starts."""
+        there = os.path.join(self.d, 'episodes.tsv')
+        open(there, 'w').close()
+        gone = os.path.join(self.d, 'episodes.err')
+        self.assertEqual(self.m._batch_file_exists_remote([there, gone]), {there})
+        self.assertEqual(self.calls, [])
+
+    def test_single_check_is_local(self):
+        """The single check answers False for a missing file and starts no
+        ssh."""
+        self.assertFalse(self.m._file_exists_local_or_remote(os.path.join(self.d, 'gone.tsv')))
+        self.assertEqual(self.calls, [])
+
+    def test_problems_starts_no_ssh(self):
+        """--problems on the fixture library, whose config names no host,
+        starts no ssh at all."""
+        self._patch.stop()
+        try:
+            log = os.path.join(self.d, 'ssh.log')
+            r = subprocess.run([MAIN_SCRIPT, '--config', _fixture_conf(), '--problems'],
+                               capture_output=True, text=True, timeout=E2E_TIMEOUT,
+                               env=_fake_ssh_env(log=log))
+        finally:
+            self._patch.start()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out[-1500:])
+        self.assertIn("PROBLEM DETECTION", r.stdout, out[-1500:])
+        self.assertFalse(os.path.exists(log), open(log).read() if os.path.exists(log) else '')
+
+
 class TestSshOptions(unittest.TestCase):
     """One owner for the options every ssh my-plex starts carries.
 
@@ -17548,7 +17604,7 @@ _UNITTEST_SCOPES = {
     'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
-    'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer],
+    'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection, TestVenvRebuildOnPythonMinor],
     'install':    [TestInstallFirewallRules, TestInstallPlexRule, TestInstallSshEntry, TestInstallAsRoot],
