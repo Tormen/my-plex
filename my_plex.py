@@ -442,7 +442,7 @@ _my-plex() {
 
     # Handle --help <TOPIC> completion
     local prev="${words[$((CURRENT-1))]}"
-    if [[ "$prev" == "--help" || "$prev" == "-h" || "$prev" == "-H" ]]; then
+    if [[ "$prev" == "--help" || "$prev" == "-H" ]]; then
         local -a help_topics
         help_topics=(
             'all:Show all help pages'
@@ -575,7 +575,7 @@ _my-plex() {
         '(-Q --quiet)'{-Q,--quiet}'[Print nothing on stdout; errors still go to stderr]'
         '(- -D -DD --debug --deepdebug)'{-D,--debug}'[Debug mode]'
         '(- -D -DD --debug --deepdebug)'{-DD,--deepdebug}'[Deep debug mode]'
-        '(-h --help -H)'{-h,--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
+        '(--help -H)'{--help,-H}'[Show help (use --help TOPIC for details)]:topic:'
         '--unmatched[List items not matched by Plex (local:// guid). Add --resolve for year-lookup + bulk rename via TMDB/TVDB]'
         '--mismatched[Mismatches: title vs directory + multi-version Plex grouping]'
         '--orphaned[Orphan sidecars + empty dirs + stale ~/.my-plex sidecars. Sub-flags: --files / --dirs / --my-plex. Add --resolve to trash/rmdir.]'
@@ -44537,7 +44537,7 @@ def main():
             config_args.config_file = config_args.config
 
     # If user is asking for help, defer all early-exit config actions to the help dispatcher.
-    _asking_help = ('--help' in sys.argv) or ('-h' in sys.argv) or ('-H' in sys.argv)
+    _asking_help = ('--help' in sys.argv) or ('-H' in sys.argv)
 
     # Handle --create-config (new flag, takes optional FILE)
     if not _asking_help and config_args.create_config is not None:

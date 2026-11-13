@@ -1017,6 +1017,79 @@ class TestLongHelp(unittest.TestCase):
                 f"Help topic '{topic}' not found in match cases of main_print_help()")
 
 
+class TestHelpFlags(unittest.TestCase):
+    """The parser's help flags are `-H` and `--help`; `-h` is no flag of
+    my-plex, so nothing may treat it as one: the zsh completion offered it
+    (and completed help topics after it), and main() counted it as a help
+    request -- so `my-plex --create-config -h` printed no config, while the
+    same run with any other unknown token did.
+
+    Every run gets a HOME of its own (with the tool's venv linked in, so
+    nothing is bootstrapped), its own config, cache and a fake ssh."""
+
+    def setUp(self) -> None:
+        self.d = tempfile.mkdtemp(prefix='my-plex-helpflags-')
+        self.conf = os.path.join(self.d, 'my-plex.conf')
+        with open(self.conf, 'w') as f:
+            f.write(f"CACHE_FILE = {os.path.join(self.d, 'cache.pkl')!r}\n"
+                    f"LOCK_FILE = {os.path.join(self.d, 'cache.lock')!r}\n"
+                    + _install_lines(self.d))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, *argv: str) -> 'tuple[subprocess.CompletedProcess[str], str]':
+        home = tempfile.mkdtemp(dir=self.d)
+        os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
+        env = dict(_fake_ssh_env(), HOME=home, PYTHONDONTWRITEBYTECODE='1')
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', self.conf, *argv],
+                           capture_output=True, text=True, timeout=60,
+                           env=env, stdin=subprocess.DEVNULL)
+        return r, home
+
+    def test_the_completion_offers_no_lower_h(self):
+        r, home = self._run('-H')
+        self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+        with open(os.path.join(home, '.zsh', 'completions', '_my-plex')) as f:
+            completion = f.read()
+        # control: the real help flags are there, so an absent -h is not an
+        # absent help entry
+        self.assertTrue(re.search(r'\{[^}\n]*--help[^}\n]*-H\}', completion),
+                        "the completion offers no --help / -H")
+        self.assertTrue('"$prev" == "-H"' in completion, "the completion has no topics after -H")
+        found = [m.group(0) for m in re.finditer(r'.{0,30}(?<![\w-])-h(?![\w-]).{0,30}', completion)]
+        self.assertEqual(found, [], "the completion names -h, which the parser does not define")
+
+    def test_lower_h_is_refused_as_an_invalid_parameter(self):
+        r, _ = self._run('-h')
+        self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
+        self.assertRegex(r.stderr, r"ERROR \d+ \[1\]: Invalid parameter '-h'\.")
+        self.assertNotIn('usage:', r.stdout, "-h printed the usage")
+
+    def test_lower_h_asks_for_no_help_beside_create_config(self):
+        """`-h` is an unknown token like any other: beside --create-config
+        it changes nothing that `-x` does not."""
+        for order in ((('--create-config', '{}')), (('{}', '--create-config'))):
+            with self.subTest(order=order):
+                other, _ = self._run(*[a.format('-x') for a in order])
+                lower_h, _ = self._run(*[a.format('-h') for a in order])
+                self.assertEqual(other.returncode, 0,
+                                 f"control: {order} with -x: exit {other.returncode}\n{other.stderr[-400:]}")
+                self.assertIn('# my-plex configuration file', other.stdout,
+                              "control: --create-config with -x printed no config")
+                self.assertEqual(lower_h.returncode, other.returncode,
+                                 f"-h is taken for a help request:\n{lower_h.stderr[-400:]}")
+                self.assertTrue(lower_h.stdout == other.stdout,
+                                f"-h printed something else than -x:\n{lower_h.stdout[:300]}")
+
+    def test_upper_h_and_help_print_the_usage(self):
+        for flag in ('-H', '--help'):
+            with self.subTest(flag=flag):
+                r, _ = self._run(flag)
+                self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertIn('usage:', r.stdout, f"{flag} printed no usage")
+
+
 class TestPlexUpdatedAtTracking(unittest.TestCase):
     """Tests for plexUpdatedAt field in EMPTY_LIBRARY_STATS."""
 
@@ -17611,7 +17684,7 @@ _UNITTEST_SCOPES = {
     'conf-template': [TestConfigTemplateCoversEveryKey, TestCreateConfig],
     'readme':     [TestReadmeFlagsExist, TestReadmeIsFound, TestReadmeInstallOutput],
     'config':     [TestConfigLayers, TestPlexDbPathRequired, TestConfigEnvVar, TestSecretArgs, TestISO639Mapping, TestAutoResolveConfig, TestResolveNoAudioLanguage,
-                   TestLongHelp, TestNoAPIFallbacks, TestResolveMediaByNumericID,
+                   TestLongHelp, TestHelpFlags, TestNoAPIFallbacks, TestResolveMediaByNumericID,
                    TestDbQueriesUseLibraryName, TestAudioLangCacheBuildFallback,
                    TestAudioLangPureVsCompleted,
                    TestUnmatchedResolve],
