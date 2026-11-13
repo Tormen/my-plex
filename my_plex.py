@@ -645,8 +645,17 @@ _my-plex "$@"
     except FileNotFoundError:
         pass
 
-    with open(completion_file, 'w') as f:
+    # temp file + rename, mode 644 (compinit ignores a 600 file without a
+    # word), and the dump goes so the next shell loads the new one
+    tmp = f"{completion_file}.{os.getpid()}.tmp"
+    with open(tmp, 'w') as f:
         f.write(completion_content)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, completion_file)
+    home = os.path.expanduser("~")
+    for name in os.listdir(home):
+        if name.startswith(".zcompdump"):
+            os.remove(os.path.join(home, name))
 
     # Patch .zshrc fpath if needed
     zshrc = os.path.expanduser("~/.zshrc")
@@ -682,8 +691,13 @@ _my-plex "$@"
 
 # Every run of an ordinary user installs it.  Root gets here only on a
 # print-only run, whose ~ is /var/root: nothing of this tool belongs there.
+# Best-effort: a completion that cannot be written never fails the run.
 if not _AS_ROOT:
-    _install_zsh_completions()
+    try:
+        _install_zsh_completions()
+    except OSError as _e:
+        print(f"my-plex: zsh completion not installed ({_e}) -- the run goes on",
+              file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # From here on we are guaranteed to run inside the venv with all deps

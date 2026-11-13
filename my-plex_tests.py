@@ -1087,6 +1087,37 @@ class TestHelpFlags(unittest.TestCase):
         found = [m.group(0) for m in re.finditer(r'.{0,30}(?<![\w-])-h(?![\w-]).{0,30}', completion)]
         self.assertEqual(found, [], "the completion names -h, which the parser does not define")
 
+    def test_an_unwritable_completion_never_fails_the_run(self):
+        """~/.zsh is a FILE, so the completion directory cannot be made: the
+        run still does its job, with one line on stderr naming the reason."""
+        home = tempfile.mkdtemp(dir=self.d)
+        os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
+        with open(os.path.join(home, '.zsh'), 'w') as f:
+            f.write('not a directory\n')
+        env = dict(_fake_ssh_env(), HOME=home, PYTHONDONTWRITEBYTECODE='1')
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', self.conf, '-H'],
+                           capture_output=True, text=True, timeout=60,
+                           env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-600:]}")
+        self.assertIn('usage:', r.stdout, "the help was not printed")
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertRegex(r.stderr, r"zsh completion not installed \(.*\) -- the run goes on")
+
+    def test_the_completion_is_written_644_and_the_dump_goes(self):
+        home = tempfile.mkdtemp(dir=self.d)
+        os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
+        dump = os.path.join(home, '.zcompdump-host-5.9')
+        with open(dump, 'w') as f:
+            f.write('old\n')
+        env = dict(_fake_ssh_env(), HOME=home, PYTHONDONTWRITEBYTECODE='1')
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', self.conf, '-H'],
+                           capture_output=True, text=True, timeout=60,
+                           env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        comp = os.path.join(home, '.zsh', 'completions', '_my-plex')
+        self.assertEqual(os.stat(comp).st_mode & 0o777, 0o644)
+        self.assertFalse(os.path.exists(dump), "the old completion dump was kept")
+
     def test_lower_h_is_refused_as_an_invalid_parameter(self):
         r, _ = self._run('-h')
         self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
