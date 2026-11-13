@@ -15000,7 +15000,7 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertEqual(run.r.returncode, 0, run.text())
         self.assertFalse([c for c in run.calls if c.startswith('cli remove')],
                          f"remove called with nothing to remove: {run.calls}")
-        self.assertIn('none found', run.r.stdout)
+        self.assertIn('REMOVED: no deny rule', run.r.stdout)
 
         py = self.listed_python()
 
@@ -15141,10 +15141,10 @@ class TestInstallAsRoot(_RootInstallCase):
         does one owned by `nobody2`: the owner is matched as a whole field,
         never as a substring of the line.  One owned by the my-plex user
         (RUN_AS_USER here) goes, a verdict token after its owner or not.
-        `anyone` and `system` are no user's own (my-little-snitch: `anyone`
-        is a rule with neither uid nor system, `system` is root's), so they
-        stay too -- and are NAMED, since such a deny may still stop my-plex
-        and beat the allow just written."""
+        So does one owned by `anyone` (#50: a rule with neither uid nor
+        system stops that user too).  `system` is root's own, so it stays --
+        and is NAMED, since it may still stop my-plex and beat the allow
+        just written."""
         py = self.listed_python()
 
         def rule(rid: str, owner: str, tail: str = '') -> str:
@@ -15155,19 +15155,109 @@ class TestInstallAsRoot(_RootInstallCase):
         run = self.run_root(listing=listing)
         self.assertEqual(run.r.returncode, 0, run.text())
         self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
-                         ['removed own111', 'removed own222'], "\n".join(run.calls))
-        for rid, owner in (('any555', 'anyone'), ('sys666', 'system')):
-            self.assertRegex(run.r.stdout, rf'kept .*{rid}.*owner {owner}',
-                             f"a kept {owner} deny is not named")
+                         ['removed any555', 'removed own111', 'removed own222'], "\n".join(run.calls))
+        self.assertRegex(run.r.stdout, r'(?m)^ >>> KEPT.*\n   > sys666  .*  system$',
+                         "the kept system deny is not named")
         for rid in ('oth333', 'sub444'):
             self.assertNotIn(rid, run.r.stdout, "another user's deny does not stop my-plex's user")
+
+    @staticmethod
+    def removed_block(stdout: str) -> 'tuple[list[str], list[str]]':
+        """The REMOVED headings a root run printed, and the `   > ` lines
+        under them (up to the next ` >>> `)."""
+        heads, items, inside = [], [], False
+        for line in stdout.splitlines():
+            if line.startswith(' >>> '):
+                inside = line.startswith(' >>> REMOVED')
+                if inside:
+                    heads.append(line)
+            elif inside and line.startswith('   > '):
+                items.append(line[5:])
+        return heads, items
+
+    def test_50_an_anyone_deny_is_removed_and_listed_with_its_ID_and_rule(self):
+        """#50: a deny owned by `anyone` (a rule with neither uid nor system)
+        stops the my-plex user too, so it goes -- until #42's fix it stayed,
+        named "kept", and beat every allow written beside it.  The output
+        lists it under REMOVED with its ID and the rule exactly as the
+        firewall tool's `list` printed it."""
+        py = self.listed_python()
+        rule = f"{py}  deny  api.themoviedb.org  tcp/443  anyone"
+        run = self.run_root(listing=f"any555\t{rule}\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
+                         "\n".join(run.calls))
+        heads, items = self.removed_block(run.r.stdout)
+        self.assertEqual(len(heads), 1, run.r.stdout)
+        self.assertRegex(heads[0], r'\b1 deny rule\(s\)', "the count is not beside the heading")
+        self.assertEqual(items, [f"any555  {rule}"], run.r.stdout)
+        self.assertNotRegex(run.r.stdout, r'(?m)^.*KEPT.*\n(   > .*\n)*   > any555', "named kept as well")
+
+    def test_50_a_system_deny_is_kept_and_named_never_removed(self):
+        """`system` is root's own rule: not the my-plex user's decision to
+        undo.  It stays, and is named on a KEPT line with why -- it may still
+        stop my-plex -- and never appears under REMOVED."""
+        py = self.listed_python()
+        rule = f"{py}  deny  api.themoviedb.org  tcp/443  system"
+        run = self.run_root(listing=f"sys666\t{rule}\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertFalse([c for c in run.calls if c.startswith('cli remove')], "\n".join(run.calls))
+        self.assertRegex(run.r.stdout, r'(?m)^ >>> KEPT.*system.*may still stop my-plex.*\n   > sys666  '
+                         + re.escape(rule) + '$', run.r.stdout)
+        _heads, items = self.removed_block(run.r.stdout)
+        self.assertEqual(items, [], run.r.stdout)
+
+    def test_50_another_users_deny_is_kept(self):
+        py = self.listed_python()
+        run = self.run_root(listing=f"oth333\t{py}  deny  api.themoviedb.org  tcp/443  someone-else\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertFalse([c for c in run.calls if c.startswith('cli remove')], "\n".join(run.calls))
+        self.assertNotIn('oth333', run.r.stdout)
+
+    def test_50_nothing_to_remove_is_one_line(self):
+        """No deny at all, or only ones that stay: ONE line says nothing was
+        removed -- no heading with an empty list under it."""
+        py = self.listed_python()
+        for listing in ('', f"sys666\t{py}  deny  api.themoviedb.org  tcp/443  system\n"):
+            run = self.run_root(listing=listing)
+            self.assertEqual(run.r.returncode, 0, run.text())
+            heads, items = self.removed_block(run.r.stdout)
+            self.assertEqual(len(heads), 1, run.r.stdout)
+            self.assertRegex(heads[0], r'^ >>> REMOVED: no deny rule\b', run.r.stdout)
+            self.assertEqual(items, [], run.r.stdout)
+
+    def test_50_the_REMOVED_list_is_exactly_what_remove_was_given(self):
+        """The printed claim must be what ran: the IDs under REMOVED, and the
+        count beside the heading, equal the IDs the firewall tool's `remove`
+        received -- no more, no fewer.  Adversarial: the Plex server's API
+        and its ssh endpoint are ONE address here, so an `any` deny for it
+        is in both remotes' listings (the stub, unlike the real tool, keeps
+        listing it after its removal) -- it is removed and listed once; a
+        `system` deny there is named once; one deny of the user's and one of
+        `anyone`'s on other remotes go; another user's stays."""
+        py = self.listed_python()
+        listing = (f"ip0001\tany  deny  192.0.2.10  any  anyone\n"
+                   f"ip0002\t/usr/bin/ssh  deny  192.0.2.10  any  system\n"
+                   f"own111\t{py}  deny  pypi.org  any  nobody\n"
+                   f"any222\t{py}  deny  api4.thetvdb.com  tcp/443  anyone\n"
+                   f"oth333\t{py}  deny  api4.thetvdb.com  tcp/443  someone-else\n")
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\nPLEX_API_REMOTE = '192.0.2.10'\n",
+                            listing=listing)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        sent = [c.split(' ', 1)[1] for c in run.calls if c.startswith('removed ')]
+        self.assertEqual(sorted(sent), ['any222', 'ip0001', 'own111'], "\n".join(run.calls))
+        heads, items = self.removed_block(run.r.stdout)
+        self.assertEqual(len(heads), 1, run.r.stdout)
+        self.assertEqual(sorted(i.split('  ', 1)[0] for i in items), sorted(sent), run.r.stdout)
+        self.assertRegex(heads[0], rf'\b{len(sent)} deny rule\(s\)', run.r.stdout)
+        self.assertEqual(run.r.stdout.count('ip0002'), 1, run.r.stdout)
 
     def test_the_owner_is_the_user_not_how_RUN_AS_USER_spells_it(self):
         """macOS's getpwnam accepts a user name in any case (and an alias
         RecordName), while `my-little-snitch list` prints the owner as the
         uid's canonical name.  RUN_AS_USER = 'NOBODY' is user nobody, so
         nobody's deny goes -- compared as spelled, 'nobody' != 'NOBODY' and
-        the run said "none found" while that deny beat every allow written.
+        the run removed nothing while that deny beat every allow written.
         The rules and the drop name the canonical user too."""
         import pwd
         try:

@@ -2013,8 +2013,8 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # LITTLE_SNITCH_CLI = {CONFIG_DEFAULTS['LITTLE_SNITCH_CLI']!r}
 
 # RUN_AS_USER: the user whose Plex this is -- `my-plex --install`, run as
-# root, writes the firewall rules for that user, removes only the denies that
-# user owns, and hands the rest of the install over to them.  Empty: the user who ran sudo; with neither, --install
+# root, writes the firewall rules for that user, removes the denies that user
+# (or `anyone`) owns, and hands the rest of the install over to them.  Empty: the user who ran sudo; with neither, --install
 # as root stops and names this key.  Any spelling macOS accepts for the user
 # (another case, an alias) means that user, by its own name.  SITE config only.  The default is empty;
 # the value is an example.
@@ -4148,12 +4148,12 @@ def _install_user() -> "tuple[str, str]":
 
 
 def _deny_ids(listing: str, program: str, tail: "list[str]",
-              owner: str) -> "tuple[list[str], list[tuple[str, str]]]":
+              owner: str) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
     """The denies in a `my-little-snitch list <remote>` LISTING that stop
     PROGRAM reaching the remote TAIL describes (tail[0], and its --port,
-    else 443): (the IDs OWNER owns -- my-plex's to remove --, and (ID,
-    owner) of those owned by `anyone` or `system`, which stay but may still
-    stop my-plex).
+    else 443), each as (ID, the rule as the listing printed it): (those
+    owned by OWNER or `anyone` -- my-plex's to remove --, and those owned
+    by `system`, which stay but may still stop my-plex).
 
     A deny beats an allow, so writing the rules while one is stored changes
     nothing: on horse, 2026-11-05, two denies the user had answered
@@ -4173,10 +4173,10 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
         listing holds upload.pypi.org's rules too, and 10.0.0.1's holds
         10.0.0.12's.
       - PORT: any, or this one, over tcp.
-      - OWNER: the my-plex user, the whole field.  Another user's deny is
-        that user's decision and stops only that user's programs.  `anyone`
-        (a rule with neither uid nor system) and `system` (root's) are no
-        user's own: they stay, and are returned to be named.
+      - OWNER: the my-plex user, the whole field, or `anyone` (a rule with
+        neither uid nor system), which stops that user too.  Another user's
+        deny is that user's decision and stops only that user's programs.
+        `system` is root's own: it stays, and is returned to be named.
     The ssh remote is the Plex server's ADDRESS, and that machine answers its
     API too, so a deny there may name either program: horse held a
     Python.app deny for 192.168.192.252, any port, and a pattern of `ssh`
@@ -4213,7 +4213,7 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
                 return True
         return False
 
-    ids, kept = [], []
+    removable, kept = [], []
     for line in listing.splitlines():
         rid, tab, rule = line.partition('\t')
         cols = re.split(r' {2,}', rule.strip())
@@ -4223,11 +4223,11 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
         if not (action in ('deny', 'both deny') and stops_program(process)
                 and remote in [r.strip() for r in remotes.split(',')] and stops_port(ports)):
             continue
-        if rule_owner == owner:
-            ids.append(rid.strip())
-        elif rule_owner in ('anyone', 'system'):
-            kept.append((rid.strip(), rule_owner))
-    return ids, kept
+        if rule_owner in (owner, 'anyone'):
+            removable.append((rid.strip(), rule.strip()))
+        elif rule_owner == 'system':
+            kept.append((rid.strip(), rule.strip()))
+    return removable, kept
 
 
 def _run_firewall_tool(argv, stdin=None):
@@ -4289,28 +4289,36 @@ def install_firewall(config_file=None) -> "tuple[str, str | None]":
         print(f"      you run (LITTLE_SNITCH_CLI points at it elsewhere)")
         return user, named
 
-    cleared, kept = [], []
+    # Two remotes can share an address (the Plex server's API and its ssh
+    # endpoint), so a deny found in one listing may be found in the next:
+    # each is removed, and printed, once.
+    removed: "dict[str, str]" = {}
+    kept: "dict[str, str]" = {}
     for program, tail, _why in remotes:
         rc, out = _run_firewall_tool([cli, 'list', tail[0]])
         if rc != 0:
             err("00036", f"{cli} list {tail[0]} failed [rc {rc}] -- no rule written, so no deny was"
                          f" read for it either:\n  {out.strip()[-400:]}")
-        ids, others = _deny_ids(out, program, tail, user)
-        kept += [f"{tail[0]}: {rid}  (owner {owner} -- not {user}'s; it may still stop my-plex)"
-                 for rid, owner in others]
+        found, others = _deny_ids(out, program, tail, user)
+        kept.update(others)
+        ids = [rid for rid, _rule in found if rid not in removed]
         if ids:
             rc, out = _run_firewall_tool([cli, 'remove', 'go'], stdin="\n".join(ids) + "\n")
             if rc != 0:
                 err("00037", f"{cli} remove go {' '.join(ids)} failed [rc {rc}] -- the deny for"
                              f" {tail[0]} stands, and would beat the allow:\n  {out.strip()[-400:]}")
-            cleared.append(f"{tail[0]}: {' '.join(ids)}")
-    print(f" >>> FIRST, any DENY {user} owns for the remotes below that names")
-    print(f"     my-plex's Python, ssh or `any` -- a deny beats an allow:  "
-          + (f"{len(cleared)} remote(s) cleared" if cleared else "none found"))
-    for c in cleared:
-        print(f"   > removed  {c}")
-    for k in kept:
-        print(f"   > kept     {k}")
+            removed.update((rid, rule) for rid, rule in found if rid in ids)
+    if removed:
+        print(f" >>> REMOVED, so the allows below can match:  {len(removed)} deny rule(s)")
+        for rid, rule in removed.items():
+            print(f"   > {rid}  {rule}")
+    else:
+        print(f" >>> REMOVED: no deny rule -- none stored would stop {user} reaching the remotes below")
+    if kept:
+        print(f" >>> KEPT, owned by `system` (root's own, not {user}'s to undo -- it may still stop"
+              f" my-plex):  {len(kept)} deny rule(s)")
+        for rid, rule in kept.items():
+            print(f"   > {rid}  {rule}")
 
     # TWO rules per remote, because one of them does not match a real run.
     # Little Snitch attributes a connection to the app ABOVE Python and calls
@@ -33759,11 +33767,13 @@ def main_print_help(args, remaining_args, main_parser):
             print('   1. python3 >= 3.10, or an ERROR naming the one it found')
             print('   2. a stored DENY for that very remote, any port or its own,')
             print("      naming my-plex's Python, ssh or `any`, and OWNED by the user")
-            print('      of 3, is removed -- a deny beats an allow; one naming another')
-            print('      program (another Python minor too) or another remote, or')
-            print("      owned by another user, is somebody else's and stays; one")
-            print('      owned by `anyone` or `system` stays too, and is named: it')
-            print('      may still stop my-plex')
+            print('      of 3 or by `anyone`, is removed -- a deny beats an allow; the')
+            print('      output lists each one under REMOVED, with its ID and the rule')
+            print('      as my-little-snitch lists it, or says in one line that none')
+            print('      was; one naming another program (another Python minor too) or')
+            print("      another remote, or owned by another user, is somebody else's")
+            print('      and stays; one owned by `system` (root\'s own) stays too, and')
+            print('      is named under KEPT: it may still stop my-plex')
             print('   3. the two rules per remote, owned by RUN_AS_USER (else the user')
             print('      who ran sudo; with neither, an ERROR) -- never root, who only')
             print("      writes them -- under that user's own name, as the firewall")

@@ -236,10 +236,13 @@ all, from the one list the rules are written from. In this order:
 1. `python3` is 3.10 or newer, or an ERROR names the one found.
 2. A stored **deny** for that very remote -- any port, or its own -- that
    names my-plex's Python, `ssh` or `any` and is **owned** by the user of
-   step 3 is removed: a deny beats an allow. A deny naming another program
-   -- another Python minor too -- or another remote, or owned by another
-   user, is somebody else's, and stays. One owned by `anyone` or `system`
-   stays too, and is named (`kept`): it may still stop my-plex.
+   step 3 or by `anyone` is removed: a deny beats an allow. The output lists
+   every rule removed under `REMOVED`, with its ID and the rule as
+   `my-little-snitch list` prints it, or says in one line that none was. A
+   deny naming another program -- another Python minor too -- or another
+   remote, or owned by another user, is somebody else's, and stays. One
+   owned by `system` (root's own) stays too, and is named under `KEPT`: it
+   may still stop my-plex.
 3. **Two rules per remote**: one naming the program that connects -- Python,
    or `ssh` for the ssh endpoint -- and one for `any` process connecting via
    it. Each rule's **owner** is `RUN_AS_USER` from the site config, else the
@@ -393,8 +396,7 @@ A fresh machine, in a root shell. The site config, `/etc/my-plex.conf`, says
       files over ssh, so there the firewall names ssh
     > owner:   plexuser        (whose rule it is -- not root, who writes it)
 
- >>> FIRST, any DENY plexuser owns for the remotes below that names
-     my-plex's Python, ssh or `any` -- a deny beats an allow:  none found
+ >>> REMOVED: no deny rule -- none stored would stop plexuser reaching the remotes below
  >>> two rules per remote: the program itself, and `any` process via it
      (Little Snitch names a run from a shell "Terminal via Python")
    > api.themoviedb.org       [rc 0 0]  TMDB API: original-language backfill, --unmatched --resolve
