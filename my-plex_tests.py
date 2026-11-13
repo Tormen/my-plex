@@ -106,6 +106,55 @@ def _must(match: 're.Match[str] | None', what: str) -> 're.Match[str]':
     return match
 
 
+def _temp_base_only_we_can_write() -> str:
+    """The first of $TMPDIR, macOS's per-user temp dir and $XDG_RUNTIME_DIR
+    that only root or this euid can change -- that dir and every one above
+    it, links resolved, by the tool's own rule (_changeable_by_another) --
+    or '' when none is.  Read by _use_a_private_temp_dir alone."""
+    mp = _main_module()
+    try:
+        darwin = subprocess.run(['getconf', 'DARWIN_USER_TEMP_DIR'], capture_output=True,
+                                text=True, check=False).stdout.strip()
+    except OSError:
+        darwin = ''
+    for base in (os.environ.get('TMPDIR', ''), darwin, os.environ.get('XDG_RUNTIME_DIR', '')):
+        if not base or not os.path.isdir(base):
+            continue
+        chain = [os.path.realpath(base)]
+        while chain[-1] != os.path.dirname(chain[-1]):
+            chain.append(os.path.dirname(chain[-1]))
+        if not any(mp._changeable_by_another(d, os.stat(d)) for d in chain):
+            return base
+    return ''
+
+
+_SUITE_TEMP_DIR = ''
+
+def _use_a_private_temp_dir() -> None:
+    """Every temp file of this run -- tempfile's, and through $TMPDIR those
+    of the tool's child runs -- in ONE 0700 directory of its own, under a
+    base only root or this euid can write; removed at exit.  Called before
+    any test runs; a second call keeps the first directory.
+
+    Why: the as-root tests write configs into temp dirs, and as root my-plex
+    runs no config on a path another user could change (err 00023) -- sticky
+    /tmp included, which is where tempfile goes when TMPDIR is unset, as
+    under my-rollout's gate (`su -l` discards the environment)."""
+    global _SUITE_TEMP_DIR
+    if _SUITE_TEMP_DIR:
+        return
+    base = _temp_base_only_we_can_write()
+    if not base:
+        print("my-plex --run-tests: no temp dir that only root or this user can write"
+              f" (TMPDIR={os.environ.get('TMPDIR', '')!r}) -- the as-root tests will fail"
+              " on err 00023; set TMPDIR to such a directory", file=sys.stderr)
+    import atexit
+    _SUITE_TEMP_DIR = tempfile.mkdtemp(prefix='my-plex-suite-', dir=base or None)
+    atexit.register(shutil.rmtree, _SUITE_TEMP_DIR, True)
+    tempfile.tempdir = _SUITE_TEMP_DIR
+    os.environ['TMPDIR'] = _SUITE_TEMP_DIR
+
+
 def _import_tool(module_name='mp', argv=None, path=None) -> Any:
     """Import one of my-plex's modules afresh, under `module_name`: the tool
     (TOOL_SOURCE, the default) or the boot module (path=BOOT_SOURCE).
@@ -13287,6 +13336,28 @@ class TestRunTestsTAP(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn('1..1', out, f"one test should have matched:\n{out[-800:]}")
 
+    def test_the_as_root_tests_pass_with_TMPDIR_unset_or_shared(self):
+        """ADVERSARIAL: my-rollout's gate starts the suite through `su -l`,
+        which discards the environment -- no TMPDIR, so tempfile chose /tmp.
+        The as-root tests write their configs into temp dirs, and as root
+        my-plex runs no config on a path another user can write (err 00023),
+        sticky /tmp included: 41 tests failed on macado (2026-11-13) that
+        pass wherever TMPDIR is a private directory.  One test that reads
+        its config in-process and one that starts the tool, each with
+        TMPDIR unset and set to /tmp."""
+        for title in ('TestConfigLayers.test_as_root_a_config_in_a_directory_others_can_write_is_refused',
+                      'TestInstallAsRoot.test_a_second_run_writes_nothing_and_says_so'):
+            for tmpdir in (None, '/tmp'):
+                with self.subTest(test=title, TMPDIR=tmpdir):
+                    env = {k: v for k, v in os.environ.items() if k != 'TMPDIR'}
+                    if tmpdir:
+                        env['TMPDIR'] = tmpdir
+                    r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', title],
+                                       capture_output=True, text=True, timeout=300, env=env)
+                    out = r.stdout + r.stderr
+                    self.assertIn(f'ok 1 - {title}', out, out[-1200:])
+                    self.assertNotIn('not ok', out, out[-1200:])
+
     def test_an_unmatched_filter_prints_the_scopes_and_fails(self):
         r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', 'no-such-thing'],
                            capture_output=True, text=True, timeout=300)
@@ -18168,6 +18239,7 @@ def describe_test_scopes():
 def _run_unittest_only(unittest_classes):
     """Run the unittest suite and exit: 0 when every test passed, else 1."""
     import sys
+    _use_a_private_temp_dir()
     try:
         result = _TAPRunner().run(_tap_suite(unittest_classes))
     except Exception as e:

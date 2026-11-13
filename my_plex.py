@@ -45942,6 +45942,7 @@ def run() -> None:
             # Load test classes into this module's namespace for unittest discovery
             for _cls in _load_test_mod()._UNITTEST_CLASSES:
                 globals()[_cls.__name__] = _cls
+            _load_test_mod()._use_a_private_temp_dir()
             unittest.main(module=__name__, argv=[sys.argv[0]] + sys.argv[2:])
         else:
             main()

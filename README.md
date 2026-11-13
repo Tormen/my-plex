@@ -694,6 +694,13 @@ and a suite run under `my-rollout go` was killed at its 600s cap because of
 it, so the copy was never offered. Nothing is deleted: set the variable and
 they run exactly as before.
 
+**Its temp files live in one private directory**, removed when the run ends,
+under the first of `$TMPDIR`, macOS's per-user temp dir and
+`$XDG_RUNTIME_DIR` that only root or the user running the suite can write:
+the as-root tests write configs there, and as root my-plex runs no config on
+a path another user could change -- `/tmp` included, which is where a run
+without `TMPDIR` (as under `my-rollout go`) would otherwise put them.
+
 A FILTER is a scope name if one matches, otherwise part of a test title; a
 FILTER that matches neither prints the scopes with their test counts. Exit 0
 when every test passed, 1 otherwise.
