@@ -4294,9 +4294,29 @@ def install_firewall(config_file=None) -> "tuple[str, str | None]":
     # each is removed, and printed, once.
     removed: "dict[str, str]" = {}
     kept: "dict[str, str]" = {}
+
+    def report() -> None:
+        """What was removed and kept so far.  Also printed before an ERROR
+        stops the loop: a deny already removed is gone from the firewall
+        whether or not the run goes on, so the run names it either way."""
+        if removed:
+            print(f" >>> REMOVED, so the allows below can match:  {len(removed)} deny rule(s)")
+            for rid, rule in removed.items():
+                print(f"   > {rid}  {rule}")
+        else:
+            print(f" >>> REMOVED: no deny rule -- none owned by {user} or `anyone` stops my-plex"
+                  f" for the remotes below")
+        if kept:
+            print(f" >>> KEPT, owned by `system` (root's own, not {user}'s to undo -- it may still stop"
+                  f" my-plex):  {len(kept)} deny rule(s)")
+            for rid, rule in kept.items():
+                print(f"   > {rid}  {rule}")
+        sys.stdout.flush()
+
     for program, tail, _why in remotes:
         rc, out = _run_firewall_tool([cli, 'list', tail[0]])
         if rc != 0:
+            report()
             err("00036", f"{cli} list {tail[0]} failed [rc {rc}] -- no rule written, so no deny was"
                          f" read for it either:\n  {out.strip()[-400:]}")
         found, others = _deny_ids(out, program, tail, user)
@@ -4305,20 +4325,11 @@ def install_firewall(config_file=None) -> "tuple[str, str | None]":
         if ids:
             rc, out = _run_firewall_tool([cli, 'remove', 'go'], stdin="\n".join(ids) + "\n")
             if rc != 0:
+                report()
                 err("00037", f"{cli} remove go {' '.join(ids)} failed [rc {rc}] -- the deny for"
                              f" {tail[0]} stands, and would beat the allow:\n  {out.strip()[-400:]}")
             removed.update((rid, rule) for rid, rule in found if rid in ids)
-    if removed:
-        print(f" >>> REMOVED, so the allows below can match:  {len(removed)} deny rule(s)")
-        for rid, rule in removed.items():
-            print(f"   > {rid}  {rule}")
-    else:
-        print(f" >>> REMOVED: no deny rule -- none stored would stop {user} reaching the remotes below")
-    if kept:
-        print(f" >>> KEPT, owned by `system` (root's own, not {user}'s to undo -- it may still stop"
-              f" my-plex):  {len(kept)} deny rule(s)")
-        for rid, rule in kept.items():
-            print(f"   > {rid}  {rule}")
+    report()
 
     # TWO rules per remote, because one of them does not match a real run.
     # Little Snitch attributes a connection to the app ABOVE Python and calls
@@ -33769,11 +33780,12 @@ def main_print_help(args, remaining_args, main_parser):
             print("      naming my-plex's Python, ssh or `any`, and OWNED by the user")
             print('      of 3 or by `anyone`, is removed -- a deny beats an allow; the')
             print('      output lists each one under REMOVED, with its ID and the rule')
-            print('      as my-little-snitch lists it, or says in one line that none')
-            print('      was; one naming another program (another Python minor too) or')
-            print("      another remote, or owned by another user, is somebody else's")
-            print('      and stays; one owned by `system` (root\'s own) stays too, and')
-            print('      is named under KEPT: it may still stop my-plex')
+            print('      as my-little-snitch lists it (also when an ERROR stops the run')
+            print('      after it), or says in one line that none was; one naming')
+            print('      another program (another Python minor too) or another remote,')
+            print("      or owned by another user, is somebody else's and stays; one")
+            print('      owned by `system` (root\'s own) stays too, and is named under')
+            print('      KEPT: it may still stop my-plex')
             print('   3. the two rules per remote, owned by RUN_AS_USER (else the user')
             print('      who ran sudo; with neither, an ERROR) -- never root, who only')
             print("      writes them -- under that user's own name, as the firewall")

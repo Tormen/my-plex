@@ -238,9 +238,10 @@ all, from the one list the rules are written from. In this order:
    names my-plex's Python, `ssh` or `any` and is **owned** by the user of
    step 3 or by `anyone` is removed: a deny beats an allow. The output lists
    every rule removed under `REMOVED`, with its ID and the rule as
-   `my-little-snitch list` prints it, or says in one line that none was. A
-   deny naming another program -- another Python minor too -- or another
-   remote, or owned by another user, is somebody else's, and stays. One
+   `my-little-snitch list` prints it -- also when an ERROR stops the run
+   after it -- or says in one line that none was. A deny naming another
+   program -- another Python minor too -- or another remote, or owned by
+   another user, is somebody else's, and stays. One
    owned by `system` (root's own) stays too, and is named under `KEPT`: it
    may still stop my-plex.
 3. **Two rules per remote**: one naming the program that connects -- Python,
@@ -396,7 +397,7 @@ A fresh machine, in a root shell. The site config, `/etc/my-plex.conf`, says
       files over ssh, so there the firewall names ssh
     > owner:   plexuser        (whose rule it is -- not root, who writes it)
 
- >>> REMOVED: no deny rule -- none stored would stop plexuser reaching the remotes below
+ >>> REMOVED: no deny rule -- none owned by plexuser or `anyone` stops my-plex for the remotes below
  >>> two rules per remote: the program itself, and `any` process via it
      (Little Snitch names a run from a shell "Terminal via Python")
    > api.themoviedb.org       [rc 0 0]  TMDB API: original-language backfill, --unmatched --resolve

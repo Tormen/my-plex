@@ -14793,8 +14793,11 @@ def _firewall_stub(d: str) -> str:
     asked of it.  `list R` prints the lines of D/listing that CONTAIN R, as
     the real one does (a filter, so upload.pypi.org is in pypi.org's) -- no
     D/listing is the real one's refusal of anyone but root; `remove` takes
-    IDs on stdin and fails on none (the real err 00036); `allow` fails while
-    D/fail-allow exists, and says "already there" while D/already does."""
+    IDs on stdin and fails on none (the real err 00036), and on ID while
+    D/fail-remove-ID exists, removing nothing; after a removal it drops
+    D/listing while D/remove-drops-listing exists, so the next `list` fails;
+    `allow` fails while D/fail-allow exists, and says "already there" while
+    D/already does."""
     stub = os.path.join(d, 'my-little-snitch')
     with open(stub, 'w') as f:
         f.write("#!/bin/dash\n"
@@ -14805,7 +14808,10 @@ def _firewall_stub(d: str) -> str:
                 '        grep -F -- "$2" "$D/listing"; exit 0;;\n'
                 '  remove) ids=$(cat)\n'
                 '          [ -n "$ids" ] || { echo "ERROR 00036 [1]: remove [go] <ID>.." >&2; exit 1; }\n'
-                '          for i in $ids; do echo "removed $i" >> "$D/calls"; done;;\n'
+                '          for i in $ids; do [ -f "$D/fail-remove-$i" ] &&'
+                ' { echo "ERROR 00037 [1]: refused" >&2; exit 1; }; done\n'
+                '          for i in $ids; do echo "removed $i" >> "$D/calls"; done\n'
+                '          [ -f "$D/remove-drops-listing" ] && rm -f "$D/listing";;\n'
                 '  allow) [ -f "$D/fail-allow" ] && { echo "ERROR 00050 [1]: refused" >&2; exit 1; }\n'
                 '         [ -f "$D/already" ] && echo " >>> already there: x";;\n'
                 'esac\n'
@@ -15225,6 +15231,35 @@ class TestInstallAsRoot(_RootInstallCase):
             self.assertEqual(len(heads), 1, run.r.stdout)
             self.assertRegex(heads[0], r'^ >>> REMOVED: no deny rule\b', run.r.stdout)
             self.assertEqual(items, [], run.r.stdout)
+            # It says only what was removed -- none owned by the user or
+            # `anyone` -- never that nothing stored stops the user: the
+            # system deny kept and named on the next line may.
+            self.assertIn('`anyone`', heads[0], run.r.stdout)
+            self.assertNotRegex(heads[0], r'none stored|nothing (stored )?(would )?stops?', run.r.stdout)
+
+    def test_50_a_failure_after_a_removal_still_lists_what_was_removed(self):
+        """A deny removed is gone from the firewall, so the run says so even
+        when a LATER remote's `list` (err 00036) or `remove` (err 00037)
+        fails and the run stops: the REMOVED block was printed after the
+        loop, err() exited before it, and any555 went with no line naming
+        it.  Adversarial both ways: the deny whose removal was refused is NOT
+        listed as removed."""
+        py = self.listed_python()
+        rule = f"{py}  deny  api.themoviedb.org  tcp/443  anyone"
+        run = self.run_root(listing=f"any555\t{rule}\n", touch=('remove-drops-listing',))
+        self.assertNotEqual(run.r.returncode, 0, run.text())
+        self.assertIn('ERROR 00036', run.r.stderr, run.text())
+        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
+                         "\n".join(run.calls))
+        self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
+        refused = f"{py}  deny  api4.thetvdb.com  tcp/443  anyone"
+        run = self.run_root(listing=f"any555\t{rule}\nany222\t{refused}\n",
+                            touch=('fail-remove-any222',))
+        self.assertNotEqual(run.r.returncode, 0, run.text())
+        self.assertIn('ERROR 00037', run.r.stderr, run.text())
+        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
+                         "\n".join(run.calls))
+        self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
 
     def test_50_the_REMOVED_list_is_exactly_what_remove_was_given(self):
         """The printed claim must be what ran: the IDs under REMOVED, and the
