@@ -18,7 +18,6 @@ import inspect
 import pickle
 import io
 import contextlib
-import getpass
 import json
 import shutil
 import signal
@@ -14741,7 +14740,8 @@ class TestInstallFirewallRules(unittest.TestCase):
         for) asking root gives the rules to somebody else.  The line names the
         value and says when it is not the caller; unset, it says whom root
         falls back to.  Adversarial: the caller is never 'nobody'."""
-        me = getpass.getuser()
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
         cases = (("RUN_AS_USER = 'nobody'\n", ("'nobody'", f"not for you ({me})")),
                  (f"RUN_AS_USER = {me!r}\n", (f"{me!r}",)),
                  ("", ("unset", "sudo")))
@@ -14761,6 +14761,32 @@ class TestInstallFirewallRules(unittest.TestCase):
                     self.assertNotIn('not for you', said[0], said[0])
             finally:
                 shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_caller_is_named_by_its_uid_not_its_environment(self):
+        """ada's gate, 2026-11-13 20:39: the suite ran with $USER and $LOGNAME
+        naming root but a non-root uid, and the line read "RUN_AS_USER 'root'
+        -- not for you (root)": the name came from the environment
+        (getpass.getuser()), the judgement from the uid.  A name read from
+        $USER can be anyone's; the uid is who runs.  Adversarial: the
+        environment names a user the uid is not."""
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
+        liar = 'root' if me != 'root' else 'nobody'
+        d, conf, _stub, sentinel = self._sentinel_conf()
+        try:
+            with open(conf, 'a') as f:
+                f.write(f"RUN_AS_USER = {me!r}\n")
+            env = dict(_fake_ssh_env(), USER=liar, LOGNAME=liar)
+            r = subprocess.run([MAIN_SCRIPT, '--config', conf, '--install'], capture_output=True,
+                               text=True, timeout=120, env=env)
+            self.assertEqual(r.returncode, 0, r.stdout[-600:] + r.stderr[-600:])
+            said = [ln for ln in r.stderr.splitlines() if 'need root' in ln]
+            self.assertEqual(len(said), 1, f"not ONE line about root:\n{r.stderr[-600:]}")
+            self.assertNotIn('not for you', said[0], said[0])
+            self.assertIn(f"(as {me}:", r.stdout, r.stdout[-600:])
+            self.assertNotIn(f"(as {liar}:", r.stdout, r.stdout[-600:])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_with_the_firewall_tool_there_a_failed_login_still_fails(self):
         """ADVERSARIAL to the test above: exit 0 is for an ssh half that
@@ -17884,8 +17910,8 @@ class TestReadmeInstallOutput(_RootInstallCase):
         """The run root hands over to (MY_PLEX_INSTALL_FROM_ROOT=1), started
         with the venv's own python -- the suite's -- so it is inside the venv
         and never rebuilds the real one."""
-        import getpass
-        shown = self._block('(as plexuser: the ssh half)').replace(self.README_USER, getpass.getuser())
+        import pwd
+        shown = self._block('(as plexuser: the ssh half)').replace(self.README_USER, pwd.getpwuid(os.getuid()).pw_name)
         d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
         stub = _firewall_stub(d)
         conf = os.path.join(d, 'my-plex.conf')

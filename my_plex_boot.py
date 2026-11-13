@@ -212,6 +212,20 @@ def print_only_run(argv: "list[str]") -> bool:
     return len(argv) == 1 or version_asked(argv) or help_asked(argv)
 
 
+def caller_name() -> str:
+    """The name of the user this run IS -- its uid's, from the password
+    database -- for every message that names the caller.  Never $USER or
+    $LOGNAME (what getpass.getuser() reads): an environment can name anyone,
+    and on ada's deploy gate (2026-11-13) it named root while the uid was
+    not, so a line judged by the uid named the wrong user.  A uid with no
+    entry is shown as the number."""
+    import pwd
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return str(os.getuid())
+
+
 def as_root() -> bool:
     """True when this run's euid is root -- the one place that asks.
 

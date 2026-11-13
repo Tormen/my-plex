@@ -695,7 +695,6 @@ from dataclasses import dataclass
 import contextlib
 import fcntl
 import functools
-import getpass
 import inspect
 import io
 import json
@@ -850,7 +849,7 @@ def read_site() -> Site:
             lines = f.read().splitlines()
     except OSError as e:
         err("00021", f"cannot read {SITE_CONF} ({e.strerror}) -- the site's directories "
-                     f"for every tool; its group must include {getpass.getuser()}")
+                     f"for every tool; its group must include {_boot.caller_name()}")
     values: dict[str, str] = {}
     for n, line in enumerate(lines, 1):
         line = line.strip()
@@ -4511,7 +4510,7 @@ def _install_ssh_entry(remote):
     if ident:
         print(f"    > key   {ident}   (PLEX_DB_REMOTE_IDENTITY, {_config_origin('PLEX_DB_REMOTE_IDENTITY')})")
         if not os.path.isfile(_ssh_path(ident)):
-            err("00040", f"PLEX_DB_REMOTE_IDENTITY = {ident!r} names no file for {getpass.getuser()}"
+            err("00040", f"PLEX_DB_REMOTE_IDENTITY = {ident!r} names no file for {_boot.caller_name()}"
                          f" ({_ssh_path(ident)}) -- nothing was written: an entry for a key that is"
                          f" not there only moves the failure to the login.\n"
                          f"Possible reasons:\n"
@@ -4755,7 +4754,7 @@ def cmd_install() -> NoReturn:
     """
     remote = _install_db_remote()
     cli = LITTLE_SNITCH_CLI
-    print(f" >>> my-plex --install          (as {getpass.getuser()}: the ssh half)", flush=True)
+    print(f" >>> my-plex --install          (as {_boot.caller_name()}: the ssh half)", flush=True)
     if os.path.isfile(cli) and os.environ.get(_boot.INSTALL_FROM_ROOT_ENV) == '1':
         # This run cannot tell what root's half did -- written, or found
         # already there -- so it names whose they are, never a count.
@@ -4774,7 +4773,7 @@ def cmd_install() -> NoReturn:
                 mine = pwd.getpwnam(owner).pw_uid == os.getuid()
             except KeyError:
                 mine = False
-            whose = f"RUN_AS_USER {owner!r}" + ("" if mine else f" -- not for you ({getpass.getuser()})")
+            whose = f"RUN_AS_USER {owner!r}" + ("" if mine else f" -- not for you ({_boot.caller_name()})")
         print(f" >>> no firewall rule written: they need root -- `my-plex --install` in a root"
               f" shell writes them for {whose}   (LITTLE_SNITCH_CLI {cli} is there)",
               file=sys.stderr, flush=True)
