@@ -13933,6 +13933,47 @@ class TestSecretArgs(unittest.TestCase):
         self.assertIn("_resolve_secret_arg('--plex-token'", src)
 
 
+class TestStrayWordRefused(unittest.TestCase):
+    """A word beside --info or --run-tests that is not their value is refused
+    by name -- never re-aimed.
+
+    The key:value normalisation turns a bare trailing word into a --list
+    title filter, and a command that exits before any list is read ignored it
+    without a word said: `--info Movie:1 extraword` printed the same output as
+    without the word, `--run-tests venv extraword` ran the venv scope (both
+    checked 2026-11-05).  _ARGV_REWRITTEN is the one owner of "what the
+    normalisation rewrote", and both commands ask it."""
+
+    def _run(self, *argv):
+        return subprocess.run([MAIN_SCRIPT, '--config', _fixture_conf(), *argv],
+                              capture_output=True, text=True, timeout=E2E_TIMEOUT,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_a_word_beside_info_is_refused_by_name(self):
+        r = self._run('--info', 'Movie:4', 'extraword')
+        self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+        self.assertIn("'extraword' beside --info", r.stderr, r.stderr[-600:])
+        self.assertNotIn('Broken Movie', r.stdout, "the item was shown although a word was refused")
+
+    def test_two_words_are_both_named(self):
+        r = self._run('--info', 'Movie:4', 'extraword', 'year>2000')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("'extraword', 'year>2000' beside --info", r.stderr, r.stderr[-600:])
+
+    def test_the_value_and_the_flags_are_not_words_beside_it(self):
+        """The control: --info with its item, a verbosity flag and a dashed
+        option is exactly what it took before."""
+        r = self._run('--info', 'Movie:4', '-V')
+        self.assertEqual(r.returncode, 0, r.stderr[-600:])
+        self.assertIn('Broken Movie', r.stdout)
+
+    def test_a_word_beside_run_tests_is_refused_and_nothing_runs(self):
+        r = self._run('--run-tests', 'venv', 'extraword')
+        self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+        self.assertIn("'extraword' beside --run-tests", r.stderr, r.stderr[-600:])
+        self.assertNotIn('1..', r.stdout, "the scope ran although a word was refused")
+
+
 class TestErrCodes(unittest.TestCase):
     """err("NNNNN") codes identify the SOURCE LINE: five digits, unique, and
     numbered 00001.. in file order with no gap -- so a code in an error
@@ -18009,7 +18050,7 @@ _UNITTEST_SCOPES = {
                    TestAbsEpIdx, TestInfoScrapedData],
     'disk-map':   [TestDiskMap],
     'rename':     [TestRename, TestRenameShared],
-    'commands':   [TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
+    'commands':   [TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
                    TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],

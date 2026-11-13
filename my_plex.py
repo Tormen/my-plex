@@ -33510,6 +33510,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("If title search fails, automatically searches directory names")
             print("(catches Plex mismatches where the Plex title doesn't match the folder).")
             print()
+            print("A word beside --info that is not its QUERY is refused by name: --info")
+            print("exits before any --list filter is read, so it is never re-aimed silently.")
+            print()
             print("VERBOSITY LEVELS:")
             print("  (default)  Key, Type, Title, Library, Year, OriginalTitle, ContentRating,")
             print("             Rating, Genres, Studio, File, Size, Duration, AudioLanguage,")
@@ -33548,6 +33551,9 @@ def main_print_help(args, remaining_args, main_parser):
             print("Reports TAP-style: the plan '1..N' first, then 'ok K - title' per test as")
             print("it ends, so `my-rollout go` can gate a pending copy on this suite before")
             print("it offers it.  Exit 0 when every test passed, 1 otherwise.")
+            print()
+            print("A word beside --run-tests that is not its one filter is refused by name:")
+            print("the suite exits before any --list filter is read, so nothing runs on a typo.")
             print()
             print(_load_test_mod().describe_test_scopes())
             print()
@@ -43397,12 +43403,32 @@ def show_item_info(identifier, table_only=False):
 #### GLOBAL PLEX COMMANDS:
 ###########################################################################################
 
+# The words the key:value normalisation in main() rewrote into --list filters,
+# as (word, what it became).  A command that takes only its own value and
+# exits -- --info, --run-tests -- never reads --list, so a word that landed
+# there was ignored without a word said (`--info Movie:1 extraword` printed
+# the same nine lines as without it): it is refused by name instead.
+_ARGV_REWRITTEN: list[tuple[str, str]] = []
+
+def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
+    """err when a word beside FLAG became a --list filter that FLAG's command
+    never reads.  TAKES names what FLAG does take, for the message."""
+    if not _ARGV_REWRITTEN:
+        return
+    words = ", ".join(f"'{w}'" for w, _ in _ARGV_REWRITTEN)
+    err("00162", f"Invalid parameter{'s' if len(_ARGV_REWRITTEN) > 1 else ''} {words} beside {flag}, "
+                 f"which takes only {takes} and exits before any --list filter is read.\n"
+                 "Possible reasons:\n"
+                 "  - the word was meant for another option, or as a second value\n"
+                 f"  - a title search was meant: without {flag}, `my-plex <word>` lists what matches")
+
 def execute_global_commands(args, cmd_args):
     if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
     #init_plex(args, all=False, server=True, library=True)
 
     # Handle --info/--find/--search command (shows system info or item info)
     if safe_getattr(cmd_args, 'info', None) is not None:
+        _refuse_words_rewritten_beside('--info', 'the item or search text after it')
         table_only = any(a in ('--find', '--search') for a in sys.argv)
         show_item_info(cmd_args.info, table_only=table_only)
         sys.exit(0)
@@ -43411,6 +43437,7 @@ def execute_global_commands(args, cmd_args):
     if cmd_args.run_tests is not None:
         # Bare --run-tests runs the whole suite; a FILTER picks a scope or
         # matches test titles.  run_regression_tests() exits, always.
+        _refuse_words_rewritten_beside('--run-tests', 'one scope or title filter after it')
         run_regression_tests(scope=cmd_args.run_tests or None)
 
     # Handle --missing command
@@ -43418,7 +43445,7 @@ def execute_global_commands(args, cmd_args):
     if _missing_val is not None:
         # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
         if _missing_val is True or _missing_val == [] or _missing_val == '':
-            err("00162", "--missing requires a series reference (title, Plex ID, or filepath)\n"
+            err("00163", "--missing requires a series reference (title, Plex ID, or filepath)\n"
                 "  Usage: my-plex --missing <show>\n"
                 "         my-plex <library> --missing  (all series in library)\n"
                 "         my-plex <show> --missing     (specific series)\n"
@@ -43474,7 +43501,7 @@ def execute_global_commands(args, cmd_args):
                    safe_getattr(args, 'sync', None))
     if sync_target is not None:
         if args.force:
-            err("00163", "--force cannot be used with --sync / --plex-disk-sync\n"
+            err("00164", "--force cannot be used with --sync / --plex-disk-sync\n"
                 "  --force is destructive and requires an explicit direction:\n"
                 "    my-plex --plex2disk --force   (Plex overwrites disk — removes markers for unwatched items)\n"
                 "    my-plex --disk2plex --force   (disk overwrites Plex — marks unwatched in Plex where no marker)")
@@ -43739,7 +43766,7 @@ def execute_global_commands(args, cmd_args):
     # Validate parameter dependencies BEFORE checking if commands should run
     # Check if --type is used without --list, --duplicates, or --broken
     if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
-        err("00164", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
+        err("00165", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
 
     # Check if --resolve is used without a resolve-capable command.
     # Resolve-capable commands today: --duplicates, --no-audio-language,
@@ -43757,14 +43784,14 @@ def execute_global_commands(args, cmd_args):
         or safe_getattr(cmd_args, 'problems', None) is not None
     )
     if safe_getattr(cmd_args, 'resolve', False) and not _resolve_capable_flags:
-        err("00165", "--resolve can only be used together with one of:\n"
+        err("00166", "--resolve can only be used together with one of:\n"
                   "  --duplicates / --no-audio-language / --junk / --naming /\n"
                   "  --unmatched / --bad-structure / --problems\n"
                   "Example: my-plex --problems --resolve")
 
     # Check if --collections is used without a library (global context = no library)
     if safe_getattr(cmd_args, 'collections', False):
-        err("00166", "--collections requires a library name.\nExample: my-plex lib1 --collections")
+        err("00167", "--collections requires a library name.\nExample: my-plex lib1 --collections")
 
     # Handle --problems: run all problem detection checks with summary
     problems_val = safe_getattr(cmd_args, 'problems', None)
@@ -43876,7 +43903,7 @@ def execute_global_commands(args, cmd_args):
 
     # --tsv/--scrape requires --problems (which already returned above)
     if safe_getattr(cmd_args, 'tsv', False):
-        err("00167", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
+        err("00168", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
 
     # Handle --unmatched [SCOPE]: list items not matched by Plex metadata agent
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
@@ -44231,14 +44258,14 @@ def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
         else:
             if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: obj is NOT of type '{obj_type}'" )
     return None
-    #err("00168", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
+    #err("00169", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
 
 def execute_plex_cmd(args, obj, obj_type, obj_args_list):
     """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
         --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
     if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
-    if obj_type not in PLEXOBJ[PARSER]: err("00169", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
-    if obj_type not in PLEXOBJ[FN]: err("00170", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[PARSER]: err("00170", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[FN]: err("00171", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
     obj_parser = PLEXOBJ[PARSER][obj_type]
     remaining_args = []
     no_args_given = len(obj_args_list) == 0
@@ -44289,7 +44316,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                    safe_getattr(args, 'sync', None))
     if _early_sync is not None and not remaining_args:
         if args.force:
-            err("00171", "--force cannot be used with --sync / --plex-disk-sync")
+            err("00172", "--force cannot be used with --sync / --plex-disk-sync")
         _dry_run = safe_getattr(args, 'dry_run', False)
         # Inline equivalent of execute_global_commands._collapse_scope_arg.
         if _early_sync is True:
@@ -44328,7 +44355,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
                     if cmd_args is not None and arg in unparsed:
                         # The flag wasn't recognized - it's an invalid flag
-                        err("00172", f"Invalid flag '{arg}'. Not a recognized global command flag."
+                        err("00173", f"Invalid flag '{arg}'. Not a recognized global command flag."
                                      + _flag_hint(arg))
                     if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
                         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
@@ -44353,10 +44380,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
         else:                      # no PLEXOBJECT and NO GLOBAL_CMD
             match state:
                 case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
-                    if obj is None: err("00173", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
+                    if obj is None: err("00174", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
                     # Series helpful error with available libraries
                     available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-                    err("00174", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
+                    err("00175", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
                 case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
                     obj_args_list.append(arg)
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
@@ -44364,10 +44391,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 3| as no remaining_args left!" )
                     state = 3;
                 case _: # state 2 should NEVER happen here as state 2 should only be set IF PLEXOBJECT FOUND and then directly USED below!
-                    err("00175", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+                    err("00176", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
-        if (state != 2 and state != 3): err("00176", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+        if (state != 2 and state != 3): err("00177", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         execute_plex_cmd(args, obj, obj_type, obj_args_list)
         match state:
@@ -44423,7 +44450,7 @@ def _resolve_secret_arg(flag: str, value):
             with open(path) as f:
                 return f.readline().strip()
         except OSError as e:
-            err("00177", f"{flag} @{path}: cannot read it -- {e}")
+            err("00178", f"{flag} @{path}: cannot read it -- {e}")
     print(f"\n\u26a0  WARNING: {flag} was given its value on the command line.\n"
           f"   It is now in your shell history, and `ps auxww` showed it to every\n"
           f"   user on this machine while my-plex ran.\n"
@@ -44465,7 +44492,7 @@ def refuse_legacy_keys(loaded_config) -> None:
              + "".join(f"\n      set in {_config_file_label(p)}"
                        for p in CONFIG_RECORD['set_by'][k])
              for k in legacy_set]
-    err("00178", "Legacy config key(s) found:\n" + "\n".join(lines) +
+    err("00179", "Legacy config key(s) found:\n" + "\n".join(lines) +
            "\n  Delete each from the file that sets it to continue.")
 
 
@@ -44566,7 +44593,7 @@ def main():
     # config its old twin --config-file names is not read first.
     _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
     if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
-        err("00179", "Invalid flag '--create'." + _flag_hint('--create'))
+        err("00180", "Invalid flag '--create'." + _flag_hint('--create'))
     # No abbreviations, as in every other parser of the tool: here a prefix of
     # --create-config ('--creat FILE') would write a config nobody asked for.
     config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -44609,7 +44636,7 @@ def main():
             if any(w in _CREATE_CONFIG_QUIET for w in _beside):
                 _hint += ("\n  Without a FILE the template on stdout is this run's only output:"
                           " -Q would silence it.")
-            err("00180", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
+            err("00181", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
                          + ", ".join(f"'{w}'" for w in _beside)
                          + " beside --create-config, which takes only its FILE, -V, -VV, -D, -DD,"
                            " and -Q only with a FILE."
@@ -44628,16 +44655,16 @@ def main():
             # the link first: isdir and isfile look through it
             _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
                      else 'a file' if os.path.isfile(target) else 'something else')
-            err("00181", f"refusing to write the config: {target} exists ({_kind})")
+            err("00182", f"refusing to write the config: {target} exists ({_kind})")
         except OSError as e:
-            err("00182", f"cannot create the config {target}: {e.strerror}")
+            err("00183", f"cannot create the config {target}: {e.strerror}")
         try:
             os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
             with os.fdopen(fd, 'w') as f:
                 f.write(config_content)
         except OSError as e:
             os.unlink(target)  # created by this run a moment ago: no half config left
-            err("00183", f"cannot write the config {target}: {e.strerror}")
+            err("00184", f"cannot write the config {target}: {e.strerror}")
         print(f"Created config file: {target} (mode 0600)")
         print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
         sys.exit(0)
@@ -45047,6 +45074,7 @@ def main():
         _i += 1
     # Store negative columns globally for _list_filtered to use
     PLEX_Media._REMOVE_COLS = _remove_cols
+    _ARGV_REWRITTEN[:] = _translations   # for the commands that read no --list
     if _inject_flags or _filter_exprs or _remove_cols:
         sys.argv = _new_argv + _inject_flags
         if _filter_exprs:
@@ -45404,14 +45432,14 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00184", f"{e}\nUse --help to see available options.")
+        err("00185", f"{e}\nUse --help to see available options.")
     # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00185", _boot.root_refusal())
+        err("00186", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -45443,11 +45471,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00186", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00187", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00187", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00188", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -45964,7 +45992,7 @@ def report_bug(unexpected: Exception) -> NoReturn:
     fixes the bug, it is just not the user's screen -- and exit 70
     (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
     and the root half of --install, which runs outside run()."""
-    err("00188",
+    err("00189",
         f"my-plex stopped on a bug -- this is not something you did wrong.\n"
         f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
         f"  full trace:    {_write_crash_trace()}\n"
