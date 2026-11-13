@@ -12495,7 +12495,10 @@ class TestVersionAndStamp(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.stamped(), short)
         self.assertEqual(os.stat(self.script).st_mode, mode, "the mode must survive the rewrite")
-        self.assertEqual(self.git('status', '--porcelain'), '', "the stamp must be IN the amended commit")
+        # Tracked files only: this throwaway repo has no .gitignore, and a run
+        # without PYTHONDONTWRITEBYTECODE leaves the boot module's __pycache__/.
+        self.assertEqual(self.git('status', '--porcelain', '--untracked-files=no'), '',
+                         "the stamp must be IN the amended commit")
         self.assertEqual(self.git('rev-list', '--count', 'HEAD'), '2', "amend, not a new commit")
         self.assertIn(f'commit {short}', self.run_tool('--version').stdout)
 
