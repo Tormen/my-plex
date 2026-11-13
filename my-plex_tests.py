@@ -1038,11 +1038,13 @@ class TestHelpFlags(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def _run(self, *argv: str) -> 'tuple[subprocess.CompletedProcess[str], str]':
+    def _run(self, *argv: str, config: bool = True) -> 'tuple[subprocess.CompletedProcess[str], str]':
+        """CONFIG=False leaves out `--config <the test's config>`: beside
+        --create-config it is a word of its own, refused and named."""
         home = tempfile.mkdtemp(dir=self.d)
         os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
         env = dict(_fake_ssh_env(), HOME=home, PYTHONDONTWRITEBYTECODE='1')
-        r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', self.conf, *argv],
+        r = subprocess.run([sys.executable, MAIN_SCRIPT, *(['--config', self.conf] if config else []), *argv],
                            capture_output=True, text=True, timeout=60,
                            env=env, stdin=subprocess.DEVNULL)
         return r, home
@@ -1068,17 +1070,17 @@ class TestHelpFlags(unittest.TestCase):
 
     def test_lower_h_asks_for_no_help_beside_create_config(self):
         """`-h` is an unknown token like any other: beside --create-config
-        it changes nothing that `-x` does not."""
+        it is refused and named, as `-x` is."""
         for order in ((('--create-config', '{}')), (('{}', '--create-config'))):
             with self.subTest(order=order):
-                other, _ = self._run(*[a.format('-x') for a in order])
-                lower_h, _ = self._run(*[a.format('-h') for a in order])
-                self.assertEqual(other.returncode, 0,
+                other, _ = self._run(*[a.format('-x') for a in order], config=False)
+                lower_h, _ = self._run(*[a.format('-h') for a in order], config=False)
+                self.assertEqual(other.returncode, 1,
                                  f"control: {order} with -x: exit {other.returncode}\n{other.stderr[-400:]}")
-                self.assertIn('# my-plex configuration file', other.stdout,
-                              "control: --create-config with -x printed no config")
+                self.assertIn("'-x'", other.stderr, "control: --create-config with -x does not name it")
                 self.assertEqual(lower_h.returncode, other.returncode,
                                  f"-h is taken for a help request:\n{lower_h.stderr[-400:]}")
+                self.assertIn("'-h'", lower_h.stderr, "-h beside --create-config is not named")
                 self.assertTrue(lower_h.stdout == other.stdout,
                                 f"-h printed something else than -x:\n{lower_h.stdout[:300]}")
 
@@ -1103,11 +1105,12 @@ class TestHelpFlags(unittest.TestCase):
     def test_help_after_double_dash_asks_for_no_help(self):
         """After `--` every token is a positional to the parser, so `--help`
         there asks for no help -- beside --create-config it changes nothing
-        that `-x` there does not."""
-        other, _ = self._run('--create-config', '--', '-x')
-        self.assertEqual(other.returncode, 0, f"control: -- -x: exit {other.returncode}\n{other.stderr[-400:]}")
-        self.assertIn('# my-plex configuration file', other.stdout, "control: --create-config -- -x printed no config")
-        help_, _ = self._run('--create-config', '--', '--help')
+        that `-x` there does not: both are refused, and named."""
+        other, _ = self._run('--create-config', '--', '-x', config=False)
+        self.assertEqual(other.returncode, 1, f"control: -- -x: exit {other.returncode}\n{other.stderr[-400:]}")
+        self.assertIn("'-x'", other.stderr, "control: --create-config -- -x does not name -x")
+        help_, _ = self._run('--create-config', '--', '--help', config=False)
+        self.assertIn("'--help'", help_.stderr, "--help after -- is not named")
         self.assertEqual(help_.returncode, other.returncode,
                          f"--help after -- is taken for a help request:\n{help_.stderr[-400:]}")
         self.assertTrue(help_.stdout == other.stdout,
@@ -15747,12 +15750,69 @@ class TestCreateConfig(unittest.TestCase):
     write through it).
     """
 
-    def _run(self, *argv: str, umask: int = 0o022) -> 'subprocess.CompletedProcess[str]':
+    def _run(self, *argv: str, umask: int = 0o022, cwd: 'str | None' = None) -> 'subprocess.CompletedProcess[str]':
         # umask 022 is what a careless default gives: a file created through
         # the umask alone comes out 0644, readable by everyone.
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True, text=True,
                               timeout=120, preexec_fn=lambda: os.umask(umask),
-                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'), cwd=cwd)
+
+    def test_51_a_word_beside_it_is_refused_and_nothing_is_written(self):
+        """ADVERSARIAL (#51): --create-config exits before the main parser
+        reads anything else, so every other word beside it was dropped
+        silently -- `--create-config -h` printed the template and
+        `--create-config FILE extra` wrote FILE, both exit 0, and
+        `-C FILE --create-config` printed the template instead of writing
+        FILE.  Each is refused, every such word named, nothing printed and
+        nothing written (relative names land in the run's directory)."""
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            for argv, named in ((['--create-config', '-h'], ['-h']),
+                                (['-h', '--create-config'], ['-h']),
+                                (['--create-config', target, 'extra'], ['extra']),
+                                (['--create-config', 'foo', 'bar'], ['bar']),
+                                (['--create-config', 'foo', '--create-config', 'bar'], ['foo']),
+                                (['--create-config', '--', '-x'], ['--', '-x']),
+                                (['--create-config', target, '-O'], ['-O']),
+                                (['-C', target, '--create-config'], ['-C', target]),
+                                (['--config', target, '--create-config'], ['--config', target])):
+                with self.subTest(argv=argv):
+                    r = self._run(*argv, cwd=d)
+                    self.assertEqual(r.returncode, 1, f"exit {r.returncode}\n{r.stderr[-400:]}")
+                    self.assertRegex(r.stderr, r"ERROR \d{5} \[1\]: Invalid parameters? ")
+                    for word in named:
+                        self.assertIn(f"'{word}'", r.stderr, f"{word} is not named")
+                    self.assertEqual(r.stdout, '', "something was printed")
+                    self.assertEqual(os.listdir(d), [], "a file was written")
+                    if argv[0] in ('-C', '--config'):
+                        self.assertIn("--create-config FILE", r.stderr,
+                                      "the refusal of a config file does not say how to write one")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_51_quiet_verbose_and_debug_are_taken_beside_it(self):
+        """-Q, -V, -VV, -D, -DD change only what is printed, so they are taken
+        beside --create-config: the template is printed, or FILE written
+        0600 -- under -Q with nothing on stdout."""
+        template = self._run('--create-config').stdout
+        self.assertIn('# my-plex configuration file', template, "control: no template printed")
+        for flag in ('-V', '-VV', '-D', '-DD', '--verbose', '--debug'):
+            with self.subTest(flag=flag):
+                r = self._run(flag, '--create-config')
+                self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+                self.assertIn('# my-plex configuration file', r.stdout, f"{flag}: no template printed")
+        d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
+        try:
+            target = os.path.join(d, 'my-plex.conf')
+            r = self._run('--create-config', target, '-Q')
+            self.assertEqual(r.returncode, 0, f"exit {r.returncode}\n{r.stderr[-400:]}")
+            self.assertEqual(r.stdout, '', "-Q printed something")
+            self.assertEqual(oct(os.stat(target).st_mode & 0o777), oct(0o600))
+            with open(target) as f:
+                self.assertEqual(f.read(), template)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_the_template_sets_no_key(self):
         r = self._run('--create-config')

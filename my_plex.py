@@ -3943,6 +3943,30 @@ def _flag_hint(arg):
         return "\n  You mean " + " or ".join(f"'{n}'" for n in _RENAMED_FLAGS[arg].split('|')) + "."
     return " Use --help to see available options."
 
+# What --create-config takes beside its FILE: the verbosity flags, which
+# change only what is printed, never what is written.
+_CREATE_CONFIG_COMPANIONS = ('-Q', '--quiet', '-V', '--verbose', '-VV', '--very-verbose',
+                             '-D', '--debug', '-DD', '--deepdebug')
+
+def _words_beside_create_config(argv: 'list[str]', file: 'str | None') -> 'list[str]':
+    """The words of ARGV (sys.argv[1:]) that --create-config does not take,
+    in their order: every word but --create-config itself, the FILE the
+    parser gave it (None for none) and _CREATE_CONFIG_COMPANIONS.  A `--`
+    is a word like any other: --create-config ends the run before the main
+    parser, so nothing after it would be read either."""
+    beside: 'list[str]' = []
+    i = 0
+    while i < len(argv):
+        word = argv[i]
+        if word == '--create-config' and file is not None and argv[i + 1:i + 2] == [file]:
+            i += 2
+            continue
+        if not (word == '--create-config' or (file is not None and word == f'--create-config={file}')
+                or word in _CREATE_CONFIG_COMPANIONS):
+            beside.append(word)
+        i += 1
+    return beside
+
 def _remote_kind(host):
     """'address' for a literal IP, 'host' for a name.  One owner: the Plex
     server and the SSH endpoint both have to answer it, and my-little-snitch
@@ -33545,6 +33569,7 @@ def main_print_help(args, remaining_args, main_parser):
             print("       my-plex --create-config            # Print default config to stdout")
             print("       my-plex --create-config FILE       # Write default config to FILE: mode 0600, never over")
             print("                                          #   an existing file or a link")
+            print("       Beside --create-config only -Q, -V, -VV, -D, -DD: any other word is refused.")
             print()
             print("Config file: Python syntax, loaded via exec().")
             print()
@@ -44543,7 +44568,7 @@ def main():
     config_parser.add_argument('--config', nargs='?', const=_CFG_PRINT_SENTINEL, default=None, metavar="FILE",
                                help="Without arg: print the config files read, then each key they set and which file set it (no secret printed), and exit. With FILE: use that config file (same as --config-file).")
     config_parser.add_argument('--create-config', nargs='?', const=_CREATE_STDOUT_SENTINEL, default=None, metavar="FILE",
-                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link.")
+                               help="Without arg: print default config to stdout. With FILE: write default config to FILE, mode 0600, never over an existing file or a link. Beside it only -Q, -V, -VV, -D, -DD: any other word is refused.")
     config_parser.add_argument('--print-problem-categories-md', action='store_true', help=argparse.SUPPRESS)  # v2.69: dump README table
     config_args, _ = config_parser.parse_known_args()
     if getattr(config_args, 'print_problem_categories_md', False):
@@ -44564,8 +44589,21 @@ def main():
     # If user is asking for help, defer all early-exit config actions to the help dispatcher.
     _asking_help = _boot.help_asked(sys.argv)
 
-    # Handle --create-config (new flag, takes optional FILE)
+    # --create-config [FILE] ends the run before the main parser reads any
+    # other word, so a word beside it is refused here -- never dropped unread.
     if not _asking_help and config_args.create_config is not None:
+        _beside = _words_beside_create_config(
+            sys.argv[1:], None if config_args.create_config == _CREATE_STDOUT_SENTINEL
+            else config_args.create_config)
+        if _beside:
+            # `-C FILE --create-config` reads as "write FILE" -- what the
+            # removed `--config-file FILE --create` did
+            _hint = ("\n  To write the template to a file: --create-config FILE."
+                     if any(w.startswith(('-C', '--config')) for w in _beside) else "")
+            err("00180", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
+                         + ", ".join(f"'{w}'" for w in _beside)
+                         + " beside --create-config, which takes only its FILE and -Q, -V, -VV, -D, -DD."
+                         + _hint)
         config_content = generate_default_config()
         if config_args.create_config == _CREATE_STDOUT_SENTINEL:
             sys.stdout.write(config_content)
@@ -44580,16 +44618,16 @@ def main():
             # the link first: isdir and isfile look through it
             _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
                      else 'a file' if os.path.isfile(target) else 'something else')
-            err("00180", f"refusing to write the config: {target} exists ({_kind})")
+            err("00181", f"refusing to write the config: {target} exists ({_kind})")
         except OSError as e:
-            err("00181", f"cannot create the config {target}: {e.strerror}")
+            err("00182", f"cannot create the config {target}: {e.strerror}")
         try:
             os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
             with os.fdopen(fd, 'w') as f:
                 f.write(config_content)
         except OSError as e:
             os.unlink(target)  # created by this run a moment ago: no half config left
-            err("00182", f"cannot write the config {target}: {e.strerror}")
+            err("00183", f"cannot write the config {target}: {e.strerror}")
         print(f"Created config file: {target} (mode 0600)")
         print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
         sys.exit(0)
@@ -45356,14 +45394,14 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00183", f"{e}\nUse --help to see available options.")
+        err("00184", f"{e}\nUse --help to see available options.")
     # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00184", _boot.root_refusal())
+        err("00185", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -45395,11 +45433,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00185", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00186", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00186", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00187", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -45915,7 +45953,7 @@ def report_bug(unexpected: Exception) -> NoReturn:
     fixes the bug, it is just not the user's screen -- and exit 70
     (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
     and the root half of --install, which runs outside run()."""
-    err("00187",
+    err("00188",
         f"my-plex stopped on a bug -- this is not something you did wrong.\n"
         f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
         f"  full trace:    {_write_crash_trace()}\n"
