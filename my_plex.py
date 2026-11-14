@@ -21663,7 +21663,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
             if DBG: print(f"{DBGPFX}add_media_obj_via_PLEX_API(): dropped {len(_stale_keys)} stale version key(s) for {filepath} "
                           f"(carry-over metadata: {'yes' if _carried_metadata else 'no'})")
         # New version of existing object - merge files dict
-        existing_files[version] = {'filepath': filepath, 'filesize': part_size}
+        existing_files[version] = val['files'][version]   # the entry just read: part id, languages
         if _carried_metadata:
             existing_files[version]['file_metadata'] = _carried_metadata
         val['files'] = existing_files

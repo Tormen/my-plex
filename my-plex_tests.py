@@ -13065,6 +13065,30 @@ class TestPlexapiRecordsStoreEpochs(unittest.TestCase):
                          (epoch, epoch, None))
         self.assertEqual(record['originalTitle'], '')
 
+    def test_a_second_version_keeps_its_part_id_and_languages(self):
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        movie = NS(type='movie', ratingKey=5, title='Film', originalTitle='', updatedAt=None,
+                   addedAt=None, lastViewedAt=None, viewCount=0, userRating=None, rating=None,
+                   audienceRating=None, summary='', year=2020, collections=[], labels=[],
+                   actors=[], countries=[], directors=[], writers=[], genres=[],
+                   contentRating=None, studio=None, reload=lambda: None)
+        media = NS(id=50, duration=5400000, videoResolution='1080', videoCodec='h264',
+                   audioCodec='aac', width=1920, height=1080)
+        first = NS(id=500, file='/lib/a.mkv', size=1_000_000_000, audioStreams=lambda: [],
+                   subtitleStreams=lambda: [])
+        second = NS(id=501, file='/lib/b.mkv', size=2_000_000_000,
+                    audioStreams=lambda: [NS(language='fr')], subtitleStreams=lambda: [])
+        self.mp.FORCE_CACHE_UPDATE = True
+        with mock.patch.object(self.mp, 'plex_rate_limit_delay'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            for part in (first, second):
+                self.mp.add_media_obj_via_PLEX_API(movie, NS(title='lib1'), movie, 0, 1, media, 0, 1, part,
+                                                   filepath=part.file)
+        record = self.mp.PLEX_Media.OBJ_BY_ID[self.mp.get_fullID(None, 'Movie', 5)]
+        entry = next(e for e in record['files'].values() if e['filepath'] == '/lib/b.mkv')
+        self.assertEqual((entry.get('part_id'), entry.get('audio_languages')), (501, ['fr']))
+
     def test_an_unchanged_item_is_up_to_date(self):
         from types import SimpleNamespace as NS
         self.mp.FORCE_CACHE_UPDATE = False
