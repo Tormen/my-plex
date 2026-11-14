@@ -33730,7 +33730,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 media.refresh()
                 print(f"Refreshed '{media.title}'.")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00113", f"Error refreshing media: {e}")
 
     @staticmethod
@@ -33754,7 +33754,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"Deleted Plex entry '{media.title}'.")
                     if mid:
                         PLEX_Media._remove_from_cache_by_id(int(mid))
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00114", f"Error deleting media: {e}")
 
     @staticmethod
@@ -33907,7 +33907,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 try:
                     check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
                     file_exists = 'EXISTS' in check_result.stdout
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     file_exists = True  # Assume exists if check fails, let move_to_trash handle it
 
                 if not file_exists:
@@ -33954,7 +33954,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             for media in resolve_plex_media_obj(media_identifier, library_name):
                 action_fn(media)
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err(err_code, f"{err_msg}: {e}")
 
     @staticmethod
@@ -34051,13 +34051,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Get real plexapi library object (cache objects lack fetchItem)
         try:
             library = plex.library.section( obj['library'] )
-        except Exception as e:
+        except PLEX_ERRORS as e:
             if must_exist: err("00129", f"section with library name not found: {e}\nOBJ = {obj}")
             return (None, None)
 
         try:
             item = library.fetchItem( int(obj['item_id']) )
-        except Exception as e:
+        except PLEX_ERRORS as e:
             if must_exist: err("00130", f"Item with ID not found: {e}\nOBJ = {obj}")
             return (None, None)
 
@@ -34126,7 +34126,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             query = f"SELECT COUNT(*) FROM metadata_items WHERE metadata_type = 15 AND title = '{safe_obj}' AND deleted_at IS NULL"
             rows = query_plex_database(query, mode='rows')
             return rows and int(rows[0][0]) > 0
-        except Exception:
+        except (ValueError, IndexError):
             return False
 
     @staticmethod
@@ -34151,7 +34151,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
                     print(f"Playlist: {row[0]}")
             else:
                 print("No playlists found.")
-        except Exception as e:
+        except IndexError as e:
             print(f"Error listing playlists: {e}")
 
     @staticmethod
@@ -34164,7 +34164,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
                 media_items += resolve_plex_media_obj(identifier)
             Playlist.create(server=plex, title=playlist_name, items=media_items)
             print(f"Playlist '{playlist_name}' created successfully.")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00133", f"Error creating playlist: {e}")
 
     @staticmethod
@@ -34183,7 +34183,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             elif action == 'remove':
                 playlist.removeItems(media_items)
                 print(f"Media removed from playlist '{playlist_name}'.")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00134", f"Error updating playlist: {e}")
 
     @staticmethod
@@ -34194,7 +34194,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             playlist = plex.playlist(playlist_name)
             playlist.delete()
             print(f"Playlist '{playlist_name}' deleted successfully.")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00135", f"Error deleting playlist: {e}")
 
 
@@ -34242,7 +34242,7 @@ def _file_exists_local_or_remote(filepath):
             capture_output=True, text=True, timeout=10
         )
         return r.returncode == 0 and 'YES' in r.stdout
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -34279,7 +34279,7 @@ def _batch_file_exists_remote(filepaths):
                 if idx in path_map:
                     existing.add(path_map[idx])
             return existing
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return set()
 
@@ -34315,7 +34315,7 @@ def read_episodes_tsv(tsv_path):
                 lines_iter = result.stdout.splitlines(keepends=True)
             else:
                 return None, None
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return None, None
 
     metadata = {}
@@ -34457,7 +34457,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
         try:
             with open(tsv_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-        except Exception as e2:
+        except OSError as e2:
             print(f"  WARNING: Local fallback also failed: {e2}", file=sys.stderr)
 
 
@@ -34482,7 +34482,7 @@ def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
             mtime = int(r.stdout.strip())
             age = time.time() - mtime
             return age > max_age
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return True  # can't determine → treat as stale
 
@@ -34545,7 +34545,7 @@ def write_episodes_err(series_dir, error_type, source, message):
         os.makedirs(series_dir, exist_ok=True)
         with open(local_err, 'w', encoding='utf-8') as f:
             f.write(content)
-    except Exception as e:
+    except OSError as e:
         # NOT fatal: a note that cannot be written must not take down the run
         # it is a note ABOUT.  A WARNING on stderr instead -- which -Q does
         # not silence and an unattended run does deliver.
@@ -34581,7 +34581,7 @@ def read_episodes_err(series_dir):
             )
             if r.returncode == 0 and r.stdout.strip():
                 lines = r.stdout.splitlines()
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
     if not lines:
         return None
@@ -34611,7 +34611,7 @@ def clear_episodes_err(series_dir):
             [*_ssh_args(PLEX_DB_REMOTE_HOST), f'rm -f "{escaped}"'],
             capture_output=True, text=True, timeout=10
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
 
 
@@ -34667,7 +34667,7 @@ def _load_custom_date_extractors():
                 print(f"  Loaded {len(mod.EXTRACTORS)} custom date extractor(s) from {module_path}")
         else:
             print(f"WARNING: CUSTOM_DATE_EXTRACTORS module has no EXTRACTORS dict: {module_path}", file=sys.stderr)
-    except Exception as e:
+    except Exception as e:  # the module is the user's own Python: whatever it raises is the module's
         print(f"WARNING: Failed to load CUSTOM_DATE_EXTRACTORS: {e}", file=sys.stderr)
 
 
@@ -35171,7 +35171,7 @@ def _tvdb_login(api_key):
                 "  Possible reasons:\n"
                 "  - TVDB API changed their response format\n"
                 "  - Temporary server issue — try again later")
-    except Exception as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         err("00138", f"TVDB login failed: {e}\n"
             "  Possible reasons:\n"
             "  - TVDB_API_KEY is invalid or expired\n"
@@ -35250,7 +35250,7 @@ def _scrape_tvdb(series_title, metadata, existing_episodes, external_ids=None):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if VRB: print(f"  WARNING: TVDB API request failed (page {page}): {e}", file=sys.stderr)
             if page == 0:
                 return None  # First page failed — fatal
@@ -35389,7 +35389,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
         elif VRB:
             print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}", file=sys.stderr)
         return None
-    except Exception as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         if VRB: print(f"  WARNING: TMDB series request failed for '{series_title}' (tmdb:{tmdb_id}): {e}", file=sys.stderr)
         return None
 
@@ -35412,7 +35412,7 @@ def _scrape_tmdb(series_title, metadata, existing_episodes, external_ids=None):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 season_data = json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if VRB: print(f"  WARNING: TMDB season {season_num} request failed: {e}", file=sys.stderr)
             continue
 
@@ -35474,7 +35474,7 @@ def _discover_fernsehserien_slug(series_title, year=None):
                 series_id = m.group(1) if m else None
                 has_epguide = '/episodenguide' in html
                 return (slug_candidate, series_id, has_epguide)
-        except Exception:
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         return None
 
@@ -35527,9 +35527,9 @@ def _discover_fernsehserien_slug(series_title, year=None):
                     m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html2)
                     series_id = m.group(1) if m else None
                     return slug, series_id
-            except Exception:
+            except (OSError, ValueError, http.client.HTTPException):
                 pass
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
         pass
 
     return None, None
@@ -35592,7 +35592,7 @@ def _scrape_fernsehserien_de(series_title, metadata, existing_episodes, year=Non
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 try:
                     html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
-                except Exception:
+                except (OSError, ValueError, http.client.HTTPException):
                     break  # no more pages for this season
 
                 # Extract series title from first page (from <title> tag: "Show Name – Episodenguide ...")
@@ -35691,7 +35691,7 @@ def _scrape_fernsehserien_de(series_title, metadata, existing_episodes, year=Non
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             try:
                 html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
-            except Exception as e:
+            except (OSError, ValueError, http.client.HTTPException) as e:
                 print(f"  fetch offset {offset} failed: {e}")
                 break
 
@@ -35734,7 +35734,7 @@ def _scrape_fernsehserien_de(series_title, metadata, existing_episodes, year=Non
                 if key in existing_by_key:
                     if existing_by_key[key]['season'] == 0:
                         existing_by_key[key]['season'] = int(season)
-        except Exception:
+        except (OSError, ValueError, http.client.HTTPException):
             pass
 
         # Derive missing seasons from known season start dates
