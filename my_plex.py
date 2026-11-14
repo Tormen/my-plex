@@ -29265,7 +29265,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return (title_n or 0) + (multi_n or 0)
 
     @staticmethod
-    def _resolve_scope_to_disk_paths(scope_val: str | list[object] | bool | None) -> list[str]:
+    def _resolve_scope_to_disk_paths(scope_val: str | list[str] | bool | None) -> list[str]:
         """Translate a --junk scope into a list of disk root paths to walk
         RECURSIVELY (on the Plex server, via SSH).  Pure-filesystem
         operation — does NOT require the file to be in Plex's index.
