@@ -33638,19 +33638,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 for part in partList:
                                     episode = PLEX_Media.OBJ_BY_ID[ part ]
                                     if VERYVRB:
-                                        print(f"SERIES\t{obj['title']} {episode['E_str_full']} [{version}] {{{part}}}: {episode['title']}")
+                                        print(f"SERIES\t{obj['title']} {episode['S0XE0X']} [{version}] {{{part}}}: {episode['title']}")
                                     else:
-                                        print(f"SERIES\t{obj['title']} {episode['E_str_full']}: {episode['title']}")
+                                        print(f"SERIES\t{obj['title']} {episode['S0XE0X']}: {episode['title']}")
                                     print(f"'{episode['file']}'")
             case "Movie":
                 if VRB:
-                    for version,obj_keys in obj['members'].items():
-                        for key in obj_keys:
-                            obj = PLEX_Media.OBJ_BY_ID[ key ]
-                            if VERYVRB:
-                                print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}] {{{key}}}\t'{obj['file']}'")
-                            else:
-                                print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}]\t'{obj['file']}'")
+                    for version, filepath in PLEX_Media.OBJ_BY_MOVIE.get(key, {obj['version']: obj['file']}).items():
+                        if VERYVRB:
+                            print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}] {{{key}}}\t'{filepath}'")
+                        else:
+                            print(f"MOVIE\t{obj['title']} ({obj['year']}) [{version}]\t'{filepath}'")
                 else:
                     print(f"MOVIE\t{obj['title']} ({obj['year']})")
             case "Collection":
@@ -33677,28 +33675,28 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"- audience rating: {obj.get('audienceRating', 'N/A')}")
         print(f"- summary: {obj['summary']}")
         print(f"- duration: {obj['duration']} ms")
-        print(f"- actor(s): {', '.join([a.tag for a in obj['actors']])}")
-        print(f"- director(s): {', '.join([d.tag for d in obj['directors']])}")
-        print(f"- writer(s): {', '.join([w.tag for w in obj['writers']])}")
-        print(f"- genre(s): {', '.join([g.tag for g in obj['genres']])}")
-        print(f"- studio: {obj['studio']}")
-        print(f"- collection(s): {', '.join([c.tag for c in obj['collections']])}")
-        print(f"- labels: {', '.join([l.tag for l in obj['labels']])}")
+        print(f"- actor(s): {', '.join(obj.get('actors', []))}")
+        print(f"- director(s): {', '.join(obj.get('directors', []))}")
+        print(f"- writer(s): {', '.join(obj.get('writers', []))}")
+        print(f"- genre(s): {', '.join(obj.get('genres', []))}")
+        print(f"- studio: {obj.get('studio') or 'n/a'}")
+        print(f"- collection(s): {', '.join(obj.get('collections', []))}")
+        print(f"- labels: {', '.join(obj.get('labels', []))}")
         print(f"- audio language(s): {obj['audio_languages']}")
         print(f"- subtitle language(s): {obj['subtitle_languages']}")
-        print(f"- content rating: {obj['contentrating']}")
-        print(f"- view count: {obj['viewcount']}")
-        print(f"- last viewed at: {obj['lastviewedat']}")
-        print(f"- added at: {obj['addedat']}")
-        print(f"- updated at: {obj['updatedat']}")
-        print(f"- user rating: {obj['userrating']}")
-        print(f"- season count: {obj['seasoncount'] if 'seasoncount' in obj else 'n/a'}")
-        print(f"- episode count: {obj['episodecount'] if 'episodecount' in obj else 'n/a'}")
-        print(f"- part count: {len(obj['parts'])}")
-        for part in obj['parts']:
-            print(f"  - part: {part.title} | duration: {part.duration} ms | codec: {part.video_codec}")
-        print(f"- original title: {obj['originaltitle']}")
-        print(f"- country: {obj['country']}")
+        print(f"- content rating: {obj['contentRating']}")
+        print(f"- view count: {obj['viewCount']}")
+        print(f"- last viewed at: {obj['lastViewedAt']}")
+        print(f"- added at: {obj['addedAt']}")
+        print(f"- updated at: {obj['updatedAt']}")
+        print(f"- user rating: {obj['userRating']}")
+        print(f"- season count: {obj.get('S_count', 'n/a')}")
+        print(f"- episode count: {obj.get('E_count', 'n/a')}")
+        print(f"- version count: {len(obj['files'])}")
+        for version, entry in obj['files'].items():
+            print(f"  - version: {version} | {entry['filepath']}")
+        print(f"- original title: {obj['originalTitle']}")
+        print(f"- country: {', '.join(obj.get('countries', []))}")
         print(f"- resolution: {obj['resolution']}")
 
     ############################################################

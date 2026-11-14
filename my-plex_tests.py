@@ -12857,6 +12857,60 @@ class TestFilepathIndexIsAList(unittest.TestCase):
                           if k in media.OBJ_BY_ID], ['Both'])
 
 
+class TestListPrinters(unittest.TestCase):
+    """-f pretty -V and -f details print a cached record.  They read keys no
+    builder writes -- 'members' on a Movie, 'E_str_full' on an Episode,
+    lowercase 'viewcount', 'parts' -- and plexapi tags (.tag) where the cache
+    holds strings, so each raised before printing a line."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        self._saved_maps = (media.OBJ_BY_ID, media.OBJ_BY_MOVIE, media.OBJ_BY_SERIES,
+                            media.OBJ_BY_SERIES_EPISODES)
+        self._saved_flags = (self.mp.FORMAT, self.mp.VRB, self.mp.VERYVRB)
+        movie = _make_movie(1, 'Film', '/lib/film.mkv', version='v1')
+        movie['actors'], movie['countries'] = ['Ann', 'Bob'], ['fr']
+        series = _make_movie(10, 'Show', '/lib/show', version='Series')
+        series.update(type='Series', S_count=1, members=['S01'])
+        season = _make_movie(11, 'Season 1', '/lib/show/s1', version='Season')
+        season.update(type='Season', S_idx=1, members=['E01'])
+        episode = _make_episode(12, 'Pilot', '/lib/show/s1/e1.mkv', 'Series:10', 'Show', 1, 1)
+        episode['S0XE0X'] = 'S01E01'
+        media.OBJ_BY_ID = {'Movie:1': movie, 'Series:10': series, 'Season:11': season,
+                           'Episode:12': episode}
+        media.OBJ_BY_MOVIE = {'Movie:1': {'v1': '/lib/film.mkv'}}
+        media.OBJ_BY_SERIES = {'Series:10': {'S01': 'Season:11'}}
+        media.OBJ_BY_SERIES_EPISODES = {'Series:10': {'S01': {'E01': {'v1': ['Episode:12']}}}}
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        (media.OBJ_BY_ID, media.OBJ_BY_MOVIE, media.OBJ_BY_SERIES,
+         media.OBJ_BY_SERIES_EPISODES) = self._saved_maps
+        self.mp.FORMAT, self.mp.VRB, self.mp.VERYVRB = self._saved_flags
+
+    def _print(self, key, fmt, verbose):
+        self.mp.FORMAT, self.mp.VRB, self.mp.VERYVRB = fmt, verbose, False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.mp.PLEX_Media.print_OBJ_BY_ID(key)
+        return out.getvalue()
+
+    def test_details_prints_the_record_s_own_values(self):
+        out = self._print('Movie:1', 'details', False)
+        self.assertIn('- actor(s): Ann, Bob', out)
+        self.assertIn('- country: fr', out)
+        self.assertIn('- version: v1 | /lib/film.mkv', out)
+
+    def test_pretty_verbose_lists_a_movie_s_versions(self):
+        out = self._print('Movie:1', 'pretty', True)
+        self.assertIn("MOVIE\tFilm (2023) [v1]\t'/lib/film.mkv'", out)
+
+    def test_pretty_verbose_lists_a_series_episodes(self):
+        out = self._print('Series:10', 'pretty', True)
+        self.assertIn('SERIES\tShow S01E01: Pilot', out)
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18458,7 +18512,7 @@ _UNITTEST_SCOPES = {
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
-    'misc':       [TestBadStructureResolve, TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+    'misc':       [TestListPrinters, TestBadStructureResolve, TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,
