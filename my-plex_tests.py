@@ -24,6 +24,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import datetime as _dt
 import importlib.machinery
 import importlib.util
 from typing import Any
@@ -13020,6 +13021,67 @@ class TestSortNewSeasonWrapper(unittest.TestCase):
         self.assertEqual(series['file'], os.path.join(root, 'Show'))
 
 
+class TestPlexapiRecordsStoreEpochs(unittest.TestCase):
+    """The cache stores times as epoch ints (_plex_dt_to_epoch says so, and
+    the database builder does).  The plexapi builder, the up-to-date check
+    and refresh_cache_metadata stored plexapi's datetime instead -- and
+    originalTitle as None where the database builder stores '' -- so
+    `added>2024`, datetime.fromtimestamp() and `.lower()` broke on those
+    records, and every up-to-date check against an epoch said 'changed'."""
+
+    WHEN = _dt.datetime(2024, 5, 6, 7, 8, 9)
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        self._saved = (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY,
+                       media.OBJ_BY_MOVIE, self.mp.FORCE_CACHE_UPDATE)
+        media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY, media.OBJ_BY_MOVIE = {}, {}, {}, {}
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY,
+         media.OBJ_BY_MOVIE, self.mp.FORCE_CACHE_UPDATE) = self._saved
+
+    def test_the_plexapi_builder_stores_epochs_and_an_empty_original_title(self):
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        movie = NS(type='movie', ratingKey=5, title='Film', originalTitle=None,
+                   updatedAt=self.WHEN, addedAt=self.WHEN, lastViewedAt=None, viewCount=0,
+                   userRating=None, rating=None, audienceRating=None, summary='', year=2020,
+                   collections=[], labels=[], actors=[], countries=[], directors=[],
+                   writers=[], genres=[], contentRating=None, studio=None, reload=lambda: None)
+        media = NS(id=50, duration=5400000, videoResolution='1080', videoCodec='h264',
+                   audioCodec='aac', width=1920, height=1080)
+        part = NS(id=500, file='/lib/film.mkv', size=1000,
+                  audioStreams=lambda: [], subtitleStreams=lambda: [])
+        self.mp.FORCE_CACHE_UPDATE = True
+        with mock.patch.object(self.mp, 'plex_rate_limit_delay'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.mp.add_media_obj_via_PLEX_API(movie, NS(title='lib1'), movie, 0, 1, media, 0, 1, part)
+        record = self.mp.PLEX_Media.OBJ_BY_ID[self.mp.get_fullID(None, 'Movie', 5)]
+        epoch = int(self.WHEN.timestamp())
+        self.assertEqual((record['updatedAt'], record['addedAt'], record['lastViewedAt']),
+                         (epoch, epoch, None))
+        self.assertEqual(record['originalTitle'], '')
+
+    def test_an_unchanged_item_is_up_to_date(self):
+        from types import SimpleNamespace as NS
+        self.mp.FORCE_CACHE_UPDATE = False
+        cached = {'updatedAt': int(self.WHEN.timestamp())}
+        self.assertFalse(self.mp.obj_needs_updating(NS(updatedAt=self.WHEN), cached, key='Movie:5'))
+
+    def test_a_metadata_refresh_stores_an_epoch(self):
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        self.mp.PLEX_Media.OBJ_BY_ID['Movie:5'] = _make_movie(5, 'Film', '/lib/film.mkv')
+        plex_item = NS(viewCount=1, lastViewedAt=self.WHEN, labels=[], userRating=None)
+        with mock.patch.object(self.mp, 'resolve_plex_media_obj', return_value=iter([plex_item])):
+            self.assertTrue(self.mp.refresh_cache_metadata('Movie:5'))
+        self.assertEqual(self.mp.PLEX_Media.OBJ_BY_ID['Movie:5']['lastViewedAt'],
+                         int(self.WHEN.timestamp()))
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18588,7 +18650,7 @@ _UNITTEST_SCOPES = {
                    TestCacheStructureParity, TestVerifyCacheSplit,
                    TestUpdateCacheSplit, TestCacheUpdateLog,
                    TestObjByLibraryDedup, TestFilepathIndexIsAList,
-                   TestFilepathIndexReaders],
+                   TestFilepathIndexReaders, TestPlexapiRecordsStoreEpochs],
     'duplicates': [TestMultiVersionMerge, TestDuplicateKeyGeneration,
                    TestClassifyMultiVersion, TestDuplicatesIgnoreLibraryCombinations,
                    TestExcessVersions, TestExcessVersionsMainParser,

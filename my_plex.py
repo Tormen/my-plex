@@ -9651,7 +9651,7 @@ def obj_needs_updating(obj, val=None, key=None, obj_type=None, obj_ratingKey=Non
         if key not in PLEX_Media.OBJ_BY_ID: return True # if we don't know about the obj yet --> yes, it needs updating ;)
         val = PLEX_Media.OBJ_BY_ID[key]
 
-    obj_updatedAt = plex_retry_operation(lambda: obj.updatedAt, context=f"{key}.updatedAt")
+    obj_updatedAt = _plex_dt_to_epoch(plex_retry_operation(lambda: obj.updatedAt, context=f"{key}.updatedAt"))
     if val['updatedAt'] == obj_updatedAt:
         # FORCE_CACHE_UPDATE is handled by load_cache(); this check is a performance optimization.
         if FORCE_CACHE_UPDATE:
@@ -18445,7 +18445,7 @@ def refresh_cache_metadata(cache_key):
 
         # Update metadata fields in cache
         obj['viewCount'] = plex_retry_operation(lambda: media.viewCount, context=f"{cache_key}.viewCount") or 0
-        obj['lastViewedAt'] = plex_retry_operation(lambda: media.lastViewedAt, context=f"{cache_key}.lastViewedAt")
+        obj['lastViewedAt'] = _plex_dt_to_epoch(plex_retry_operation(lambda: media.lastViewedAt, context=f"{cache_key}.lastViewedAt"))
         obj['labels'] = plex_retry_operation(lambda: [l.tag for l in media.labels], context=f"{cache_key}.labels") or []
         obj['userRating'] = plex_retry_operation(lambda: media.userRating, context=f"{cache_key}.userRating")
 
@@ -21436,7 +21436,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
     item_ratingKey = item.ratingKey
     obj_title = obj.title
-    obj_originalTitle = plex_retry_operation(lambda: obj.originalTitle if hasattr(obj, 'originalTitle') else None, context=f"{key} originalTitle", library=library.title)
+    obj_originalTitle = plex_retry_operation(lambda: obj.originalTitle if hasattr(obj, 'originalTitle') else None, context=f"{key} originalTitle", library=library.title) or ''
     lib_title = library.title  # For retry messages
 
     # PERFORMANCE OPTIMIZATION: During cache rebuild, skip duplicate detection and timestamp checks
@@ -21563,9 +21563,10 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
     media_height = plex_retry_operation(lambda: media.height, context=f"{key} {ctx_title} media.height", library=lib_title)
 
     # Access obj properties (already loaded by reload() if FORCE_CACHE_UPDATE, otherwise lazy)
-    obj_updatedAt = plex_retry_operation(lambda: obj.updatedAt, context=f"{key} {ctx_title} updatedAt", library=lib_title)
-    obj_addedAt = plex_retry_operation(lambda: obj.addedAt, context=f"{key} {ctx_title} addedAt", library=lib_title)
-    obj_lastViewedAt = plex_retry_operation(lambda: obj.lastViewedAt, context=f"{key} {ctx_title} lastViewedAt", library=lib_title)
+    # Stored as epoch ints, as the database builder stores them.
+    obj_updatedAt = _plex_dt_to_epoch(plex_retry_operation(lambda: obj.updatedAt, context=f"{key} {ctx_title} updatedAt", library=lib_title))
+    obj_addedAt = _plex_dt_to_epoch(plex_retry_operation(lambda: obj.addedAt, context=f"{key} {ctx_title} addedAt", library=lib_title))
+    obj_lastViewedAt = _plex_dt_to_epoch(plex_retry_operation(lambda: obj.lastViewedAt, context=f"{key} {ctx_title} lastViewedAt", library=lib_title))
     obj_viewCount = plex_retry_operation(lambda: obj.viewCount, context=f"{key} {ctx_title} viewCount", library=lib_title)
     obj_userRating = plex_retry_operation(lambda: obj.userRating, context=f"{key} {ctx_title} userRating", library=lib_title)
     obj_criticsRating = plex_retry_operation(lambda: obj.rating, context=f"{key} {ctx_title} rating", library=lib_title)
