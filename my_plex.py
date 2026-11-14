@@ -58,6 +58,12 @@
 # a type may be named before the line that defines it.
 from __future__ import annotations
 
+# pyright: reportConstantRedefinition=false
+#   Uppercase names here are run state set from the command line and the
+#   config (VRB, DBG, FORMAT, CACHE_FILE, ...), as the house names its run
+#   flags -- not constants.  Off per file because pyright's "strict" list
+#   overrides any rule setting in pyrightconfig.json.
+
 # Coding guidelines, architecture docs, and test policies: see README.md
 # Error codes: one numbering across my_plex_boot.py and this file -- the rule
 # and the renumber command are in my_plex_boot.py, beside err().
