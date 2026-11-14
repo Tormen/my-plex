@@ -8642,9 +8642,11 @@ def cmd_install() -> NoReturn:
     sys.exit(0)
 
 
-def _build_version_string(duration_ms: int | str | None, width: int | str | None, height: int | str | None,
-                          video_codec: str | None, audio_codec: str | None, filesize: int | str | None,
-                          part_id: int | str | None,
+# A media value as the database (str) or plexapi (int) gives it.
+_MediaValue = int | str | None
+
+def _build_version_string(duration_ms: _MediaValue, width: _MediaValue, height: _MediaValue, video_codec: str | None,
+                          audio_codec: str | None, filesize: _MediaValue, part_id: _MediaValue,
                           existing_files: dict[str, FileEntry] | None = None) -> tuple[str, str]:
     """Build a version string for a media file, guaranteed unique within existing_files.
     Format: '60.8min 720x576 (h264 mp3) 439MB'
@@ -8783,12 +8785,12 @@ def plex_get_all_items(library):
     """API required: used by brute_force_search() and undo_operation() only. Wrapper for library.all() with retry logic."""
     return plex_retry_operation(lambda: library.all(), context=f"'{library.title}'.all()")
 
-def plex_get_seasons(item, library_title=""):
+def plex_get_seasons(item, library_title: str | None = ""):
     """Wrapper for item.seasons() with retry logic"""
     ctx = f"'{library_title}' {item.title}" if library_title else item.title
     return plex_retry_operation(lambda: item.seasons(), context=f"{ctx}.seasons()")
 
-def plex_get_episodes(season, library_title="", series_title=""):
+def plex_get_episodes(season, library_title: str | None = "", series_title: str = ""):
     """Wrapper for season.episodes() with retry logic"""
     ctx = f"'{library_title}' {series_title} {season.title}" if library_title else f"{series_title} {season.title}"
     return plex_retry_operation(lambda: season.episodes(), context=f"{ctx}.episodes()")
@@ -9441,8 +9443,8 @@ def _get_active_scan_section_ids(plex: PlexServer) -> set[str]:
     active: set[str] = set()
     try:
         for activity in plex.activities:  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- plexapi infers list[Unknown]
-            if getattr(activity, 'type', '') == 'library.update.section':
-                context = getattr(activity, 'Context', None)
+            if getattr(activity, 'type', '') == 'library.update.section':  # pyright: ignore[reportUnknownArgumentType]
+                context = getattr(activity, 'Context', None)  # pyright: ignore[reportUnknownArgumentType]
                 if context is not None:
                     sid = str(getattr(context, 'librarySectionID', ''))
                     if sid: active.add(sid)
@@ -9452,7 +9454,8 @@ def _get_active_scan_section_ids(plex: PlexServer) -> set[str]:
         pass
     return active
 
-def wait_for_plex_scans_complete(plex, libraries, scan_start_times, max_wait=120):
+def wait_for_plex_scans_complete(plex: PlexServer, libraries, scan_start_times: dict[str, float],
+                                 max_wait: float = 120) -> None:
     """Wait for multiple Plex library scans to complete in parallel.
 
     Checks both lib.refreshing (file discovery phase) and plex.activities
@@ -9503,7 +9506,8 @@ def wait_for_plex_scans_complete(plex, libraries, scan_start_times, max_wait=120
                 print(f"  ✓ Completed: {lib_name} ({elapsed:.0f}s)")
                 del pending[lib_name]
 
-def wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120, verbose=True):
+def wait_for_plex_scan_complete(plex: PlexServer, lib_name: str, lib, max_wait: float = 120,
+                                verbose: bool = True) -> tuple[bool, float]:
     """Wait for a single Plex library scan to complete (convenience wrapper).
 
     Returns: (completed: bool, elapsed: float)
@@ -9544,11 +9548,12 @@ def connect_to_plex(plex_url: str, plex_token: str, required: bool = True) -> No
 
         # Custom adapter that enforces request-level timeouts
         class TimeoutHTTPAdapter(HTTPAdapter):
-            def __init__(self, timeout=PLEX_TIMEOUT, *args, **kwargs):
+            # *args, **kwargs: Any -- HTTPAdapter's own parameters, handed on as they came
+            def __init__(self, timeout: float = PLEX_TIMEOUT, *args: Any, **kwargs: Any) -> None:
                 self.timeout = timeout
                 super().__init__(*args, **kwargs)
 
-            def send(self, request, **kwargs):  # type: ignore[override]
+            def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
                 # Force timeout on every request to prevent hanging on dead connections
                 kwargs['timeout'] = kwargs.get('timeout') or self.timeout
                 return super().send(request, **kwargs)
@@ -9582,11 +9587,14 @@ def connect_to_plex(plex_url: str, plex_token: str, required: bool = True) -> No
         err("00056", f"Failed to connect to PLEX Server: {plex_url=} plex_token=<redacted, {len(plex_token)} chars> {PLEX_TIMEOUT=}: {e}")
 
 
-def get_alternative_paths(path, including_path=False, path_2nd=None) -> list:
+def get_alternative_paths(path: str, including_path: bool = False, path_2nd: str | None = None) -> list[Any]:
     """ if path_2nd is provided, returns a LIST of TUPLES (alternative_path, alternative_path_2nd)
             (if only ONE of them matched, the other will be None)
         else: returns a LIST of alternative paths of path """
+    # list[Any]: str items, or (str | None, str | None) tuples when path_2nd is given --
+    # two return types chosen by an argument, which only an @overload could name.
     global ALTERNATIVE_ROOTPATHS
+    res: list[Any]
     if path_2nd is None:
         if including_path: res = [path]
         else:              res = []
@@ -9617,7 +9625,7 @@ def get_alternative_paths(path, including_path=False, path_2nd=None) -> list:
     return res
 
 
-def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
+def resolve_path(filepath: str, remote_host: str | None = None, check: str = 'file') -> tuple[str, bool]:
     """Resolve a path by checking all ALTERNATIVE_ROOTPATHS and returning the first existing one.
 
     This is the SINGLE function for resolving any path (file or directory) across
@@ -9633,7 +9641,7 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
             - resolved_path: First existing path found, or original filepath if none exist
             - exists: True if found, False otherwise
     """
-    paths_to_check = get_alternative_paths(filepath, including_path=True)
+    paths_to_check: list[str] = get_alternative_paths(filepath, including_path=True)
 
     if DEEPDBG:
         print(f"{DBGPFX}resolve_path({check}): checking {len(paths_to_check)} paths for '{filepath}'")
@@ -9641,9 +9649,6 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
     local_check = {'file': os.path.isfile, 'dir': os.path.isdir, 'any': os.path.exists}.get(check, os.path.isfile)
 
     for check_path in paths_to_check:
-        if check_path is None:
-            continue
-
         # Local check first
         try:
             if local_check(check_path):
@@ -9658,8 +9663,6 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
     # SSH fallback: if remote_host given, check all paths on remote
     if remote_host:
         for check_path in paths_to_check:
-            if check_path is None:
-                continue
             escaped_path = shlex.quote(check_path)
             cmd = [*_ssh_args(remote_host), f'[ -e {escaped_path} ] && echo EXISTS || echo NOTFOUND']
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -9674,7 +9677,7 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
     return (filepath, False)
 
 
-def get_library_stats(supported=True):
+def get_library_stats(supported: bool = True):
     """Collect statistical information about libraries from Plex server or database
 
        IMPORTANT: Returns ACTUAL UNMODIFIED values from Plex server/database.
@@ -9751,7 +9754,7 @@ def get_library_stats(supported=True):
     return library_stats
 
 
-def get_fullID(media_obj, obj_type=None, obj_ratingKey=None):
+def get_fullID(media_obj, obj_type: str | None = None, obj_ratingKey: int | str | None = None) -> str:
     if media_obj is None:
         if obj_type is None: err("00057")      # needed if media_obj is None
         if obj_ratingKey is None: err("00058") # needed if media_obj is None
@@ -9764,7 +9767,8 @@ def get_fullID(media_obj, obj_type=None, obj_ratingKey=None):
         case _ : err("00059", f"obj_type={obj_type}")
 
 
-def obj_needs_updating(obj, val=None, key=None, obj_type=None, obj_ratingKey=None):
+def obj_needs_updating(obj, val: MediaRecord | CollectionRecord | None = None, key: str | None = None,
+                       obj_type: str | None = None, obj_ratingKey: int | str | None = None) -> bool:
     """ This needs obj and val. But if val is None, you can provide key to look it up, else key will be determined via get_fullID() using optional obj_type and obj_ratingKey parameter
         For Movies + Episodes: This is dangerous as for different MEDIA or different PARTS the update would be needed!
         For Series + Season: No problem to just judge based on obj.updatedAt time.
@@ -9787,7 +9791,7 @@ def obj_needs_updating(obj, val=None, key=None, obj_type=None, obj_ratingKey=Non
         return True
 
 
-def brute_force_search(media_identifier, library_name=None):
+def brute_force_search(media_identifier: str, library_name: str | None = None):
     """ API required: exhaustive search via library.all() when cache-based lookup fails.
         Returns the matching object if found, else None. """
     global PLEX_SERVER
@@ -9854,7 +9858,7 @@ def brute_force_search(media_identifier, library_name=None):
 # On-disk label helpers
 ###############################################################################
 
-def parse_ondisk_labels(name):
+def parse_ondisk_labels(name: str | None) -> list[str]:
     """Extract all on-disk labels from a filename or directory name component.
 
     Labels are bracketed strings matching ONDISK_LABEL_START/END_MARKER, e.g. [reencode].
@@ -9872,17 +9876,17 @@ def parse_ondisk_labels(name):
     return re.findall(pattern, basename)
 
 
-def collect_ondisk_labels_for_obj(obj):
+def collect_ondisk_labels_for_obj(obj: MediaRecord | CollectionRecord) -> list[str]:
     """Return list of on-disk labels found in filename/directory components for a cached object.
 
     For Movies:   checks filename + movie-dir name
     For Episodes: checks filename + season-dir name + series-dir name
     Labels from all relevant path components are merged (deduplicated, order preserved).
     """
-    labels = []
-    seen = set()
+    labels: list[str] = []
+    seen: set[str] = set()
 
-    def _add(name):
+    def _add(name: str) -> None:
         for lbl in parse_ondisk_labels(name):
             if lbl not in seen:
                 seen.add(lbl)
@@ -9903,12 +9907,12 @@ def collect_ondisk_labels_for_obj(obj):
     return labels
 
 
-def build_ondisk_labels_index():
+def build_ondisk_labels_index() -> dict[str, list[str]]:
     """Build reverse index: label → [cache_keys] from obj['ondisk_labels'] in OBJ_BY_ID.
 
     Returns dict suitable for storing as CACHE['ondisk_labels_index'].
     """
-    index = {}
+    index: dict[str, list[str]] = {}
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         for lbl in (obj.get('ondisk_labels') or []):
             if lbl not in index:
@@ -9917,16 +9921,16 @@ def build_ondisk_labels_index():
     return index
 
 
-def refresh_ondisk_labels_from_cache():
+def refresh_ondisk_labels_from_cache() -> None:
     """Re-read ondisk_labels for every object from its cached filepaths and rebuild the index.
     Used after on-disk renames to keep the cache consistent without a full --update-cache.
     """
-    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+    for _key, obj in PLEX_Media.OBJ_BY_ID.items():
         obj['ondisk_labels'] = collect_ondisk_labels_for_obj(obj)
     PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
 
 
-def format_filesize(size_bytes, force_unit=None):
+def format_filesize(size_bytes: int | float | None, force_unit: Literal['MB', 'GB', 'KB', 'B'] | None = None) -> str:
     """Convert bytes to human-readable format (B/KB/MB/GB)
 
     Args:
@@ -9959,7 +9963,9 @@ def format_filesize(size_bytes, force_unit=None):
     else:
         return f"{size_bytes} B"
 
-def _format_episode_range(ep_obj):
+def _format_episode_range(ep_obj: Any) -> str | None:
+    # Any: an Episode's record, as callers take it from OBJ_BY_ID.get() --
+    # MediaRecord | CollectionRecord there, or that or a default.
     """Return the display episode id, collapsing Plex multi-episode siblings.
 
     When an episode participates in a Plex sNNeXX-eYY multi-episode file
@@ -9974,15 +9980,16 @@ def _format_episode_range(ep_obj):
     siblings = ep_obj.get('multi_episode_siblings')
     if not siblings or len(siblings) < 2:
         return s0xe0x
-    last_ep = PLEX_Media.OBJ_BY_ID.get(siblings[-1], {})
-    last_e_idx = last_ep.get('E_idx', 0) or 0
+    last_ep = media_record(siblings[-1])    # a collection, like no record, has no E_idx
+    last_e_idx = (last_ep.get('E_idx', 0) if last_ep else 0) or 0
     series_key = ep_obj.get('series_key', '')
-    series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {})
-    e_pad = series_obj.get('E_pad_width', 2) or 2
+    series_obj = media_record(series_key)
+    e_pad = (series_obj.get('E_pad_width', 2) if series_obj else 2) or 2
     return f"{s0xe0x}-{last_e_idx:0{e_pad}d}"
 
 
-def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context=None):
+def print_ssh_error(remote_host: str, operation: str, cmd: list[str] | str | None = None,
+                    stderr: str | None = None, extra_context: dict[str, str] | None = None) -> None:
     """Print detailed SSH error message with troubleshooting instructions
 
     Args:
@@ -10020,7 +10027,7 @@ def print_ssh_error(remote_host, operation, cmd=None, stderr=None, extra_context
     print(f"    IdentityFile ~/.ssh/id_rsa", file=sys.stderr)
     print(f"{'='*80}\n", file=sys.stderr)
 
-def get_trash_dir(remote_host=None, file_path=None):
+def get_trash_dir(remote_host: str | None = None, file_path: str | None = None) -> str:
     """Get or create trash directory for the current OS or remote host
 
     For remote operations, attempts to place trash on the same volume as the file
@@ -10178,7 +10185,7 @@ def _ssh_args(host: str, multiplex: bool = True) -> list[str]:
     return ['ssh', *_ssh_opts(multiplex=multiplex), host]
 
 
-def _resolve_tool_path(tool_name, category):
+def _resolve_tool_path(tool_name: str, category: Literal['LOCAL', 'SERVER']) -> tuple[str | None, str]:
     """Resolve the path for an external tool from EXTERNAL_TOOLS config or PATH.
 
     Args:
@@ -10197,7 +10204,9 @@ def _resolve_tool_path(tool_name, category):
     return (found, config_key_str)
 
 
-def run_tool_locally(tool_name, args, capture_output=True, text=True, timeout=None):
+# A run's CompletedProcess: [Any], as its output is str or bytes by TEXT.
+def run_tool_locally(tool_name: str, args: list[str], capture_output: bool = True, text: bool = True,
+                     timeout: float | None = None) -> subprocess.CompletedProcess[Any] | None:
     """Run an external tool on the local machine.
 
     Looks up EXTERNAL_TOOLS['LOCAL'][tool_name] for configured path.
@@ -10232,9 +10241,11 @@ def run_tool_locally(tool_name, args, capture_output=True, text=True, timeout=No
 
 
 # Cache for remote tool path lookups (avoid repeated 'ssh which' calls)
-_remote_tool_path_cache = {}
+_remote_tool_path_cache: dict[str, str] = {}
 
-def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=True, text=True, timeout=None):
+def run_tool_on_PLEX_server(tool_name: str, args: list[str], remote_host: str | None = None,
+                            capture_output: bool = True, text: bool = True,
+                            timeout: float | None = None) -> subprocess.CompletedProcess[Any] | None:
     """Run an external tool on the Plex server (locally or via SSH).
 
     Looks up EXTERNAL_TOOLS['SERVER'][tool_name] for configured path.
@@ -10253,6 +10264,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
     """
     config_key = f"EXTERNAL_TOOLS['SERVER']['{tool_name}']"
     configured = EXTERNAL_TOOLS.get('SERVER', {}).get(tool_name)
+    tool_path: str | None
 
     if configured:
         tool_path = configured
@@ -10265,8 +10277,7 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
             # Auto-detect on remote via login shell (non-interactive SSH doesn't load PATH)
             result = run_tool_locally('ssh', [*_ssh_opts(), remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
             if result and result.returncode == 0 and result.stdout.strip():
-                tool_path = result.stdout.strip()
-                _remote_tool_path_cache[cache_key] = tool_path
+                _remote_tool_path_cache[cache_key] = tool_path = result.stdout.strip()
             else:
                 tool_path = None
     else:
@@ -10296,7 +10307,12 @@ def run_tool_on_PLEX_server(tool_name, args, remote_host=None, capture_output=Tr
             return None
 
 
-def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
+def my_plex_file_operation(operation: Literal['CHECK', 'TRASH', 'RENAME', 'MOVE', 'RMDIR', 'LIST_DIR'],
+                           filepath: str, remote_host: str | None = None,
+                           **kwargs: Any) -> tuple[bool, Any]:
+    # **kwargs: Any -- each operation reads its own keys (a path, a flag, a depth).
+    # The result's Any: a path (str), LIST_DIR's listing (list[str]) or None --
+    # a type chosen by an argument, which only an @overload could name.
     """Central function for all file operations - executes check + action in ONE SSH call
 
     ⚠️  CRITICAL: ALL SSH/FILE OPERATIONS MUST USE THIS FUNCTION ⚠️
@@ -10545,8 +10561,8 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         elif operation == 'LIST_DIR':
             # List all files in directory recursively
             try:
-                files = []
-                for root, dirs, filenames in os.walk(filepath):
+                files: list[str] = []
+                for root, _dirs, filenames in os.walk(filepath):
                     for filename in filenames:
                         files.append(os.path.join(root, filename))
                 return (True, files)
@@ -10608,7 +10624,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 #
 ################################################################################
 
-def _parse_csv_to_rows(csv_text):
+def _parse_csv_to_rows(csv_text: str) -> list[tuple[str, ...]]:
     """Helper to convert CSV text to list of tuples
 
     Returns:
@@ -10658,7 +10674,10 @@ def plex_db_path() -> str:
         f"    e.g. PLEX_DB_PATH = {PLEX_DB_PATH_EXAMPLE!r}   (a macOS server's standard path)"]))
 
 
-def query_plex_database(query, mode='rows'):
+def query_plex_database(query: str, mode: Literal['rows', 'raw', 'csv'] = 'rows') -> Any:
+    # Any: the rows (list[tuple[str, ...]]) for 'rows', the text for 'raw' and
+    # 'csv', None on an error -- a type chosen by an argument, which only an
+    # @overload could name.
     """Central function for querying Plex database (locally or via SSH)
 
     ⚠️  CRITICAL: ALL PLEX DATABASE QUERIES MUST USE THIS FUNCTION ⚠️
@@ -10772,7 +10791,7 @@ def query_plex_database(query, mode='rows'):
         print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
         return None
 
-def sync_view_state_into_cache():
+def sync_view_state_into_cache() -> tuple[int, int]:
     """v2.69: refresh viewCount/lastViewedAt for every item in cache by
     polling Plex's metadata_item_settings table directly.
 
@@ -10786,7 +10805,7 @@ def sync_view_state_into_cache():
     keyed not id-keyed).  In-process patch, then save cache.  Returns
     (n_view_state_changes, n_items_total).
     """
-    rows = query_plex_database(
+    rows: list[tuple[str, ...]] = query_plex_database(
         "SELECT mi.id, mi.guid, mis.view_count, mis.last_viewed_at "
         "FROM metadata_items mi "
         "LEFT JOIN metadata_item_settings mis ON mis.guid = mi.guid "
@@ -10825,7 +10844,7 @@ def sync_view_state_into_cache():
     return (n_changed, len(rows))
 
 
-def query_plex_database_write(query):
+def query_plex_database_write(query: str) -> bool:
     """Execute a write-mode SQL statement against the Plex database.
 
     Mirrors query_plex_database() (auto-detects local vs SSH+sqlite3) but
@@ -10866,7 +10885,7 @@ def query_plex_database_write(query):
         return False
 
 
-def validate_plex_database_schema():
+def validate_plex_database_schema() -> bool:
     """Validate that Plex database schema matches our expectations
 
     This function checks that all required tables, columns, and indexes exist.
@@ -10911,7 +10930,7 @@ def validate_plex_database_schema():
         ]
     }
 
-    validation_errors = []
+    validation_errors: list[str] = []
 
     # Check each table
     for table_name, required_columns in expected_schema.items():
@@ -10951,7 +10970,19 @@ def validate_plex_database_schema():
 
     return True
 
-def get_library_sections_from_database():
+class LibrarySectionRow(TypedDict):
+    """One library section as get_library_sections_from_database() reads it."""
+    id: int
+    name: str
+    section_type: int               # 1 movie, 2 show, 8 music
+    type: Literal['movie', 'show', 'artist', 'unknown']
+    updated_at: int                 # epoch, 0 when unset
+    agent: str
+    language: str
+    root_path: str
+
+
+def get_library_sections_from_database() -> list[LibrarySectionRow] | None:
     """Get all library sections from the Plex database with timestamps
 
     REPLACES: PLEX_SERVER.library.sections()
@@ -10985,7 +11016,7 @@ def get_library_sections_from_database():
     if rows is None:
         return None
 
-    libraries = []
+    libraries: list[LibrarySectionRow] = []
     for row in rows:
         lib_id, lib_name, section_type, updated_at, agent, language, root_path = row
         libraries.append({
@@ -11007,7 +11038,7 @@ def get_library_sections_from_database():
 
     return libraries
 
-def fetch_movies_from_database(library_section_id):
+def fetch_movies_from_database(library_section_id: int | str) -> list[MediaRecord] | None:
     """Fetch all movies from a library section with complete metadata via direct database access
 
     REPLACES: plexapi library.all() + item.reload() + per-item property fetching
@@ -11122,7 +11153,7 @@ def fetch_movies_from_database(library_section_id):
     stream_rows = query_plex_database(streams_query, mode='rows')
 
     # Build streams lookup: part_id -> {audio_languages: [...], subtitle_languages: [...]}
-    streams_by_part = {}
+    streams_by_part: dict[str, dict[str, list[str]]] = {}
     if stream_rows:
         for row in stream_rows:
             part_id, stream_type_id, language, _codec = row
@@ -11156,7 +11187,8 @@ def fetch_movies_from_database(library_section_id):
     tag_rows = query_plex_database(tags_query, mode='rows')
 
     # Build tags lookup: metadata_id -> {genres: [...], actors: [...], ...}
-    tags_by_metadata = {}
+    # Any: a tag kind's names (list[str]) -- or, for 'external_ids', a dict.
+    tags_by_metadata: dict[str, dict[str, Any]] = {}
     if tag_rows:
         for row in tag_rows:
             metadata_id, tag_type, tag = row
@@ -11185,7 +11217,7 @@ def fetch_movies_from_database(library_section_id):
     # Convert rows to movie dicts, grouping multiple media items per metadata_id
     # Plex can have multiple media_items per movie (multi-version: different quality releases)
     # The SQL returns one row per (metadata_id, media_id, part_id) — we merge them into one dict
-    movies_by_id = {}  # metadata_id -> movie_dict (with merged files)
+    movies_by_id: dict[str, MediaRecord] = {}  # metadata_id -> movie_dict (with merged files)
     for row in rows:
         (metadata_id, title, original_title, year, critics_rating, audience_rating,
          content_rating, summary, _metadata_duration, added_at, updated_at, guid,
@@ -11198,7 +11230,7 @@ def fetch_movies_from_database(library_section_id):
         streams = streams_by_part.get(part_id, {'audio_languages': [], 'subtitle_languages': []})
 
         # Get tags for this metadata item
-        tags = tags_by_metadata.get(metadata_id, {
+        tags: dict[str, Any] = tags_by_metadata.get(metadata_id, {
             'genres': [], 'actors': [], 'directors': [],
             'writers': [], 'countries': [], 'collections': [],
             'external_ids': {}
@@ -11236,7 +11268,7 @@ def fetch_movies_from_database(library_section_id):
         else:
             # First row for this metadata_id — create the movie dict
             version, resolution_full = _build_version_string(media_duration, width, height, video_codec, audio_codec, filesize, part_id)
-            movie_dict = {
+            movie_dict: MediaRecord = {
                 'file': filepath,
                 'files': {
                     version: {
@@ -11305,7 +11337,7 @@ def fetch_movies_from_database(library_section_id):
     movies = list(movies_by_id.values())
 
     if VRB:
-        multi_version = sum(1 for m in movies if m['media_cnt'] > 1)
+        multi_version = sum(1 for m in movies if (m['media_cnt'] or 0) > 1)   # always an int here
         if multi_version:
             print(f"{VRBPFX}Fetched {len(movies)} movies from database ({multi_version} with multiple versions) (library_section_id={library_section_id})")
         else:
@@ -11313,7 +11345,7 @@ def fetch_movies_from_database(library_section_id):
 
     return movies
 
-def fetch_collections_from_database(library_section_id):
+def fetch_collections_from_database(library_section_id: int | str) -> list[CollectionRecord]:
     """Fetch all collections (metadata_type=18) from a library section.
 
     Collections exist in both movie libraries (subtype='movie') and series libraries
@@ -11368,7 +11400,7 @@ def fetch_collections_from_database(library_section_id):
     member_rows = query_plex_database(members_query, mode='rows')
 
     # Build members dict: collection_id -> [member_ids]
-    members_by_col = {}
+    members_by_col: dict[str, list[str]] = {}
     if member_rows:
         for col_id, member_id in member_rows:
             if col_id not in members_by_col:
@@ -11378,11 +11410,11 @@ def fetch_collections_from_database(library_section_id):
     # section_type: 1=movie, 2=show, 8=music, 13=photo
     section_type_to_subtype = {1: 'movie', 2: 'show', 8: 'artist', 13: 'photo'}
 
-    collections = []
+    collections: list[CollectionRecord] = []
     for row in rows:
         col_id, title, added_at, updated_at, library_name, section_type = row
         subtype = section_type_to_subtype.get(int(section_type) if section_type else 0, 'unknown')
-        col_dict = {
+        col_dict: CollectionRecord = {
             'type':       'Collection',
             'type_str':   'Collection',
             'id':         col_id,
@@ -11400,7 +11432,7 @@ def fetch_collections_from_database(library_section_id):
 
     return collections
 
-def check_file_exists(filepath, remote_host=None):
+def check_file_exists(filepath: str, remote_host: str | None = None) -> bool:
     """Check if file exists locally or on remote host
 
     This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
@@ -11426,7 +11458,7 @@ def check_file_exists(filepath, remote_host=None):
     return exists
 
 
-def check_file_exists_with_path(filepath, remote_host=None):
+def check_file_exists_with_path(filepath: str, remote_host: str | None = None) -> tuple[bool, str | None]:
     """Check if file exists and return the resolved path
 
     This function automatically checks alternative paths using ALTERNATIVE_ROOTPATHS.
@@ -11449,7 +11481,7 @@ def check_file_exists_with_path(filepath, remote_host=None):
     return my_plex_file_operation('CHECK', filepath, remote_host)
 
 
-def has_other_video_files_in_dir(directory, exclude_file, remote_host=None):
+def has_other_video_files_in_dir(directory: str, exclude_file: str, remote_host: str | None = None) -> bool:
     """Check if a directory contains other video files besides the excluded one
 
     ⚠️  NOTE: This function demonstrates proper use of the centralized my_plex_file_operation()
@@ -11486,7 +11518,7 @@ def has_other_video_files_in_dir(directory, exclude_file, remote_host=None):
 
     return False
 
-def _write_resolve_log(command_name, payload):
+def _write_resolve_log(command_name: str, payload: Any) -> str | None:
     """Write a JSON log for a --resolve run.  Returns the log path or None.
 
     Convention used across every --resolve-style command in my-plex:
@@ -11503,11 +11535,12 @@ def _write_resolve_log(command_name, payload):
         os.makedirs(log_dir, exist_ok=True)
         ts = _dt.now().strftime('%Y%m%d_%H%M%S')
         path = os.path.join(log_dir, f'{command_name}_{ts}.json')
+        data: PlainData = payload      # Any: a JSON payload, a dict or not
         wrapped = {
             'command':        command_name,
             'timestamp':      _dt.now().isoformat(timespec='seconds'),
             'script_version': SCRIPT_VERSION,
-            **(payload if isinstance(payload, dict) else {'data': payload}),
+            **(data if isinstance(data, dict) else {'data': data}),
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(wrapped, f, indent=2, ensure_ascii=False)
@@ -11516,7 +11549,7 @@ def _write_resolve_log(command_name, payload):
         print(f"  > WARNING: could not write {command_name} resolve log: {e}", file=sys.stderr)
         return None
 
-def move_to_trash(filepath, remote_host=None):
+def move_to_trash(filepath: str, remote_host: str | None = None) -> tuple[bool, str | None]:
     """Move file or directory to trash
 
     Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
@@ -11531,7 +11564,7 @@ def move_to_trash(filepath, remote_host=None):
     """
     return my_plex_file_operation('TRASH', filepath, remote_host)
 
-def rename_file(src_path, new_filename, remote_host=None):
+def rename_file(src_path: str, new_filename: str, remote_host: str | None = None) -> tuple[bool, str | None]:
     """Rename file in the same directory
 
     Automatically resolves alternative paths using ALTERNATIVE_ROOTPATHS.
@@ -11548,7 +11581,8 @@ def rename_file(src_path, new_filename, remote_host=None):
     return my_plex_file_operation('RENAME', src_path, remote_host, new_filename=new_filename)
 
 
-def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, log_prefix=''):
+def rename_file_siblings(old_path: str, new_path: str, remote_host: str | None = None,
+                         dry_run: bool = False, log_prefix: str = '') -> tuple[int, int]:
     """Rename sibling files alongside a renamed media file.
 
     Sibling = any file in the same directory whose name starts with EITHER:
@@ -11581,7 +11615,7 @@ def rename_file_siblings(old_path, new_path, remote_host=None, dry_run=False, lo
     # two leftovers (they should be equal) is the canonical sibling
     # prefix.  A trailing space is also stripped.
     import re as _re
-    def _strip_markers(s):
+    def _strip_markers(s: str) -> str:
         return _re.sub(r'(?:\s*\[[^\]\[/]+\])+\s*$', '', s)
     _old_clean = _strip_markers(base_no_ext)
     _new_clean = _strip_markers(new_base_no_ext)
@@ -11693,7 +11727,7 @@ _DISK_PLEX_MERGE_POLICIES = ('newer', 'plex', 'disk', 'ignore', 'warn', 'fail')
 _DISK_PLEX_SERIES_STRATEGIES = ('flat', 'bottom_up')
 
 
-def _normalise_disk_plex_scope(scope):
+def _normalise_disk_plex_scope(scope: PlainData) -> tuple[str, ...] | None:
     """Coerce a 'scope' field into a tuple of canonical scope names.
     Returns None on invalid input."""
     if scope == 'all':
@@ -11706,13 +11740,16 @@ def _normalise_disk_plex_scope(scope):
     return None
 
 
-def validate_disk_plex_map(cfg):
+def validate_disk_plex_map(cfg_any: Any) -> list[str]:
     """Validate DISK_PLEX_MAP config dict. Returns list of error strings."""
-    errors = []
+    # Any: the config's value, of whatever shape; each check below narrows it.
+    errors: list[str] = []
+    cfg: PlainData = cfg_any
     if not isinstance(cfg, dict):
         return [f"DISK_PLEX_MAP must be a dict, got {type(cfg).__name__}"]
 
-    for plex_var, var_spec in cfg.items():
+    for plex_var, var_spec_v in cfg.items():
+        var_spec: PlainData = var_spec_v
         if not isinstance(plex_var, str) or not plex_var:
             errors.append(f"DISK_PLEX_MAP key must be a non-empty string, got {plex_var!r}")
             continue
@@ -11750,21 +11787,25 @@ def validate_disk_plex_map(cfg):
                           f"{ssh_strategy!r}: must be one of "
                           f"{_DISK_PLEX_SERIES_STRATEGIES}.")
 
-        values = var_spec.get('values', {})
+        values: PlainData = var_spec.get('values', {})
         if not isinstance(values, dict):
             errors.append(f"DISK_PLEX_MAP[{plex_var!r}].values must be a dict, got {type(values).__name__}")
             continue
 
-        for plex_val, entry_or_list in values.items():
-            entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
-            for ei, entry in enumerate(entries):
+        for plex_val, entry_or_list_v in values.items():
+            entry_or_list: PlainData = entry_or_list_v
+            entries: list[Any] = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+            for ei, entry_v in enumerate(entries):
+                entry: PlainData = entry_v
                 _ent_id = (f"DISK_PLEX_MAP[{plex_var!r}].values[{plex_val!r}]"
                            + (f"[{ei}]" if isinstance(entry_or_list, list) else ""))
                 if not isinstance(entry, dict):
                     errors.append(f"{_ent_id} must be a dict, got {type(entry).__name__}")
                     continue
                 # Empty {} is valid: "recognised, does nothing".
-                for k, v in entry.items():
+                for k_v, v_v in entry.items():
+                    k: PlainData = k_v
+                    v: PlainData = v_v
                     direction = None
                     if k in ('plex2disk', 'disk2plex', 'when'):
                         direction = k if k in _DISK_PLEX_DIRECTIONS else None
@@ -11807,7 +11848,7 @@ def validate_disk_plex_map(cfg):
     return errors
 
 
-def _actor_name_parts(actors, index):
+def _actor_name_parts(actors: list[str], index: int) -> tuple[str, str]:
     """Extract first/last name from actor at given 0-based index. Returns (first_name, last_name)."""
     if index >= len(actors):
         return ('', '')
@@ -11837,13 +11878,17 @@ def _actor_name_parts(actors, index):
 # ============================================================================
 _PROMOTION_BLOCKS = ('', 'unknown', None)
 
-def _disk_plex_map_promoted_vars(disk_plex_map):
+def _disk_plex_map_promoted_vars(disk_plex_map: dict[str, Any] | None) -> list[str]:
     """Return list of plex_var names whose series_strategy is 'bottom_up'."""
-    return [p for p, spec in (disk_plex_map or {}).items()
-            if isinstance(spec, dict) and spec.get('series_strategy', 'flat') == 'bottom_up']
+    promoted: list[str] = []
+    for p, spec_v in (disk_plex_map or {}).items():
+        spec: PlainData = spec_v
+        if isinstance(spec, dict) and spec.get('series_strategy', 'flat') == 'bottom_up':
+            promoted.append(p)
+    return promoted
 
 
-def finalize_disk_plex_map_uniform_fields(disk_plex_map):
+def finalize_disk_plex_map_uniform_fields(disk_plex_map: dict[str, Any] | None) -> None:
     """Compute and store '<plex_var>_uniform' on every Series and Season cache
     entry for each plex_var with series_strategy='bottom_up'.
 
@@ -11860,7 +11905,7 @@ def finalize_disk_plex_map_uniform_fields(disk_plex_map):
         if not series_obj:
             continue
         # season_uniform_per_var[plex_var][season_key] = uniform_or_None
-        season_uniform_per_var = {p: {} for p in promoted}
+        season_uniform_per_var: dict[str, dict[str, Any]] = {p: {} for p in promoted}
 
         ep_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
         for S_str, season_key in series_seasons.items():
@@ -11868,10 +11913,10 @@ def finalize_disk_plex_map_uniform_fields(disk_plex_map):
             if not season_obj:
                 continue
             # Walk every episode in this season, collect per-var values.
-            per_var_values = {p: set() for p in promoted}
+            per_var_values: dict[str, set[Any]] = {p: set() for p in promoted}
             ep_count = 0
-            for E_str, versions in (ep_data.get(S_str) or {}).items():
-                for version, ep_keys in versions.items():
+            for _E_str, versions in (ep_data.get(S_str) or {}).items():
+                for _version, ep_keys in versions.items():
                     for ep_key in ep_keys:
                         ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
                         if not ep_obj:
@@ -11904,7 +11949,7 @@ def finalize_disk_plex_map_uniform_fields(disk_plex_map):
                 series_obj[f'{p}_uniform'] = None
 
 
-def _check_all_children_watched(obj, type_str):
+def _check_all_children_watched(obj: MediaRecord | CollectionRecord, type_str: str) -> tuple[bool, int | None]:
     """Check if all child episodes of a Show or Season are watched.
 
     Both Plex AND disk are ground truth. An episode counts as "watched" if:
@@ -11940,14 +11985,14 @@ def _check_all_children_watched(obj, type_str):
         seasons_to_check = episodes_data
 
     all_watched = True
-    max_last_viewed = None
+    max_last_viewed: int | None = None
     episode_count = 0
 
-    for s_str, eps in seasons_to_check.items():
-        for e_str, versions in eps.items():
-            for version, ep_keys in versions.items():
+    for _s_str, eps in seasons_to_check.items():
+        for _e_str, versions in eps.items():
+            for _version, ep_keys in versions.items():
                 for ek in ep_keys:
-                    ep_obj = PLEX_Media.OBJ_BY_ID.get(ek, {})
+                    ep_obj: MediaRecord | CollectionRecord | dict[str, Any] = PLEX_Media.OBJ_BY_ID.get(ek, {})
                     episode_count += 1
                     ep_vc = ep_obj.get('viewCount', 0) or 0
                     ep_lv = ep_obj.get('lastViewedAt')
@@ -11969,7 +12014,8 @@ def _check_all_children_watched(obj, type_str):
         return False, None
     return all_watched, max_last_viewed
 
-def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
+def resolve_disk_map_variables(obj: MediaRecord | CollectionRecord, cache_key: str | None = None,
+                               _bottom_up_pass: bool = False) -> dict[str, Any]:
     """Build variable dict from an OBJ_BY_ID cache entry for disk map substitution.
 
     Args:
@@ -11987,7 +12033,7 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
               str for most others. Falsy values mean "not available".
     """
     from datetime import datetime
-    var = {}
+    var: dict[str, Any] = {}     # Any: each variable's own type, for the eval() engine
 
     # Watched status
     type_str = obj.get('type_str', '')
@@ -12074,7 +12120,8 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     # AUDIO_LANGS_LIST = full track list, original order (unaffected by prefs)
     _alangs = obj.get('audio_languages') or []
     _primary = ''
-    for _pref in (PREFERRED_AUDIO_LANGUAGES or []):
+    _prefs: list[str] = PREFERRED_AUDIO_LANGUAGES or []
+    for _pref in _prefs:
         if _pref in _alangs:
             _primary = _pref
             break
@@ -12117,7 +12164,8 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
         # the value (e.g. a German-only library implies AUDIO_LANG=de), suppress that
         # marker entirely — writing it everywhere is redundant noise.
         _lib = obj.get('library', '')
-        _lib_suppress = (DPM_LIBRARY_SUPPRESS or {}).get(_lib, {})
+        _suppress_by_lib: dict[str, dict[str, Any]] = DPM_LIBRARY_SUPPRESS or {}
+        _lib_suppress = _suppress_by_lib.get(_lib, {})
         if _lib_suppress:
             for _plex_var, _suppress_val in _lib_suppress.items():
                 if var.get(_plex_var) == _suppress_val:
@@ -12126,7 +12174,7 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     return var
 
 
-def _apply_bottom_up_promotion(obj, type_str, var):
+def _apply_bottom_up_promotion(obj: MediaRecord | CollectionRecord, type_str: str, var: dict[str, Any]) -> None:
     """For each plex_var with series_strategy='bottom_up' in DISK_PLEX_MAP,
     rewrite var[plex_var] in line with the uniform fields stored on the
     Series and Season cache entries.
@@ -12149,7 +12197,8 @@ def _apply_bottom_up_promotion(obj, type_str, var):
         return
 
     series_key = obj.get('series_key', '')
-    series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {}
+    series_obj: MediaRecord | CollectionRecord | dict[str, Any] = (
+        PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {})
 
     if type_str == 'Season':
         for p in promoted:
@@ -12163,7 +12212,7 @@ def _apply_bottom_up_promotion(obj, type_str, var):
     # Episode — derive season_key from series_key + season number.
     # Episodes don't store season_key directly; OBJ_BY_SERIES maps
     # series_key → {'S<NN>': season_cache_key}.
-    season_obj = {}
+    season_obj: MediaRecord | CollectionRecord | dict[str, Any] = {}
     season_raw = str(obj.get('season', ''))
     season_match = re.search(r'(\d+)', season_raw)
     if series_key and season_match:
@@ -12177,7 +12226,11 @@ def _apply_bottom_up_promotion(obj, type_str, var):
             var[p] = 'unknown'   # parent uniform → episode marker muted
 
 
-def _dpm_entry_active(entry, plex_vars):
+# A DISK_PLEX_MAP entry: dict[Any, Any] -- the config's own dict, keyed by a
+# direction, 'when', or a (direction, scope) tuple.  plex_vars: the dict
+# resolve_disk_map_variables() returns.
+
+def _dpm_entry_active(entry: dict[Any, Any], plex_vars: dict[str, Any]) -> bool:
     """Evaluate the entry's optional 'when' predicate.  True = entry applies."""
     when = entry.get('when')
     if not when:
@@ -12188,11 +12241,11 @@ def _dpm_entry_active(entry, plex_vars):
         return False
 
 
-def _dpm_resolve_plex2disk(entry, plex_vars, scope):
+def _dpm_resolve_plex2disk(entry: dict[Any, Any], plex_vars: dict[str, Any], scope: str) -> str | None:
     """Resolve the plex2disk value for `entry` at `scope`.
     Tuple-key (plex2disk, scope) overrides bare 'plex2disk'.
     Returns the marker string ('' if no marker), or None if entry doesn't define plex2disk."""
-    spec = entry.get(('plex2disk', scope), entry.get('plex2disk'))
+    spec: object = entry.get(('plex2disk', scope), entry.get('plex2disk'))
     if spec is None:
         return None
     try:
@@ -12203,20 +12256,21 @@ def _dpm_resolve_plex2disk(entry, plex_vars, scope):
         return ''
 
 
-def _dpm_resolve_disk2plex(entry, scope):
+def _dpm_resolve_disk2plex(entry: dict[Any, Any], scope: str) -> list[str]:
     """Resolve the disk2plex regex list for `entry` at `scope`.
     The bare 'disk2plex' is augmented (not replaced) by ('disk2plex', scope)."""
-    out = list(entry.get('disk2plex') or [])
+    out: list[str] = list(entry.get('disk2plex') or [])
     out.extend(entry.get(('disk2plex', scope)) or [])
     return out
 
 
-def _dpm_first_active_entry(entry_or_list, plex_vars):
+def _dpm_first_active_entry(entry_or_list: PlainData, plex_vars: dict[str, Any]) -> dict[Any, Any] | None:
     """Given an entry (dict) or a list of entries, return the first whose
     'when' predicate is true (or which has no 'when').  Returns None if all
     entries are gated out."""
-    entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
-    for e in entries:
+    entries: list[Any] = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+    for e_v in entries:
+        e: PlainData = e_v
         if not isinstance(e, dict):
             continue
         if _dpm_entry_active(e, plex_vars):
@@ -12224,23 +12278,23 @@ def _dpm_first_active_entry(entry_or_list, plex_vars):
     return None
 
 
-def compute_markers_dpm(disk_plex_map, plex_vars, scope):
+def compute_markers_dpm(disk_plex_map: dict[str, Any], plex_vars: dict[str, Any], scope: str) -> dict[str, str]:
     """Resolve every plex_var in DISK_PLEX_MAP to a marker for `scope`.
 
     Returns a dict {plex_var: marker_string}.  List-valued plex_vars produce
     a concatenated marker (e.g. '[de][en]').  Empty markers are omitted.
     """
-    markers = {}
+    markers: dict[str, str] = {}
     for plex_var, var_spec in disk_plex_map.items():
         scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
         if scope not in scope_set:
             continue
         values_dict = var_spec.get('values', {})
-        plex_value = plex_vars.get(plex_var)
+        plex_value: PlainData = plex_vars.get(plex_var)
 
         # List-valued plex_var → iterate per element
         elements = list(plex_value) if isinstance(plex_value, list) else [plex_value]
-        out_parts = []
+        out_parts: list[str] = []
         for el in elements:
             # Specific value first; else wildcard '*'
             entry_or_list = values_dict.get(el)
@@ -12263,7 +12317,8 @@ def compute_markers_dpm(disk_plex_map, plex_vars, scope):
     return markers
 
 
-def read_markers_from_disk(name, disk_plex_map, plex_vars, scope):
+def read_markers_from_disk(name: str, disk_plex_map: dict[str, Any], plex_vars: dict[str, Any],
+                           scope: str) -> dict[str, Any]:
     """Scan a disk name (filename basename or directory name) at `scope`
     against the disk2plex regex lists in DISK_PLEX_MAP.
 
@@ -12274,7 +12329,7 @@ def read_markers_from_disk(name, disk_plex_map, plex_vars, scope):
       - regex named groups whose name matches a known PLEX VARIABLE also
         contribute (e.g. (?P<WATCHED_DATE>\\d{4}-\\d{2}-\\d{2}) sets WATCHED_DATE).
     """
-    out = {}
+    out: dict[str, Any] = {}     # Any: a str value, or a list of them for a list-valued variable
     for plex_var, var_spec in disk_plex_map.items():
         scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
         if scope not in scope_set:
@@ -12324,7 +12379,7 @@ def read_markers_from_disk(name, disk_plex_map, plex_vars, scope):
                 break  # one matching pattern per (plex_val, scope); move on
     return out
 
-def strip_our_markers(filename, sidecar_entry):
+def strip_our_markers(filename: str, sidecar_entry: dict[str, Any] | None) -> str:
     """Strip markers that we previously added (tracked in sidecar) from a filename.
 
     Handles both formats:
@@ -12354,7 +12409,7 @@ def strip_our_markers(filename, sidecar_entry):
             filename = filename.replace(f'.{bare}', '', 1)
     return filename
 
-def apply_markers(clean_filename, markers):
+def apply_markers(clean_filename: str, markers: dict[str, Any]) -> str:
     """Insert non-empty markers into filename before extension, sorted by aspect name.
 
     Format: space + brackets before extension.
@@ -12369,9 +12424,9 @@ def apply_markers(clean_filename, markers):
     """
     name, ext = os.path.splitext(clean_filename)
     # Build marker string from non-empty markers, sorted by aspect name
-    marker_parts = []
+    marker_parts: list[str] = []
     for aspect in sorted(markers.keys()):
-        val = markers[aspect]
+        val: object = markers[aspect]   # a str -- or, from a sidecar, a raw value dropped below
         if not val:  # skip empty markers
             continue
         # v2.69: reject raw scalars (bool / number / non-bracketed leaf).
