@@ -21485,10 +21485,9 @@ def classify_multi_version(obj: MediaRecord | CollectionRecord) -> Literal['exac
     sizes: set[int] = set()
     codecs: set[str] = set()
     for version_str, file_info in files_dict.items():
-        if isinstance(file_info, dict):
-            size = file_info.get('filesize')
-            if size:
-                sizes.add(size)
+        size = file_info.get('filesize')
+        if size:
+            sizes.add(size)
         codec_match = re.search(r'\((\w+)', version_str)
         if codec_match:
             codecs.add(codec_match.group(1))
@@ -21518,14 +21517,17 @@ def safe_getattr(obj: object, attr: str, default: Any = None) -> Any:  # Any: wh
 PlexObject = Any
 
 
+# plexapi declares .index through utils.cast(int, ...), which its stubs leave
+# partially unknown; the attribute is an int, or None when Plex has none.
 def get_S_str(season: plexapi.video.Season | None) -> str:
-    if season is None:  S_str = ""
-    else:               S_str = "S??" if season.index is None else f"S{season.index:02}"
-    return S_str
+    if season is None:  return ""
+    index: int | None = getattr(season, 'index')
+    return "S??" if index is None else f"S{index:02}"
 def get_E_str(episode: plexapi.video.Episode | None) -> str:
-    if episode is None: E_str = ""
-    else:               E_str = "E??" if episode.index is None else f"E{episode.index:02}"
-    return E_str
+    if episode is None: return ""
+    index: int | None = getattr(episode, 'index')
+    return "E??" if index is None else f"E{index:02}"
+
 
 def add_movie_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, version: str, filepath: str, lib_title: str | None = None) -> MediaRecord:
     # Update PLEX_Media.OBJ_BY_MOVIE:
@@ -21571,7 +21573,7 @@ def add_series_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, 
                 PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key][S_str][E_str][version].append( key )
         case "Season":
             if series_key not in PLEX_Media.OBJ_BY_SERIES: PLEX_Media.OBJ_BY_SERIES[series_key] = {}
-            if S_str in PLEX_Media.OBJ_BY_SERIES and PLEX_Media.OBJ_BY_SERIES[series_key][S_str] is not None: err("00072", f"obj = {obj}")
+            if S_str in PLEX_Media.OBJ_BY_SERIES and PLEX_Media.OBJ_BY_SERIES[series_key][S_str] is not None: err("00072", f"obj = {obj}")  # pyright: ignore[reportUnnecessaryComparison]  # suspected bug: tests S_str against the SERIES keys, see the report
             PLEX_Media.OBJ_BY_SERIES[series_key][S_str] = key
             episode = None # to avoid that we add stuff about it to 'val'
         case "Series":
@@ -21833,14 +21835,15 @@ def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexO
         # stale version key and carry its file_metadata over to the new key.
         _carried_metadata = None
         _stale_keys = [_v for _v, _fi in existing_files.items()
-                       if isinstance(_fi, dict) and _fi.get('filepath') == filepath
+                       if _fi.get('filepath') == filepath
                        and _fi.get('filesize') == part_size
                        and _v != version]
         if _stale_keys:
             for _sv in _stale_keys:
                 _sfi = existing_files[_sv]
-                _sm = _sfi.get('file_metadata') if isinstance(_sfi, dict) else None
-                if _sm and isinstance(_sm, dict) and _sm.get('filesize') == part_size and not _sm.get('broken'):
+                _sm = _sfi.get('file_metadata')
+                if _sm and _sm.get('filesize') == part_size and not _sm.get('broken'):
+
                     _carried_metadata = _sm
                     break
             for _sv in _stale_keys:
@@ -21933,8 +21936,6 @@ def _collect_missing_file_metadata(cached_obj: MediaRecord | CollectionRecord, d
     queued = 0
     obj_key = f"{cached_obj.get('type', 'Unknown')}:{cached_obj.get('id', '?')}"
     for version, file_info in cached_obj.get('files', {}).items():
-        if not isinstance(file_info, dict):
-            continue
         existing_metadata = file_info.get('file_metadata')
         if existing_metadata and not existing_metadata.get('broken') and not FORCE_METADATA:
             continue  # Already has valid metadata
@@ -22579,9 +22580,7 @@ def _process_movies_from_database(all_movies: list[MediaRecord], library_name: s
                 # Also check if file paths changed (e.g. rename .mkv → .mp4)
                 new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
                 cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
-                # Check if cached files are missing per-file language data (added later)
-                cached_missing_langs = any(fi.get('audio_languages') is None for fi in cached_files.values())
-                if new_file_count == cached_file_count and new_paths == cached_paths and not cached_missing_langs:
+                if new_file_count == cached_file_count and new_paths == cached_paths:
                     if DBG: print(f"{DBGPFX}update_movie_library_objs_db(): SKIPPING movie '{movie_dict['title']}' - already in cache ({cached_file_count} files)")
                     _collect_missing_file_metadata(cached, display_title)
                     continue
@@ -22609,11 +22608,12 @@ def _process_movies_from_database(all_movies: list[MediaRecord], library_name: s
         if not is_new_movie:
             cached_files: dict[str, FileEntry] = PLEX_Media.OBJ_BY_ID[movie_key].get('files', {})
             for ver, new_fi in movie_dict.get('files', {}).items():
-                if isinstance(new_fi, dict) and new_fi.get('file_metadata') is None:
+                if new_fi.get('file_metadata') is None:
                     cached_fi = cached_files.get(ver)
-                    if isinstance(cached_fi, dict) and (cached_meta := cached_fi.get('file_metadata')) is not None:
+                    if cached_fi is not None and (cached_meta := cached_fi.get('file_metadata')) is not None:
                         new_fi['file_metadata'] = cached_meta
         PLEX_Media.OBJ_BY_ID[movie_key] = movie_dict
+
         _track_delta(display_title, 'Movie', is_new_movie)
 
         # Update other cache indices — register ALL filepaths for multi-version items
@@ -23039,9 +23039,7 @@ def _process_series_from_database(series_data_all: dict[str, DbSeries], library_
                         # Also check if file paths changed (e.g. rename .mkv → .mp4)
                         new_paths = sorted(fi.get('filepath', '') for fi in new_files.values())
                         cached_paths = sorted(fi.get('filepath', '') for fi in cached_files.values())
-                        # Check if cached files are missing per-file language data
-                        cached_missing_langs = any(fi.get('audio_languages') is None for fi in cached_files.values())
-                        if new_file_count == cached_file_count and new_paths == cached_paths and not cached_missing_langs:
+                        if new_file_count == cached_file_count and new_paths == cached_paths:
                             if DBG: print(f"{DBGPFX}_process_series_from_database(): SKIPPING episode '{episode_dict['S0XE0X']}' - already cached ({cached_file_count} files)")
                             _collect_missing_file_metadata(cached, display_title)
                             continue
@@ -23061,14 +23059,15 @@ def _process_series_from_database(series_data_all: dict[str, DbSeries], library_
                     # Index cached entries by filepath for fallback lookup.
                     by_filepath: dict[str, list[FileEntry]] = {}
                     for _cv, _cfi in cached_files.items():
-                        if isinstance(_cfi, dict) and _cfi.get('filepath') and _cfi.get('file_metadata'):
+                        if _cfi.get('filepath') and _cfi.get('file_metadata'):
                             by_filepath.setdefault(_cfi['filepath'], []).append(_cfi)
                     for ver, new_fi in episode_dict.get('files', {}).items():
-                        if not (isinstance(new_fi, dict) and new_fi.get('file_metadata') is None):
+                        if new_fi.get('file_metadata') is not None:
                             continue
                         # 1. exact version-key match
                         cached_fi = cached_files.get(ver)
-                        if isinstance(cached_fi, dict) and (cached_meta := cached_fi.get('file_metadata')) is not None:
+                        if cached_fi is not None and (cached_meta
+ := cached_fi.get('file_metadata')) is not None:
                             new_fi['file_metadata'] = cached_meta
                             continue
                         # 2. filepath+filesize fallback (version drift across --scan)
@@ -23538,6 +23537,9 @@ def _ensure_tsv_and_normalize_episodes(series_data_all: dict[str, DbSeries], lib
         title_count = 0
         numbering_issues: list[NumberingIssue] = []
 
+        def _E_idx(e: MediaRecord) -> int:
+            return e.get('E_idx', 0)  # pyright: ignore[reportReturnType] -- an Episode's E_idx is an int; a None raises where it is compared or formatted, as it always did
+
         for s_key, season_data in series_data['seasons'].items():
             if s_key <= 0:
                 continue
@@ -23548,13 +23550,13 @@ def _ensure_tsv_and_normalize_episodes(series_data_all: dict[str, DbSeries], lib
                 continue
 
             # Sort Plex episodes by their current E_idx to establish position order
-            plex_eps = sorted(season_data['episodes'], key=lambda e: e.get('E_idx', 0))  # pyright: ignore[reportArgumentType, reportCallIssue] -- an Episode's E_idx is an int; a None raises here, as it always did
+            plex_eps = sorted(season_data['episodes'], key=_E_idx)
             # Sort TSV episode numbers
             tsv_ep_nums = sorted(tsv_season.keys())
 
             # Match by position: plex_eps[i] ↔ tsv_ep_nums[i]
             for i, ep_dict in enumerate(plex_eps):
-                plex_e_idx = ep_dict.get('E_idx', 0)
+                plex_e_idx = _E_idx(ep_dict)
                 plex_e_str = ep_dict.get('E_str', f"E{plex_e_idx:02d}")
 
                 scraped_e_num = tsv_ep_nums[i] if i < len(tsv_ep_nums) else None
@@ -23583,12 +23585,13 @@ def _ensure_tsv_and_normalize_episodes(series_data_all: dict[str, DbSeries], lib
                     # numbering (higher than scraped AND no lower Plex eps in season),
                     # that's a match-hint situation — don't flag. Otherwise Plex and
                     # the scraped source genuinely disagree and it needs auditing.
-                    plex_e_indices = sorted(ep.get('E_idx', 0) for ep in plex_eps)
+                    plex_e_indices = sorted(_E_idx(ep) for ep in plex_eps)
+
                     has_lower = any(idx < plex_e_idx and idx > 0 for idx in plex_e_indices)
                     if not (plex_e_idx > scraped_e_num and not has_lower):
                         numbering_issues.append({
                             'season': s_str,
-                            'episode_plex': plex_e_str,
+                            'episode_plex': plex_e_str,  # pyright: ignore[reportArgumentType] -- E_str, which MediaRecord allows to be None while NumberingIssue says str: see the report
                             'episode_scraped': scraped_e_str,
                             'plex_idx': plex_e_idx,
                             'scraped_idx': scraped_e_num,
@@ -23717,8 +23720,9 @@ def _list_tsv_problems(obj_keys: list[str], library_name: str | None = None) -> 
         all_paths.extend([tsv_path, err_path])
     local_exists = {p for p in all_paths if os.path.isfile(p)}
     remote_check = [p for p in all_paths if p not in local_exists]
-    remote_exists = _batch_file_exists_remote(remote_check) if remote_check else set()
+    remote_exists: set[str] = _batch_file_exists_remote(remote_check) if remote_check else set()
     all_existing = local_exists | remote_exists
+
 
     for series_key, series_dir, tsv_path, err_path in series_info:
         has_tsv = tsv_path in all_existing
@@ -23945,11 +23949,11 @@ def get_media_list_from_PLEX_OBJ_list( obj_list: list[MediaRecord | CollectionRe
         assert media is not None  # must_exist=True guarantees this
         match obj["type"]:
             case "Movie":    print(f"File '{obj['file']}' found as movie '{media.title}' ({media.year})")
-            case "Movie*":   print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of movie '{media.title}' ({media.year})")
+            case "Movie*":   print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of movie '{media.title}' ({media.year})")  # pyright: ignore[reportUnnecessaryComparison] -- 'Movie*' is a type_str, never a type: suspected bug, see the report
             case "Series":     print(f"File '{obj['file']}' found as series '{obj['title']}' ({obj['year']})")
             case "Season":   print(f"File '{obj['file']}' found as season {obj['S_str']} as part of series '{obj['series']}' ({obj['year']})")  # pyright: ignore[reportTypedDictNotRequiredAccess] -- every Season builder writes 'series'
             case "Episode":  print(f"File '{obj['file']}' found as episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")  # pyright: ignore[reportTypedDictNotRequiredAccess] -- every Episode builder writes 'series'
-            case "Episode*": print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")
+            case "Episode*": print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")  # pyright: ignore[reportUnnecessaryComparison] -- 'Episode*' is a type_str, never a type: suspected bug, see the report
             case _:
                 err( "00084", "Unknown obj['type'] '{obj['type']}'.")
         mediae.append( media )
@@ -23978,7 +23982,9 @@ def resolve_plex_media_obj(media_identifier: str, library_name: str | None = Non
     mediae: list[Any] = []   # plexapi objects of several classes (Media, Movie, Episode, ...)
 
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj( media_identifier='{media_identifier}', library='{library_name}')")
-    if media_identifier is None: err("00085", "This should never be. Please contact maintainer.")
+    if media_identifier is None: err("00085", "This should never be. Please contact maintainer.")  # pyright: ignore[reportUnnecessaryComparison] -- dead since the parameter is a str; stays until the err codes are renumbered (they run without gaps)
+
+
 
     # Check for FULL_ID (exact cache key like "Episode_ID:18349"):
     stage = "1st"
@@ -24371,7 +24377,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         lib_type = PLEX_Library.OBJ_DICT_TYPE.get(title, 'Unknown')
 
         # Validate cache format
-        if old_counts and not isinstance(old_counts, dict):
+        if old_counts and not isinstance(old_counts, dict):  # pyright: ignore[reportUnnecessaryIsInstance] -- the counts come from the pickle payload unchecked (update_cache reads CACHE['library_object_counts']); this is their shape check
             print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
             err("00086", f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
 
@@ -24593,7 +24599,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                 'type': obj.get('type'),
                                 'duration': obj.get('duration'),
                                 'files': {v: {'filepath': fi.get('filepath'), 'filesize': fi.get('filesize')}
-                                          for v, fi in obj.get('files', {}).items() if isinstance(fi, dict)},
+                                          for v, fi in obj.get('files', {}).items()},
                             }
                             removal_details.append(detail_info)
 
@@ -24769,10 +24775,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if _fp_obj:
                 obj['file_segment_words'] = _segment_words_per_segment(_fp_obj, lib)
             for _fi in (obj.get('files', {}) or {}).values():
-                if isinstance(_fi, dict):
-                    _vfp = _fi.get('filepath') or ''
-                    if _vfp:
-                        _fi['file_segment_words'] = _segment_words_per_segment(_vfp, lib)
+                _vfp = _fi.get('filepath') or ''
+                if _vfp:
+                    _fi['file_segment_words'] = _segment_words_per_segment(_vfp, lib)
+
             if obj_type == 'Series':
                 updated_library_object_counts[lib]['series'] = updated_library_object_counts[lib].get('series', 0) + 1
             elif obj_type == 'Season':
@@ -25031,9 +25037,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 # File path → look up in PLEX_Media.OBJ_BY_FILEPATH
                 if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') and candidate in PLEX_Media.OBJ_BY_FILEPATH:
                     for key in PLEX_Media.OBJ_BY_FILEPATH[candidate]:
-                        lib_name = PLEX_Media.OBJ_BY_ID.get(key, {}).get('library')
+                        _rec = PLEX_Media.OBJ_BY_ID.get(key)
+                        lib_name = _rec.get('library') if _rec is not None else None
                         if lib_name:
                             resolved_libraries.add(lib_name)
+
                             print(f"  --scan: Resolved file path → library '{lib_name}'")
                     continue
                 # Unknown — error
@@ -25195,7 +25203,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if DBG:
             for lib, counts in old_itemsCount_from_cache.items():
                 # Validate cache format - must be dict with type counts
-                if not isinstance(counts, dict):
+                if not isinstance(counts, dict):  # pyright: ignore[reportUnnecessaryIsInstance] -- read from the pickle payload unchecked, a few lines up; this is its shape check
                     print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
                     err("00093", f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
@@ -25245,9 +25253,10 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Process libraries in parallel
             global _active_executor, _shutdown_requested
+            from concurrent.futures import Future
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 _active_executor = executor  # Allow signal handler to shutdown
-                futures = {}
+                futures: dict[Future[bool], str] = {}   # each running library -> its display title
                 global LIBRARY_START_DELAY
 
                 # PERFORMANCE OPTIMIZATION: Sort libraries by size (largest first)
@@ -25570,7 +25579,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             # Process libraries to update (in parallel if multiple)
             if libraries_to_update:
                 # Temporarily disable READ_ONLY_MODE since user explicitly approved cache update
-                old_read_only = READ_ONLY_MODE
+                old_read_only = READ_ONLY_MODE  # pyright: ignore[reportUnusedVariable] -- read through locals().get('old_read_only') at the _finalize_and_save_cache call
                 READ_ONLY_MODE = False
 
                 # Always use ThreadPoolExecutor with partitioning for better performance
@@ -25628,9 +25637,11 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     print(f"\nProcessing {num_tasks} task(s) with {max_workers} worker(s)...")
                     print(f"{'='*76}")
 
+                    from concurrent.futures import Future
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         _active_executor = executor
-                        futures = {}
+                        futures: dict[Future[bool], str] = {}   # each running task -> its display title
+
 
                         # PERFORMANCE: Use dynamic work redistribution
                         # As workers finish, they immediately pick up remaining work
@@ -25778,7 +25789,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             PLEX_Media._list_filtered(filter_expr, library_name=obj, media_type=media_type,
                 watched_only=watched_only, unwatched_only=unwatched_only, audio_filter=audio_filter)
         elif needs_full_list or duplicates_only:
-                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field=audio_lang_field)
+                                        PLEX_Media.list(args, obj_args, obj, media_type, duplicates_only, resolve_mode, False, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field=audio_lang_field)  # pyright: ignore[reportUnknownMemberType] -- list()'s first parameter stays unannotated: a source test pins its signature text
+
         # Handle --missing: show missing episodes for all series in this library
         if safe_getattr(obj_args, 'missing', False):
             lib_name = obj  # obj is the library name string
@@ -25969,7 +25981,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
     def create(collection_name: str, library_name: str) -> None:
         # API required: collection mutations via Plex HTTP API
         plex = ensure_plex_api()
-        Collection.create(server=plex, title=collection_name, section=PLEX_Library.OBJ_DICT[library_name])
+        Collection.create(server=plex, title=collection_name, section=PLEX_Library.OBJ_DICT[library_name])  # pyright: ignore[reportUnknownMemberType] -- plexapi leaves Collection.create's parameters unannotated
 
     @staticmethod
     def add_to(collection_name: str, media_identifiers: list[str]) -> None:
@@ -26141,12 +26153,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         import pickle as _pkl
                         with open(backup_cache_file, 'rb') as _f:
                             old_cache = _pkl.load(_f)
-                        old_obj_by_id = old_cache.get('obj_by_id', {})
+                        # a pickle payload nobody has checked: an old cache may still hold a file as a bare path
+                        old_obj_by_id: dict[str, dict[str, Any]] = old_cache.get('obj_by_id', {})
                         for obj in old_obj_by_id.values():
                             if obj['type'] == 'Collection' or obj['type'] not in ('Movie', 'Episode'):
                                 continue
-                            for _ver, file_info in obj.get('files', {}).items():
+                            old_files: dict[str, dict[str, Any] | str] = obj.get('files', {})
+                            for _ver, file_info in old_files.items():
                                 if not isinstance(file_info, dict):
+
                                     continue
                                 fm: dict[str, Any] | None = file_info.get('file_metadata')
                                 fp: str | None = file_info.get('filepath')
@@ -26402,8 +26417,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if obj['type'] == 'Collection' or obj['type'] not in ('Movie', 'Episode'):
                     continue
                 for version, file_info in obj.get('files', {}).items():
-                    if not isinstance(file_info, dict):
-                        continue
                     fm = file_info.get('file_metadata')
                     if fm and fm.get('broken'):
                         filepath = file_info.get('filepath')
@@ -26420,8 +26433,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if obj['type'] == 'Collection' or obj['type'] not in ('Movie', 'Episode'):
                     continue
                 for _ver, file_info in obj.get('files', {}).items():
-                    if not isinstance(file_info, dict):
-                        continue
                     if file_info.get('file_metadata') is not None:
                         continue  # Already has metadata
                     fp = file_info.get('filepath')
@@ -26437,7 +26448,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 _metadata_batch_queue = [
                     (fp, obj_key, ver, dt) for fp, obj_key, ver, dt in _metadata_batch_queue
                     if obj_key in PLEX_Media.OBJ_BY_ID and
-                       PLEX_Media.OBJ_BY_ID[obj_key].get('files', {}).get(ver, {}).get('file_metadata') is None
+                       ((_qfi := PLEX_Media.OBJ_BY_ID[obj_key].get('files', {}).get(ver)) is None or _qfi.get('file_metadata') is None)
                 ]
                 if old_len != len(_metadata_batch_queue):
                     print(f"  Batch queue reduced from {old_len} to {len(_metadata_batch_queue)} files")
@@ -26457,8 +26468,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if SCAN_LIBRARIES is not None and obj.get('library') not in SCAN_LIBRARIES:
                     continue
                 for version, file_info in obj.get('files', {}).items():
-                    if not isinstance(file_info, dict):
-                        continue
                     if file_info.get('file_metadata') is not None and not FORCE_METADATA:
                         continue
                     filepath = file_info.get('filepath')
@@ -26515,7 +26524,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     continue
                 # Movie/Episode: store each file path
                 for _ver, fi in obj.get('files', {}).items():
-                    fp = fi.get('filepath') if isinstance(fi, dict) else None
+                    fp = fi.get('filepath')
                     if fp:
                         if fp not in PLEX_Media.OBJ_BY_FILEPATH:
                             PLEX_Media.OBJ_BY_FILEPATH[fp] = []
@@ -26559,12 +26568,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     for _s_str, episodes in list(PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key].items()):
                         for _e_str, ep_versions in list(episodes.items()):
                             for ver, ep_keys in list(ep_versions.items()):
-                                if isinstance(ep_keys, list):
-                                    cleaned = [k for k in ep_keys if k in PLEX_Media.OBJ_BY_ID]
-                                    removed = len(ep_keys) - len(cleaned)
-                                    if removed > 0:
-                                        dangling_episodes += removed
-                                        ep_versions[ver] = cleaned
+                                cleaned = [k for k in ep_keys if k in PLEX_Media.OBJ_BY_ID]
+                                removed = len(ep_keys) - len(cleaned)
+                                if removed > 0:
+                                    dangling_episodes += removed
+                                    ep_versions[ver] = cleaned
+
             if dangling_episodes > 0:
                 print(f"  Cleaned {dangling_episodes} dangling keys from OBJ_BY_SERIES_EPISODES")
 
@@ -27262,7 +27271,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return False
 
     @staticmethod
-    def execute_cmd(args, obj, obj_args) -> None:         # Handling action(s) on media -- parameters as in PLEX_OBJ_TYPE_ABC; left bare because a source test greps this exact signature
+    def execute_cmd(args, obj, obj_args) -> None:  # pyright: ignore[reportMissingParameterType] -- Handling action(s) on media; the types are PLEX_OBJ_TYPE_ABC's, left bare because a source test greps this exact signature
         if obj_args.delete and not obj_args.remove:
             err("00103", "--del requires --rm (Plex API delete also removes files from disk).\n"
                 "  Use --rm --del to explicitly confirm file removal.\n"
@@ -27302,7 +27311,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
             # v2.69: parity log per resolve memory rule.
             import datetime as _dt
-            _scope_label = obj.get('title') if isinstance(obj, dict) else str(obj)
+            _scope_label = str(obj)
+
             _write_resolve_log('rename', {
                 'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
                 'dry_run': bool(dry_run), 'scope_kind': 'object',
@@ -27445,7 +27455,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         error_count = 0
         multi_ep_skipped = 0
         for ep_key in sorted(episode_keys, key=_episode_sort_key):
-            ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+            ep = media_record(ep_key)
             if not ep:
                 continue
             # Skip Plex multi-episode files: non-leader siblings would
@@ -27504,9 +27514,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Resolve identifier to found_items list of (key, obj) tuples
         found_items: list[_CacheItem] | list[MediaRecord | CollectionRecord]
         if isinstance(media_identifier, list):
-            found_items = media_identifier
+            found_items = media_identifier   # pyright: ignore[reportUnknownVariableType] -- a list from the caller is taken as it comes: (key, obj) tuples or records
         elif isinstance(media_identifier, tuple):
             found_items = [media_identifier]
+
         elif isinstance(media_identifier, str):
             # Silent alias: accept "Show:" prefix, convert to "Series:"
             if media_identifier.startswith('Show:'):
@@ -27677,10 +27688,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Update files dict
         files = ep.get('files', {})
         for version_str, file_info in files.items():
-            vpath = file_info.get('filepath', '') if isinstance(file_info, dict) else file_info
+            vpath = file_info.get('filepath', '')
             if vpath == filepath:
-                if isinstance(ep['files'][version_str], dict):
-                    ep['files'][version_str]['filepath'] = new_actual
+                ep['files'][version_str]['filepath'] = new_actual
                 break
         ep['file'] = new_actual
 
@@ -27705,7 +27715,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return 'renamed'
 
     @staticmethod
-    def _rename_single_episode(ep, ep_key: str, pattern: str,
+    def _rename_single_episode(ep: MediaRecord, ep_key: str, pattern: str,
+
                                dry_run: bool) -> Literal['renamed', 'skipped', 'error']:
         """Rename a single episode file according to pattern.
         Returns 'renamed', 'skipped', or 'error'."""
@@ -28158,10 +28169,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         for sk, ep_set in matched_eps_per_series.items():
             total = 0
             for _s_str, vmap in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(sk, {}).items():
-                if isinstance(vmap, dict):
-                    for _eklist in vmap.values():
-                        if isinstance(_eklist, list):
-                            total += len(_eklist)
+                for _eklist in vmap.values():
+                    if isinstance(_eklist, list):   # suspected bug: _eklist is a {version: [keys]} dict, never a list -- see the report
+                        total += len(_eklist)
             if total > 0 and len(ep_set) == total:
                 clubbed_series[sk] = positions[sk]
             else:
@@ -28230,7 +28240,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if file_info.get('filesize') == 0:
                     continue
                 _fm_pre = file_info.get('file_metadata') or {}
-                if isinstance(_fm_pre, dict) and _fm_pre.get('disk_bytes') == 0:
+                if _fm_pre.get('disk_bytes') == 0:
+
                     continue
                 # Skip files that fully match a JUNK_PATTERNS entry —
                 # known clutter that --junk will trash.  Match semantics
@@ -28532,7 +28543,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         total_missing = 0
         series_with_missing = 0
         excluded_filtered = 0
-        _exclude = [str(x) for x in (MISSING_COMPLETION_EXCLUDE_SHOWS or [])]
+        _exclude_cfg: list[object] = MISSING_COMPLETION_EXCLUDE_SHOWS or []   # the user's config: titles or cache keys
+        _exclude = [str(x) for x in _exclude_cfg]
         _min_pct = float(MISSING_MIN_COMPLETION_PCT or 0)
         # Collect series keys from obj_keys
         series_keys: set[str] = set()
@@ -28574,13 +28586,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if not _fdict:
                     return False
                 for _fi in _fdict.values():
-                    if not isinstance(_fi, dict):
-                        continue
                     if (_fi.get('filesize') or 0) == 0:
                         continue
                     _fm = _fi.get('file_metadata') or {}
                     # Sparse (logical size but 0 blocks allocated) → no content.
-                    if isinstance(_fm, dict) and _fm.get('disk_bytes') == 0:
+                    if _fm.get('disk_bytes') == 0:
                         continue
                     return True
                 return False
@@ -28595,13 +28605,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 for e_str, vmap in eps.items():
                     # vmap: {version: [episode_keys]}; an Episode counts as
                     # "have" only if SOME version of it has filesize > 0.
-                    if isinstance(vmap, dict):
-                        ep_keys: list[str] = []
-                        for _eks in vmap.values():
-                            if isinstance(_eks, list):
-                                ep_keys.extend(_eks)
-                        if ep_keys and not any(_ep_has_real_content(ek) for ek in ep_keys):
-                            continue  # all-empty → treat as missing
+                    ep_keys: list[str] = []
+                    for _eks in vmap.values():
+                        ep_keys.extend(_eks)
+                    if ep_keys and not any(_ep_has_real_content(ek) for ek in ep_keys):
+                        continue  # all-empty → treat as missing
+
                     try:
                         e_nums.append(int(e_str[1:]))
                     except (ValueError, IndexError):
@@ -28801,7 +28810,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         """
         # Build library → expected-language map (only single-code entries).
         _lib_expected: dict[str, str] = {}
-        for _lname, _lval in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY or []):
+        _by_library: list[tuple[str, object]] = AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY or []   # the user's config: (library, language) pairs
+        for _lname, _lval in _by_library:
             if str(_lval).upper() == 'MULTI':
                 continue
             _lib_expected[_lname] = str(_lval).lower()
@@ -29039,11 +29049,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     files = eobj.get('files') or {} if eobj else {}
                     _ep_dur_ms = 0
                     for fi in files.values():
-                        if not isinstance(fi, dict):
-                            continue
                         fm = fi.get('file_metadata') or {}
                         cd = fm.get('container_duration')
                         if cd and cd > _ep_dur_ms:
+
                             _ep_dur_ms = cd
                     if not _ep_dur_ms:
                         _all_feature = False
@@ -29161,7 +29170,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         """
         flagged: list[tuple[str, str, str, int, int, str, str]] = []
         seen_keys: set[str] = set()
-        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+        lib_locations: dict[str, list[str]] = library_stats.get('locations', {}) or {}
         for key in obj_keys:
             if key in seen_keys:
                 continue
@@ -29183,7 +29193,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             file_entries: list[str] = []
             if files_dict:
                 for _ver, fi in files_dict.items():
-                    fp = fi.get('filepath') if isinstance(fi, dict) else fi
+                    fp = fi.get('filepath')
                     if fp:
                         file_entries.append(fp)
             else:
@@ -29362,8 +29372,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         durations: list[float] = []
         parent_dirs: set[str] = set()
         for fi in files.values():
-            if not isinstance(fi, dict):
-                continue
             fm = fi.get('file_metadata') or {}
             cd = fm.get('container_duration')
             if cd:
@@ -29445,8 +29453,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             reasons_str = '; '.join(reasons)
             print(f"{key:<14} {obj_type:<8} {ver_count:>3}  {library:<15} {title:<35}  {reasons_str}")
             for fi in (obj.get('files') or {}).values():
-                if not isinstance(fi, dict):
-                    continue
                 fm = fi.get('file_metadata') or {}
                 cd = fm.get('container_duration')
                 cd_str = f"{cd/60000:.2f}min" if cd else '?'
@@ -29499,7 +29505,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Empty scope → every library root.
         if scope_val is None or scope_val is True or scope_val == '' or scope_val == [] or scope_val == ['']:
             for _lib_name, lib_obj in PLEX_Library.OBJ_DICT.items():
-                for loc in (getattr(lib_obj, 'locations', None) or []):
+                lib_locs: list[str] = getattr(lib_obj, 'locations', None) or []   # a LibrarySection's folders
+                for loc in lib_locs:
                     if loc:
                         paths.add(loc.rstrip('/'))
             return sorted(paths)
@@ -29507,14 +29514,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         candidate_str = None
         if isinstance(scope_val, str):
             candidate_str = scope_val
-        elif isinstance(scope_val, list) and len(scope_val) == 1 and isinstance(scope_val[0], str):
+        elif isinstance(scope_val, list) and len(scope_val) == 1:
             candidate_str = scope_val[0]
         if candidate_str and candidate_str.startswith('/'):
             return [candidate_str.rstrip('/')]
         # Library name?
         if candidate_str and candidate_str in PLEX_Library.OBJ_DICT:
             lib_obj = PLEX_Library.OBJ_DICT[candidate_str]
-            for loc in (getattr(lib_obj, 'locations', None) or []):
+            lib_locs = getattr(lib_obj, 'locations', None) or []
+            for loc in lib_locs:
                 if loc:
                     paths.add(loc.rstrip('/'))
             return sorted(paths)
@@ -29726,7 +29734,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         Returns total count of orphans handled (across all rounds).
         """
-        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+        lib_locations: dict[str, list[str]] = library_stats.get('locations', {}) or {}
         roots: list[str] = []
         for paths in lib_locations.values():
             for p in (paths or []):
@@ -29957,7 +29966,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print("  Populate NAMING_RULES in your CONF to opt in.  See: my-plex --help naming")
             return 0
 
-        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+        lib_locations: dict[str, list[str]] = library_stats.get('locations', {}) or {}
         library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
         if not library_roots:
             print("  No library roots known — run --update-cache first.")
@@ -30060,7 +30070,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                      log_prefix='    ')
 
             # ---- sidecar: re-key + record the FIRST original ---------------
-            sidecar_entry = sidecar.pop(old_path, None) or {}
+            sidecar_entry: dict[str, Any] = sidecar.pop(old_path, None) or {}   # one disk_map.json record
+
             sidecar_entry.setdefault('naming_original', os.path.basename(old_path))
             sidecar_entry['renamed_at'] = date.today().isoformat()
             if is_dir:
