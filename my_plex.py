@@ -10242,6 +10242,35 @@ def run_tool_locally(tool_name: str, args: list[str], capture_output: bool = Tru
 # Cache for remote tool path lookups (avoid repeated 'ssh which' calls)
 _remote_tool_path_cache: dict[str, str] = {}
 
+def server_tool_path(tool_name: str, remote_host: str | None = None) -> str | None:
+    """The path of TOOL_NAME on the Plex server: EXTERNAL_TOOLS['SERVER'][tool_name]
+    when set, else found on the server's PATH -- remotely through a login
+    shell (a non-interactive ssh loads no PATH), remembered per host.  None,
+    and an ERROR line on stderr naming the key to set, when it is nowhere."""
+    configured = EXTERNAL_TOOLS.get('SERVER', {}).get(tool_name)
+    tool_path: str | None
+    if configured:
+        tool_path = configured
+    elif remote_host:
+        cache_key = f"{remote_host}:{tool_name}"
+        if cache_key in _remote_tool_path_cache:
+            tool_path = _remote_tool_path_cache[cache_key]
+        else:
+            result = run_tool_locally('ssh', [*_ssh_opts(), remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
+            if result and result.returncode == 0 and result.stdout.strip():
+                _remote_tool_path_cache[cache_key] = tool_path = result.stdout.strip()
+            else:
+                tool_path = None
+    else:
+        tool_path = shutil.which(tool_name)
+    if not tool_path:
+        location = f"on Plex server '{remote_host}'" if remote_host else "locally"
+        install_hint = f"Install it on the server" if remote_host else "Install it"
+        print(f"ERROR: Tool '{tool_name}' not found {location}. {install_hint} or set "
+              f"EXTERNAL_TOOLS['SERVER']['{tool_name}'] in ~/.my-plex.conf", file=sys.stderr)
+    return tool_path
+
+
 def run_tool_on_PLEX_server(tool_name: str, args: list[str], remote_host: str | None = None,
                             capture_output: bool = True, text: bool = True,
                             timeout: float | None = None) -> subprocess.CompletedProcess[Any] | None:
@@ -10262,30 +10291,8 @@ def run_tool_on_PLEX_server(tool_name: str, args: list[str], remote_host: str | 
         subprocess.CompletedProcess on success, or None if tool not found
     """
     config_key = f"EXTERNAL_TOOLS['SERVER']['{tool_name}']"
-    configured = EXTERNAL_TOOLS.get('SERVER', {}).get(tool_name)
-    tool_path: str | None
-
-    if configured:
-        tool_path = configured
-    elif remote_host:
-        # Check cache first
-        cache_key = f"{remote_host}:{tool_name}"
-        if cache_key in _remote_tool_path_cache:
-            tool_path = _remote_tool_path_cache[cache_key]
-        else:
-            # Auto-detect on remote via login shell (non-interactive SSH doesn't load PATH)
-            result = run_tool_locally('ssh', [*_ssh_opts(), remote_host, f"/bin/sh --login -c 'which {tool_name}'"], timeout=10)
-            if result and result.returncode == 0 and result.stdout.strip():
-                _remote_tool_path_cache[cache_key] = tool_path = result.stdout.strip()
-            else:
-                tool_path = None
-    else:
-        tool_path = shutil.which(tool_name)
-
+    tool_path = server_tool_path(tool_name, remote_host)
     if not tool_path:
-        location = f"on Plex server '{remote_host}'" if remote_host else "locally"
-        install_hint = f"Install it on the server" if remote_host else "Install it"
-        print(f"ERROR: Tool '{tool_name}' not found {location}. {install_hint} or set {config_key} in ~/.my-plex.conf", file=sys.stderr)
         return None
 
     if remote_host:
