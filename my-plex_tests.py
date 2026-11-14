@@ -15435,7 +15435,7 @@ class TestInstallAsRoot(_RootInstallCase):
 
     def test_50_a_failure_after_a_removal_still_lists_what_was_removed(self):
         """A deny removed is gone from the firewall, so the run says so even
-        when a LATER remote's `list` (err 00036) or `remove` (err 00037)
+        when a LATER remote's `list` (err 00037) or `remove` (err 00038)
         fails and the run stops: the REMOVED block was printed after the
         loop, err() exited before it, and any555 went with no line naming
         it.  Adversarial both ways: the deny whose removal was refused is NOT
@@ -15444,7 +15444,7 @@ class TestInstallAsRoot(_RootInstallCase):
         rule = f"{py}  deny  api.themoviedb.org  tcp/443  anyone"
         run = self.run_root(listing=f"any555\t{rule}\n", touch=('remove-drops-listing',))
         self.assertNotEqual(run.r.returncode, 0, run.text())
-        self.assertIn('ERROR 00036', run.r.stderr, run.text())
+        self.assertIn('ERROR 00037', run.r.stderr, run.text())
         self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
                          "\n".join(run.calls))
         self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
@@ -15452,7 +15452,7 @@ class TestInstallAsRoot(_RootInstallCase):
         run = self.run_root(listing=f"any555\t{rule}\nany222\t{refused}\n",
                             touch=('fail-remove-any222',))
         self.assertNotEqual(run.r.returncode, 0, run.text())
-        self.assertIn('ERROR 00037', run.r.stderr, run.text())
+        self.assertIn('ERROR 00038', run.r.stderr, run.text())
         self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
                          "\n".join(run.calls))
         self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
