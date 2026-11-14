@@ -285,29 +285,6 @@ def _pick_most_populated_library(list_libraries_stdout: str, lib_type: str | Non
     return best_name
 
 
-def _pick_any_title_word(lib: str) -> str | None:
-    """A word from the title of an item that exists in LIB here, or None.
-
-    `tagesschau` is one title in one person's library: on a machine without
-    it the search is correctly empty and the TEST is wrong, not the code
-    (ada, 2026-11-02, the last of that family). The key comes from a scoped
-    listing, so the item is one the same default scope lets through, and a
-    search for a word of its title therefore has something to return."""
-    import subprocess, re
-    rows = subprocess.run([sys.executable, MAIN_SCRIPT, lib, '--list'],
-                          capture_output=True, text=True, timeout=120)
-    m = re.search(r'^((?:Movie|Series|Season|Episode):\d+)', rows.stdout, re.MULTILINE)
-    if not m:
-        return None
-    info = subprocess.run([sys.executable, MAIN_SCRIPT, '--info', m.group(1)],
-                          capture_output=True, text=True, timeout=60)
-    t = re.search(r'^Title:\s*(.+)$', info.stdout, re.MULTILINE)
-    if not t:
-        return None
-    words = [w for w in re.findall(r'[A-Za-z]{4,}', t.group(1))]
-    return max(words, key=len).lower() if words else None
-
-
 def _registry_entry_block(content: str, category: str) -> str:
     """Return the source block of ONE PROBLEM_CATEGORIES_REGISTRY entry.
 
@@ -4242,53 +4219,21 @@ class TestFilter(unittest.TestCase):
 class TestDefaultScope(unittest.TestCase):
     """Tests for DEFAULT_SCOPE config variable — default filter tokens for listing commands."""
 
-    @classmethod
-    def setUpClass(cls):
-        """Discover a library to use for scope-dependent tests -- picked
-        dynamically, never hard-coded: every install names its libraries differently."""
-        import subprocess
-        libs_result = subprocess.run([sys.executable, MAIN_SCRIPT, '--list-libraries'],
-                                     capture_output=True, text=True, timeout=30)
-        cls._any_lib = _pick_most_populated_library(libs_result.stdout)
-        cls._any_title_word = _pick_any_title_word(cls._any_lib) if cls._any_lib else None
+    # The fixture library (_fixture_library): its movies are all unwatched, so
+    # the default DEFAULT_SCOPE (watched:no) keeps every one of them.  It used
+    # to be this machine's real cache and config: horse's most populated
+    # library turned out fully watched, the listings came back empty, and the
+    # two bare-token tests failed its deploy gate (2026-11-14).
+    _any_lib = 'library1'
 
-    def _run(self, *args: str | None) -> subprocess.CompletedProcess[str]:
-        """Run my-plex with these arguments.
-
-        A None argument means setUpClass found no library -- which is what
-        every machine looks like before its first --update-cache. Passing it
-        on gives `TypeError: expected str, bytes or os.PathLike object, not
-        NoneType` from deep inside subprocess, a traceback that names nothing
-        about the cause; and since my-rollout offers no copy whose suite
-        fails, the whole tool then stops being deployable on that machine
-        (ada, 2026-11-01: eight errors and one failure, all of them this).
-        So the guard sits HERE, once, instead of in every test that takes a
-        scope -- including the ones not written yet."""
-        import subprocess
-        if any(a is None for a in args):
-            self.skipTest("no library in this machine's cache for a scoped "
-                          "test -- run `my-plex --update-cache` here")
-        argv = [a for a in args if a is not None]  # all of them: skipTest raised on a None
-        return subprocess.run([sys.executable, MAIN_SCRIPT] + argv,
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """Run my-plex with these arguments, against the fixture library."""
+        return subprocess.run([sys.executable, MAIN_SCRIPT, '--config', _fixture_conf(), *args],
                               capture_output=True, text=True, timeout=30)
 
     def _read_script(self):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
-
-    def _skip_if_no_lib(self):
-        if not getattr(self, '_any_lib', None):
-            self.skipTest("No library available in cache for scoped test")
-
-    def test_a_missing_library_skips_instead_of_crashing(self):
-        """The guard itself, proven on ANY machine -- including this one, where
-        the cache is there and the scoped tests below never take the None path.
-
-        Without the guard, None reaches subprocess and the test dies with
-        `TypeError: expected str, bytes or os.PathLike object, not NoneType`,
-        which says nothing about a missing cache."""
-        with self.assertRaises(unittest.SkipTest):
-            self._run(None, '--list')
 
     def test_default_scope_in_config_defaults(self):
         """DEFAULT_SCOPE must exist in CONFIG_DEFAULTS."""
@@ -4363,17 +4308,17 @@ class TestDefaultScope(unittest.TestCase):
 
     def test_bare_token_adds_column(self):
         """A bare field name (e.g. 'genre') must add a display column without filtering."""
-        self._skip_if_no_lib()
         result = self._run(self._any_lib, 'genre', '-V')
         self.assertIn('GENRE', result.stdout, "Bare 'genre' token must add GENRE column")
+        self.assertIn('Movie:4', result.stdout, "the bare token filtered out a movie with no genre")
         self.assertNotIn('ERROR', result.stdout + result.stderr)
 
     def test_bare_token_combined_with_filter(self):
-        """Bare token + filter token must work together (e.g. 'rating>7 genre')."""
-        self._skip_if_no_lib()
-        result = self._run(self._any_lib, 'watched:no', 'rating>7', 'genre', '-V')
-        header_lines = [l for l in result.stdout.splitlines() if 'RATING' in l and 'GENRE' in l]
-        self.assertTrue(len(header_lines) >= 1, "Must show both RATING and GENRE columns")
+        """Bare token + filter token must work together (e.g. 'lang:en genre'):
+        the filter's column (AUDIO) and the bare token's (GENRE) in one header."""
+        result = self._run(self._any_lib, 'watched:no', 'lang:en', 'genre', '-V')
+        header_lines = [l for l in result.stdout.splitlines() if 'AUDIO' in l and 'GENRE' in l]
+        self.assertTrue(len(header_lines) >= 1, f"Must show both AUDIO and GENRE columns: {result.stdout}")
 
     def test_bare_token_display_only_no_filter(self):
         """_parse_filter_sub_expr must handle +field tokens (display-only, no filtering)."""
@@ -4416,23 +4361,16 @@ class TestDefaultScope(unittest.TestCase):
     def test_cat_d_title_search_results(self):
         """Title search must return items whose title matches the search term.
 
-        The TERM is taken from a title in this install, never hard-coded.
-        What is NOT asserted, though the test name invites it: that every row
+        The term is a word of a fixture title.  What is NOT asserted, though the test name invites it: that every row
         returned has the term in its own TITLE column. A search for a word of
         a series title returns that series' EPISODES, whose titles do not
         contain it -- `creatures` returns 187 episodes of a series listed in
         German. The claim the output actually makes is the filter line, and
-        that is what the test beside this one checks.
-
-        No skip guard here on purpose: with no cache the term is None and
-        _run skips for every test in this class at once. A second guard in
-        this one test was written first and proved redundant."""
-        term = getattr(self, '_any_title_word', None)
+        that is what the test beside this one checks."""
+        term = 'another'  # Movie:2, "Another Movie"
         result = self._run(term, '-V')
         lines = [l for l in result.stdout.splitlines() if l.startswith(('Movie:', 'Series:', 'Episode:', 'Season:'))]
-        self.assertTrue(len(lines) > 0,
-                        f"Title search {term!r} -- a word from a title in this "
-                        f"install -- returned nothing")
+        self.assertEqual([l.split()[0] for l in lines], ['Movie:2'], result.stdout)
 
     def test_cat_d_skips_help_topic(self):
         """--help <topic> must NOT treat the topic as a Cat-D title search."""
@@ -4531,15 +4469,12 @@ class TestDefaultScope(unittest.TestCase):
     # --- imdb / tmdb / tvdb display columns ---
 
     def test_imdb_token_adds_url_column(self):
-        """Bare `imdb` token must add an IMDB URL column to output."""
-        result = self._run(self._any_lib, 'imdb', '-V')
+        """Bare `imdb` token must add an IMDB URL column to output (the
+        fixture's series carries an imdb id; its movies carry none)."""
+        result = self._run('library_fr', 'imdb', '-V')
         self.assertEqual(result.returncode, 0)
-        # Either the IMDB header is present, or no rows match (empty libraries)
-        if 'Movie:' in result.stdout or 'Episode:' in result.stdout or 'Series:' in result.stdout:
-            self.assertIn('IMDB', result.stdout,
-                "imdb token must add IMDB column header")
-            self.assertIn('imdb.com/title/', result.stdout,
-                "IMDB column must contain imdb.com URLs")
+        self.assertIn('IMDB', result.stdout, "imdb token must add IMDB column header")
+        self.assertIn('imdb.com/title/tt1', result.stdout, "IMDB column must contain imdb.com URLs")
 
     def test_imdb_in_cat_c_regex(self):
         """imdb / tmdb / tvdb must be in the Cat-C display-only token regex."""
