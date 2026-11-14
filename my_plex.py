@@ -35814,7 +35814,7 @@ def get_all_series_in_series_libraries():
 # --missing command
 # ---------------------------------------------------------------------------
 
-def _determine_episode_source(series_dict, source_override=None):
+def _determine_episode_source(series_dict: MediaRecord | CollectionRecord, source_override: str | None = None):
     """Determine the episode data source for a series.
 
     Priority:
@@ -35869,11 +35869,10 @@ def _determine_episode_source(series_dict, source_override=None):
     return 'tmdb'
 
 
-def cmd_missing(series_ref, source_override=None):
+def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
     """Show missing episodes for a series.
     Compares episodes.tsv (all aired episodes) against Plex cache (episodes on disk).
     """
-    import os
     from datetime import datetime
 
     series_key, series_dict = resolve_series_for_episodes(series_ref)
@@ -35933,13 +35932,13 @@ def cmd_missing(series_ref, source_override=None):
     # source: Episode.index is the episode number within the season).  Some shows use "absolute"
     # numbering in filenames (e.g. "Tagesschau 101" → Plex stores index=101 for S01E01).
     # Detect per-season: if ALL episodes in a season have index // 100 == season_num, normalise.
-    have_set = set()
+    have_set: set[tuple[int, int]] = set()
     for s_str, eps in cached_episodes.items():
         try:
             s_num = int(s_str[1:])
         except (ValueError, IndexError):
             continue
-        e_nums = []
+        e_nums: list[int] = []
         for e_str in eps:
             try:
                 e_nums.append(int(e_str[1:]))
@@ -35956,13 +35955,14 @@ def cmd_missing(series_ref, source_override=None):
     print(f"  >> Cache:     {len(have_set)} episodes on disk")
 
     # Build set of (season, episode) from TSV
-    tsv_set = {}  # (season, episode) -> {'date': ..., 'title': ...}
+    # a row of episodes.tsv: int season/episode, str date/title (read_episodes_tsv)
+    tsv_set: dict[tuple[int, int], dict[str, Any]] = {}  # (season, episode) -> {'date': ..., 'title': ...}
     for ep in all_episodes:
         key = (ep['season'], ep['episode'])
         tsv_set[key] = ep
 
     # Find missing: in TSV but not in cache
-    missing = []
+    missing: list[dict[str, Any]] = []
     for key, ep in sorted(tsv_set.items()):
         if key not in have_set:
             missing.append(ep)
@@ -35972,8 +35972,8 @@ def cmd_missing(series_ref, source_override=None):
 
     # Group missing by season to detect fully missing seasons
     from collections import defaultdict
-    missing_by_season = defaultdict(list)
-    tsv_by_season = defaultdict(int)
+    missing_by_season: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    tsv_by_season: defaultdict[int, int] = defaultdict(int)
     for ep in all_episodes:
         tsv_by_season[ep['season']] += 1
     for ep in missing:
@@ -35982,12 +35982,12 @@ def cmd_missing(series_ref, source_override=None):
     today = datetime.now().strftime('%Y-%m-%d')
 
     # Filter out future-only seasons/episodes to get real missing count
-    missing_lines = []
+    missing_lines: list[str] = []
     for season in sorted(missing_by_season):
         season_missing = missing_by_season[season]
         season_total = tsv_by_season[season]
         if len(season_missing) == season_total:
-            first_date = min(ep['date'] for ep in season_missing)
+            first_date: str = min(ep['date'] for ep in season_missing)
             if first_date > today:
                 continue
             missing_lines.append(f"  S{season:02d}        {first_date}  (entire season — {season_total} episodes)")
@@ -35999,7 +35999,7 @@ def cmd_missing(series_ref, source_override=None):
                 missing_lines.append(f"  S{season:02d}E{ep['episode']:02d}    {ep['date']}{title_str}")
 
     # Build extras lines — map (season, ep) back to Plex episode info
-    extras_lines = []
+    extras_lines: list[str] = []
     for (s_num, e_num) in sorted(extras):
         s_str = f"S{s_num:02d}"
         e_str = f"E{e_num:02d}"
@@ -36009,9 +36009,9 @@ def cmd_missing(series_ref, source_override=None):
                    or next(iter((PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
                                  .get(f"S{s_num:02d}", {}).get(f"E{e_num:02d}", {}) or {}).values()), []))
         title = ''
-        for ek in (ep_keys if isinstance(ep_keys, list) else [ep_keys]):
-            obj = PLEX_Media.OBJ_BY_ID.get(ek, {})
-            if obj.get('title'):
+        for ek in ep_keys:
+            obj = media_record(ek)
+            if obj and obj.get('title'):
                 title = f"  {obj['title']}"
                 break
         extras_lines.append(f"  {s_str}{e_str}    {title.strip()}")
@@ -36038,7 +36038,7 @@ def cmd_missing(series_ref, source_override=None):
 # --plex2disk / --disk2plex commands (aliases: --map-to-filename, --map-from-filename)
 # ---------------------------------------------------------------------------
 
-def _resolve_audio_lang_from_filename(filename):
+def _resolve_audio_lang_from_filename(filename: str | None) -> str | None:
     """Try to resolve a 2-letter audio-language code from a filename via
     DISK_PLEX_MAP['AUDIO_LANG']['values'][*]['disk2plex'] regexes.
 
@@ -36070,7 +36070,18 @@ def _resolve_audio_lang_from_filename(filename):
     return None
 
 
-def _classify_migration_action(obj, version=None):
+class MigrationClass(TypedDict):
+    """_classify_migration_action's verdict on one media-file version."""
+    action: Literal['none', 'remux', 'reencode']
+    reasons: list[str]
+    lang: str | None
+    filepath: str
+    version: str | None
+    bitrate_mbps: float | None
+    ext: str
+
+
+def _classify_migration_action(obj: ScopeRecord, version: str | None = None) -> MigrationClass:
     """Classify a single media-file version's migration need.
 
     Args:
@@ -36112,12 +36123,12 @@ def _classify_migration_action(obj, version=None):
 
     duration_ms = obj.get('duration') or 0
     filesize = file_info.get('filesize') or 0
-    bitrate_mbps = None
+    bitrate_mbps: float | None = None
     if duration_ms and filesize:
         bitrate_mbps = (filesize * 8) / (duration_ms / 1000) / 1_000_000
 
     is_outdated = ext in OUTDATED_CONTAINERS
-    is_modern_target = ext.lstrip('.') == REMUX_TARGET_CONTAINER
+    _is_modern_target = ext.lstrip('.') == REMUX_TARGET_CONTAINER
     is_high_bitrate = bool(bitrate_mbps and bitrate_mbps > REENCODE_THRESHOLD_MBPS)
 
     video_codec = str(obj.get('video_codec') or '').lower()
@@ -36126,14 +36137,14 @@ def _classify_migration_action(obj, version=None):
                    and audio_codec in REMUX_AUDIO_CODECS_OK)
 
     # Resolve language: prefer Plex audio_languages, fallback to filename regex
-    lang = None
+    lang: str | None = None
     audio_langs = file_info.get('audio_languages') or obj.get('audio_languages') or []
     if audio_langs and audio_langs[0] not in ('', 'unknown'):
         lang = audio_langs[0]
     if lang is None:
         lang = _resolve_audio_lang_from_filename(filepath)
 
-    reasons = []
+    reasons: list[str] = []
 
     # Decision: high_bitrate ALWAYS wins → reencode
     if is_high_bitrate:
@@ -36167,7 +36178,7 @@ def _classify_migration_action(obj, version=None):
             'bitrate_mbps': bitrate_mbps, 'ext': ext}
 
 
-def _resolve_target_to_cache_keys_via_filepath(target):
+def _resolve_target_to_cache_keys_via_filepath(target: object) -> list[str]:
     """If target looks like a filepath, resolve it to a list of cache_keys
     via PLEX_Media.OBJ_BY_FILEPATH (which maps filepath → list of keys,
     since one file can be linked to multiple cache entries — multi-episode
@@ -36222,7 +36233,12 @@ _SCOPE_FILTER_RE = re.compile(
 )
 
 
-def _is_scope_filter_token(token):
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import TypeAlias, TypeGuard
+
+
+def _is_scope_filter_token(token: object) -> TypeGuard[str]:
     """True iff `token` is a Cat-B filter expression (lang:fr, year>2020,
     or a compound `AND` / `OR` / paren expression).
 
@@ -36250,7 +36266,7 @@ def _is_scope_filter_token(token):
     return bool(_SCOPE_FILTER_RE.match(token.strip()))
 
 
-def _tokenize_filter_expr_string(expr):
+def _tokenize_filter_expr_string(expr: str) -> list[str]:
     """Lex a filter-expression STRING into a flat list of tokens.
 
     Tokens are: '(', ')', 'AND' (uppercase only), 'OR' (uppercase only),
@@ -36260,7 +36276,7 @@ def _tokenize_filter_expr_string(expr):
     in the string form too — `(country:france OR country:italy)` would
     be ONE atom token; the user must write `( country:france OR ... )`.
     """
-    tokens = []
+    tokens: list[str] = []
     i = 0
     n = len(expr)
     while i < n:
@@ -36279,7 +36295,7 @@ def _tokenize_filter_expr_string(expr):
                 i += 1
                 continue
         start = i
-        in_quote = None
+        in_quote: str | None = None
         while i < n:
             ch = expr[i]
             if in_quote:
@@ -36298,7 +36314,14 @@ def _tokenize_filter_expr_string(expr):
     return tokens
 
 
-def _parse_compound_filter(expr_or_tokens):
+if TYPE_CHECKING:
+    # A parsed filter expression: a leaf atom, or an operator over sub-trees.
+    _FilterNode: TypeAlias = (tuple[Literal["LEAF"], str] | tuple[Literal["NOT"], "_FilterNode"]
+                              | tuple[Literal["AND", "OR"], list["_FilterNode"]])
+
+
+def _parse_compound_filter(expr_or_tokens: str | list[str] | list[str | None]
+                           ) -> tuple[str | None, Callable[..., bool] | None, list[str]]:
     """Parse a compound filter expression with AND / OR / parens precedence.
 
     Grammar:
@@ -36338,19 +36361,19 @@ def _parse_compound_filter(expr_or_tokens):
         return (None, None, [])
 
     pos = [0]
-    leaves = []
+    leaves: list[str] = []
 
-    def _peek():
+    def _peek() -> str | None:
         return tokens[pos[0]] if pos[0] < len(tokens) else None
-    def _consume():
+    def _consume() -> str | None:
         t = _peek()
         if t is not None:
             pos[0] += 1
         return t
 
-    def _parse_or():
+    def _parse_or() -> _FilterNode:
         node = _parse_and()
-        children = [node]
+        children: list[_FilterNode] = [node]
         while _peek() == 'OR':
             _consume()
             children.append(_parse_and())
@@ -36358,9 +36381,9 @@ def _parse_compound_filter(expr_or_tokens):
             return node
         return ('OR', children)
 
-    def _parse_and():
+    def _parse_and() -> _FilterNode:
         node = _parse_not()
-        children = [node]
+        children: list[_FilterNode] = [node]
         while True:
             t = _peek()
             if t == 'AND':
@@ -36375,7 +36398,7 @@ def _parse_compound_filter(expr_or_tokens):
             return node
         return ('AND', children)
 
-    def _parse_not():
+    def _parse_not() -> _FilterNode:
         # v2.3: NOT prefix — higher precedence than AND.  `NOT atom`.
         # Chained `NOT NOT atom` is allowed (rare but logical).
         if _peek() == 'NOT':
@@ -36384,7 +36407,7 @@ def _parse_compound_filter(expr_or_tokens):
             return ('NOT', inner)
         return _parse_atom()
 
-    def _parse_atom():
+    def _parse_atom() -> _FilterNode:
         t = _peek()
         if t is None:
             err("00143", "Filter expression: unexpected end of input.")
@@ -36405,7 +36428,7 @@ def _parse_compound_filter(expr_or_tokens):
     if pos[0] < len(tokens):
         err("00146", f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
 
-    def _compile(node) -> "tuple[str, Callable[..., bool]]":
+    def _compile(node) -> "tuple[str, Callable[..., bool]]":  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a _FilterNode; --run-tests compound pins this signature's text
         kind = node[0]
         if kind == 'LEAF':
             atom = node[1]
@@ -36430,19 +36453,21 @@ def _parse_compound_filter(expr_or_tokens):
         if kind == 'NOT':
             inner_label, inner_fn = _compile(node[1])
             label = f"NOT {inner_label}"
-            def _not_fn(obj, fi, _inner=inner_fn):
+            def _not_fn(obj: object, fi: object, _inner: Callable[..., bool] = inner_fn) -> bool:
                 return not _inner(obj, fi)
             return (label, _not_fn)
         if kind == 'AND':
             children = [_compile(c) for c in node[1]]
             label = ' AND '.join(c[0] for c in children)
-            def _and_fn(obj, fi, _cs=children):
+            def _and_fn(obj: object, fi: object,
+                        _cs: list[tuple[str, Callable[..., bool]]] = children) -> bool:
                 return all(c[1](obj, fi) for c in _cs)
             return (label, _and_fn)
         # OR
         children = [_compile(c) for c in node[1]]
         label = '(' + ' OR '.join(c[0] for c in children) + ')'
-        def _or_fn(obj, fi, _cs=children):
+        def _or_fn(obj: object, fi: object,
+                   _cs: list[tuple[str, Callable[..., bool]]] = children) -> bool:
             return any(c[1](obj, fi) for c in _cs)
         return (label, _or_fn)
 
@@ -36450,7 +36475,36 @@ def _parse_compound_filter(expr_or_tokens):
     return (label, fn, leaves)
 
 
-def _resolve_scope_filter_expr(expr):
+class _FolderFileEntry(TypedDict):
+    filepath: str
+
+
+class FolderRecord(TypedDict):
+    """An uncatalogued top-level folder that a `layout:` filter surfaces as a
+    scope item, under the key 'Folder:<path>' -- Plex never matched it, so
+    it is in no cache map."""
+    type_str: Literal['Folder']
+    type: Literal['Folder']
+    file: str
+    files: dict[str, _FolderFileEntry]
+    library: str
+    title: str
+    _uncatalogued: bool
+    _layout: str
+
+
+if TYPE_CHECKING:
+    # What a scope resolver yields: a cached record (a collection only when a
+    # `type:` filter names it) or an uncatalogued folder.
+    ScopeRecord: TypeAlias = MediaRecord | CollectionRecord | FolderRecord
+    ScopeItem: TypeAlias = tuple[str, ScopeRecord]
+    # A scope record that can own a file: never a collection.
+    FileScopeRecord: TypeAlias = MediaRecord | FolderRecord
+    # What a SCOPE argument may be: one token, a token list, or nothing (= all).
+    ScopeTarget: TypeAlias = str | list[str] | list[str | None] | None
+
+
+def _resolve_scope_filter_expr(expr) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- str | list[str]; --run-tests scope pins this signature's text
     """Return list of (key, obj) satisfying a filter expression.
 
     Delegates parsing to `_parse_compound_filter()` — supports AND / OR /
@@ -36479,8 +36533,8 @@ def _resolve_scope_filter_expr(expr):
         re.match(r'^layout[:=]', leaf, re.IGNORECASE) for leaf in leaves
     )
 
-    items = []
-    seen = set()
+    items: list[ScopeItem] = []
+    seen: set[str] = set()
     # 1) Cached Plex objects.
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         obj_type = obj.get('type_str') or obj.get('type', '')
@@ -36490,7 +36544,7 @@ def _resolve_scope_filter_expr(expr):
             if not (obj.get('file') or obj.get('files')):
                 continue
         files_dict = obj.get('files', {}) or {}
-        file_matches = list(files_dict.values()) if files_dict else [{}]
+        file_matches: list[FileEntry] | list[dict[str, str]] = list(files_dict.values()) if files_dict else [{}]
         for fi in file_matches:
             if combined_fn(obj, fi):
                 if key not in seen:
@@ -36524,7 +36578,7 @@ def _resolve_scope_filter_expr(expr):
                     pseudo_key = f'Folder:{entry_path}'
                     if pseudo_key in seen:
                         continue
-                    pseudo_obj = {
+                    pseudo_obj: FolderRecord = {
                         'type_str':      'Folder',
                         'type':          'Folder',
                         'file':          entry_path,
@@ -36541,7 +36595,7 @@ def _resolve_scope_filter_expr(expr):
     return items
 
 
-def _get_universal_scope(scope_tokens):
+def _get_universal_scope(scope_tokens) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a ScopeTarget; --run-tests scope pins this signature's text
     """Universal scope resolver — the ONE entry point every command should call.
 
     Accepts a list (or tuple) of scope tokens.  Each token can be ANY of:
@@ -36596,17 +36650,17 @@ def _get_universal_scope(scope_tokens):
         return _resolve_scope_filter_expr(real_tokens)
 
     # Multi-token: intersect per-token key sets.
-    per_token_keysets = []
-    first_order = None
+    per_token_keysets: list[set[str]] = []
+    first_order: list[str] | None = None
     for tok in real_tokens:
         sub_items = _get_disk_map_scope(tok)
         sub_keys = {k for k, _ in sub_items}
         per_token_keysets.append(sub_keys)
         if first_order is None:
             first_order = [k for k, _ in sub_items]
-    survivors = set.intersection(*per_token_keysets) if per_token_keysets else set()
-    seen = set()
-    result = []
+    survivors: set[str] = set.intersection(*per_token_keysets) if per_token_keysets else set()
+    seen: set[str] = set()
+    result: list[ScopeItem] = []
     for k in (first_order or []):
         if k in survivors and k not in seen:
             seen.add(k)
@@ -36616,7 +36670,7 @@ def _get_universal_scope(scope_tokens):
     return result
 
 
-def _get_disk_map_scope(target):
+def _get_disk_map_scope(target) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a ScopeTarget; --run-tests scope pins this signature's text
     """Determine which cache entries to process — UNIVERSAL scope resolver.
 
     Accepts ALL these target shapes:
@@ -36643,7 +36697,7 @@ def _get_disk_map_scope(target):
         else:
             return _get_universal_scope(clean)
 
-    items = []
+    items: list[ScopeItem] = []
     # Filter-expression scope — delegate to the same parser --list uses, so
     # any Cat-B token (lang:fr / original_lang:fr / country:france / year>2020)
     # works identically as SCOPE for every command (--mv, --remux, etc.).
@@ -36668,7 +36722,7 @@ def _get_disk_map_scope(target):
     elif target in PLEX_Library.OBJ_DICT:
         # Library scope — all items in that library
         lib_types = PLEX_Media.OBJ_BY_LIBRARY.get(target, {})
-        for type_str, keys in lib_types.items():
+        for _type_str, keys in lib_types.items():
             for key in keys:
                 obj = PLEX_Media.OBJ_BY_ID.get(key)
                 if obj and (obj.get('file') or obj.get('files')):
@@ -36689,16 +36743,16 @@ def _get_disk_map_scope(target):
             items.append((target, obj))
             series_key = target
             episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
-            for s_str, eps in episodes.items():
-                for e_str, versions in eps.items():
-                    for version, ep_keys in versions.items():
+            for _s_str, eps in episodes.items():
+                for _e_str, versions in eps.items():
+                    for _version, ep_keys in versions.items():
                         for ek in ep_keys:
                             ep_obj = PLEX_Media.OBJ_BY_ID.get(ek)
                             if ep_obj and (ep_obj.get('file') or ep_obj.get('files')):
                                 items.append((ek, ep_obj))
             # Also add Season objects for season dir markers
             series_seasons = PLEX_Media.OBJ_BY_SERIES.get(series_key, {})
-            for s_str, season_key in series_seasons.items():
+            for _s_str, season_key in series_seasons.items():
                 s_obj = PLEX_Media.OBJ_BY_ID.get(season_key)
                 if s_obj:
                     items.append((season_key, s_obj))
@@ -36711,8 +36765,8 @@ def _get_disk_map_scope(target):
             season_match = re.search(r'(\d+)', season_raw)
             S_str = f"S{int(season_match.group(1)):02d}" if season_match else ''
             episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {}).get(S_str, {})
-            for e_str, versions in episodes.items():
-                for version, ep_keys in versions.items():
+            for _e_str, versions in episodes.items():
+                for _version, ep_keys in versions.items():
                     for ek in ep_keys:
                         ep_obj = PLEX_Media.OBJ_BY_ID.get(ek)
                         if ep_obj and (ep_obj.get('file') or ep_obj.get('files')):
@@ -36721,27 +36775,27 @@ def _get_disk_map_scope(target):
             items.append((target, obj))
     return items
 
-def _get_all_filepaths(obj):
+def _get_all_filepaths(obj: ScopeRecord) -> list[str]:
     """Get all file paths from a cache entry.
 
     Returns:
         list of filepath strings
     """
-    paths = []
+    paths: list[str] = []
     files = obj.get('files')
     if files and isinstance(files, dict):
-        for version_str, file_info in files.items():
+        for _version_str, file_info in files.items():
             if isinstance(file_info, dict):
                 fp = file_info.get('filepath', '')
             else:
                 fp = file_info
             if fp:
                 paths.append(fp)
-    elif obj.get('file'):
+    elif obj['type'] != 'Collection' and obj.get('file'):
         paths.append(obj['file'])
     return paths
 
-def _extract_legacy_vu_marker(name):
+def _extract_legacy_vu_marker(name: str) -> str | None:
     """Detect [vu] or [vu@TIMESTAMP] marker in a file/dir name (legacy migration helper).
 
     Case-insensitive: matches [vu], [VU], [Vu], [vu@2026-03-22], [VU@2026-03-22], etc.
@@ -36755,7 +36809,8 @@ def _extract_legacy_vu_marker(name):
     match = re.search(r'\[vu(?:@[^\]]+)?\]', name, re.IGNORECASE)
     return match.group(0) if match else None
 
-def _migrate_legacy_vu_sidecar(name, is_dir=False, obj=None):
+def _migrate_legacy_vu_sidecar(name: str, is_dir: bool = False,
+                               obj: ScopeRecord | None = None) -> tuple[dict[str, Any] | None, str]:
     """Create synthetic sidecar entry from legacy [vu] marker on a file/dir.
 
     Args:
@@ -36818,14 +36873,22 @@ def _migrate_legacy_vu_sidecar(name, is_dir=False, obj=None):
     clean = clean.rstrip('. ')  # remove trailing dots/spaces from stripping
     # Store bare value without brackets (brackets are added by apply_markers/apply_markers_to_dir)
     bare_value = migrated_marker.strip('[]')
-    entry = {'markers': {'watched': bare_value}, 'clean_name': clean}
+    # a sidecar JSON entry, as the sidecar file stores it
+    entry: dict[str, Any] = {'markers': {'watched': bare_value}, 'clean_name': clean}
     if is_dir:
         entry['is_dir'] = True
     return entry, ts_source
 
-def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
-                                  is_dir=False, apply_fn=None, strip_fn=None,
-                                  force=False, replace=False):
+DpmScope = Literal['file', 'movie_dir', 'series_dir', 'season_dir']
+
+
+def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[str, str, FileScopeRecord]],
+                                  sidecar: dict[str, dict[str, Any]], dry_run: bool,
+                                  is_dir: bool = False,
+                                  apply_fn: Callable[[str, dict[str, str]], str] | None = None,
+                                  strip_fn: Callable[[str, dict[str, Any] | None], str] | None = None,
+                                  force: bool = False, replace: bool = False
+                                  ) -> tuple[int, int, int, int, dict[str, str]]:
     """v1.1 PLEX2DISK processor — consumes DISK_PLEX_MAP for one scope.
 
     Args:
@@ -36845,13 +36908,13 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
     assert apply_fn is not None and strip_fn is not None, "apply_fn/strip_fn required"
 
     renamed_count = 0
-    renames = {}
+    renames: dict[str, str] = {}
     skipped_count = 0
     warning_count = 0
     error_count = 0
 
     # Deduplicate paths — for dir scopes, prefer Season/Series/Movie owner objects
-    seen_paths = {}
+    seen_paths: dict[str, tuple[str, FileScopeRecord]] = {}
     for path, cache_key, obj in items_with_paths:
         type_str = obj.get('type_str', '')
         if path in seen_paths:
@@ -36865,7 +36928,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
 
     # Pre-compile every disk2plex regex for this scope so --replace can strip
     # non-canonical markers before writing.
-    _replace_patterns = []
+    _replace_patterns: list[re.Pattern[str]] = []
     if replace:
         for plex_var, var_spec in DISK_PLEX_MAP.items():
             scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
@@ -36920,7 +36983,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
             _scope_set = _normalise_disk_plex_scope(_var_spec.get('scope', 'file')) or ()
             if scope not in _scope_set:
                 continue
-            _aspect_patterns = []
+            _aspect_patterns: list[re.Pattern[str]] = []
             for _, _entry_or_list in (_var_spec.get('values') or {}).items():
                 _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
                 for _entry in _entries:
@@ -36976,7 +37039,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
         # for scalar markers (apply_fn re-wraps).  For list-valued plex_vars
         # the value is already multi-bracketed (e.g. '[de][en]') and apply_fn
         # passes it through.
-        sidecar_shape = {}
+        sidecar_shape: dict[str, str] = {}
         for aspect, marker in new_markers.items():
             if not marker:
                 continue
@@ -37018,7 +37081,7 @@ def _plex2disk_process_scope_dpm(scope, items_with_paths, sidecar, dry_run,
     return (renamed_count, skipped_count, warning_count, error_count, renames)
 
 
-def _update_cache_child_paths(old_dir, new_dir):
+def _update_cache_child_paths(old_dir: str, new_dir: str) -> None:
     """After renaming a directory, update all file paths in the cache that reference old_dir (exact match or children)."""
     old_prefix = old_dir + os.sep
     new_prefix = new_dir + os.sep
@@ -37031,8 +37094,9 @@ def _update_cache_child_paths(old_dir, new_dir):
             obj['file'] = new_dir
         elif f.startswith(old_prefix):
             obj['file'] = new_prefix + f[len(old_prefix):]
-        # Update 'files' dict
-        files = obj.get('files')
+        # Update 'files' dict.  Any: a version's value is a file entry, or the
+        # bare path older caches held
+        files: dict[str, Any] | None = obj.get('files')
         if files and isinstance(files, dict):
             for version_str, file_info in files.items():
                 if isinstance(file_info, dict):
@@ -37048,8 +37112,8 @@ def _update_cache_child_paths(old_dir, new_dir):
                         files[version_str] = new_prefix + file_info[len(old_prefix):]
     # Update OBJ_BY_FILEPATH
     if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') and PLEX_Media.OBJ_BY_FILEPATH:
-        updates = {}
-        removals = []
+        updates: dict[str, list[str]] = {}
+        removals: list[str] = []
         for fp, val in PLEX_Media.OBJ_BY_FILEPATH.items():
             if fp == old_dir:
                 removals.append(fp)
@@ -37061,12 +37125,12 @@ def _update_cache_child_paths(old_dir, new_dir):
             del PLEX_Media.OBJ_BY_FILEPATH[fp]
         PLEX_Media.OBJ_BY_FILEPATH.update(updates)
 
-def _update_sidecar_child_paths(sidecar, old_dir, new_dir):
+def _update_sidecar_child_paths(sidecar: dict[str, dict[str, Any]], old_dir: str, new_dir: str) -> None:
     """After renaming a directory, update all child paths in the sidecar."""
     old_prefix = old_dir + os.sep
     new_prefix = new_dir + os.sep
-    updates = {}
-    removals = []
+    updates: dict[str, dict[str, Any]] = {}
+    removals: list[str] = []
     for path in list(sidecar.keys()):
         if path.startswith(old_prefix):
             new_path = new_prefix + path[len(old_prefix):]
@@ -37076,7 +37140,7 @@ def _update_sidecar_child_paths(sidecar, old_dir, new_dir):
         del sidecar[path]
     sidecar.update(updates)
 
-def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
+def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = False, replace: bool = False) -> None:
     """Sync Plex metadata to disk markers (files + directories) using DISK_MAP config.
 
     Processes 4 scopes in order: series dirs → season dirs → movie dirs → files.
@@ -37133,7 +37197,7 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     total_errors = 0
 
     # Count distinct scopes the DPM config reaches.
-    _dpm_scopes = set()
+    _dpm_scopes: set[str] = set()
     for _v in DISK_PLEX_MAP.values():
         if isinstance(_v, dict):
             for _s in _normalise_disk_plex_scope(_v.get('scope', 'file')) or ():
@@ -37149,13 +37213,13 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
             print(f"Syncing Plex metadata to disk{force_label} ({len(items)} items, {scope_count} scope(s))...")
 
     # --- Collect paths for each scope ---
-    file_items = []       # (filepath, cache_key, obj)
-    movie_dir_items = []  # (dirpath, cache_key, obj)
-    season_dir_items = [] # (dirpath, cache_key, obj)
-    series_dir_items = [] # (dirpath, cache_key, obj)
+    file_items: list[tuple[str, str, FileScopeRecord]] = []       # (filepath, cache_key, obj)
+    movie_dir_items: list[tuple[str, str, FileScopeRecord]] = []  # (dirpath, cache_key, obj)
+    season_dir_items: list[tuple[str, str, FileScopeRecord]] = [] # (dirpath, cache_key, obj)
+    series_dir_items: list[tuple[str, str, FileScopeRecord]] = [] # (dirpath, cache_key, obj)
 
     # Determine which scopes to collect from the DPM config.
-    _dpm_collect_scopes = set()
+    _dpm_collect_scopes: set[str] = set()
     for _vspec in DISK_PLEX_MAP.values():
         if isinstance(_vspec, dict):
             for _s in _normalise_disk_plex_scope(_vspec.get('scope', 'file')) or ():
@@ -37166,6 +37230,8 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     _need_series_dir = 'series_dir' in _dpm_collect_scopes
 
     for cache_key, obj in items:
+        if obj['type'] == 'Collection':
+            continue    # owns no file: _get_all_filepaths() finds none
         obj_type = obj.get('type', '')
         type_str = obj.get('type_str', '')
         filepaths = _get_all_filepaths(obj)
@@ -37204,16 +37270,19 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     # After each dir rename, update child paths in cache + sidecar.
 
     # Per-scope stats for summary
-    scope_stats = []
+    scope_stats: list[str] = []
 
     # DISK_PLEX_MAP — single unified pass over every configured scope.
     if DISK_PLEX_MAP:
-        for _scope, _items, _is_dir, _apply, _strip in [
+        _dpm_passes: list[tuple[DpmScope, list[tuple[str, str, FileScopeRecord]], bool,
+                                Callable[[str, dict[str, str]], str],
+                                Callable[[str, dict[str, Any] | None], str]]] = [
             ('file',        file_items,        False, apply_markers,        strip_our_markers),
             ('season_dir',  season_dir_items,  True,  apply_markers_to_dir, strip_markers_from_dir),
             ('series_dir',  series_dir_items,  True,  apply_markers_to_dir, strip_markers_from_dir),
             ('movie_dir',   movie_dir_items,   True,  apply_markers_to_dir, strip_markers_from_dir),
-        ]:
+        ]
+        for _scope, _items, _is_dir, _apply, _strip in _dpm_passes:
             if not _items:
                 continue
             n_unique = len(set(p for p,_,_ in _items))
@@ -37246,7 +37315,7 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     # wait for it to finish so the next command (or the user's own
     # actions) operates on a consistent view.
     if not dry_run and total_renamed > 0 and not OFFLINE and not READ_ONLY_MODE:
-        _affected_libs = set()
+        _affected_libs: set[str] = set()
         for _entry in items:
             _obj = _entry[1] if isinstance(_entry, tuple) and len(_entry) >= 2 else None
             if not isinstance(_obj, dict):
@@ -37271,7 +37340,9 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
                 update_cache_for_library(None)
                 print("  Cache refreshed; ready for next command.")
 
-def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
+def _plex2disk_clean_scope(sidecar: dict[str, dict[str, Any]], paths: set[str],
+                           strip_fn: Callable[[str, dict[str, Any] | None], str],
+                           dry_run: bool, is_dir: bool = False) -> tuple[int, int, int]:
     """Strip markers from a set of paths using sidecar data.
 
     Args:
@@ -37325,7 +37396,7 @@ def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
                 print(f"  ERROR renaming: {name}", file=sys.stderr)
     return (renamed, skipped, errors)
 
-def cmd_plex2disk_clean(target, dry_run=False):
+def cmd_plex2disk_clean(target: ScopeTarget, dry_run: bool = False) -> None:
     """Strip all disk markers from files and directories, clear sidecar entries.
 
     Processing order: innermost first (files → movie dirs → season dirs → series dirs)
@@ -37355,10 +37426,10 @@ def cmd_plex2disk_clean(target, dry_run=False):
     total_errors = 0
 
     # Collect paths for each scope
-    file_paths = set()
-    movie_dir_paths = set()
-    season_dir_paths = set()
-    series_dir_paths = set()
+    file_paths: set[str] = set()
+    movie_dir_paths: set[str] = set()
+    season_dir_paths: set[str] = set()
+    series_dir_paths: set[str] = set()
 
     for cache_key, obj in items:
         obj_type = obj.get('type', '')
@@ -37396,14 +37467,14 @@ def cmd_plex2disk_clean(target, dry_run=False):
     prefix = "Would strip" if dry_run else "Stripped"
     print(f"\n  {prefix}: {total_renamed}, unchanged: {total_skipped}, errors: {total_errors}")
 
-def _scope_paths_for_obj(obj):
+def _scope_paths_for_obj(obj: ScopeRecord) -> Iterator[tuple[DpmScope, str, str]]:
     """Yield (scope_name, basename) tuples for an item, covering every disk
     location its markers can live at.  Used by --disk2plex to scan for
     user-authored markers on the file AND on movie/season/series dirs.
     """
     obj_type = obj.get('type', '')
     type_str = obj.get('type_str', '')
-    seen = set()
+    seen: set[tuple[DpmScope, str, str]] = set()
     # File scope — only Movie/Episode have media files
     if type_str in ('Movie', 'Episode'):
         for fp in _get_all_filepaths(obj):
@@ -37459,13 +37530,25 @@ def _scope_paths_for_obj(obj):
 # Errors should print a clear line and return False.
 # ============================================================================
 
-def _watched_date(change):
+class Disk2PlexChange(TypedDict):
+    """One disk marker --disk2plex would push to Plex."""
+    plex_var: str
+    disk_val: object
+    plex_val: object
+    source_path: str
+    scope: DpmScope
+    extras: dict[str, object]
+    cache_key: str
+    obj: ScopeRecord
+
+
+def _watched_date(change: Disk2PlexChange) -> object:
     """The WATCHED_DATE a WATCHED change carries (`[vu@YYYY-MM-DD]`), or
     None.  Pushing one writes the Plex database itself, beside the API."""
     return (change.get('extras') or {}).get('WATCHED_DATE')
 
 
-def _push_watched_dpm(obj, change, dry_run):
+def _push_watched_dpm(obj: ScopeRecord, change: Disk2PlexChange, dry_run: bool) -> bool:
     """Push WATCHED (and optional WATCHED_DATE from extras) to Plex."""
     title = obj.get('title', '?')
     item_id = obj.get('item_id')
@@ -37517,7 +37600,7 @@ def _push_watched_dpm(obj, change, dry_run):
         return False
 
 
-def _push_audio_lang_dpm(obj, change, dry_run):
+def _push_audio_lang_dpm(obj: ScopeRecord, change: Disk2PlexChange, dry_run: bool) -> None:
     """v2.69: AUDIO_LANG is a DERIVED attribute, not a push target.
 
     Earlier versions tried to "push" disk's AUDIO_LANG marker into Plex
@@ -37550,7 +37633,7 @@ _DISK2PLEX_PUSH_HANDLERS = {
 }
 
 
-def _ensure_disk_plex_map_uniforms_computed():
+def _ensure_disk_plex_map_uniforms_computed() -> None:
     """If any DISK_PLEX_MAP plex_var has series_strategy='bottom_up' AND any
     Series cache entry is missing the corresponding '<plex_var>_uniform' key,
     run finalize_disk_plex_map_uniform_fields() once to backfill.  Idempotent
@@ -37575,7 +37658,7 @@ def _ensure_disk_plex_map_uniforms_computed():
             update_and_save_cache(CACHE)
 
 
-def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
+def cmd_disk2plex(target: ScopeTarget, dry_run: bool = False, force: bool = False, yes: bool = False) -> None:
     """v1.2 --disk2plex: push disk markers back to Plex via DISK_PLEX_MAP.
 
     Phase 1 (always runs) collects every change that WOULD be applied.
@@ -37614,7 +37697,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
     # Per-item structure: cache_key → {plex_var: change-dict}
     # change-dict = {'plex_var', 'disk_val', 'plex_val', 'source_path',
     #                'scope', 'extras', 'cache_key', 'obj'}
-    pending_by_item = {}
+    pending_by_item: dict[str, dict[str, Disk2PlexChange]] = {}
     skipped_in_sync = 0
     skipped_unknown_handler = 0
 
@@ -37671,7 +37754,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
               f" (compared {len(items)} items).")
         return
 
-    by_var = {}
+    by_var: dict[str, list[Disk2PlexChange]] = {}
     for c in flat:
         by_var.setdefault(c['plex_var'], []).append(c)
 
@@ -37683,7 +37766,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
     for plex_var in sorted(by_var):
         ops = by_var[plex_var]
         # Per-value breakdown
-        by_val = {}
+        by_val: dict[str, int] = {}
         for op in ops:
             by_val.setdefault(str(op['disk_val']), 0)
             by_val[str(op['disk_val'])] += 1
@@ -37768,7 +37851,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
     print(f"\nDone: pushed {pushed}, skipped {skipped + skipped_unknown_handler}, errors {errors}.")
 
 
-def _disk2plex_values_equal(plex_val, disk_val):
+def _disk2plex_values_equal(plex_val: object, disk_val: object) -> bool:
     """Compare a Plex variable's current value to a disk-derived value
     in a tolerant way (str, bool, list, None)."""
     if plex_val is None and disk_val in (None, '', 'unknown'):
@@ -37780,7 +37863,7 @@ def _disk2plex_values_equal(plex_val, disk_val):
     return str(plex_val).lower() == str(disk_val).lower()
 
 
-def _update_cache_filepath(obj, old_path, new_path):
+def _update_cache_filepath(obj: ScopeRecord, old_path: str, new_path: str) -> None:
     """Update filepath in cache entry after rename.
 
     Args:
@@ -37788,9 +37871,10 @@ def _update_cache_filepath(obj, old_path, new_path):
         old_path: Previous filepath
         new_path: New filepath
     """
-    if obj.get('file') == old_path:
+    if obj['type'] != 'Collection' and obj.get('file') == old_path:
         obj['file'] = new_path
-    files = obj.get('files')
+    # Any: a version's value is a file entry, or the bare path older caches held
+    files: dict[str, Any] | None = obj.get('files')
     if files and isinstance(files, dict):
         for version_str, file_info in files.items():
             if isinstance(file_info, dict) and file_info.get('filepath') == old_path:
