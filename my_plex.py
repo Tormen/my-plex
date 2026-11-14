@@ -41059,7 +41059,7 @@ def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'
     else:
         # Try as media identifier (cache key, Plex ID, title)
         try:
-            obj_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(scope_str)  # pyright: ignore[reportPrivateUsage]  # the label command shares PLEX_Media's resolver
+            obj_keys, _, _, _ = PLEX_Media._resolve_to_media_keys(scope_str)
         except SystemExit:
             obj_keys = []
         if not obj_keys:
@@ -43437,6 +43437,11 @@ def show_item_info(identifier: str | None, table_only: bool = False) -> None:
 # the same nine lines as without it): it is refused by name instead.
 _ARGV_REWRITTEN: list[tuple[str, str]] = []
 
+# The value of a variadic option (nargs='*', or a legacy nargs='?'): the
+# words given, a single word, True for a bare flag, None when absent.
+VariadicArg = list[str] | str | bool | None
+
+
 def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
     """err when a word beside FLAG became a --list filter that FLAG's command
     never reads.  TAKES names what FLAG does take, for the message."""
@@ -43449,7 +43454,11 @@ def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
                  "  - the word was meant for another option, or as a second value\n"
                  f"  - a title search was meant: without {flag}, `my-plex <word>` lists what matches")
 
-def execute_global_commands(args, cmd_args):
+def execute_global_commands(args: Any, cmd_args: Any) -> None:
+    # args, cmd_args: the argparse.Namespace of the main and the global
+    # parser.  Any until safe_getattr() is annotated: a Namespace passed to
+    # the unannotated safe_getattr() here changes what pyright infers it
+    # returns at every other call, and flags callers outside this function.
     if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
     #init_plex(args, all=False, server=True, library=True)
 
@@ -43468,7 +43477,7 @@ def execute_global_commands(args, cmd_args):
         run_regression_tests(scope=cmd_args.run_tests or None)
 
     # Handle --missing command
-    _missing_val = safe_getattr(cmd_args, 'missing', None)
+    _missing_val: VariadicArg = safe_getattr(cmd_args, 'missing', None)
     if _missing_val is not None:
         # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
         if _missing_val is True or _missing_val == [] or _missing_val == '':
@@ -43506,7 +43515,7 @@ def execute_global_commands(args, cmd_args):
     # Helper: collapse a SCOPE arg (nargs='*' list, legacy single str, or
     # legacy `True` sentinel) into the shape every cmd_* + _get_disk_map_scope
     # expects: None / str / list[str].
-    def _collapse_scope_arg(val):
+    def _collapse_scope_arg(val):  # type: (VariadicArg) -> VariadicArg
         if val is None or val is True:
             return None
         if isinstance(val, list):
@@ -43577,7 +43586,7 @@ def execute_global_commands(args, cmd_args):
         sys.exit(0)
 
     # Handle --mv / --move command (cross-library file move)
-    mv_args = safe_getattr(cmd_args, 'mv', None)
+    mv_args: list[str] | str | None = safe_getattr(cmd_args, 'mv', None)
     if mv_args is not None:
         if not isinstance(mv_args, list):
             mv_args = [mv_args]
@@ -43623,19 +43632,19 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.none':          'Personal Media',
             'com.plexapp.agents.localmedia':    'Local Media',
         }
-        lib_stats = CACHE.get('library_stats', {})
-        agents = lib_stats.get('agent', {})
-        languages = lib_stats.get('language', {})
-        items_count = lib_stats.get('itemsCount', {})
-        lang_dist = lib_stats.get('language_distribution', {})
+        lib_stats: dict[str, dict[str, Any]] = CACHE.get('library_stats', {})
+        agents: dict[str, str] = lib_stats.get('agent', {})
+        languages: dict[str, str] = lib_stats.get('language', {})
+        items_count: dict[str, int] = lib_stats.get('itemsCount', {})
+        lang_dist: dict[str, dict[str, list[str]]] = lib_stats.get('language_distribution', {})
 
         # Build per-library AUTO_RESOLVE lookup: {lib: 'MULTI' | '<2-letter>'}
-        _auto_resolve_map = {}
+        _auto_resolve_map: dict[str, str] = {}
         for _l, _v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
             _auto_resolve_map[_l] = (str(_v).upper() if str(_v).upper() == 'MULTI'
                                      else str(_v).lower()[:2])
 
-        def _format_language_distribution(lib_name):
+        def _format_language_distribution(lib_name: str) -> str:
             """Render distribution as 'en* 79%, fr 15%, de 2% [MULTI]' with:
               *  = matches Plex library.language for this library
               ** = matches AUTO_RESOLVE override AND that override differs from Plex's lang
@@ -43653,7 +43662,7 @@ def execute_global_commands(args, cmd_args):
             if total == 0 and not is_multi and not override_code:
                 return '-'
             ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:4]
-            parts = []
+            parts: list[str] = []
             for code, n in ordered:
                 pct = round(100 * n / total) if total else 0
                 if pct < 1:
@@ -43689,9 +43698,10 @@ def execute_global_commands(args, cmd_args):
                 'PLEX-MEDIA-INFO-SOURCE', 'ITEMS', _eps_col, 'RATINGS']
         # Build all rows in memory first, then pad each cell to its column's
         # max width and join with TAB (so awk -F'\t' / cut still parse cleanly).
-        _rows = []
+        _rows: list[list[str]] = []
+        lib_name: str
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
-            l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
+            l_type: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
@@ -43743,7 +43753,7 @@ def execute_global_commands(args, cmd_args):
                                             supported, agent, items, missing_src, rating_col)])
         # Column widths: max(len of header, len of each cell). Last column not padded.
         _widths = [max([len(_hdr[i])] + [len(r[i]) for r in _rows]) for i in range(len(_hdr))]
-        def _format_row(cells):
+        def _format_row(cells: list[str]) -> str:
             # Pad every cell except the last; tab-separate them all
             return '\t'.join((cells[i].ljust(_widths[i]) if i < len(cells) - 1 else cells[i])
                               for i in range(len(cells)))
@@ -43877,7 +43887,7 @@ def execute_global_commands(args, cmd_args):
         cached_str = f": last --update-cache: {_cached_at}" if _cached_at else ""
         print(f" >>> PROBLEM DETECTION (based on cache){cached_str}")
 
-        def _run_check(func, *args, **kwargs):
+        def _run_check(func: Callable[..., int | None], *args: object, **kwargs: object) -> int | None:
             """Run a check function, suppressing detail output unless -V/--verbose."""
             if VRB:
                 return func(*args, **kwargs)
@@ -43890,7 +43900,7 @@ def execute_global_commands(args, cmd_args):
         # to the registry).  Users select which categories run via
         # PROBLEM_CATEGORIES_ENABLED in CONF (None = all, [] = none, [...]
         # = only those listed).
-        live_problems = {}
+        live_problems: dict[str, Any] = {}
         for cat_name, cat in _enabled_problem_categories().items():
             if tsv_only and not cat.get('tsv_relevant'):
                 continue
@@ -43970,7 +43980,7 @@ def execute_global_commands(args, cmd_args):
     # (each from JUNK_PATTERNS dict keys); empty → run all patterns.
     # Each pattern carries its own SCOPE; --recursive/--no-recursive on
     # the CLI globally overrides every pattern's RECURSIVE field.
-    junk_val = safe_getattr(cmd_args, 'junk', None)
+    junk_val: VariadicArg = safe_getattr(cmd_args, 'junk', None)
     if junk_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
@@ -43992,7 +44002,7 @@ def execute_global_commands(args, cmd_args):
 
     # Handle --orphaned [SCOPE]: orphan files / empty dirs / stale my-plex sidecars.
     # Sub-flags --files / --dirs / --my-plex narrow the categories; none = all three.
-    orphaned_val = safe_getattr(cmd_args, 'orphaned', None)
+    orphaned_val: VariadicArg = safe_getattr(cmd_args, 'orphaned', None)
     if orphaned_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
@@ -44015,7 +44025,7 @@ def execute_global_commands(args, cmd_args):
     # Handle --naming [SCOPE]: NAMING_RULES-driven canonical renames.
     # Preview by default; --resolve applies; --revert rolls back via the
     # sidecar's naming_original.  --try / --yes honoured like everywhere.
-    naming_val = safe_getattr(cmd_args, 'naming', None)
+    naming_val: VariadicArg = safe_getattr(cmd_args, 'naming', None)
     if naming_val is None:
         naming_val = safe_getattr(args, 'naming', None)
     if naming_val is not None:
@@ -44052,7 +44062,7 @@ def execute_global_commands(args, cmd_args):
     # If the FIRST positional token is a bare integer, treat it as a one-shot
     # override of UNCOLLECTED_MIN_MEMBERS (mirrors the --excess-versions N
     # pattern).  Remaining tokens become the SCOPE.
-    uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
+    uncoll_val: VariadicArg = safe_getattr(cmd_args, 'uncollected', None)
     if uncoll_val is not None:
         # If scope came AFTER --resolve / --auto / --try in the user's
         # argv (e.g. `--uncollected --resolve --auto Movie:123204 Movie:123205`),
@@ -44060,7 +44070,7 @@ def execute_global_commands(args, cmd_args):
         # --uncollected.  Merge them in so the operator's intent — scoping
         # --uncollected — is honoured regardless of arg ordering.
         if not uncoll_val:   # empty list / True / None
-            _cop = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
+            _cop: list[str] | str | None = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
             if _cop:
                 if isinstance(_cop, list):
                     uncoll_val = list(_cop)
@@ -44118,7 +44128,7 @@ def execute_global_commands(args, cmd_args):
         return
 
     # Handle --bad-structure [SCOPE]: media files nested too deeply on disk
-    bs_val = safe_getattr(cmd_args, 'bad_structure', None)
+    bs_val: VariadicArg = safe_getattr(cmd_args, 'bad_structure', None)
     if bs_val is not None:
         # --bad-structure --resolve [--auto] [--try]: auto-flatten when safe,
         # interactive prompt on conflicts.
@@ -44250,7 +44260,7 @@ def execute_global_commands(args, cmd_args):
 #### DO IT
 ###########################################################################################
 
-def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
+def detect_PLEX_OBJ_TYPE(args: argparse.Namespace, obj: str) -> str | None: # determine_PLEX_OBJ_TYPE
     """ returns None if no PLEX_OBJ could be detected! """
     if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
     #init_plex(args)
@@ -44268,14 +44278,14 @@ def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
     return None
     #err("00169", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
 
-def execute_plex_cmd(args, obj, obj_type, obj_args_list):
+def execute_plex_cmd(args: argparse.Namespace, obj: str, obj_type: str, obj_args_list: list[str]) -> list[str]:
     """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
         --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
     if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
     if obj_type not in PLEXOBJ[PARSER]: err("00170", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
     if obj_type not in PLEXOBJ[FN]: err("00171", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
-    obj_parser = PLEXOBJ[PARSER][obj_type]
-    remaining_args = []
+    obj_parser: argparse.ArgumentParser = PLEXOBJ[PARSER][obj_type]
+    remaining_args: list[str] = []
     no_args_given = len(obj_args_list) == 0
     obj_args = obj_parser.parse_args([])
     if no_args_given and hasattr(obj_args, 'list'):
@@ -44300,7 +44310,7 @@ def execute_plex_cmd(args, obj, obj_type, obj_args_list):
     PLEXOBJ[FN][obj_type] (args, obj, obj_args)
     return remaining_args
 
-def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
+def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args: list[str]) -> None:
     global GLOBAL_CMD_PARSER
     # HERE: args.CMD_OR_PLEXOBJECT can be also None (if there was ONLY a global command provided)!
 
@@ -44341,9 +44351,9 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
         sys.exit(0)
 
     state = 0 # means we did not yet find a PLEXOBJECT
-    obj = None
-    obj_type = None
-    obj_args_list = []
+    obj: str | None = None
+    obj_type: str | None = None
+    obj_args_list: list[str] = []
     while len(remaining_args) > 0:
         arg = remaining_args.pop(0)
         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP state={state} [{len(remaining_args)} arg='{arg}', remaining_args = {remaining_args}" )
@@ -44404,7 +44414,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
         # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
         if (state != 2 and state != 3): err("00177", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
-        execute_plex_cmd(args, obj, obj_type, obj_args_list)
+        execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # states 2 and 3 come only after obj and obj_type were set
         match state:
             case 3: continue # state 3: there are NO remaining args left -> we are done :)
             case 2:
@@ -44417,7 +44427,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     continue     # if NOT yet done -> continue to collect obj_args_list or find new PLEXOBJ
                 else: # if no args left -> we also execute the last PLEX_OBJ we had found in this loop
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 2 --> state 0| no remaining_args left! -> now executing the NEW PLEXOBJ (default action)" )
-                    execute_plex_cmd(args, obj, obj_type, obj_args_list)
+                    execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # state 2 is set only when new_obj_type is not None
                     state = 0                                 # it should not matter as we are done now
 
 
@@ -44432,7 +44442,7 @@ def _flag_on_command_line(flag: str) -> bool:
     return any(a == flag or a.startswith(flag + '=') for a in sys.argv[1:])
 
 
-def _resolve_secret_arg(flag: str, value):
+def _resolve_secret_arg(flag: str, value: str | None) -> str | None:
     """A secret passed on the command line, resolved -- and reported if it
     was passed as a literal.
 
@@ -44469,7 +44479,7 @@ def _resolve_secret_arg(flag: str, value):
     return value
 
 
-def refuse_legacy_keys(loaded_config) -> None:
+def refuse_legacy_keys(loaded_config: dict[str, object]) -> None:
     """Stop the run when a config file still sets a key that is no longer
     recognised (a hard cutover): one migration hint per key, and EVERY file
     that sets it -- with layered configs that may be the site config or a
@@ -44678,7 +44688,7 @@ def main():
         sys.exit(0)
 
     # Load configuration file
-    loaded_config = load_config_file(config_args.config_file)
+    loaded_config: dict[str, Any] = load_config_file(config_args.config_file)
 
     # A file named with --config is the file for every my-plex this run
     # starts too -- a pipeline's phases -- through the variable they inherit,
@@ -44718,7 +44728,7 @@ def main():
     # so they must be recomputed here after the config file values have been applied.
     global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
     _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.5})
-    _c = []
+    _c: list[float] = []
     if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
     if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
     REENCODE_THRESHOLD_MBPS    = min(_c) if _c else 2.0
@@ -44786,10 +44796,10 @@ def main():
         re.IGNORECASE
     )
     _new_argv = [sys.argv[0]]
-    _inject_flags = []   # flags to append after the current argv sweep
-    _filter_exprs = []   # category B expressions collected
-    _remove_cols = set()  # column headers to remove (from negative Cat-C)
-    _translations = []   # (original_token, translated_to) for user echo
+    _inject_flags: list[str] = []   # flags to append after the current argv sweep
+    _filter_exprs: list[str] = []   # category B expressions collected
+    _remove_cols: set[str] = set()  # column headers to remove (from negative Cat-C)
+    _translations: list[tuple[str, str]] = []   # (original_token, translated_to) for user echo
     _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
     # v2.1: if the user passes an explicit `library:NAME` anywhere in argv,
     # bare words that happen to match library names are treated as
@@ -45123,7 +45133,7 @@ def main():
     has_watched = '--watched' in sys.argv
     has_unwatched = '--unwatched' in sys.argv
     AUDIO_FLAGS = ['--en', '--english', '--de', '--german', '--fr', '--french']
-    def is_audio_flag(arg):
+    def is_audio_flag(arg: str) -> bool:
         return arg.startswith('--audio') or arg in AUDIO_FLAGS
 
     has_audio = any(is_audio_flag(arg) for arg in sys.argv)
@@ -45131,7 +45141,7 @@ def main():
                              or '--no-language' in sys.argv
                              or '--no-plex-audio-language' in sys.argv)
 
-    def inject_before_first_match(trigger_fn, to_inject, label=""):
+    def inject_before_first_match(trigger_fn: Callable[[str], bool], to_inject: list[str], label: str = "") -> bool:
         """Inject args before the first matching trigger in sys.argv. Returns True if injected."""
         normalized = [sys.argv[0]]
         injected = False
@@ -45151,7 +45161,7 @@ def main():
         if inject_before_first_match(lambda a: a == '--resolve', ['--list'], " (--no-audio-language --resolve)"):
             has_list = True
     elif has_resolve and not (has_list and has_duplicates) and not has_no_audio_language:
-        inject_args = []
+        inject_args: list[str] = []
         if not has_list:       inject_args.append('--list')
         if not has_duplicates: inject_args.append('--duplicates')
         if inject_before_first_match(lambda a: a == '--resolve', inject_args, " (--resolve)"):
@@ -45193,6 +45203,7 @@ def main():
             LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
         load_cache()
         load_media_cache(CACHE)
+        seen: set[str]
         if _complete_what in ('genres', 'genre'):
             seen = set()
             for obj in PLEX_Media.OBJ_BY_ID.values():
@@ -45662,7 +45673,7 @@ def main():
         print(f"{DBGPFX}=== END CONFIGURATION VARIABLES ===\n")
 
     # Validation: Check that all required variables have sensible values
-    validation_errors = []
+    validation_errors: list[str] = []
 
     # PLEX_DB_PATH is not checked here: a command that reads only the cache
     # does not need it.  plex_db_path() stops the ones that read the database.
@@ -45723,7 +45734,7 @@ def main():
     if has_scan:
         # Collect library names from CMD_OR_PLEXOBJECT and remaining_args
         # (remaining_args may contain the library name if --scan was parsed first)
-        scan_lib_candidates = []
+        scan_lib_candidates: list[str] = []
         if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT != '--scan':
             scan_lib_candidates.append(args.CMD_OR_PLEXOBJECT)
         for ra in remaining_args:
@@ -45739,8 +45750,8 @@ def main():
     # All follow the same nargs='*' pattern: flag → optional list of SCOPE tokens.
     # When no value AND CMD_OR_PLEXOBJECT is present, the flag becomes an obj_arg
     # (appended after the object); otherwise it's a global command (prepended).
-    def _reinject_variadic(attr_name, flag_name, prefer_obj_arg_when_bare=True):
-        val = safe_getattr(args, attr_name, None)
+    def _reinject_variadic(attr_name: str, flag_name: str, prefer_obj_arg_when_bare: bool = True) -> None:
+        val: VariadicArg = safe_getattr(args, attr_name, None)
         if val is None:
             return
         _vals = val if isinstance(val, list) else ([val] if val and val is not True else [])
@@ -45757,7 +45768,8 @@ def main():
     # --missing has a slightly different bare-flag policy: always append (it
     # errors at the dispatcher level if no series reference resolves).
     if safe_getattr(args, 'missing', None) is not None:
-        _vals = args.missing if isinstance(args.missing, list) else ([args.missing] if args.missing and args.missing is not True else [])
+        _missing_arg: VariadicArg = args.missing
+        _vals = _missing_arg if isinstance(_missing_arg, list) else ([_missing_arg] if _missing_arg and _missing_arg is not True else [])
         if _vals:
             remaining_args.insert(0, '--missing')
             for _i, _v in enumerate(_vals, 1):
@@ -45787,7 +45799,8 @@ def main():
 
     # Re-inject --renumber into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'renumber', None) is not None:
-        _renumber_vals = args.renumber if isinstance(args.renumber, list) else ([args.renumber] if args.renumber and args.renumber is not True else [])
+        _renumber_arg: VariadicArg = args.renumber
+        _renumber_vals = _renumber_arg if isinstance(_renumber_arg, list) else ([_renumber_arg] if _renumber_arg and _renumber_arg is not True else [])
         if _renumber_vals:
             remaining_args.insert(0, '--renumber')
             for _i, _v in enumerate(_renumber_vals, 1):
@@ -45823,20 +45836,23 @@ def main():
 
     # Re-inject --plex2disk into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'plex2disk', None) is not None:
-        _vals = args.plex2disk if isinstance(args.plex2disk, list) else ([args.plex2disk] if args.plex2disk and args.plex2disk is not True else [])
+        _plex2disk_arg: VariadicArg = args.plex2disk
+        _vals = _plex2disk_arg if isinstance(_plex2disk_arg, list) else ([_plex2disk_arg] if _plex2disk_arg and _plex2disk_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
     # Re-inject --map-to-filename alias (legacy → --plex2disk)
     elif safe_getattr(args, 'map_to_filename', None) is not None:
-        _vals = args.map_to_filename if isinstance(args.map_to_filename, list) else ([args.map_to_filename] if args.map_to_filename and args.map_to_filename is not True else [])
+        _map_to_filename_arg: VariadicArg = args.map_to_filename
+        _vals = _map_to_filename_arg if isinstance(_map_to_filename_arg, list) else ([_map_to_filename_arg] if _map_to_filename_arg and _map_to_filename_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
 
     # Re-inject --remux into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'remux', None) is not None:
-        _remux_vals = args.remux if isinstance(args.remux, list) else ([args.remux] if args.remux and args.remux is not True else [])
+        _remux_arg: VariadicArg = args.remux
+        _remux_vals = _remux_arg if isinstance(_remux_arg, list) else ([_remux_arg] if _remux_arg and _remux_arg is not True else [])
         remaining_args.insert(0, '--remux')
         for _i, _v in enumerate(_remux_vals, 1):
             remaining_args.insert(_i, _v)
@@ -45856,14 +45872,16 @@ def main():
     # Re-inject --mv-to into remaining_args
     # --mv-to DEST_LIB [SCOPE...] — first positional is destination, rest is scope.
     if safe_getattr(args, 'mv', None) is not None:
-        _mv_args = args.mv if isinstance(args.mv, list) else [args.mv]
+        _mv_arg: list[str] | str = args.mv
+        _mv_args = _mv_arg if isinstance(_mv_arg, list) else [_mv_arg]
         for _i, _v in enumerate(_mv_args):
             remaining_args.insert(_i + 1, _v)
         remaining_args.insert(0, '--mv-to')
 
     # Re-inject --disk2plex into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'disk2plex', None) is not None:
-        _vals = args.disk2plex if isinstance(args.disk2plex, list) else ([args.disk2plex] if args.disk2plex and args.disk2plex is not True else [])
+        _disk2plex_arg: VariadicArg = args.disk2plex
+        _vals = _disk2plex_arg if isinstance(_disk2plex_arg, list) else ([_disk2plex_arg] if _disk2plex_arg and _disk2plex_arg is not True else [])
         remaining_args.insert(0, '--disk2plex')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
@@ -45880,7 +45898,8 @@ def main():
 
     # Re-inject --map-from-filename alias (→ --plex2disk --strip), nargs='*'
     if safe_getattr(args, 'map_from_filename', None) is not None:
-        _vals = args.map_from_filename if isinstance(args.map_from_filename, list) else ([args.map_from_filename] if args.map_from_filename and args.map_from_filename is not True else [])
+        _map_from_filename_arg: VariadicArg = args.map_from_filename
+        _vals = _map_from_filename_arg if isinstance(_map_from_filename_arg, list) else ([_map_from_filename_arg] if _map_from_filename_arg and _map_from_filename_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
@@ -45891,7 +45910,8 @@ def main():
     #   1. --rename <TARGETS...> (no CMD_OR_PLEXOBJECT) → targets become PLEX objects, --rename is obj_arg
     #   2. <PLEXOBJ> --rename (bare --rename with CMD_OR_PLEXOBJECT) → append as obj_arg
     if safe_getattr(args, 'rename', None) is not None:
-        _rename_vals = args.rename if isinstance(args.rename, list) else ([args.rename] if args.rename and args.rename is not True else [])
+        _rename_arg: VariadicArg = args.rename
+        _rename_vals = _rename_arg if isinstance(_rename_arg, list) else ([_rename_arg] if _rename_arg and _rename_arg is not True else [])
         if _rename_vals:
             for _i, _v in enumerate(_rename_vals):
                 remaining_args.insert(_i, _v)
