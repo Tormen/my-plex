@@ -669,7 +669,7 @@ _my-plex "$@"
     try:
         with open(zshrc_real, 'r') as f:
             zshrc_content = f.read()
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         return
 
     if '.zsh/completions' in zshrc_content:
@@ -3121,7 +3121,7 @@ def load_config_file(config_file=None):
             if k.isupper() and not k.startswith('_'):
                 try:
                     out[k] = copy.deepcopy(v)
-                except Exception:
+                except (TypeError, copy.Error):
                     out[k] = v
         return out
 
@@ -3149,7 +3149,7 @@ def load_config_file(config_file=None):
                     src = f.read()
             code = compile(src, path, 'exec')
             exec(code, ns)
-        except Exception as e:
+        except Exception as e:  # the config is the user's own Python: whatever it raises is the config's
             where = f"line {e.lineno}: " if isinstance(e, SyntaxError) and e.lineno else ""
             if isinstance(e, Exception) and e.__traceback__ is not None and not where:
                 tb = [fr for fr in __import__('traceback').extract_tb(e.__traceback__) if fr.filename == path]
@@ -3198,25 +3198,20 @@ def apply_config(loaded_config) -> None:
     a loaded config becomes the values the tool runs with: main() calls it,
     and so does --install's root half, which never runs main()."""
     for key in CONFIG_DEFAULTS:
-        try:
-            value = loaded_config.get(key, CONFIG_DEFAULTS[key])
+        value = loaded_config.get(key, CONFIG_DEFAULTS[key])
 
-            # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
-            if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
-                if value and not str(value).startswith('< PLEASE CONFIGURE'):
-                    globals()[key] = value
-                    if DEEPDBG and key in loaded_config:
-                        print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-                continue
+        # For PLEX_URL, PLEX_TOKEN, PLEX_XML_URL: only set if not placeholder
+        if key in ['PLEX_URL', 'PLEX_TOKEN', 'PLEX_XML_URL']:
+            if value and not str(value).startswith('< PLEASE CONFIGURE'):
+                globals()[key] = value
+                if DEEPDBG and key in loaded_config:
+                    print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
+            continue
 
-            # For other config values, apply normally
-            globals()[key] = value
-            if DEEPDBG and key in loaded_config:
-                print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
-        except Exception as e:
-            print(f"{DBGPFX}ERROR applying config for {key}: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+        # For other config values, apply normally
+        globals()[key] = value
+        if DEEPDBG and key in loaded_config:
+            print(f"{DBGPFX}{config_applied_line(key, value)}", file=sys.stderr)
 
 def generate_default_config():
     """Generate a default config file content with all available options.
@@ -7473,7 +7468,7 @@ def _graceful_shutdown_handler(signum, _frame):
                 print(f"Checkpoint saved: {PLEX_Media.items_processed} media files, "
                       f"{len(PLEX_Media.OBJ_BY_ID)} unique objects -- re-run the same "
                       f"command to resume from it.", file=sys.stderr)
-        except Exception as e:
+        except (OSError, pickle.PicklingError) as e:
             print(f"WARNING: Could not save checkpoint: {e}", file=sys.stderr)
         os._exit(128 + signum)
 
@@ -7693,7 +7688,7 @@ def _ssh_effective(alias):
     cmd = ['ssh', '-G'] + (['-F', os.path.expanduser(SSH_CONFIG_FILE)] if SSH_CONFIG_FILE else []) + [alias]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     eff = {}
     for line in out.splitlines():
@@ -8780,7 +8775,7 @@ def load_cache():
                         cache_size_mb = file_size / (1024 * 1024)
                         if DBG:
                             print(f"{DBGPFX}CACHE found: {num_items} items, {cache_size_mb:.2f} MB ({CACHE_FILE})")
-                except Exception as e:
+                except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
                     print(f"CACHE file '{CACHE_FILE}' is CORRUPTED - needs to be rebuilt.")
                     print(f"Error: {e}", file=sys.stderr)
                     print(f"Please run: my-plex --update-cache", file=sys.stderr)
@@ -8838,7 +8833,7 @@ def is_library_name(name: str) -> bool:
         try:
             with open(os.path.join(Path.home(), CACHE_FILE), 'rb') as f:
                 names = frozenset(pickle.load(f).get('obj_by_library', {}))
-        except Exception:  # whatever the file holds, its load reports it
+        except Exception:  # pickle.load of a damaged file raises any exception (pickle's own docs)
             pass
         _LIBRARY_NAMES_IN_CACHE_FILE = names
     return name in _LIBRARY_NAMES_IN_CACHE_FILE
@@ -8908,7 +8903,7 @@ def _write_crash_trace() -> str:
             f.write(f"argv: {sys.argv!r}\n\n")
             traceback.print_exc(file=f)
         return path
-    except Exception as write_failure:
+    except OSError as write_failure:
         return f"(could not be written: {write_failure})"
 
 
@@ -9208,7 +9203,7 @@ def parse_plex_xml_url(xml_url):
             err("00052", "No X-Plex-Token found in the provided XML URL")
 
         return server_url, token
-    except Exception as e:
+    except ValueError as e:
         err("00053", f"Failed to parse Plex XML URL: {e}")
 
 # Connect to Plex server API
@@ -9243,7 +9238,7 @@ def _get_active_scan_section_ids(plex):
                     if sid: active.add(sid)
                 else:
                     active.add('*')  # Unknown section — treat all as active
-    except Exception:
+    except PLEX_ERRORS:
         pass
     return active
 
@@ -9287,7 +9282,7 @@ def wait_for_plex_scans_complete(plex, libraries, scan_start_times, max_wait=120
                         phase1_done.add(lib_name)
                     else:
                         continue  # Still scanning
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"  ✗ Error checking {lib_name}: {e}")
                     del pending[lib_name]
                     continue
@@ -9367,7 +9362,7 @@ def connect_to_plex(plex_url: str, plex_token: str, required: bool = True) -> No
             context="PlexServer connection"
         )
         if DBG: print(f"{DBGPFX}Connected to Plex server: {PLEX_SERVER.friendlyName}")
-    except Exception as e:
+    except PLEX_ERRORS as e:
         if not required:
             PLEX_SERVER = None
             PLEX_CONNECT_ERROR = str(e)
@@ -9519,7 +9514,7 @@ def get_library_stats(supported=True):
                     library_stats['itemsCount'][lib_name] = count
                 elif meta_type == 4: # Episode
                     library_stats['episodesCount'][lib_name] = count
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         if DBG: print(f"{DBGPFX}get_library_stats(): batch DB count failed: {e}")
         # Fallback: individual queries per library
         for title, library in libraries_list:
@@ -9533,14 +9528,14 @@ def get_library_stats(supported=True):
                     query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.deleted_at IS NULL"
                 rows = query_plex_database(query, mode='rows')
                 library_stats['itemsCount'][title] = int(rows[0][0]) if rows else 0
-            except Exception as e2:
+            except (ValueError, IndexError) as e2:
                 if DBG: print(f"{DBGPFX}get_library_stats(): DB count failed for '{title}': {e2}")
             if library.type == 'show':
                 try:
                     ep_query = f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_title}' AND mi.metadata_type = 4 AND mi.deleted_at IS NULL"
                     ep_rows = query_plex_database(ep_query, mode='rows')
                     library_stats['episodesCount'][title] = int(ep_rows[0][0]) if ep_rows else 0
-                except Exception as e2:
+                except (ValueError, IndexError) as e2:
                     if DBG: print(f"{DBGPFX}get_library_stats(): DB episode count failed for '{title}': {e2}")
     if DBG: print(f"{DBGPFX}get_library_stats(supported:{supported}): done")
     return library_stats
@@ -10295,7 +10290,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 shutil.move(filepath, trash_path)
                 if VRB: print(f"{VRBPFX}Moved to trash: {trash_path}")
                 return (True, trash_path)
-            except Exception as e:
+            except OSError as e:
                 print(f"ERROR: Failed to move file to trash: {e}", file=sys.stderr)
                 return (False, None)
 
@@ -10309,7 +10304,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 shutil.move(filepath, dst_path)
                 if VRB: print(f"{VRBPFX}Renamed: {os.path.basename(filepath)} -> {new_filename}")
                 return (True, dst_path)
-            except Exception as e:
+            except OSError as e:
                 print(f"ERROR: Failed to rename file: {e}", file=sys.stderr)
                 return (False, None)
 
@@ -10320,7 +10315,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                 shutil.move(filepath, dest_path)
                 if VRB: print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
                 return (True, dest_path)
-            except Exception as e:
+            except OSError as e:
                 print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
                 return (False, None)
 
@@ -10345,7 +10340,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
                     for filename in filenames:
                         files.append(os.path.join(root, filename))
                 return (True, files)
-            except Exception as e:
+            except OSError as e:
                 if VRB:
                     print(f"{VRBPFX}Warning: Could not access directory {filepath}: {e}")
                 return (False, None)
@@ -10562,7 +10557,7 @@ def query_plex_database(query, mode='rows'):
         print(f"ERROR: Plex database query timed out (>300s)", file=sys.stderr)
         print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
         return None
-    except Exception as e:
+    except (OSError, csv.Error) as e:
         print(f"ERROR: Exception during Plex database query: {e}", file=sys.stderr)
         print(f"  Query: {query[:200]}{'...' if len(query) > 200 else ''}", file=sys.stderr)
         return None
@@ -10615,7 +10610,7 @@ def sync_view_state_into_cache():
     if n_changed and not READ_ONLY_MODE:
         try:
             update_and_save_cache(CACHE)
-        except Exception as e:
+        except (OSError, pickle.PicklingError) as e:
             if DBG: print(f"{DBGPFX}sync_view_state_into_cache: save failed: {e}")
     return (n_changed, len(rows))
 
@@ -10656,7 +10651,7 @@ def query_plex_database_write(query):
     except subprocess.TimeoutExpired:
         print(f"ERROR: Plex DB write timed out", file=sys.stderr)
         return False
-    except Exception as e:
+    except OSError as e:
         print(f"ERROR: Plex DB write exception: {e}", file=sys.stderr)
         return False
 
@@ -11307,7 +11302,7 @@ def _write_resolve_log(command_name, payload):
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(wrapped, f, indent=2, ensure_ascii=False)
         return path
-    except Exception as e:
+    except (OSError, TypeError, ValueError) as e:
         print(f"  > WARNING: could not write {command_name} resolve log: {e}", file=sys.stderr)
         return None
 
@@ -11853,7 +11848,7 @@ def resolve_disk_map_variables(obj, cache_key=None, _bottom_up_pass=False):
     lang = ''
     try:
         lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
-    except Exception:
+    except AttributeError:
         pass
     if lang == 'xn':
         lang = 'none'
@@ -11979,7 +11974,7 @@ def _dpm_entry_active(entry, plex_vars):
         return True
     try:
         return bool(eval(when, {"__builtins__": {}}, plex_vars))
-    except Exception:
+    except Exception:  # evaluates a config expression: whatever it raises is the expression's
         return False
 
 
@@ -12416,7 +12411,7 @@ def _cleanup_managed_orphans():
         try:
             move_to_trash(_err)
             err_trashed.append(_err)
-        except Exception as _e:
+        except (OSError, subprocess.SubprocessError) as _e:
             err_failed.append((_err, str(_e)))
 
     # ---- Summary ------------------------------------------------------
