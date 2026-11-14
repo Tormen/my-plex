@@ -27221,7 +27221,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return f"S{season:0{s_pad}d}E{ep_num:0{e_pad}d}"
 
     @staticmethod
-    def _build_sxex_filename(season, ep_num, original_filename, s_pad=2, e_pad=2):
+    def _build_sxex_filename(season: int, ep_num: int, original_filename: str, s_pad: int = 2, e_pad: int = 2) -> str:
         """Build a filename with S0XE0X prefix prepended to the original filename.
 
         Used by --sort-new to prepend episode numbering to unsorted files.
@@ -27240,7 +27240,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return f"{prefix} - {original_filename}"
 
     @staticmethod
-    def _rename_episode_file(ep, ep_key, new_filename, dry_run, rename_siblings=True):
+    def _rename_episode_file(ep: MediaRecord, ep_key: str, new_filename: str, dry_run: bool,
+                             rename_siblings: bool = True) -> Literal['renamed', 'skipped', 'error']:
         """Rename an episode's file on disk and update the cache.
 
         This is the shared rename primitive used by both --rename and
@@ -27331,13 +27332,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return 'renamed'
 
     @staticmethod
-    def _rename_single_episode(ep, ep_key, pattern, dry_run):
+    def _rename_single_episode(ep, ep_key: str, pattern: str,
+                               dry_run: bool) -> Literal['renamed', 'skipped', 'error']:
         """Rename a single episode file according to pattern.
         Returns 'renamed', 'skipped', or 'error'."""
         from datetime import datetime
 
         # Build variable dict for pattern substitution
-        var = {}
+        var: dict[str, object] = {}   # only handed to pattern.format()
         var['S0XE0X'] = ep.get('S0XE0X', '')
         var['TITLE'] = ep.get('title', '') or ''
         var['ORIGINALTITLE'] = ep.get('originalTitle', '') or ''
@@ -27346,7 +27348,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Library language from cache
         lib_name = ep.get('library', '')
-        lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
+        lang: str = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
         if lang == 'xn':
             lang = 'none'
         var['LANG'] = lang
@@ -27405,13 +27407,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### REENCODE ITEM (force-mark a specific item):
 
     @staticmethod
-    def reencode_item(media_identifier, dry_run=False, force_mark=False):
+    def reencode_item(media_identifier: object, dry_run: bool = False, force_mark: bool = False) -> None:
         """List reencode candidates for a specific item; with force_mark=True write on-disk label
         at the appropriate level (series dir, season dir, or episode file) regardless of threshold.
 
         media_identifier: cache key (e.g. 'Series:102639'), title string, or ID:xxx.
         """
-        obj_keys, explicit_series, explicit_seasons, explicit_episodes = \
+        obj_keys, _explicit_series, explicit_seasons, explicit_episodes = \
             PLEX_Media._resolve_to_media_keys(media_identifier)
 
         if not obj_keys:
@@ -27420,7 +27422,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         reencode_cfg    = PROBLEMS2DISK.get('reencode', {})
         labeltext       = reencode_cfg.get('LABELTEXT_ON_DISK', 'reencode')
-        remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
+        _remove_existing = reencode_cfg.get('REMOVE_EXISTING_LABELS', False)
 
         # Always show what candidates exist above threshold
         print(f"\n--- Reencode Candidates for '{media_identifier}' (threshold: {REENCODE_THRESHOLD_MBPS} Mbps) ---")
@@ -27436,17 +27438,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         label_marker  = f"{ONDISK_LABEL_START_MARKER}{labeltext}{ONDISK_LABEL_END_MARKER}"
 
-        def _add_label(name):
+        def _add_label(name: str) -> str:
             if label_marker in name:
                 return name
             return name.rstrip() + f" {label_marker}"
 
         # Group episode keys by show → figure out highest level to label
-        series_groups = {}  # series_key → {s_str → [fp, ...]}
-        movie_fps   = []
+        series_groups: dict[str, dict[str, list[str]]] = {}  # series_key → {s_str → [fp, ...]}
+        movie_fps: list[str] = []
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             # Skip non-leader siblings of Plex multi-episode files.
@@ -27459,15 +27461,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 movie_fps.extend(fps)
             elif obj_type in ('Episode', 'Episode*'):
                 series_key = obj.get('series_key', '')
-                s_str    = obj.get('S_str', 'S?')
+                s_str: str = obj.get('S_str', 'S?')  # pyright: ignore[reportAssignmentType]  # an Episode always carries S_str (None only on a Movie / Series)
                 if series_key:
                     series_groups.setdefault(series_key, {}).setdefault(s_str, []).extend(fps)
 
         renamed = 0
-        renamed_dirs = {}       # old_dir → new_dir (for updating cache filepaths on actual rename)
-        target_labeled_dirs = set()  # set of final labeled on-disk dir paths (includes already-labeled)
+        renamed_dirs: dict[str, str] = {}       # old_dir → new_dir (for updating cache filepaths on actual rename)
+        target_labeled_dirs: set[str] = set()  # set of final labeled on-disk dir paths (includes already-labeled)
 
-        def _do_rename_tracked(path):
+        def _do_rename_tracked(path: str) -> bool:
             """Rename and track old→new mapping for cache filepath updates.
             Records the target labeled dir in `target_labeled_dirs` regardless of whether
             an actual rename happened (so the post-step cache sync can heal stale entries)."""
@@ -27506,8 +27508,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             all_seasons_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
             non_special = [s for s in all_seasons_data if s != 'S00']
             flagged_non_special = [s for s in seasons if s != 'S00']
-            series_obj  = PLEX_Media.OBJ_BY_ID.get(series_key, {})
-            series_title = series_obj.get('title', series_key)
+            series_obj  = media_record(series_key)
+            _series_title = series_obj['title'] if series_obj else series_key
 
             # Sample a filepath to derive directories
             sample_fp = next((fp for s_fps in seasons.values() for fp in s_fps if fp), None)
@@ -27540,10 +27542,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     # Episode keys in this season that the caller actually pulled in
                     keys_in_this_season = [
                         k for k in obj_keys
-                        if (obj := PLEX_Media.OBJ_BY_ID.get(k)) and obj.get('series_key') == series_key and obj.get('S_str') == s_str
+                        if (obj := media_record(k)) and obj.get('series_key') == series_key and obj.get('S_str') == s_str
                     ]
                     flagged_in_season = set(
-                        (obj.get('E_str', '') if (obj := PLEX_Media.OBJ_BY_ID.get(k)) else '')
+                        (obj.get('E_str', '') if (obj := media_record(k)) else '')
                         for k in keys_in_this_season
                     )
                     # If user explicitly passed Episode(s) in this season, never escalate to season dir.
@@ -27581,13 +27583,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if target_labeled_dirs and not dry_run:
             from itertools import combinations as _combinations
 
-            def _compute_path_variants(labeled_path):
+            def _compute_path_variants(labeled_path: str) -> set[str]:
                 """Return every 'stale' variant of this labeled path (power-set of
                 components that contain label_marker, with the marker stripped).
                 The fully-labeled path itself is included."""
                 components = labeled_path.split(os.sep)
                 idx_with_label = [i for i, c in enumerate(components) if label_marker in c]
-                variants = set()
+                variants: set[str] = set()
                 for r in range(len(idx_with_label) + 1):
                     for subset in _combinations(idx_with_label, r):
                         v = list(components)
@@ -27598,7 +27600,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Build variant → labeled mapping. Longer (more specific) variants win when
             # the same prefix could match multiple labeled dirs.
-            variant_to_labeled = {}
+            variant_to_labeled: dict[str, str] = {}
             for labeled_dir in target_labeled_dirs:
                 for variant in _compute_path_variants(labeled_dir):
                     # If two targets produce the same variant, prefer the longer labeled (deeper) target
@@ -27607,7 +27609,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         variant_to_labeled[variant] = labeled_dir
             sorted_variants = sorted(variant_to_labeled.keys(), key=len, reverse=True)
 
-            def _apply_variant(path):
+            def _apply_variant(path: str) -> str:
                 """If `path` starts with any known variant, return the rewritten
                 (labeled) form; otherwise return `path` unchanged."""
                 for variant in sorted_variants:
@@ -27652,7 +27654,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### RENUMBER:
 
     @staticmethod
-    def renumber_item(media_identifier, dry_run=False, fix_mode=False, plex_mode=False):
+    def renumber_item(media_identifier: object, dry_run: bool = False, fix_mode: bool = False,
+                      plex_mode: bool = False) -> None:
         """List renumber candidates for a specific item; with fix_mode=True rename files.
         With plex_mode=True, show Plex metadata numbering issues instead.
 
@@ -27679,7 +27682,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     ###### HELPER FUNCTIONS:
 
     @staticmethod
-    def _normalize_list_args(audio_filter, media_type, library_name, duplicates_only, broken_only, watched_only, unwatched_only, no_audio_language, excess_versions=None):
+    def _normalize_list_args(audio_filter: str | None, media_type: str | None, library_name: str | None,
+                             duplicates_only: bool, broken_only: bool, watched_only: bool, unwatched_only: bool,
+                             no_audio_language: bool, excess_versions: int | None = None
+                             ) -> tuple[str | None, str | None, bool]:
         if audio_filter:
             lang_map = {
                 'en': 'en', 'english': 'en', 'eng': 'en',
@@ -27703,9 +27709,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return audio_filter, media_type, True  # True = continue
 
     @staticmethod
-    def _print_list_header(library_name, media_type, broken_only, duplicates_only, watched_only, unwatched_only, audio_filter, no_audio_language):
-        def _build_filters():
-            filters = []
+    def _print_list_header(library_name: str | None, media_type: str | None, broken_only: bool,
+                           duplicates_only: bool, watched_only: bool, unwatched_only: bool,
+                           audio_filter: str | None, no_audio_language: bool) -> None:
+        def _build_filters() -> list[str]:
+            filters: list[str] = []
             if media_type:      filters.append(media_type)
             if watched_only:    filters.append("watched")
             elif unwatched_only: filters.append("unwatched")
@@ -27740,7 +27748,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if VRB: print(f"\nMedia in '{library_name}' ({filter_str}):")
 
     @staticmethod
-    def _club_fully_matched_series(obj_keys):
+    def _club_fully_matched_series(obj_keys: list[str]) -> list[str]:
         """v2.56: when a filter returned ALL episodes of a series, collapse
         them under a single Series row (prepend the Series key; drop the
         per-episode rows).  Under -V the Series row is prepended AND the
@@ -27753,13 +27761,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if not obj_keys:
             return obj_keys
         # Group Episode keys in `obj_keys` by their series_key.
-        matched_eps_per_series = {}  # series_key -> set of episode keys in obj_keys
-        positions = {}               # series_key -> first index where one of its eps appears
-        non_episode_keys = []        # non-Episode items keep their original order
-        episode_pos = {}             # episode_key -> original index (for stable replay under -V)
+        matched_eps_per_series: dict[str, set[str]] = {}  # series_key -> set of episode keys in obj_keys
+        positions: dict[str, int] = {}               # series_key -> first index where one of its eps appears
+        non_episode_keys: list[tuple[int, str]] = []        # non-Episode items keep their original order
+        episode_pos: dict[str, int] = {}             # episode_key -> original index (for stable replay under -V)
         for idx, k in enumerate(obj_keys):
-            o = PLEX_Media.OBJ_BY_ID.get(k) or {}
-            if o.get('type') != 'Episode':
+            o = media_record(k)
+            if o is None or o['type'] != 'Episode':
                 non_episode_keys.append((idx, k))
                 continue
             sk = o.get('series_key')
@@ -27772,11 +27780,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # For each series in the match: count total cached episodes.
         # If matched == total → CLUB.
-        clubbed_series = {}  # series_key -> first_position (for ordering)
-        kept_eps = []        # episode keys that were NOT clubbed
+        clubbed_series: dict[str, int] = {}  # series_key -> first_position (for ordering)
+        kept_eps: list[tuple[int, str]] = []        # episode keys that were NOT clubbed
         for sk, ep_set in matched_eps_per_series.items():
             total = 0
-            for s_str, vmap in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(sk, {}).items():
+            for _s_str, vmap in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(sk, {}).items():
                 if isinstance(vmap, dict):
                     for _eklist in vmap.values():
                         if isinstance(_eklist, list):
@@ -27800,7 +27808,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Under -V: ALSO keep the matched episodes (below the Series header).
         if VRB:
-            ep_keys_clubbed = []
+            ep_keys_clubbed: list[tuple[int, str]] = []
             for sk in clubbed_series:
                 for ek in matched_eps_per_series.get(sk, ()):
                     ep_keys_clubbed.append((episode_pos[ek], ek))
@@ -27811,14 +27819,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return result
 
     @staticmethod
-    def _list_broken_files(obj_keys, library_name):
-        broken_files = []
-        seen_keys = set()
+    def _list_broken_files(obj_keys: list[str], library_name: str | None) -> int:
+        broken_files: list[tuple[str, float | None, str | None, str]] = []
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj or obj.get('type') not in ['Episode', 'Movie']:
                 continue
             if library_name and obj.get('library') != library_name:
@@ -27958,14 +27966,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         print(f"\n{'KEY':<{key_w}} | {'SEVERITY':<12} | {'DIFF%':<8} | {'DURATION':>10} | {'V':>4} | {'LIBRARY':<15} | FILEPATH")
         print("-" * 155)
         for key, diff_pct, severity, filepath in broken_files:
-            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
-            library = obj.get('library', 'Unknown')[:15]
-            plex_duration_raw = obj.get('duration') or 0
+            obj = media_record(key)
+            library = (obj['library'] if obj else 'Unknown')[:15]
+            plex_duration_raw = (obj['duration'] if obj else None) or 0
             plex_duration_min = plex_duration_raw / 60000 if plex_duration_raw > 0 else -1
             severity_str = severity.upper() if severity else 'BROKEN'
             diff_str = f"{diff_pct:.2f}%" if diff_pct is not None else "N/A"
             dur_str = f"{plex_duration_min:.1f} min" if plex_duration_raw > 0 else "-1"
-            ver_count = len(obj.get('files', {}))
+            ver_count = len(obj['files']) if obj else 0
             ver_str = f"{ver_count:>4}" if ver_count > 1 else "    "
             print(f"{key:<{key_w}} | {severity_str:<12} | {diff_str:<8} | {dur_str:>10} | {ver_str} | {library:<15} | {filepath}")
         print(f"\nTotal: {len(broken_files)} broken/truncated files found")
@@ -27974,15 +27982,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(broken_files)
 
     @staticmethod
-    def _list_excess_versions(obj_keys, library_name, version_limit):
+    def _list_excess_versions(obj_keys: list[str], library_name: str | None, version_limit: int) -> tuple[int, int]:
         """List files belonging to entries with >= version_limit versions."""
-        excess_files = []
-        seen_keys = set()
+        excess_files: list[tuple[int | str, str, int, int, str, str]] = []
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj or obj.get('type') not in ['Episode', 'Movie']:
                 continue
             if library_name and obj.get('library') != library_name:
@@ -28005,7 +28013,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 title = f"{series} {s_str}{e_str}" + (f" {title}" if title else "")
             plex_id = obj.get('id', 'N/A')
             library = obj.get('library', 'Unknown')
-            for idx, (version, file_info) in enumerate(files_dict.items(), 1):
+            for idx, (_version, file_info) in enumerate(files_dict.items(), 1):
                 filepath = file_info.get('filepath', '')
                 excess_files.append((plex_id, title, idx, total, library, filepath))
 
@@ -28033,21 +28041,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(excess_files), entry_count
 
     @staticmethod
-    def _list_unmatched(obj_keys, library_name):
+    def _list_unmatched(obj_keys: list[str], library_name: str | None) -> int:
         """List items needing rematch in Plex: local:// guid (never matched) or
         matched but missing external IDs (no TMDB/TVDB → can't scrape episodes).
         Returns count of unmatched items."""
         if getattr(PLEX_Media, '_cache_missing_guid', False):
             print("  WARNING: Cache is missing 'guid' field — run: my-plex --update-cache --force-plex", file=sys.stderr)
             return 0
-        unmatched = []       # (obj_type, plex_id, title, library, filepath, reason)
+        unmatched: list[tuple[str, int | str, str, str, str, str]] = []       # (obj_type, plex_id, title, library, filepath, reason)
         missing_guid_count = 0
-        seen_keys = set()
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             obj_type = obj.get('type')
@@ -28092,7 +28100,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(unmatched)
 
     @staticmethod
-    def _list_no_audio_language(obj_keys, library_name, field='audio_languages'):
+    def _list_no_audio_language(obj_keys: list[str], library_name: str | None, field: str = 'audio_languages') -> int:
         """List items (Movie/Episode) whose only audio language is 'unknown'.
 
         Plex's inconsistent placeholders (und/mis/mul/zxx/empty) are collapsed
@@ -28108,7 +28116,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         """
         count = 0
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             obj_type = obj.get('type')
@@ -28116,6 +28124,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             # Fall back to 'audio_languages' when the requested field is
             # missing on this object (pre-v2.9 caches don't carry _plex).
+            audio_languages: list[str]
             if field in obj:
                 audio_languages = obj.get(field) or []
             else:
@@ -28133,7 +28142,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return count
 
     @staticmethod
-    def _list_missing_episodes(obj_keys, library_name, apply_completion_filter=False):
+    def _list_missing_episodes(obj_keys: list[str], library_name: str | None, apply_completion_filter: bool = False) -> int:
         """Count missing episodes across all series (cache-only, reads episodes.tsv from disk).
         Returns total number of missing episodes across all series that have TSV data.
 
@@ -28153,9 +28162,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _exclude = [str(x) for x in (MISSING_COMPLETION_EXCLUDE_SHOWS or [])]
         _min_pct = float(MISSING_MIN_COMPLETION_PCT or 0)
         # Collect series keys from obj_keys
-        series_keys = set()
+        series_keys: set[str] = set()
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type') == 'Series':
@@ -28166,7 +28175,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     series_keys.add(sk)
 
         for series_key in sorted(series_keys):
-            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+            series_obj = media_record(series_key)
             if not series_obj:
                 continue
             series_dir_server = series_obj.get('file', '')
@@ -28184,8 +28193,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # have_set) so --missing reports it.  --broken skips 0-byte
             # files for the same reason (they aren't truncated; they're
             # not there at all).
-            def _ep_has_real_content(ek):
-                _eo = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            def _ep_has_real_content(ek: str) -> bool:
+                _eo = media_record(ek)
+                if _eo is None:
+                    return False
                 _fdict = _eo.get('files') or {}
                 if not _fdict:
                     return False
@@ -28201,18 +28212,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     return True
                 return False
             cached_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
-            have_set = set()
+            have_set: set[tuple[int, int]] = set()
             for s_str, eps in cached_episodes.items():
                 try:
                     s_num = int(s_str[1:])
                 except (ValueError, IndexError):
                     continue
-                e_nums = []
+                e_nums: list[int] = []
                 for e_str, vmap in eps.items():
                     # vmap: {version: [episode_keys]}; an Episode counts as
                     # "have" only if SOME version of it has filesize > 0.
                     if isinstance(vmap, dict):
-                        ep_keys = []
+                        ep_keys: list[str] = []
                         for _eks in vmap.values():
                             if isinstance(_eks, list):
                                 ep_keys.extend(_eks)
@@ -28273,15 +28284,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_missing
 
     @staticmethod
-    def _list_unsorted(obj_keys, library_name=None):
+    def _list_unsorted(obj_keys: list[str], library_name: str | None = None) -> int:
         """List series with episodes directly in the series directory (no season subdirs).
         Plex needs season directories (e.g. 'Season 01/') for proper organization.
         Accepts obj_keys of any type — derives series_keys internally.
         Returns count of unsorted series."""
         # Derive unique series keys from obj_keys
-        target_series_keys = set()
+        target_series_keys: set[str] = set()
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+            obj = media_record(key)
+            if obj is None:
+                continue
             t = obj.get('type', '')
             if t == 'Series':
                 target_series_keys.add(key)
@@ -28294,11 +28307,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if sk:
                     target_series_keys.add(sk)
 
-        unsorted = []
+        unsorted: list[tuple[str, str, str, str, list[tuple[str, str, str]]]] = []
         for series_key, seasons in PLEX_Media.OBJ_BY_SERIES_EPISODES.items():
             if series_key not in target_series_keys:
                 continue
-            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+            series_obj = media_record(series_key)
             if not series_obj:
                 continue
             if series_obj.get('type') != 'Series':
@@ -28311,12 +28324,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             title = series_obj.get('title', '?')
             library = series_obj.get('library', '?')
             # Check all episode filepaths: if dirname(filepath) == series_dir, it's unsorted
-            unsorted_files = []
+            unsorted_files: list[tuple[str, str, str]] = []
             for s_str, episodes in seasons.items():
                 for e_str, versions in episodes.items():
-                    for version, ep_keys in versions.items():
+                    for _version, ep_keys in versions.items():
                         for ep_key in ep_keys:
-                            ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                            ep = media_record(ep_key)
                             if not ep:
                                 continue
                             filepath = ep.get('file', '')
@@ -28345,7 +28358,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(unsorted)
 
     @staticmethod
-    def _normalize_for_comparison(name):
+    def _normalize_for_comparison(name: str) -> str:
         """Normalize a name for fuzzy comparison: lowercase, strip punctuation, collapse whitespace."""
         import re
         name = name.lower()
@@ -28362,7 +28375,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return name
 
     @staticmethod
-    def _title_similarity(dir_name, title, original_title=''):
+    def _title_similarity(dir_name: str, title: str, original_title: str = '') -> tuple[float, str]:
         """Compute best similarity ratio between a directory name and a Plex title/originalTitle.
         Returns (best_ratio, matched_against) where matched_against is 'title' or 'originalTitle'.
         Uses difflib.SequenceMatcher for token-level similarity."""
@@ -28390,7 +28403,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return best_ratio, matched
 
     @staticmethod
-    def _list_library_language_mismatch(obj_keys, library_name):
+    def _list_library_language_mismatch(obj_keys: list[str], library_name: str | None) -> int:
         """List Movies/Episodes whose effective language doesn't match the
         configured language of the library they live in.
 
@@ -28414,20 +28427,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         TMDB original_language (path B).
         """
         # Build library → expected-language map (only single-code entries).
-        _lib_expected = {}
+        _lib_expected: dict[str, str] = {}
         for _lname, _lval in (AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY or []):
             if str(_lval).upper() == 'MULTI':
                 continue
             _lib_expected[_lname] = str(_lval).lower()
         if not _lib_expected:
             return 0   # no library has a configured language → nothing to flag
-        flagged = []
-        seen_keys = set()
+        flagged: list[tuple[str, MediaRecord, str, str, str | None]] = []
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj or obj.get('type') not in ('Movie', 'Episode'):
                 continue
             lib = obj.get('library', '')
@@ -28471,7 +28484,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  {'-'*16}  {'-'*14}  ----  -----  ---------------------")
         # via='p' → got=primary Plex audio; via='o' → got=TMDB original_language
         # (italics-equivalent: append a small marker so the operator sees the source).
-        _via_markers = {'p': '', 'o': '*'}
+        _via_markers: dict[str | None, str] = {'p': '', 'o': '*'}
         for key, obj, got, expected, via in flagged:
             lib   = obj.get('library', '')
             title = obj.get('title') or '?'
@@ -28492,7 +28505,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     @staticmethod
-    def _list_uncollected(obj_keys, library_name):
+    def _list_uncollected(obj_keys: list[str], library_name: str | None) -> int:
         """v2.69: List Movies belonging to a TMDB collection that aren't yet
         grouped under a matching Plex Collection.
 
@@ -28511,14 +28524,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         Returns count of flagged groups.
         """
         # Build TMDB-collection-id → [(cache_key, movie_obj)]
-        coll_groups = {}
-        seen = set()
+        coll_groups: dict[str, list[tuple[str, MediaRecord]]] = {}
+        seen: set[str] = set()
         for key in obj_keys:
             if key in seen:
                 continue
             seen.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
-            if obj.get('type') != 'Movie':
+            obj = media_record(key)
+            if obj is None or obj.get('type') != 'Movie':
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
@@ -28533,14 +28546,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return 0
 
         # Build inverse: Plex-Collection → set of member ratingKeys.
-        plex_coll_members = {}   # collection_cache_key → (title, set(ratingKeys as int))
+        plex_coll_members: dict[str, tuple[str, set[int], str]] = {}   # collection_cache_key → (title, set(ratingKeys as int))
         for k, o in PLEX_Media.OBJ_BY_ID.items():
-            if o.get('type') != 'Collection':
+            if o['type'] != 'Collection':
                 continue
             mids = set(int(m) for m in (o.get('member_ids') or []) if str(m).isdigit())
             plex_coll_members[k] = (o.get('title') or '', mids, o.get('library', ''))
 
-        flagged = []   # (tmdb_cid, tmdb_name, [(key, obj)], existing_plex_coll_or_None)
+        flagged: list[tuple[str, str, list[tuple[str, MediaRecord]], None]] = []   # (tmdb_cid, tmdb_name, [(key, obj)], existing_plex_coll_or_None)
         for cid, members in coll_groups.items():
             if len(members) < UNCOLLECTED_MIN_MEMBERS:
                 continue
@@ -28554,7 +28567,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # per-library: each library subset must be covered by a Plex
             # Collection IN THAT LIBRARY.  A group is "uncollected" if
             # ANY library subset is uncovered.
-            per_lib_rks = {}   # library_name → set(ratingKeys)
+            per_lib_rks: dict[str, set[int]] = {}   # library_name → set(ratingKeys)
             for _, _o in members:
                 _lib = _o.get('library') or ''
                 _rk = int(_o.get('id') or 0)
@@ -28595,7 +28608,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_misplaced(obj_keys, library_name):
+    def _list_misplaced(obj_keys: list[str], library_name: str | None) -> int:
         """v2.69: List items whose media TYPE doesn't fit their library.
 
         Two sub-detectors:
@@ -28613,19 +28626,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         Both signals are heuristic — auto only flags; the user decides via
         --misplaced --resolve whether to act.
         """
-        flagged_series = []   # (key, obj, max_min_duration, episode_count)
-        flagged_movies = []   # (key, obj, sxxeyy_token)
+        flagged_series: list[tuple[str, MediaRecord, int, int, int]] = []   # (key, obj, max_min_duration, episode_count)
+        flagged_movies: list[tuple[str, MediaRecord, str]] = []   # (key, obj, sxxeyy_token)
         # SxxEyy (with or without separators), [NxNN], or bare N x NN with
         # word-boundaries to avoid matching e.g. "1080p" or "x264" tags.
         _series_pat   = re.compile(r'(?i)(S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b)')
-        seen_keys = set()
+        seen_keys: set[str] = set()
         # Plex stores container_duration in MILLISECONDS.
         thresh_ms = (MISPLACED_FEATURE_LENGTH_MIN or 0) * 60 * 1000
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+            obj = media_record(key)
+            if obj is None:
+                continue
             lib = obj.get('library', '')
             if library_name and lib != library_name:
                 continue
@@ -28633,7 +28648,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # ----- (A) Series → Movies -----
             if t == 'Series':
-                episode_keys = []
+                episode_keys: list[str] = []
                 seasons = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
                 for _s, ep_dict in (seasons or {}).items():
                     for _e, version_dict in (ep_dict or {}).items():
@@ -28643,12 +28658,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     continue
                 if len(episode_keys) > MISPLACED_MAX_EPISODES:
                     continue
-                _min_dur_ms = None
+                _min_dur_ms: int | None = None
                 _max_dur_ms = 0
                 _all_feature = True
                 for ek in episode_keys:
-                    eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
-                    files = eobj.get('files') or {}
+                    eobj = media_record(ek)
+                    files = eobj.get('files') or {} if eobj else {}
                     _ep_dur_ms = 0
                     for fi in files.values():
                         if not isinstance(fi, dict):
@@ -28707,7 +28722,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total
 
     @staticmethod
-    def _list_multi_movie_folder(obj_keys, library_name):
+    def _list_multi_movie_folder(obj_keys: list[str], library_name: str | None) -> int:
         """List wrappers that host MULTIPLE distinct Plex Movies.
 
         Plex expects one Movie per wrapper directory.  When two films share
@@ -28722,13 +28737,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         Detection: group Movies by `_derive_wrapper_path(obj)` and flag
         any wrapper holding ≥2 distinct Movie ratingKeys.
         """
-        wrapper_to_movies = {}
-        seen_keys = set()
+        wrapper_to_movies: dict[str, list[tuple[str, MediaRecord]]] = {}
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj or obj.get('type') != 'Movie':
                 continue
             if library_name and obj.get('library') != library_name:
@@ -28757,7 +28772,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_bad_structure(obj_keys, library_name):
+    def _list_bad_structure(obj_keys: list[str], library_name: str | None) -> int:
         """List items whose on-disk path is nested too deeply.
 
         Plex expects a FLAT structure for media files:
@@ -28771,14 +28786,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         Returns the count of flagged items.
         """
-        flagged = []
-        seen_keys = set()
-        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        flagged: list[tuple[str, str, str, int, int, str, str]] = []
+        seen_keys: set[str] = set()
+        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             obj_type = obj.get('type')
@@ -28792,9 +28807,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             # Walk over every file (Movies can have multiple versions).
             files_dict = obj.get('files') or {}
-            file_entries = []
+            file_entries: list[str] = []
             if files_dict:
-                for ver, fi in files_dict.items():
+                for _ver, fi in files_dict.items():
                     fp = fi.get('filepath') if isinstance(fi, dict) else fi
                     if fp:
                         file_entries.append(fp)
@@ -28843,7 +28858,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         for cache_key, _obj_type, lib, depth, ref_d, kind, filepath in flagged:
             depth_str = f"{depth}>{ref_d}" if kind == 'deep' else f"{depth}<{ref_d}"
             print(f"  {cache_key:<16} {lib:<15} {depth_str:>5}  {filepath}")
-        msg = []
+        msg: list[str] = []
         if n_deep:    msg.append(f"{n_deep} too deep")
         if n_shallow: msg.append(f"{n_shallow} too shallow (bare at library root)")
         print(f"\n  {len(flagged)} item(s) flagged: {', '.join(msg)}.")
@@ -28854,19 +28869,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_potential_mismatches(obj_keys, library_name):
+    def _list_potential_mismatches(obj_keys: list[str], library_name: str | None) -> int:
         """List items where the Plex title doesn't match the filesystem directory name.
         This detects potential Plex misidentifications (Fix Match needed).
         Returns count of potential mismatches."""
         MISMATCH_THRESHOLD = 0.35  # below this = likely mismatch
 
-        mismatches = []
-        seen_keys = set()
+        mismatches: list[tuple[str, str, str, str, str, str, str, float]] = []
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             obj_type = obj.get('type')
@@ -28884,8 +28899,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Get scraped title if available
             scraped_title = ''
             if obj_type == 'Series':
-                scraped_data = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key, {})
-                scraped_title = scraped_data.get('title', '')
+                scraped_data = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key)
+                scraped_title = scraped_data['title'] if scraped_data else ''
 
             # Get the directory/file name to compare against
             if obj_type == 'Series':
@@ -28903,7 +28918,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
 
             # Always compare Plex title against directory name (strongest signal for user intent)
-            dir_ratio, dir_matched = PLEX_Media._title_similarity(dir_name, title, original_title)
+            dir_ratio, _dir_matched = PLEX_Media._title_similarity(dir_name, title, original_title)
             comparison = f"DIR: {dir_name}"
             ratio = dir_ratio
 
@@ -28947,7 +28962,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(mismatches)
 
     @staticmethod
-    def _detect_multi_version_mismatch(obj):
+    def _detect_multi_version_mismatch(obj: MediaRecord) -> list[str] | None:
         """Return list[str] of reasons the version-grouping looks wrong, or None.
 
         Three independent signals; ANY one triggers:
@@ -28965,14 +28980,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if len(files) < 2:
             return None
 
-        reasons = []
+        reasons: list[str] = []
 
         limit = MULTI_VERSION_MAX_MOVIE if obj_type == 'Movie' else MULTI_VERSION_MAX_SERIES
         if len(files) > limit:
             reasons.append(f"version count {len(files)} > {limit}")
 
-        durations = []
-        parent_dirs = set()
+        durations: list[float] = []
+        parent_dirs: set[str] = set()
         for fi in files.values():
             if not isinstance(fi, dict):
                 continue
@@ -28998,7 +29013,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return reasons or None
 
     @staticmethod
-    def _list_multi_version_mismatches(obj_keys, library_name):
+    def _list_multi_version_mismatches(obj_keys: list[str], library_name: str | None) -> int:
         """List Movies / Episodes where Plex has bundled what's almost certainly
         DIFFERENT content under a single ID. See _detect_multi_version_mismatch
         for the three signals.
@@ -29009,15 +29024,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         almost always evaporate these.  A per-series tally line is shown
         instead so the user knows they're shelved, not lost.
         """
-        skip_series_keys = getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set()
-        flagged = []
-        suppressed = {}  # series_key → list of (key, obj, reasons)
-        seen_keys = set()
+        skip_series_keys: set[str] = getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set()
+        flagged: list[tuple[str, MediaRecord, list[str]]] = []
+        suppressed: dict[str, list[tuple[str, MediaRecord, list[str]]]] = {}  # series_key → list of (key, obj, reasons)
+        seen_keys: set[str] = set()
         for key in obj_keys:
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if library_name and obj.get('library') != library_name:
@@ -29080,13 +29095,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print()
             print(f"SUPPRESSED (inside already-mismatched series — fix series match first):")
             for sk in sorted(suppressed):
-                so = PLEX_Media.OBJ_BY_ID.get(sk) or {}
-                stitle = (so.get('title') or '?')[:35]
+                so = media_record(sk)
+                stitle = ((so['title'] if so else None) or '?')[:35]
                 print(f"{sk:<14} '{stitle}'  →  {len(suppressed[sk])} multi-version mismatch(es) inside")
         return len(flagged)
 
     @staticmethod
-    def _list_mismatched(obj_keys, library_name):
+    def _list_mismatched(obj_keys: list[str], library_name: str | None) -> int:
         """Combined --mismatched listing: title-vs-directory mismatches +
         multi-version mismatches (Plex grouping of unrelated files)."""
         print("=== Title vs Directory mismatches ===")
@@ -29097,7 +29112,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return (title_n or 0) + (multi_n or 0)
 
     @staticmethod
-    def _resolve_scope_to_disk_paths(scope_val):
+    def _resolve_scope_to_disk_paths(scope_val: str | list[object] | bool | None) -> list[str]:
         """Translate a --junk scope into a list of disk root paths to walk
         RECURSIVELY (on the Plex server, via SSH).  Pure-filesystem
         operation — does NOT require the file to be in Plex's index.
@@ -29107,10 +29122,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
           library name                  → that library's root paths
           cache key / title / filter    → wrapper dirs of resolved objects
         """
-        paths = set()
+        paths: set[str] = set()
         # Empty scope → every library root.
         if scope_val is None or scope_val is True or scope_val == '' or scope_val == [] or scope_val == ['']:
-            for lib_name, lib_obj in PLEX_Library.OBJ_DICT.items():
+            for _lib_name, lib_obj in PLEX_Library.OBJ_DICT.items():
                 for loc in (getattr(lib_obj, 'locations', None) or []):
                     if loc:
                         paths.add(loc.rstrip('/'))
@@ -29133,7 +29148,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Fall through: resolve to keys, derive wrapper dirs.
         obj_keys, _lib, _scope = resolve_scope_to_keys(scope_val)
         for k in (obj_keys or []):
-            obj = PLEX_Media.OBJ_BY_ID.get(k) or {}
+            obj = media_record(k)
+            if obj is None:
+                continue
             wrapper = ''
             try:
                 wrapper = _derive_wrapper_path(obj) or ''
@@ -29148,7 +29165,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return sorted(paths)
 
     @staticmethod
-    def _list_junk_files(pattern_names=None, resolve=False, dry_run=False, yes=False, recursive_override=None):
+    def _list_junk_files(pattern_names: list[str] | None = None, resolve: bool = False, dry_run: bool = False,
+                         yes: bool = False, recursive_override: bool | None = None) -> int:
         """Pure disk-walk junk detection driven by JUNK_PATTERNS (dict).
 
         pattern_names       None or [] → run every pattern.
@@ -29181,8 +29199,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         print(f"  Patterns selected: {[n for n, _ in selected]}")
 
-        flagged = []  # list of (filepath, pattern_name, reason)
-        roots_seen = set()
+        flagged: list[tuple[str, str, str]] = []  # list of (filepath, pattern_name, reason)
+        roots_seen: set[str] = set()
         for pat_name, (scope, regex, max_bytes, pat_recursive) in selected:
             roots = PLEX_Media._resolve_scope_to_disk_paths(scope)
             if not roots:
@@ -29191,7 +29209,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             roots_seen.update(roots)
             recursive = pat_recursive if recursive_override is None else bool(recursive_override)
             depth_args_remote = '' if recursive else ' -maxdepth 1'
-            depth_args_local  = [] if recursive else ['-maxdepth', '1']
+            depth_args_local: list[str] = [] if recursive else ['-maxdepth', '1']
             # Hidden FOLDERS (.Trashes, .Spotlight-V100, ...) are not entered;
             # hidden FILES are judged like any other: .DS_Store and ._* are
             # what the os_index and macos_dotunderscore patterns exist for.
@@ -29226,7 +29244,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     size_pass  = (max_bytes <= 0) or (sz <= max_bytes)
                     if not (regex_pass and size_pass):
                         continue
-                    bits = []
+                    bits: list[str] = []
                     if regex is not None:
                         bits.append(f"regex /{regex.pattern}/")
                     if max_bytes > 0:
@@ -29241,14 +29259,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         # Default output: per-category STATISTICS only.  The full per-file
         # listing (thousands of lines on a dirty tree) is verbose-gated.
-        per_category = {}
+        per_category: dict[str, list[tuple[str, str]]] = {}
         for fp, pat_name, reason in flagged:
             per_category.setdefault(pat_name, []).append((fp, reason))
 
-        def _pattern_criteria(pat_name):
+        def _pattern_criteria(pat_name: str) -> str:
             """Human-readable criteria summary for one compiled pattern."""
             _scope, _regex, _max_bytes, _recursive = compiled[pat_name]
-            bits = []
+            bits: list[str] = []
             if _regex is not None:
                 bits.append(f"regex /{_regex.pattern}/")
             if _max_bytes > 0:
@@ -29288,7 +29306,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 print(f"  Aborted — no files trashed.")
                 return len(flagged)
 
-        log_entries = []
+        log_entries: list[dict[str, str | None]] = []
         trashed = 0
         for fp, pat_name, reason in flagged:
             ok, info = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
@@ -29316,8 +29334,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_orphaned(do_files=True, do_dirs=True, do_my_plex=True,
-                       scope=None, resolve=False, dry_run=False, yes=False):
+    def _list_orphaned(do_files: bool = True, do_dirs: bool = True, do_my_plex: bool = True,
+                       scope: list[str] | None = None, resolve: bool = False, dry_run: bool = False,
+                       yes: bool = False) -> int:
         """Detect orphan files / empty dirs / stale my-plex sidecars.
 
         Categories (any combination; default = all three):
@@ -29334,8 +29353,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         Returns total count of orphans handled (across all rounds).
         """
-        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
-        roots = []
+        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        roots: list[str] = []
         for paths in lib_locations.values():
             for p in (paths or []):
                 if p and p not in roots:
@@ -29344,10 +29363,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print("  No library roots known — run --update-cache first.")
             return 0
 
-        def _scan_files():
+        def _scan_files() -> list[tuple[str, str]]:
             if not do_files:
                 return []
-            found = []  # (filepath, reason)
+            found: list[tuple[str, str]] = []  # (filepath, reason)
             for d in roots:
                 escaped = shlex.quote(d)
                 if PLEX_DB_REMOTE_HOST:
@@ -29360,7 +29379,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if VRB: print(f"  ⚠ orphan-files scan failed for {d}: {r.stderr.strip()}")
                     continue
                 # Group files by parent dir.
-                per_dir = {}
+                per_dir: dict[str, list[str]] = {}
                 for line in r.stdout.splitlines():
                     fp = line.strip()
                     if not fp or not fp.startswith('/'):
@@ -29368,8 +29387,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     parent, _, fname = fp.rpartition('/')
                     per_dir.setdefault(parent, []).append(fname)
                 for parent, fnames in per_dir.items():
-                    video_stems = set()
-                    non_video = []
+                    video_stems: set[str] = set()
+                    non_video: list[tuple[str, str]] = []
                     for fn in fnames:
                         stem, _, ext = fn.rpartition('.')
                         ext_lc = ('.' + ext).lower() if ext else ''
@@ -29399,10 +29418,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         found.append((f'{parent}/{fn}', 'no video sibling'))
             return sorted(set(found))
 
-        def _scan_dirs():
+        def _scan_dirs() -> list[str]:
             if not do_dirs:
                 return []
-            found = []
+            found: list[str] = []
             for d in roots:
                 escaped = shlex.quote(d)
                 if PLEX_DB_REMOTE_HOST:
@@ -29422,18 +29441,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # last child is rmdir'd.
             return sorted(set(found), key=lambda p: -p.count('/'))
 
-        def _scan_my_plex():
+        def _scan_my_plex() -> list[tuple[str, str]]:
             if not do_my_plex:
                 return []
             state_dir = _MOVE_STATE_DIR
             if not os.path.isdir(state_dir):
                 return []
             # Build the live rk set from OBJ_BY_ID keys ('Type:NNN').
-            live_rks = set()
+            live_rks: set[str] = set()
             for k in PLEX_Media.OBJ_BY_ID.keys():
                 if ':' in k:
                     live_rks.add(k.split(':', 1)[1])
-            found = []
+            found: list[tuple[str, str]] = []
             for fn in os.listdir(state_dir):
                 if not fn.endswith('.json'):
                     continue
@@ -29443,7 +29462,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 found.append((os.path.join(state_dir, fn), f'rk {rk} not in cache'))
             return sorted(found)
 
-        log_entries = []
+        log_entries: list[dict[str, str]] = []
         total_files = total_dirs = total_my_plex = 0
         rounds = 0
         while True:
@@ -29494,7 +29513,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     break
                 yes = True
             for fp, reason in files:
-                ok, info = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
+                ok, _info = my_plex_file_operation('TRASH', fp, PLEX_DB_REMOTE_HOST)
                 log_entries.append({'category': 'files', 'path': fp,
                                     'reason': reason,
                                     'status': 'trashed' if ok else 'failed'})
@@ -29536,7 +29555,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total_files + total_dirs + total_my_plex
 
     @staticmethod
-    def _list_naming(scope=None, resolve=False, dry_run=False, yes=False, revert=False):
+    def _list_naming(scope: list[str] | None = None, resolve: bool = False, dry_run: bool = False,
+                     yes: bool = False, revert: bool = False) -> int:
         """--naming: template-driven canonical renames from NAMING_RULES.
 
         Modes:
@@ -29549,7 +29569,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         Returns the number of renames planned / applied / reverted.
         """
-        sidecar = load_disk_map_sidecar()
+        sidecar: dict[str, Any] = load_disk_map_sidecar()   # the disk_map.json payload
 
         # ---- --revert: independent of NAMING_RULES -------------------------
         if revert:
@@ -29564,7 +29584,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print("  Populate NAMING_RULES in your CONF to opt in.  See: my-plex --help naming")
             return 0
 
-        lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+        lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
         library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
         if not library_roots:
             print("  No library roots known — run --update-cache first.")
@@ -29627,8 +29647,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return 0
 
         from datetime import date
-        applied, failed = [], []
-        log_entries = []
+        applied: list[object] = []   # plan entries, only counted
+        failed: list[object] = []
+        log_entries: list[dict[str, str]] = []
         for entry in renames:
             old_path, new_path = entry['old_path'], entry['new_path']
             new_name = os.path.basename(new_path)
@@ -29698,22 +29719,23 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(applied)
 
     @staticmethod
-    def _naming_revert(sidecar, scope=None, dry_run=False, yes=False):
+    def _naming_revert(sidecar: dict[str, Any], scope: list[str] | None = None, dry_run: bool = False,
+                       yes: bool = False) -> int:   # sidecar: the disk_map.json payload
         """Roll back --naming renames using the sidecar's naming_original.
 
         Scope-restricted when SCOPE is given (an entry qualifies when its
         path IS one of the scope items' paths or lives underneath one).
         Children revert before parent dirs (deepest paths first)."""
-        candidates = [(path, entry) for path, entry in sidecar.items()
+        candidates: list[tuple[str, dict[str, Any]]] = [(path, entry) for path, entry in sidecar.items()
                       if isinstance(entry, dict) and entry.get('naming_original')]
         if scope:
-            scope_paths = set()
+            scope_paths: set[str] = set()
             for _key, _obj in _get_universal_scope(scope):
                 _fp = _obj.get('file')
                 if _fp:
                     scope_paths.add(_fp)
                     scope_paths.add(os.path.dirname(_fp))
-            def _in_scope(path):
+            def _in_scope(path: str) -> bool:
                 return any(path == sp or path.startswith(sp + os.sep)
                            or sp.startswith(path + os.sep)
                            for sp in scope_paths)
@@ -29739,7 +29761,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return 0
 
         reverted, failed = 0, 0
-        log_entries = []
+        log_entries: list[dict[str, str]] = []
+        entry: dict[str, Any]
         for path, entry in candidates:
             original_name = entry['naming_original']
             restored_path = os.path.join(os.path.dirname(path), original_name)
@@ -29788,15 +29811,29 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  Log: {log_path}")
         return reverted
 
+    class _NumberingIssueRow(TypedDict):
+        """One row of --renumber --plex: a series' NumberingIssue with the series' names."""
+        series_key: str
+        series_title: str
+        scraped_title: str
+        library: str
+        source: str
+        season: str
+        episode_plex: str
+        episode_scraped: str | None
+        reason: str
+
     @staticmethod
-    def _list_episode_numbering_issues(obj_keys, library_name=None):
+    def _list_episode_numbering_issues(obj_keys: list[str], library_name: str | None = None) -> int:
         """List series where Plex and scraped episode numbering disagree.
         Accepts obj_keys of any type — derives series_keys internally.
         Returns count of issues found."""
         # Derive target series keys from obj_keys
-        target_series_keys = set()
+        target_series_keys: set[str] = set()
         for key in obj_keys:
-            obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+            obj = media_record(key)
+            if obj is None:
+                continue
             t = obj.get('type', '')
             if t == 'Series':
                 target_series_keys.add(key)
@@ -29809,7 +29846,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if sk:
                     target_series_keys.add(sk)
 
-        issues = []
+        issues: list[PLEX_Media._NumberingIssueRow] = []
         for series_key, scraped_data in PLEX_Media.OBJ_BY_SERIES_SCRAPED.items():
             if series_key not in target_series_keys:
                 continue
@@ -29817,7 +29854,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not series_issues:
                 continue
 
-            series_dict = PLEX_Media.OBJ_BY_ID.get(series_key)
+            series_dict = media_record(series_key)
             if not series_dict:
                 continue
             if library_name and series_dict.get('library') != library_name:
@@ -29860,7 +29897,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     @staticmethod
-    def _count_remux_candidates(obj_keys, library_name):
+    def _count_remux_candidates(obj_keys: list[str], library_name: str | None) -> int:
         """Count file versions whose migration action is 'remux' (outdated
         container + safe stream-copy codecs + lang resolved).  Mirrors the
         signature of _list_reencode_candidates so it slots into the same
@@ -29869,7 +29906,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         Returns total count of remux-candidate file versions."""
         n = 0
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if library_name and obj.get('library') != library_name:
@@ -29884,7 +29921,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return n
 
     @staticmethod
-    def _list_reencode_candidates(obj_keys, library_name):
+    def _list_reencode_candidates(obj_keys: list[str], library_name: str | None) -> int:
         """List media files whose avg bitrate exceeds REENCODE_THRESHOLD_MBPS.
         For series: rolls up episodes → seasons → show when ALL items in a group are flagged.
         Columns: KEY  DETAILS(bitrate/size/duration)  LABELED  FILEPATH
@@ -29893,13 +29930,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         labeltext  = PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')
         lbl_marker = f"{ONDISK_LABEL_START_MARKER}{labeltext}{ONDISK_LABEL_END_MARKER}"
 
-        flagged_movies = []
+        flagged_movies: list[tuple[float, int, int, str, str, int, str, str, str, bool, str]] = []
         # {series_key: {s_str: {e_str: [(bitrate, filesize, dur_ms, cache_key, ep_title, filepath, version, labeled)]}}}
-        flagged_ep_by_series = {}
-        series_meta = {}  # {series_key: (series_title, library)}
+        flagged_ep_by_series: dict[str, dict[str, dict[str, list[tuple[float, int, int, str, str, str, str, None, str]]]]] = {}
+        series_meta: dict[str, tuple[str, str]] = {}  # {series_key: (series_title, library)}
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             obj_type = obj.get('type', '')
@@ -29952,7 +29989,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         flagged_ep_by_series[series_key] = {}
                         series_meta[series_key] = (obj.get('series', series_key), lib)
                     # Store filepath for level-specific labeled checks at render time
-                    flagged_ep_by_series[series_key].setdefault(s_str, {}).setdefault(e_str, []).append(
+                    # an Episode always carries S_str and E_str (None only on a Movie / Series)
+                    flagged_ep_by_series[series_key].setdefault(s_str, {}).setdefault(e_str, []).append(  # pyright: ignore[reportArgumentType, reportCallIssue]
                         (bitrate_mbps, filesize, duration_ms, key, ep_title, filepath, version, None, reasons_str)
                     )
 
@@ -29967,27 +30005,27 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  No reencode candidates{scope} found (threshold: {threshold} Mbps).")
             return 0
 
-        def _fmt_item(br, sz, dur_ms):
+        def _fmt_item(br: float, sz: float, dur_ms: float) -> str:
             return f"{br:.1f}Mbps/{format_filesize(int(sz)).replace(' ', '')}/{int(dur_ms/60000)}min"
 
-        def _fmt_avg(items, n=None):
+        def _fmt_avg(items: list[tuple[float, int, int, str, str, str, str, None, str]], n: int | None = None) -> str:
             n = n or len(items)
             avg_br = sum(i[0] for i in items) / n
             avg_sz = sum(i[1] for i in items) / n
             return f"avg {avg_br:.1f}Mbps/{format_filesize(int(avg_sz)).replace(' ', '')} ({n} eps)"
 
-        def _sample_fp(seasons_dict):
+        def _sample_fp(seasons_dict: dict[str, dict[str, list[tuple[float, int, int, str, str, str, str, None, str]]]]) -> str:
             for s_eps in seasons_dict.values():
                 for e_items in s_eps.values():
                     if e_items:
                         return e_items[0][5]
             return ''
 
-        def _labeled_at_dir(dirpath):
+        def _labeled_at_dir(dirpath: str) -> bool:
             """True if the label is on the directory itself (not inherited from parent/child)."""
             return labeltext in parse_ondisk_labels(os.path.basename(dirpath)) if dirpath else False
 
-        def _labeled_at_file(filepath):
+        def _labeled_at_file(filepath: str) -> bool:
             """True if the label is on the episode filename itself."""
             return labeltext in parse_ondisk_labels(os.path.basename(filepath)) if filepath else False
 
@@ -29997,7 +30035,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         hdr   = f"  {'KEY':<{key_w}}  {'DETAILS':<{det_w}}  {'LABELED':<{lbl_w}}  FILE/PATH"
         sep   = "  " + "-" * (key_w + det_w + lbl_w + 14)
 
-        def _row(cache_key, details, labeled, filepath, indent=0):
+        def _row(cache_key: str, details: str, labeled: bool, filepath: str, indent: int = 0) -> None:
             pad = ' ' * (indent * 2)
             k   = f"{pad}{cache_key}"
             lbl = lbl_marker if labeled else ''
@@ -30037,7 +30075,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 all_seasons_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
                 all_season_keys  = [s for s in all_seasons_data if s != 'S00']
 
-                season_rollup = {}
+                season_rollup: dict[str, str] = {}
                 for s_str, ep_dict_total in all_seasons_data.items():
                     if s_str not in flagged_seasons:
                         season_rollup[s_str] = 'none'
@@ -30088,7 +30126,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     _RE_SXEX = re.compile(r'[Ss](\d+)[Ee](\d+)')
 
     @staticmethod
-    def _scraped_padding(series_key):
+    def _scraped_padding(series_key: str) -> tuple[int, int]:
         """Compute S/E padding widths from SCRAPED episode data (ground truth).
 
         The series' S_pad_width / E_pad_width are derived from Plex's E_idx values,
@@ -30097,10 +30135,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
         Returns (s_pad, e_pad) — minimum 2 each.
         """
-        scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-        scraped_eps = scraped.get('episodes', {})
+        scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+        scraped_eps = scraped['episodes'] if scraped else {}
         if not scraped_eps:
-            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {})
+            series_obj = media_record(series_key)
+            if series_obj is None:
+                return (2, 2)
             return (series_obj.get('S_pad_width', 2) or 2,
                     series_obj.get('E_pad_width', 2) or 2)
         max_s = 0
@@ -30119,7 +30159,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
     @staticmethod
     @staticmethod
-    def _list_renumber_title_mismatch(obj_keys, library_name=None):
+    def _list_renumber_title_mismatch(obj_keys: list[str], library_name: str | None = None) -> int:
         """v2.69: Episodes whose Plex title at S/E slot disagrees with the
         scraped TSV's title at the SAME slot.
 
@@ -30138,21 +30178,21 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         """
         import difflib
 
-        def _norm(s):
+        def _norm(s: str | None) -> str:
             return re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).strip()
 
-        flagged = []  # [(ep_key, ep_obj, plex_title, scraped_title, scraped_orig)]
+        flagged: list[tuple[str, MediaRecord, str, str, str]] = []  # [(ep_key, ep_obj, plex_title, scraped_title, scraped_orig)]
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
-            if obj.get('type') not in ('Episode', 'Episode*'):
+            obj = media_record(key)
+            if obj is None or obj.get('type') not in ('Episode', 'Episode*'):
                 continue
             if library_name and obj.get('library') != library_name:
                 continue
             sk = obj.get('series_key', '')
             if not sk:
                 continue
-            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(sk, {})
-            eps_by_season = scraped.get('episodes', {})
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(sk)
+            eps_by_season = scraped['episodes'] if scraped else {}
             if not eps_by_season:
                 continue
             s_str = obj.get('S_str') or ''
@@ -30167,7 +30207,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             # Match if plex_t is a substring of scraped (or vice versa) OR
             # similarity >= 0.75 against either scraped title.
-            def _ok(a, b):
+            def _ok(a: str, b: str) -> bool:
                 if not a or not b:
                     return False
                 if a in b or b in a:
@@ -30197,38 +30237,38 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_renumber_candidates(obj_keys, library_name=None):
+    def _list_renumber_candidates(obj_keys: list[str], library_name: str | None = None) -> int:
         """List episodes whose filename numbering disagrees with scraped data.
         Only episodes WITH scraped data are considered (no-scraped-data is a
         separate problem category).  Returns count of flagged episodes."""
         # {series_key: [(ep_key, ep_obj, current_sxex, expected_sxex, filepath, reason)]}
-        flagged_by_series = {}
-        series_meta = {}  # {series_key: (series_title, library)}
+        flagged_by_series: dict[str, list[tuple[str, MediaRecord, str, str, str, str]]] = {}
+        series_meta: dict[str, tuple[str, str]] = {}  # {series_key: (series_title, library)}
 
         # Pre-build positional mapping per series per season:
         # {series_key: {S_str: {plex_position_0based: scraped_e_num}}}
-        _pos_map_cache = {}
+        _pos_map_cache: dict[str, dict[str, dict[str, int]]] = {}
 
-        def _get_correct_e_num(series_key, s_str, ep_key):
+        def _get_correct_e_num(series_key: str, s_str: str, ep_key: str) -> int | None:
             """Get the correct E number from scraped data via positional matching.
             Returns the scraped episode number, or None if not determinable."""
             if series_key not in _pos_map_cache:
                 _pos_map_cache[series_key] = {}
             if s_str not in _pos_map_cache[series_key]:
-                scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-                scraped_season = scraped.get('episodes', {}).get(s_str, {})
+                scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+                scraped_season = scraped['episodes'].get(s_str, {}) if scraped else {}
                 scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys()) if scraped_season else []
                 # Get Plex episodes in this season sorted by E_idx
                 ep_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {}).get(s_str, {})
-                plex_keys_sorted = []
+                plex_keys_sorted: list[str] = []
                 for e_str_k in sorted(ep_data.keys()):
                     for _ver, _ep_keys in ep_data[e_str_k].items():
                         for _ek in _ep_keys:
-                            _eo = PLEX_Media.OBJ_BY_ID.get(_ek)
+                            _eo = media_record(_ek)
                             if _eo and not PLEX_Media._is_multi_ep_non_leader(_ek, _eo):
                                 plex_keys_sorted.append(_ek)
                 # Build position→scraped_e_num map
-                pos_map = {}
+                pos_map: dict[str, int] = {}
                 for i, pk in enumerate(plex_keys_sorted):
                     if i < len(scraped_e_nums):
                         pos_map[pk] = scraped_e_nums[i]
@@ -30236,7 +30276,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return _pos_map_cache[series_key].get(s_str, {}).get(ep_key)
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type', '') not in ('Episode', 'Episode*'):
@@ -30252,8 +30292,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
 
             # Only act when scraped data exists
-            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-            scraped_eps = scraped.get('episodes', {})
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+            scraped_eps = scraped['episodes'] if scraped else {}
             if not scraped_eps:
                 continue  # no scraped data → separate problem category
 
@@ -30268,7 +30308,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             s_idx = obj.get('S_idx', 0) or 0
             e_idx = obj.get('E_idx', 0) or 0
-            s_str = obj.get('S_str', f'S{s_idx:02d}')
+            s_str: str = obj.get('S_str', f'S{s_idx:02d}')  # pyright: ignore[reportAssignmentType]  # an Episode always carries S_str (None only on a Movie / Series)
 
             # Determine the correct E number from scraped data.
             # scraped_E_str is set when Plex and scraped explicitly disagree,
@@ -30319,7 +30359,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 series_title, lib = series_meta[series_key]
                 eps = flagged_by_series[series_key]
                 print(f"\n  {series_key:<20}  [{lib}]  {series_title}  ({len(eps)} episode(s))")
-                for ep_key, ep_obj, current, expected, fp, reason in sorted(eps, key=lambda x: (x[1].get('S_idx', 0), x[1].get('E_idx', 0))):
+                for ep_key, _ep_obj, current, expected, fp, reason in sorted(eps, key=lambda x: (x[1].get('S_idx', 0), x[1].get('E_idx', 0))):
                     fn = os.path.basename(fp)
                     print(f"    {ep_key:<20}  current: {current}  expected: {expected}  ({reason})")
                     print(f"    {'':20}  file: {fn}")
@@ -30333,30 +30373,31 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total
 
     @staticmethod
-    def _fix_renumber_candidates(obj_keys, library_name=None, dry_run=False):
+    def _fix_renumber_candidates(obj_keys: list[str], library_name: str | None = None,
+                                 dry_run: bool = False) -> tuple[int, int]:
         """Rename episodes whose filename numbering disagrees with scraped data.
         Only episodes WITH scraped data are actionable.  Returns (renamed, errors) tuple."""
         from datetime import datetime
 
         # Reuse detection logic from _list_renumber_candidates — same positional mapping
-        _pos_map_cache = {}
+        _pos_map_cache: dict[str, dict[str, dict[str, int]]] = {}
 
-        def _get_correct_e_num(series_key, s_str, ep_key):
+        def _get_correct_e_num(series_key: str, s_str: str, ep_key: str) -> int | None:
             if series_key not in _pos_map_cache:
                 _pos_map_cache[series_key] = {}
             if s_str not in _pos_map_cache[series_key]:
-                scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-                scraped_season = scraped.get('episodes', {}).get(s_str, {})
+                scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+                scraped_season = scraped['episodes'].get(s_str, {}) if scraped else {}
                 scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys()) if scraped_season else []
                 ep_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {}).get(s_str, {})
-                plex_keys_sorted = []
+                plex_keys_sorted: list[str] = []
                 for e_str_k in sorted(ep_data.keys()):
                     for _ver, _ep_keys in ep_data[e_str_k].items():
                         for _ek in _ep_keys:
-                            _eo = PLEX_Media.OBJ_BY_ID.get(_ek)
+                            _eo = media_record(_ek)
                             if _eo and not PLEX_Media._is_multi_ep_non_leader(_ek, _eo):
                                 plex_keys_sorted.append(_ek)
-                pos_map = {}
+                pos_map: dict[str, int] = {}
                 for i, pk in enumerate(plex_keys_sorted):
                     if i < len(scraped_e_nums):
                         pos_map[pk] = scraped_e_nums[i]
@@ -30368,7 +30409,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         skipped_count = 0
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type', '') not in ('Episode', 'Episode*'):
@@ -30382,8 +30423,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if not series_key:
                 continue
 
-            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-            scraped_eps = scraped.get('episodes', {})
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+            scraped_eps = scraped['episodes'] if scraped else {}
             if not scraped_eps:
                 continue
 
@@ -30398,7 +30439,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             s_idx = obj.get('S_idx', 0) or 0
             e_idx = obj.get('E_idx', 0) or 0
-            s_str = obj.get('S_str', f'S{s_idx:02d}')
+            s_str: str = obj.get('S_str', f'S{s_idx:02d}')  # pyright: ignore[reportAssignmentType]  # an Episode always carries S_str (None only on a Movie / Series)
 
             correct_e = _get_correct_e_num(series_key, s_str, key)
             if correct_e is None:
@@ -30417,7 +30458,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     continue  # already correct
 
             # Build new filename using RENUMBER_NAME_PATTERN
-            var = {}
+            var: dict[str, object] = {}   # only handed to RENUMBER_NAME_PATTERN.format()
             var['S0XE0X'] = expected_sxex
             var['TITLE'] = obj.get('title', '') or ''
             var['ORIGINALTITLE'] = obj.get('originalTitle', '') or ''
@@ -30425,7 +30466,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             var['YEAR'] = str(obj.get('year', '')) if obj.get('year') else ''
 
             lib_name = obj.get('library', '')
-            lang = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
+            lang: str = CACHE.get('library_stats', {}).get('language', {}).get(lib_name, '')
             if lang == 'xn':
                 lang = 'none'
             var['LANG'] = lang
@@ -30486,15 +30527,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return renamed_count, error_count
 
     @staticmethod
-    def _list_renumber_lack_of_data(obj_keys, library_name=None):
+    def _list_renumber_lack_of_data(obj_keys: list[str], library_name: str | None = None) -> int:
         """List shows whose episodes have no scraped data — can't determine correct numbering.
         Returns count of episodes without scraped data."""
         # {series_key: count}
-        series_no_data = {}
-        series_meta = {}
+        series_no_data: dict[str, int] = {}
+        series_meta: dict[str, tuple[str, str]] = {}
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type', '') not in ('Episode', 'Episode*'):
@@ -30506,8 +30547,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             series_key = obj.get('series_key', '')
             if not series_key:
                 continue
-            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-            if scraped.get('episodes'):
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+            if scraped and scraped['episodes']:
                 continue  # has scraped data → not this category
             series_no_data[series_key] = series_no_data.get(series_key, 0) + 1
             if series_key not in series_meta:
@@ -30531,14 +30572,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total
 
     @staticmethod
-    def _list_renumber_season_mismatch(obj_keys, library_name=None):
+    def _list_renumber_season_mismatch(obj_keys: list[str], library_name: str | None = None) -> int:
         """List episodes where S-number in filename doesn't match the season directory.
         Returns count of mismatched episodes."""
-        flagged = []  # [(ep_key, series_key, filename_s, dir_s, filepath)]
-        series_meta = {}
+        flagged: list[tuple[str, str, int, int, str]] = []  # [(ep_key, series_key, filename_s, dir_s, filepath)]
+        series_meta: dict[str, tuple[str, str]] = {}
 
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type', '') not in ('Episode', 'Episode*'):
@@ -30577,7 +30618,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             return 0
 
         # Group by show
-        by_series = {}
+        by_series: dict[str, list[tuple[str, int, int, str]]] = {}
         for ep_key, series_key, file_s, dir_s, fp in flagged:
             by_series.setdefault(series_key, []).append((ep_key, file_s, dir_s, fp))
 
@@ -30597,17 +30638,17 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return len(flagged)
 
     @staticmethod
-    def _list_renumber_abs_mismatch(obj_keys, library_name=None):
+    def _list_renumber_abs_mismatch(obj_keys: list[str], library_name: str | None = None) -> int:
         """List episodes where Plex's abs ordering disagrees with scraped data ordering.
         Compares positional ordering: if Plex E_idx sequence within a season doesn't
         match scraped episode number sequence. Returns count of mismatched episodes."""
-        flagged_by_series = {}
-        series_meta = {}
+        flagged_by_series: dict[str, list[tuple[str, str, int | None, int]]] = {}
+        series_meta: dict[str, tuple[str, str]] = {}
 
         # Collect shows from obj_keys
-        series_keys_seen = set()
+        series_keys_seen: set[str] = set()
         for key in set(obj_keys):
-            obj = PLEX_Media.OBJ_BY_ID.get(key)
+            obj = media_record(key)
             if not obj:
                 continue
             if obj.get('type', '') not in ('Episode', 'Episode*'):
@@ -30617,12 +30658,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             series_key = obj.get('series_key', '')
             if series_key and series_key not in series_keys_seen:
                 series_keys_seen.add(series_key)
-                series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {})
-                series_meta[series_key] = (series_obj.get('title', series_key), series_obj.get('library', '?'))
+                series_obj = media_record(series_key)
+                series_meta[series_key] = ((series_obj['title'], series_obj['library']) if series_obj
+                                           else (series_key, '?'))
 
         for series_key in series_keys_seen:
-            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key, {})
-            scraped_eps = scraped.get('episodes', {})
+            scraped = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(series_key)
+            scraped_eps = scraped['episodes'] if scraped else {}
             if not scraped_eps:
                 continue  # no scraped data → different category
 
@@ -30634,12 +30676,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 # Scraped episode numbers in order
                 scraped_e_nums = sorted(int(e.lstrip('E')) for e in scraped_season.keys())
                 # Plex episodes in E_idx order
-                plex_e_idxs = []
-                plex_ep_keys = []
+                plex_e_idxs: list[int | None] = []
+                plex_ep_keys: list[str] = []
                 for e_str in sorted(ep_data[s_str].keys()):
                     for _ver, ep_keys in ep_data[s_str][e_str].items():
                         for ep_key in ep_keys:
-                            ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                            ep_obj = media_record(ep_key)
                             if not ep_obj:
                                 continue
                             if PLEX_Media._is_multi_ep_non_leader(ep_key, ep_obj):
@@ -30676,7 +30718,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return total
 
     @staticmethod
-    def _parse_filter_sub_expr(sub_expr):
+    def _parse_filter_sub_expr(sub_expr: str) -> tuple[str, Callable[..., bool]] | None:
         """Parse a single filter sub-expression into a (field_label, fn(obj)->bool) pair.
 
         Supported sub-expressions:
@@ -30698,7 +30740,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         fn(obj) -> bool where obj is a cache dict (Movie or Episode level).
         fn takes an optional file_info dict as second arg for file-level fields.
         """
-        _OPS = {
+        # A predicate reads a cached record of any type, a collection, or a synthetic Folder
+        # record, and one version's file entry (or {}): their keys vary by shape.
+        _OPS: dict[str, Callable[[float, float], bool]] = {
             '<': lambda a, b: a < b,
             '<=': lambda a, b: a <= b,
             '>': lambda a, b: a > b,
@@ -30716,7 +30760,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # remains a title search; only the explicit `--unmatched` is a filter.
         if sub.startswith('--'):
             if sub == '--unmatched':
-                def _unmatched_fn(obj, fi):
+                def _unmatched_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Series'):
                         return False
                     g = obj.get('guid') or ''
@@ -30729,45 +30773,46 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     return False
                 return '--unmatched', _unmatched_fn
             if sub in ('--no-audio-language', '--no-language'):
-                def _nal_fn(obj, fi):
+                def _nal_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Episode'):
                         return False
-                    al = obj.get('audio_languages', []) or []
+                    al: list[object] = obj.get('audio_languages', []) or []
                     return (not al) or all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al)
                 return '--no-audio-language', _nal_fn
             if sub == '--no-plex-audio-language':
-                def _npal_fn(obj, fi):
+                def _npal_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Episode'):
                         return False
-                    al = obj.get('audio_languages_plex')
+                    al: list[object] | None = obj.get('audio_languages_plex')
                     if al is None:
                         al = obj.get('audio_languages', []) or []
                     return (not al) or all(str(l).lower() == _AUDIO_LANG_UNKNOWN for l in al)
                 return '--no-plex-audio-language', _npal_fn
             if sub == '--broken':
-                def _broken_fn(obj, fi):
+                def _broken_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Episode'):
                         return False
                     plex_duration = obj.get('duration') or 0
-                    for fi2 in (obj.get('files', {}) or {}).values():
+                    _files: dict[str, dict[str, Any]] = obj.get('files', {}) or {}
+                    for fi2 in _files.values():
                         if _get_broken_reason(fi2, plex_duration):
                             return True
                     return False
                 return '--broken', _broken_fn
             if sub == '--reencode':
-                def _reenc_fn(obj, fi):
+                def _reenc_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Episode'):
                         return False
                     return _classify_migration_action(obj).get('action') == 'reencode'
                 return '--reencode', _reenc_fn
             if sub == '--remux':
-                def _remux_fn(obj, fi):
+                def _remux_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') not in ('Movie', 'Episode'):
                         return False
                     return _classify_migration_action(obj).get('action') == 'remux'
                 return '--remux', _remux_fn
             if sub == '--unsorted':
-                def _unsorted_fn(obj, fi):
+                def _unsorted_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
                     if obj.get('type') != 'Series':
                         return False
                     lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj.get('library', ''), '')
@@ -30787,7 +30832,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                   'imdb', 'tmdb', 'tvdb',
                                   'originallang', 'original_lang', 'original_language',
                                   'path', 'filepath', 'file'):
-                return f"+{_display_field}", lambda obj, fi: True
+                def _display_fn(obj: dict[str, Any], fi: dict[str, Any]) -> bool:
+                    return True
+                return f"+{_display_field}", _display_fn
 
         # --- Bitrate: bare '<N' '>N' or 'bitrate OP N [unit]' ---
         _bitrate_re = re.match(
@@ -30806,7 +30853,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             cmp = _OPS.get(op, lambda a, b: False)
             unit_display = f"MB/hr" if is_mbph else "Mbps"
             label = f"bitrate {op} {value}{unit_display}"
-            def _bitrate_fn(obj, fi, _t=threshold, _c=cmp):
+            def _bitrate_fn(obj: dict[str, Any], fi: dict[str, Any], _t: float = threshold, _c: Callable[[float, float], bool] = cmp) -> bool:
                 dur = obj.get('duration') or 0
                 if dur < 60_000: return False
                 fs = fi.get('filesize') or 0
@@ -30852,12 +30899,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Paris" and `who s that girl` finds "Who's That Girl".
             _needle_norm = _normalize_text(needle)
             _needle_norm_eq_orig = (_needle_norm == needle)
-            _matching_series = set()
+            _matching_series: set[str] = set()
             if not _ep_only:
                 for _sk2 in PLEX_Media.OBJ_BY_SERIES_EPISODES:
-                    _sobj = PLEX_Media.OBJ_BY_ID.get(_sk2, {})
-                    _st = (_sobj.get('title') or '').lower()
-                    _sot = (_sobj.get('originalTitle') or '').lower()
+                    _sobj = media_record(_sk2)
+                    _st = ((_sobj['title'] if _sobj else '') or '').lower()
+                    _sot = ((_sobj['originalTitle'] if _sobj else '') or '').lower()
                     if needle in _st or needle in _sot:
                         _matching_series.add(_sk2)
                         continue
@@ -30872,10 +30919,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # the 3 movies grouped under the 'Edelstein Filmreihe' Plex
             # Collection even when none of those movies has the token in
             # its own title / file path.
-            _matching_collection_member_ratingkeys = set()
+            _matching_collection_member_ratingkeys: set[str] = set()
             if not _ep_only:
                 for _ck, _cobj in PLEX_Media.OBJ_BY_ID.items():
-                    if _cobj.get('type') != 'Collection':
+                    if _cobj['type'] != 'Collection':
                         continue
                     _ct = (_cobj.get('title') or '').lower()
                     _cot = (_cobj.get('originalTitle') or '').lower()
@@ -30891,18 +30938,19 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Pre-v2.15 cache (no file_segment_words on objs) falls back to
             # on-the-fly tokenisation; first --update-cache backfills.
             _seg_word_re = re.compile(r'[\s._\-]+')
-            def _segwords_match(segwords, _nw=_needle_words):
+            def _segwords_match(segwords: list[list[str]] | None, _nw: set[str] = _needle_words) -> bool:
                 """segwords: list[list[str]] — match if any segment's words
                 cover every needle word (substring-on-word)."""
                 for cw in segwords or ():
                     if all(any(nw in w for w in cw) for nw in _nw):
                         return True
                 return False
-            def _filepath_match_live(filepath, lib_name, _nw=_needle_words, _rx=_seg_word_re):
+            def _filepath_match_live(filepath: str, lib_name: str, _nw: set[str] = _needle_words,
+                                     _rx: re.Pattern[str] = _seg_word_re) -> bool:
                 if not filepath or not _nw:
                     return False
                 rel = filepath
-                roots = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib_name, []) or []
+                roots: list[str] = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib_name, []) or []
                 for _root in roots:
                     rn = _root.rstrip('/')
                     if filepath.startswith(rn + '/'):
@@ -30913,10 +30961,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if all(any(nw in w for w in cw) for nw in _nw):
                         return True
                 return False
-            def _title_fn(obj, fi, _n=needle, _nn=_needle_norm, _eq=_needle_norm_eq_orig,
-                          _ep_only=_ep_only, _ms=_matching_series,
-                          _cm=_matching_collection_member_ratingkeys,
-                          _pf=_path_fallback, _swm=_segwords_match, _lpm=_filepath_match_live):
+            def _title_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle, _nn: str = _needle_norm,
+                          _eq: bool = _needle_norm_eq_orig,
+                          _ep_only: bool = _ep_only, _ms: set[str] = _matching_series,
+                          _cm: set[str] = _matching_collection_member_ratingkeys,
+                          _pf: bool = _path_fallback,
+                          _swm: Callable[[list[list[str]] | None], bool] = _segwords_match,
+                          _lpm: Callable[[str, str], bool] = _filepath_match_live) -> bool:
                 t = (obj.get('title') or '').lower()
                 ot = (obj.get('originalTitle') or '').lower()
                 if _n in t or _n in ot:
@@ -30937,7 +30988,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if _sw is not None:
                     if _swm(_sw):
                         return True
-                    for _fi in (obj.get('files', {}) or {}).values():
+                    _files: dict[str, dict[str, Any]] = obj.get('files', {}) or {}
+                    for _fi in _files.values():
                         if isinstance(_fi, dict):
                             _vsw = _fi.get('file_segment_words')
                             if _vsw is not None and _swm(_vsw):
@@ -30948,7 +31000,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 f = obj.get('file', '')
                 if f and _lpm(f, lib_name):
                     return True
-                for _fi in (obj.get('files', {}) or {}).values():
+                _files_slow: dict[str, dict[str, Any]] = obj.get('files', {}) or {}
+                for _fi in _files_slow.values():
                     if isinstance(_fi, dict) and _lpm(_fi.get('filepath', ''), lib_name):
                         return True
                 return False
@@ -30974,7 +31027,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             alias = {'4k': '2160', 'uhd': '2160', 'fhd': '1080', 'hd': '720', 'sd': '480'}
             needle = alias.get(val.lower(), val.lower())
             label = f"resolution:{val}"
-            def _res_fn(obj, fi, _n=needle):
+            def _res_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
                 res = (obj.get('resolution_full') or obj.get('resolution') or '').lower()
                 return _n in res
             return label, _res_fn
@@ -30984,7 +31037,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             alias = {'hevc': 'h265', 'h.265': 'h265', 'avc': 'h264', 'h.264': 'h264'}
             needle = alias.get(val.lower(), val.lower())
             label = f"codec:{val}"
-            def _codec_fn(obj, fi, _n=needle):
+            def _codec_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
                 vc = (obj.get('video_codec') or '').lower()
                 return _n in vc
             return label, _codec_fn
@@ -30997,7 +31050,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return None
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"year {op} {yr}"
-            def _year_fn(obj, fi, _yr=yr, _c=cmp):
+            def _year_fn(obj: dict[str, Any], fi: dict[str, Any], _yr: int = yr, _c: Callable[[float, float], bool] = cmp) -> bool:
                 y = obj.get('year') or 0
                 return bool(y) and _c(y, _yr)
             return label, _year_fn
@@ -31006,8 +31059,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if field == 'label':
             needle = val.lower()
             label_str = f"label:{val}"
-            def _label_fn(obj, fi, _n=needle):
-                return any(_n == str(l).lower() for l in (obj.get('labels') or []))
+            def _label_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
+                return any(_n == str(l).lower() for l in (obj.get('labels') or ()))
             return label_str, _label_fn
 
         # --- Genre ---
@@ -31015,8 +31068,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # Genres are stored normalized (English) in cache — simple case-insensitive substring match
             needle = _normalize_genre(val).lower()
             label_str = f"genre:{val}"
-            def _genre_fn(obj, fi, _n=needle):
-                return any(_n in str(g).lower() for g in (obj.get('genres') or []))
+            def _genre_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
+                return any(_n in str(g).lower() for g in (obj.get('genres') or ()))
             return label_str, _genre_fn
 
         # --- Director (case-insensitive substring match against directors list) ---
@@ -31024,13 +31077,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             needle = val.lower()
             label_str = f"director:{val}"
             # For episodes, also match the parent series' directors
-            def _director_fn(obj, fi, _n=needle):
-                if any(_n in str(d).lower() for d in (obj.get('directors') or [])):
+            def _director_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
+                if any(_n in str(d).lower() for d in (obj.get('directors') or ())):
                     return True
                 _sk = obj.get('series_key', '')
                 if _sk:
-                    _so = PLEX_Media.OBJ_BY_ID.get(_sk, {})
-                    if any(_n in str(d).lower() for d in (_so.get('directors') or [])):
+                    _so = media_record(_sk)
+                    if any(_n in str(d).lower() for d in ((_so.get('directors') if _so else None) or [])):
                         return True
                 return False
             return label_str, _director_fn
@@ -31046,7 +31099,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             threshold = sz_val * multipliers[sz_unit]
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"size {op} {val}"
-            def _size_fn(obj, fi, _t=threshold, _c=cmp):
+            def _size_fn(obj: dict[str, Any], fi: dict[str, Any], _t: float = threshold, _c: Callable[[float, float], bool] = cmp) -> bool:
                 fs = fi.get('filesize') or obj.get('filesize') or 0
                 return bool(fs) and _c(fs, _t)
             return label, _size_fn
@@ -31064,7 +31117,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             threshold_ms = dur_val * ms_multipliers.get(dur_unit, 60_000)
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"duration {op} {val}"
-            def _dur_fn(obj, fi, _t=threshold_ms, _c=cmp):
+            def _dur_fn(obj: dict[str, Any], fi: dict[str, Any], _t: float = threshold_ms, _c: Callable[[float, float], bool] = cmp) -> bool:
                 dur = obj.get('duration') or 0
                 return _c(dur, _t)
             return label, _dur_fn
@@ -31079,7 +31132,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             label = f"stars {op} {r_val}"
             # Plex stores userRating as 0–10; UI shows 0–5 stars → multiply input by 2
             internal = r_val * 2.0
-            def _stars_fn(obj, fi, _r=internal, _c=cmp):
+            def _stars_fn(obj: dict[str, Any], fi: dict[str, Any], _r: float = internal, _c: Callable[[float, float], bool] = cmp) -> bool:
                 rating = obj.get('userRating') or 0
                 return bool(rating) and _c(float(rating), _r)
             return label, _stars_fn
@@ -31092,7 +31145,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return None
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"rating {op} {r_val}"
-            def _rating_fn(obj, fi, _r=r_val, _c=cmp):
+            def _rating_fn(obj: dict[str, Any], fi: dict[str, Any], _r: float = r_val, _c: Callable[[float, float], bool] = cmp) -> bool:
                 rating = obj.get('audienceRating') or 0
                 return bool(rating) and _c(float(rating), _r)
             return label, _rating_fn
@@ -31105,7 +31158,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return None
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"critics {op} {r_val}"
-            def _critics_fn(obj, fi, _r=r_val, _c=cmp):
+            def _critics_fn(obj: dict[str, Any], fi: dict[str, Any], _r: float = r_val, _c: Callable[[float, float], bool] = cmp) -> bool:
                 rating = obj.get('criticsRating') or 0
                 return bool(rating) and _c(float(rating), _r)
             return label, _critics_fn
@@ -31114,7 +31167,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if field == 'watched':
             yes = val.lower() in ('yes', 'true', '1', 'y')
             label = "watched" if yes else "unwatched"
-            def _watched_fn(obj, fi, _yes=yes):
+            def _watched_fn(obj: dict[str, Any], fi: dict[str, Any], _yes: bool = yes) -> bool:
                 count = obj.get('viewCount', 0) or 0
                 return count > 0 if _yes else count == 0
             return label, _watched_fn
@@ -31129,8 +31182,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'}
             needle = lang_map.get(val.lower(), val.lower())
             label_str = f"lang:{needle}"
-            def _lang_fn(obj, fi, _n=needle):
-                langs = [str(l).lower() for l in (obj.get('audio_languages') or [])]
+            def _lang_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
+                langs = [str(l).lower() for l in (obj.get('audio_languages') or ())]
                 return _n in langs
             return label_str, _lang_fn
 
@@ -31162,7 +31215,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             }
             target_layout = _LAYOUT_ALIASES.get(needle, needle)
             label_str = f"layout:{needle}"
-            def _layout_fn(obj, fi, _t=target_layout):
+            def _layout_fn(obj: dict[str, Any], fi: dict[str, Any], _t: str = target_layout) -> bool:
                 fp = (fi.get('filepath') if fi else None) or obj.get('file', '')
                 if not fp:
                     return False
@@ -31178,7 +31231,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if field == 'library':
             needle = val
             label_str = f"library:{val}"
-            def _library_fn(obj, fi, _n=needle):
+            def _library_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
                 return (obj.get('library') or '') == _n
             return label_str, _library_fn
 
@@ -31214,7 +31267,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             else:
                 target_types = {needle.title(), needle.title() + '*'}
             label_str = f"type:{needle}"
-            def _type_fn(obj, fi, _t=target_types):
+            def _type_fn(obj: dict[str, Any], fi: dict[str, Any], _t: set[str] = target_types) -> bool:
                 ts = obj.get('type_str') or obj.get('type', '')
                 return ts in _t
             return label_str, _type_fn
@@ -31225,7 +31278,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # United States, UK) via _normalize_country_name_or_code().
         if field in ('country', 'countries'):
             label_str = f"country:{val}"
-            def _country_fn(obj, fi, _v=val):
+            def _country_fn(obj: dict[str, Any], fi: dict[str, Any], _v: str = val) -> bool:
                 return _country_matches(_v, obj.get('countries') or [])
             return label_str, _country_fn
 
@@ -31236,14 +31289,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if field in ('original_language', 'originallang', 'original_lang'):
             needle = _normalize_lang_name_or_code(val)
             label_str = f"originallang:{needle or val}"
-            def _origlang_fn(obj, fi, _n=needle):
+            def _origlang_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
                 ol = (obj.get('original_language') or '').lower()
                 if not ol:
                     # For episodes, inherit from parent series
                     sk = obj.get('series_key', '')
                     if sk:
-                        so = PLEX_Media.OBJ_BY_ID.get(sk, {})
-                        ol = (so.get('original_language') or '').lower()
+                        so = media_record(sk)
+                        ol = ((so.get('original_language') if so else None) or '').lower()
                 if not ol:
                     return False
                 if _n and ol == _n:
@@ -31259,8 +31312,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         'fr': 'fr', 'french': 'fr', 'fra': 'fr', 'fre': 'fr'}
             needle = lang_map.get(val.lower(), val.lower())
             label_str = f"subs:{needle}"
-            def _subs_fn(obj, fi, _n=needle):
-                langs = [str(l).lower() for l in (obj.get('subtitle_languages') or [])]
+            def _subs_fn(obj: dict[str, Any], fi: dict[str, Any], _n: str = needle) -> bool:
+                langs = [str(l).lower() for l in (obj.get('subtitle_languages') or ())]
                 return _n in langs
             return label_str, _subs_fn
 
@@ -31281,13 +31334,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 ts_start = int(_dt.datetime(yr, 1, 1).timestamp())
                 ts_end   = int(_dt.datetime(yr + 1, 1, 1).timestamp()) - 1
                 label = f"added:{yr}"
-                def _added_eq_fn(obj, fi, _s=ts_start, _e=ts_end):
+                def _added_eq_fn(obj: dict[str, Any], fi: dict[str, Any], _s: int = ts_start, _e: int = ts_end) -> bool:
                     t = obj.get('addedAt') or 0
                     return _s <= t <= _e
                 return label, _added_eq_fn
             cmp = _OPS.get(op, lambda a, b: False)
             label = f"added {op} {yr}"
-            def _added_fn(obj, fi, _t=ts_threshold, _c=cmp):
+            def _added_fn(obj: dict[str, Any], fi: dict[str, Any], _t: int = ts_threshold, _c: Callable[[float, float], bool] = cmp) -> bool:
                 t = obj.get('addedAt') or 0
                 return bool(t) and _c(t, _t)
             return label, _added_fn
