@@ -707,8 +707,10 @@ from abc import ABC, abstractmethod
 import argparse
 from dataclasses import dataclass
 import contextlib
+import csv
 import fcntl
 import functools
+import http.client
 import inspect
 import io
 import json
@@ -752,23 +754,38 @@ import threading
 # second and tolerates their absence.  Binding them to None in the checker's
 # view instead would make every one of those uses Optional and cost 8 false
 # findings.
+#
+# PLEX_ERRORS is what a plexapi call raises when the server, the network or
+# the XML fails: plexapi's own errors, requests' (every urllib3 and socket
+# failure reaches the caller wrapped in one) and the XML parser's.  A handler
+# around a plexapi call catches these and nothing else, so a bug in the code
+# beside the call still reaches the top-level handler.  Root has no plexapi,
+# and nothing it runs calls one: the empty tuple catches nothing.
 if TYPE_CHECKING:
     import readchar
     import urllib3.exceptions
     import requests.exceptions
+    import plexapi.exceptions
+    from xml.etree.ElementTree import ParseError as _XMLParseError
     from plexapi.media import Media
     from plexapi.server import PlexServer
     from plexapi.playlist import Playlist
     from plexapi.collection import Collection
+    PLEX_ERRORS: tuple[type[Exception], ...] = (plexapi.exceptions.PlexApiException,
+                                                 requests.exceptions.RequestException, _XMLParseError)
 else:
     try:
         import readchar
         import urllib3.exceptions
         import requests.exceptions
+        import plexapi.exceptions
+        from xml.etree.ElementTree import ParseError as _XMLParseError
         from plexapi.media import Media
         from plexapi.server import PlexServer
         from plexapi.playlist import Playlist
         from plexapi.collection import Collection
+        PLEX_ERRORS = (plexapi.exceptions.PlexApiException,
+                       requests.exceptions.RequestException, _XMLParseError)
     except ImportError:
         # Root imports this module only for a print-only run or --install's
         # firewall half (my_plex_boot refuses every other root run), and
@@ -777,6 +794,7 @@ else:
             raise
         readchar = urllib3 = requests = None
         Media = PlexServer = Playlist = Collection = None
+        PLEX_ERRORS = ()
 
 
 ###########################################################################################
@@ -40248,7 +40266,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             new_stem = os.path.splitext(new_name)[0]
             try:
                 ok_ls, files_in_src_dir = my_plex_file_operation('LIST_DIR', src_dir, remote_host, maxdepth=1)
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 ok_ls, files_in_src_dir = False, []
             moved_sidecar_src_paths = []
             if ok_ls and files_in_src_dir:
@@ -40836,16 +40854,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
     # own `sort_new_redo` log inside the redo branch; this covers the
     # regular (non-redo) sort-new path.
     if not redo:
-        try:
-            import datetime as _dt
-            _write_resolve_log('sort_new', {
-                'command':  'sort_new',
-                'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-                'dry_run':  bool(dry_run),
-                'target':   target,
-            })
-        except Exception as _e:
-            print(f">>> (resolve log skipped: {_e})")
+        import datetime as _dt
+        _write_resolve_log('sort_new', {
+            'command':  'sort_new',
+            'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+            'dry_run':  bool(dry_run),
+            'target':   target,
+        })
 
 
 def _next_episode_in_dir(directory, season_num, remote_host=None):
@@ -40865,7 +40880,7 @@ def _next_episode_in_dir(directory, season_num, remote_host=None):
         local_dir = get_local_path(directory) if 'get_local_path' in globals() else directory
         if os.path.isdir(local_dir):
             entries = os.listdir(local_dir)
-    except Exception:
+    except OSError:
         entries = []
     # 2. Fallback to SSH if the local check found nothing AND the path
     # looks like a server-side path (heuristic: starts with /Volumes/).
@@ -40875,7 +40890,7 @@ def _next_episode_in_dir(directory, season_num, remote_host=None):
             success, file_list = my_plex_file_operation('LIST_DIR', directory, host, maxdepth=1)
             if success and file_list:
                 entries = [os.path.basename(p) for p in file_list]
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             entries = []
     for fn in entries:
         m = _re.search(rf'{spad}E(\d+)', fn)
@@ -40941,7 +40956,7 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
                 'file_type': ext[1:]  # Remove leading dot
             }
 
-    except Exception as e:
+    except (OSError, ValueError) as e:
         if VRB:
             print(f"{VRBPFX}Warning: Could not read metadata for {filepath}: {e}")
         return None
@@ -40972,7 +40987,7 @@ def integrate_metadata_from_json(json_file):
     try:
         with open(json_file, 'r') as f:
             metadata_by_filepath = json.load(f)
-    except Exception as e:
+    except (OSError, ValueError) as e:
         print(f"✗ Error loading metadata JSON: {e}")
         sys.exit(1)
 
@@ -41231,7 +41246,7 @@ def add_label_to_item(label, plex_id):
         library_name = obj['library']
         library = PLEX_Library.OBJ_DICT[library_name]
         item = library.fetchItem(obj['item_id'])
-    except Exception as e:
+    except PLEX_ERRORS as e:
         err("00160", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label already exists
@@ -41248,7 +41263,7 @@ def add_label_to_item(label, plex_id):
         obj['labels'].append(label)
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
         return 'added'
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"  {obj_key}: ERROR: Failed to add label: {e}", file=sys.stderr)
         return 'error'
 
@@ -41264,7 +41279,7 @@ def remove_label_from_item(label, plex_id):
         library_name = obj['library']
         library = PLEX_Library.OBJ_DICT[library_name]
         item = library.fetchItem(obj['item_id'])
-    except Exception as e:
+    except PLEX_ERRORS as e:
         err("00161", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label exists
@@ -41282,7 +41297,7 @@ def remove_label_from_item(label, plex_id):
             obj['labels'].remove(label)
         PLEX_Media.OBJ_BY_ID[obj_key] = obj
         return 'removed'
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"  {obj_key}: ERROR: Failed to remove label: {e}", file=sys.stderr)
         return 'error'
 
@@ -41464,7 +41479,7 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
                     if rk not in server_series_ids and series_title not in server_series_titles:
                         result['deleted_from_server'].append(series_title)
 
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         if DBG: print(f"{DBGPFX}Failed to get differences for '{lib_name}': {e}")
 
     return result
@@ -41501,7 +41516,7 @@ def show_system_info():
                 print(f"  {'Platform':<12} {plex.platform}")
                 if hasattr(plex, 'myPlexUsername') and plex.myPlexUsername:
                     print(f"  {'User':<12} {plex.myPlexUsername}")
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 print(f"  ⚠ Could not retrieve server info: {e}")
         else:
             print(f"  {'Status':<12} Not connected")
@@ -41540,7 +41555,7 @@ def show_system_info():
                     print(f"  {'Plex DB (SSH)':<16} ✓ reachable ({PLEX_DB_REMOTE_HOST})")
                 else:
                     print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 print(f"  {'Plex DB (SSH)':<16} ✗ connection failed ({PLEX_DB_REMOTE_HOST})")
         else:
             print(f"  {'Plex DB (SSH)':<16} ✗ not configured (set PLEX_DB_REMOTE_HOST)")
@@ -41558,7 +41573,7 @@ def show_system_info():
                         print(f"  {'TVDB API':<16} ✓ authenticated (key: ...{TVDB_API_KEY[-6:]})")
                     else:
                         print(f"  {'TVDB API':<16} ✗ login returned no token")
-            except Exception as e:
+            except (OSError, ValueError, http.client.HTTPException) as e:
                 print(f"  {'TVDB API':<16} ✗ login failed: {e}")
         else:
             print(f"  {'TVDB API':<16} - not configured (optional, for --missing)")
@@ -41580,7 +41595,7 @@ def show_system_info():
                     print(f"  {'TMDB API':<16} ✗ authentication failed (invalid token)")
                 else:
                     print(f"  {'TMDB API':<16} ✗ request failed: {e}")
-            except Exception as e:
+            except (OSError, ValueError, http.client.HTTPException) as e:
                 print(f"  {'TMDB API':<16} ✗ request failed: {e}")
         else:
             print(f"  {'TMDB API':<16} - not configured (optional, for --missing)")
@@ -41785,7 +41800,7 @@ def show_system_info():
                     # totalSize is a cheap property access (no API call needed)
                     if hasattr(lib, 'totalSize'):
                         server_items = lib.totalSize
-                except Exception:
+                except PLEX_ERRORS:
                     pass  # Silently ignore if can't get count
 
             all_libraries.append((lib_type, lib_name, server_items))
@@ -41856,7 +41871,7 @@ def show_system_info():
                             for lib_name, ts in sorted(cache_timestamps.items()):
                                 ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
                                 print(f"{DBGPFX}  {lib_name}: {ts_str}")
-            except Exception as e:
+            except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
                 if DBG: print(f"{DBGPFX}--info: Failed to reload from disk: {e}, falling back to in-memory cache")
                 # If reload fails, fall back to in-memory cache
                 if 'library_stats' in CACHE and 'updatedAt' in CACHE['library_stats']:
@@ -42351,7 +42366,7 @@ def verify_cache():
                         for lib_name, ts in sorted(library_timestamps_disk.items()):
                             ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(ts, 'strftime') else str(ts)
                             print(f"{DBGPFX}  {lib_name}: {ts_str}")
-        except Exception as e:
+        except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
             if DBG: print(f"{DBGPFX}--verify-cache: Failed to reload from disk: {e}, falling back to in-memory cache")
             # If reload fails, fall back to in-memory cache
             library_timestamps_disk = CACHE.get('library_stats', {}).get('updatedAt', {})
@@ -42436,7 +42451,7 @@ def verify_cache():
                         f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 18 AND mi.deleted_at IS NULL",
                         mode='rows')
                     server_collections = int(rows[0][0]) if rows else 0
-                except Exception as e:
+                except (ValueError, IndexError) as e:
                     if DBG: print(f"{DBGPFX}Failed to get counts from DB for '{lib_name}': {e}")
 
             # Check if shutdown was requested during processing
@@ -42513,7 +42528,7 @@ def verify_cache():
                     elif (cache_timestamp - plex_timestamp) > timedelta(seconds=60):
                         timestamp_mismatch = True
                         timestamp_mismatches.append(lib_name)
-                except Exception:
+                except TypeError:
                     pass  # Can't compare - different types or invalid
 
             # Status indicator
@@ -42590,7 +42605,7 @@ def verify_cache():
                             try:
                                 if hasattr(lib, 'updatedAt') and lib.updatedAt:
                                     plex_ts = lib.updatedAt
-                            except Exception:
+                            except PLEX_ERRORS:
                                 pass
 
                         cache_str = cache_ts.strftime('%Y-%m-%d %H:%M:%S') if cache_ts != 'N/A' and hasattr(cache_ts, 'strftime') else str(cache_ts)
@@ -42633,7 +42648,7 @@ def verify_cache():
         print("\n\n⚠ Verification interrupted by user", file=sys.stderr)
         print("(Results shown above may be incomplete)\n")
         return
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"\n✗ Error during verification: {e}", file=sys.stderr)
         return
 
@@ -42811,16 +42826,16 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
                 else:
                     prev_path = CACHE_UPDATES_FILE.replace('.json', '.prev.json')
                 os.rename(CACHE_UPDATES_FILE, prev_path)
-            except Exception:
+            except (OSError, ValueError, AttributeError):
                 # If we can't read the old log, just rename with .prev
                 prev_path = CACHE_UPDATES_FILE.replace('.json', '.prev.json')
                 try:
                     os.rename(CACHE_UPDATES_FILE, prev_path)
-                except Exception:
+                except OSError:
                     pass
         with open(CACHE_UPDATES_FILE, 'w') as f:
             json.dump(log, f, indent=2, ensure_ascii=False, default=str)
-    except Exception as e:
+    except OSError as e:
         print(f"  ⚠ Failed to write update log: {e}", flush=True)
 
 
@@ -43604,15 +43619,12 @@ def execute_global_commands(args, cmd_args):
         yes = bool(safe_getattr(args, 'yes', False) or safe_getattr(cmd_args, 'yes', False))
         cmd_move(mv_args, dry_run=dry_run, force=force, yes=yes)
         # v2.69: parity log per resolve memory rule.
-        try:
-            import datetime as _dt
-            _write_resolve_log('mv', {
-                'command': 'mv', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-                'dry_run': bool(dry_run), 'force': bool(force), 'yes': bool(yes),
-                'args': list(mv_args),
-            })
-        except Exception as _e:
-            print(f">>> (resolve log skipped: {_e})")
+        import datetime as _dt
+        _write_resolve_log('mv', {
+            'command': 'mv', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+            'dry_run': bool(dry_run), 'force': bool(force), 'yes': bool(yes),
+            'args': list(mv_args),
+        })
         sys.exit(0)
 
     # Handle --map-from-filename alias (standalone, without --plex2disk)
@@ -43862,31 +43874,22 @@ def execute_global_commands(args, cmd_args):
                 print(f"\n>>> Iteration {iteration}/{MAX_ITER}")
                 changed = False
                 # 1) --unmatched --resolve --auto
-                try:
-                    print(f"\n  [1] --unmatched --resolve --auto")
-                    before = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
-                                 if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
-                    cmd_unmatched_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
-                    after  = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
-                                 if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
-                    if after < before:
-                        changed = True
-                except Exception as e:
-                    print(f"      ⚠ --unmatched --resolve --auto failed: {e}")
+                print(f"\n  [1] --unmatched --resolve --auto")
+                before = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
+                             if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
+                cmd_unmatched_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
+                after  = sum(1 for _k, _o in PLEX_Media.OBJ_BY_ID.items()
+                             if _o.get('type') in ('Movie','Series') and (_o.get('guid','') or '').startswith('local://'))
+                if after < before:
+                    changed = True
                 # 2) --bad-structure --resolve --auto
-                try:
-                    print(f"\n  [2] --bad-structure --resolve --auto")
-                    cmd_bad_structure_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
-                except Exception as e:
-                    print(f"      ⚠ --bad-structure --resolve --auto failed: {e}")
+                print(f"\n  [2] --bad-structure --resolve --auto")
+                cmd_bad_structure_resolve(scope=_scope_for_subcmd, auto=True, dry_run=_dry_run, yes=_yes)
                 # 3) --junk --resolve
-                try:
-                    print(f"\n  [3] --junk --resolve")
-                    _n = PLEX_Media._list_junk_files(None, resolve=True, dry_run=_dry_run, yes=_yes, recursive_override=None)
-                    if _n and _n > 0:
-                        changed = True
-                except Exception as e:
-                    print(f"      ⚠ --junk --resolve failed: {e}")
+                print(f"\n  [3] --junk --resolve")
+                _n = PLEX_Media._list_junk_files(None, resolve=True, dry_run=_dry_run, yes=_yes, recursive_override=None)
+                if _n and _n > 0:
+                    changed = True
                 if not changed:
                     print(f"\n>>> No further auto-resolvable changes detected — loop done after {iteration} pass(es).")
                     break
@@ -43925,11 +43928,7 @@ def execute_global_commands(args, cmd_args):
             if tsv_only and not cat.get('tsv_relevant'):
                 continue
             print(f"  >> {cat['header']}{lib_label}")
-            try:
-                count = _run_check(cat['invoke'], obj_keys, problems_library, tsv_only) or 0
-            except Exception as e:
-                print(f"     ⚠ check {cat_name!r} raised: {e}")
-                count = 0
+            count = _run_check(cat['invoke'], obj_keys, problems_library, tsv_only) or 0
             live_problems[cat_name] = int(count) if count else 0
 
         active_now = set(_enabled_problem_categories().keys())
@@ -44222,18 +44221,15 @@ def execute_global_commands(args, cmd_args):
             print(f"\n--- {pfx}Renumber --fix{scope} ---")
             PLEX_Media._fix_renumber_candidates(obj_keys, library_name, dry_run=dry_run)
             # v2.69: parity log per resolve memory rule.
-            try:
-                import datetime as _dt
-                _write_resolve_log('renumber_fix', {
-                    'command':  'renumber_fix',
-                    'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-                    'dry_run':  bool(dry_run),
-                    'scope':    scope,
-                    'library':  library_name,
-                    'obj_count': len(obj_keys or []),
-                })
-            except Exception as _e:
-                print(f">>> (resolve log skipped: {_e})")
+            import datetime as _dt
+            _write_resolve_log('renumber_fix', {
+                'command':  'renumber_fix',
+                'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                'dry_run':  bool(dry_run),
+                'scope':    scope,
+                'library':  library_name,
+                'obj_count': len(obj_keys or []),
+            })
         else:
             print(f"\n--- Renumber Candidates{scope} ---")
             PLEX_Media._list_renumber_candidates(obj_keys, library_name)
@@ -44323,7 +44319,7 @@ def execute_plex_cmd(args, obj, obj_type, obj_args_list):
     while not done:
         try:
             obj_args = obj_parser.parse_args(obj_args_list)
-        except Exception as e:
+        except argparse.ArgumentError as e:
             if DBG: print( f"{DBGPFX}execute_plex_cmd(): <{obj_type}>.PARSER.parse_args() FAILED: '{e}'" )
             # as we got ALL remaining_args -> lets shave off last param and try again
             if len(obj_args_list) == 0: done = True
@@ -44393,7 +44389,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                 try: # regardless the state, we check for GLOBAL_CMD and execute if found:
                     # Try parsing with current arg plus all remaining args to handle flags like --duplicates
                     cmd_args, unparsed = GLOBAL_CMD_PARSER.parse_known_args( [arg] + remaining_args )
-                except Exception as e:
+                except argparse.ArgumentError as e:
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP GLOBAL_CMD_PARSER.parse_args() FAILED: '{e}'" )
                 else:
                     # Check if the arg was actually consumed (recognized) by the parser
@@ -46036,7 +46032,7 @@ def run() -> None:
               "  What was already written stays, and is complete: the cache and the\n"
               "  resume checkpoint are both written whole or not at all.", file=sys.stderr)
         sys.exit(130)
-    except Exception as unexpected:
+    except Exception as unexpected:  # the top of the run: one ERROR line, the trace in a file, exit 70
         report_bug(unexpected)
 
 
