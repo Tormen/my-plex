@@ -17053,7 +17053,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         print(">>> Stopped early (q).")
 
 
-def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
+def cmd_pipeline(name: str, scope: str | None = None, dry_run: bool = False, yes: bool = False, force: bool = False) -> None:
     """v2.34: run a named pipeline from the PIPELINES CONF dict.
 
     `name` is the pipeline key (e.g. '--clean').  Each phase is invoked as
@@ -17082,7 +17082,7 @@ def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
     FORCE_AWARE = {'--sort-new', '--mv-to', '--reencode'}
 
     _self = sys.argv[0]
-    _scope_args = [scope] if scope else []
+    _scope_args: list[str] = [scope] if scope else []
     total = len(phases)
 
     print("=" * 76)
@@ -17093,7 +17093,7 @@ def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
         if not isinstance(phase, (list, tuple)) or not phase:
             err("00065", f"Pipeline {name!r} phase #{i}: expected non-empty list of CLI tokens, got {phase!r}")
         cli_head = phase[0]
-        argv = _scope_args + list(phase)
+        argv: list[str] = _scope_args + list(phase)
         if dry_run and cli_head in DRY_RUN_AWARE and '--try' not in argv and '--dry-run' not in argv:
             argv.append('--try')
         if yes and cli_head in YES_AWARE and '--yes' not in argv and '-Y' not in argv:
@@ -17116,7 +17116,7 @@ def cmd_pipeline(name, scope=None, dry_run=False, yes=False, force=False):
     print("=" * 76)
 
 
-def cmd_original_languages(target=None, dry_run=False):
+def cmd_original_languages(target: str | None = None, dry_run: bool = False) -> tuple[int, int, int] | None:
     """v1.8: --original-languages — backfill obj['original_language'] from TMDB.
 
     Walks the cache (optionally scoped) and for every Movie/Series with a
@@ -17133,20 +17133,26 @@ def cmd_original_languages(target=None, dry_run=False):
                   "  Sign up at https://www.themoviedb.org/settings/api (free)\n"
                   "  then add: TMDB_API_KEY = 'your-bearer-token-here' to your config.")
 
-    items = _get_disk_map_scope(target) if target else [
-        (k, o) for k, o in PLEX_Media.OBJ_BY_ID.items()
-        if o.get('type_str') in ('Movie', 'Series')
-    ]
+    items: list[tuple[str, MediaRecord | CollectionRecord]]
+    if target:
+        items = _get_disk_map_scope(target)
+    else:
+        items = [
+            (k, o) for k, o in PLEX_Media.OBJ_BY_ID.items()
+            if o.get('type_str') in ('Movie', 'Series')
+        ]
 
     # Reduce to one entry per cache key (scope may include episodes whose series we want)
-    work = []
-    seen = set()
+    work: list[tuple[str, MediaRecord | CollectionRecord, str]] = []
+    seen: set[str] = set()
     for k, o in items:
+        if o['type'] == 'Collection':
+            continue   # no TMDB id: only Movies and Series are backfilled
         type_str = o.get('type_str', '')
         if type_str == 'Episode':
             # Use the parent series for episodes
-            sk = o.get('series_key', '')
-            so = PLEX_Media.OBJ_BY_ID.get(sk)
+            sk: str = o.get('series_key', '')
+            so = media_record(sk)
             if not so or sk in seen:
                 continue
             k, o, type_str = sk, so, 'Series'
@@ -17193,7 +17199,7 @@ def cmd_original_languages(target=None, dry_run=False):
     _CHECKPOINT_EVERY   = 50
     _started = _t.time()
 
-    def _save_checkpoint(reason=''):
+    def _save_checkpoint(reason: str = '') -> None:
         if READ_ONLY_MODE:
             return
         try:
@@ -17210,7 +17216,7 @@ def cmd_original_languages(target=None, dry_run=False):
             endpoint = 'tv' if type_str == 'Series' else 'movie'
             lang = fetch_original_language_from_tmdb(tmdb_id, media_type=endpoint)
             if lang:
-                o['original_language'] = lang
+                o['original_language'] = lang  # pyright: ignore[reportGeneralTypeIssues]  # a key MediaRecord does not declare yet
                 n_ok += 1
                 print(f"  [{i}/{len(work)}] {k}  →  original_language = {lang}    ({o.get('title','?')})")
             else:
@@ -17247,10 +17253,10 @@ def cmd_original_languages(target=None, dry_run=False):
     return (n_ok, n_fail, 0)
 
 
-_PLEX_DB_KNOWN_FILES_CACHE = None  # session-local memo
+_PLEX_DB_KNOWN_FILES_CACHE: set[str] | None = None  # session-local memo
 
 
-def _compute_known_filepaths_from_plex_db_live():
+def _compute_known_filepaths_from_plex_db_live() -> set[str]:
     """LIVE query of Plex DB media_parts.  Always hits SQLite (via SSH if
     PLEX_DB_REMOTE_HOST is set).  Invoked by `--update-cache` to persist
     into the cache pickle; non-update commands must use
@@ -17259,7 +17265,7 @@ def _compute_known_filepaths_from_plex_db_live():
     rows = query_plex_database(
         "SELECT file FROM media_parts WHERE deleted_at IS NULL AND file IS NOT NULL"
     )
-    paths = set()
+    paths: set[str] = set()
     if rows:
         for row in rows:
             fp = row[0] if isinstance(row, (list, tuple)) else row
@@ -17270,7 +17276,7 @@ def _compute_known_filepaths_from_plex_db_live():
     return paths
 
 
-def _get_known_filepaths_from_plex_db(force_refresh=False):
+def _get_known_filepaths_from_plex_db(force_refresh: bool = False) -> set[str]:
     """Cache-first reader for the set of paths Plex DB has a media_part for.
 
     Prefers `CACHE['plex_known_filepaths']` (persisted by --update-cache).
@@ -17300,7 +17306,7 @@ def _get_known_filepaths_from_plex_db(force_refresh=False):
     return paths
 
 
-def _list_top_level_entries(rootpath, remote_host=None):
+def _list_top_level_entries(rootpath: str, remote_host: str | None = None) -> list[tuple[str, Literal['dir', 'file']]]:
     """List immediate children (files + directories) of `rootpath`.
 
     Uses SSH `find -maxdepth 1` on the Plex host (or local find if no remote).
@@ -17320,7 +17326,7 @@ def _list_top_level_entries(rootpath, remote_host=None):
     else:
         cmd_d = ['sh', '-c', find_dirs]
         cmd_f = ['sh', '-c', find_files]
-    out = []
+    out: list[tuple[str, Literal['dir', 'file']]] = []
     try:
         rd = subprocess.run(cmd_d, capture_output=True, text=True, timeout=120)
         rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=120)
@@ -17348,12 +17354,15 @@ _VIDEO_EXT_SET = {'.mkv', '.mp4', '.avi', '.m4v', '.mov', '.mpg', '.mpeg', '.ts'
                   '.m2ts', '.wmv', '.flv', '.ogm', '.divx', '.vob', '.3gp', '.webm'}
 
 
-def _is_season_dir_name(name):
+def _is_season_dir_name(name: str) -> bool:
     """True iff `name` looks like a season directory: 'Season 1', 'S01', etc."""
     return bool(_SEASON_DIR_RE.match(name.strip()))
 
 
-def _classify_layout(entry_path, kind, remote_host=None):
+LayoutKind = Literal['movie', 'series', 'season', 'episode', 'unknown']
+
+
+def _classify_layout(entry_path: str, kind: Literal['dir', 'file'], remote_host: str | None = None) -> LayoutKind:
     """Classify a top-level library entry by its on-disk shape.
 
     Returns one of: 'movie', 'series', 'season', 'episode', 'unknown'.
@@ -17398,10 +17407,10 @@ def _classify_layout(entry_path, kind, remote_host=None):
     return 'unknown'
 
 
-_LAYOUT_INDEX_CACHE = None   # session memo: {lib_rootpath: {entry_basename: layout}}
+_LAYOUT_INDEX_CACHE: dict[str, dict[str, LayoutKind]] | None = None   # session memo: {lib_rootpath: {entry_basename: layout}}
 
 
-def _compute_layout_index_live():
+def _compute_layout_index_live() -> dict[str, dict[str, LayoutKind]]:
     """LIVE computation of the per-library top-level layout index via SSH find.
 
     Always hits the network — runs ONE bulk `find -maxdepth 2 -type d/f`
@@ -17416,10 +17425,10 @@ def _compute_layout_index_live():
         { '/Volumes/2/watch.v/lib1': {entry_basename: 'movie'/'series'/...},
           ... }
     """
-    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+    locations_by_lib: dict[str, list[str]] = CACHE.get('library_stats', {}).get('locations', {}) or {}
     remote = PLEX_DB_REMOTE_HOST
-    index = {}
-    for lib, rootpaths in locations_by_lib.items():
+    index: dict[str, dict[str, LayoutKind]] = {}
+    for _lib, rootpaths in locations_by_lib.items():
         for rp in rootpaths:
             rp_norm = rp.rstrip('/')
             # ONE SSH find: every level-1 + level-2 entry under rp_norm, with type tag.
@@ -17442,9 +17451,9 @@ def _compute_layout_index_live():
             except (OSError, subprocess.SubprocessError) as e:
                 if VRB: print(f"WARNING: _build_layout_index find failed for {rp_norm}: {e}", file=sys.stderr)
                 continue
-            level1_dirs   = []   # top-level dirs (direct child of rp_norm)
-            level2_in_dir = {}   # dir_basename → list of (basename, kind) inside it
-            level1_files  = []   # top-level video files
+            level1_dirs: list[str] = []   # top-level dirs (direct child of rp_norm)
+            level2_in_dir: dict[str, list[tuple[str, Literal['dir', 'file']]]] = {}   # dir_basename → list of (basename, kind) inside it
+            level1_files: list[str] = []   # top-level video files
             # Process dirs
             for line in (rd.stdout or '').splitlines():
                 p = line.strip()
@@ -17469,7 +17478,7 @@ def _compute_layout_index_live():
                     level2_in_dir.setdefault(parts[0], []).append((parts[1], 'file'))
 
             # Classify each top-level entry from the in-memory listings
-            lib_idx = {}
+            lib_idx: dict[str, LayoutKind] = {}
             for d in level1_dirs:
                 children = level2_in_dir.get(d, [])
                 has_season_subdir = any(_is_season_dir_name(name) for name, k in children if k == 'dir')
@@ -17502,7 +17511,7 @@ def _compute_layout_index_live():
     return index
 
 
-def _build_layout_index(force_refresh=False):
+def _build_layout_index(force_refresh: bool = False) -> dict[str, dict[str, LayoutKind]]:
     """Cache-first layout-index reader.  Returns the same nested dict as
     `_compute_layout_index_live()` but prefers the value persisted in
     `CACHE['layout_index']` by `--update-cache`.  Falls back to live
@@ -17538,7 +17547,7 @@ def _build_layout_index(force_refresh=False):
     return index
 
 
-def _lookup_layout_for_filepath(filepath):
+def _lookup_layout_for_filepath(filepath: str | None) -> LayoutKind | None:
     """Return the layout label ('movie'/'series'/'season'/'episode'/'unknown')
     of the top-level library entry containing `filepath`, or None if it
     doesn't live under any cached library rootpath.
@@ -17556,10 +17565,10 @@ def _lookup_layout_for_filepath(filepath):
     return None
 
 
-def _count_unrecognized_top_level(target_library=None):
+def _count_unrecognized_top_level(target_library: str | None = None) -> int:
     """Silent count helper used by --problems.  Returns int."""
-    library_stats = CACHE.get('library_stats', {})
-    locations_by_lib = library_stats.get('locations', {})
+    library_stats: dict[str, Any] = CACHE.get('library_stats', {})
+    locations_by_lib: dict[str, list[str]] = library_stats.get('locations', {})
     if not locations_by_lib:
         return 0
     libraries = [target_library] if target_library else sorted(PLEX_Library.OBJ_DICT.keys())
@@ -17575,7 +17584,7 @@ def _count_unrecognized_top_level(target_library=None):
     return count
 
 
-def cmd_unrecognized(target=None):
+def cmd_unrecognized(target: str | None = None) -> tuple[int, int, int]:
     """v1.11: --unrecognized / --alien — list top-level entries in each library
     rootpath that Plex DB does NOT have a media_part for.
 
@@ -17626,7 +17635,7 @@ def cmd_unrecognized(target=None):
 
     n_unrecognized = 0
     n_errors = 0
-    per_lib_unrecog = {}
+    per_lib_unrecog: dict[str, list[tuple[str, Literal['dir', 'file']]]] = {}
 
     for lib in libraries:
         rootpaths = locations_by_lib.get(lib, [])
@@ -17634,7 +17643,7 @@ def cmd_unrecognized(target=None):
             print(f"  ! {lib}: no rootpath in cache — skipping")
             n_errors += 1
             continue
-        lib_alien = []
+        lib_alien: list[tuple[str, Literal['dir', 'file']]] = []
         for rp in rootpaths:
             rp_norm = rp.rstrip('/')
             entries = _list_top_level_entries(rp_norm, PLEX_DB_REMOTE_HOST)
@@ -17683,7 +17692,7 @@ def cmd_unrecognized(target=None):
     return (len(libraries), n_unrecognized, n_errors)
 
 
-def format_duration(duration_ms, unit='m'):
+def format_duration(duration_ms: Any, unit: str = 'm') -> float:  # Any: --info passes a record's value as it iterates the record
     """Convert duration from milliseconds to specified unit
 
     Args:
@@ -17706,7 +17715,7 @@ def format_duration(duration_ms, unit='m'):
     else:
         err("00069", f"Invalid duration unit '{unit}'. Must be 's'/'seconds', 'm'/'minutes', or 'h'/'hours'")
 
-def get_media_language(obj):
+def get_media_language(obj: MediaRecord | CollectionRecord) -> str:
     """Get 2-letter language code from a media object.
     Uses audio_languages from Plex metadata, falls back to library name."""
     audio_langs = obj.get('audio_languages', [])
@@ -17722,12 +17731,12 @@ def get_media_language(obj):
         return library.rsplit('.', 1)[-1].upper()
     return '??'
 
-def get_media_description_original(obj):
+def get_media_description_original(obj: MediaRecord | CollectionRecord) -> str:
     """Build description using originalTitle (for duplicate listing).
     Falls back to regular title if no originalTitle."""
     obj_type = obj['type']
     title = obj.get('originalTitle') or obj.get('title', 'Unknown')
-    if obj_type == 'Movie':
+    if obj['type'] == 'Movie':
         what = f"Movie: {title}"
         if obj.get('year'):
             what += f" ({obj['year']})"
@@ -17742,7 +17751,7 @@ def get_media_description_original(obj):
         what = f"{obj_type}: {title}"
     return what
 
-def get_media_description(obj):
+def get_media_description(obj: MediaRecord | CollectionRecord) -> str:
     """Build description string for a media object
 
     Args:
@@ -17752,7 +17761,7 @@ def get_media_description(obj):
         String description of the media (e.g., "Movie: Title (2020)" or "Episode: Series S01E05")
     """
     obj_type = obj['type']
-    if obj_type == 'Movie':
+    if obj['type'] == 'Movie':
         what = f"Movie: {obj['title']}"
         if obj.get('year'):
             what += f" ({obj['year']})"
@@ -17768,7 +17777,7 @@ def get_media_description(obj):
         what = f"{obj_type}: {obj['title']}"
     return what
 
-def display_duplicate_details(nr, obj):
+def display_duplicate_details(nr: int, obj: MediaRecord | CollectionRecord) -> None:
     """Display detailed information about a duplicate media file
 
     Args:
@@ -17860,7 +17869,7 @@ def display_duplicate_details(nr, obj):
                         print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
                         print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
 
-def determine_remote_host(filepath) -> tuple:
+def determine_remote_host(filepath: str | None) -> tuple[str | None, bool, Any]:  # Any: the path is None when not found, and callers read it after testing `exists`, which pyright cannot follow
     """Determine if file is local or on remote SSH host
 
     Args:
@@ -17909,7 +17918,7 @@ def determine_remote_host(filepath) -> tuple:
         print(f"{DBGPFX}  -> Returning (None, False, None) - file NOT FOUND anywhere")
     return (None, False, None)
 
-def play_media_file(filepath, remote_host=None):
+def play_media_file(filepath: str, remote_host: str | None = None) -> bool:
     """Play a media file using available players (mpv, Plex, or Infuse)
 
     Args:
@@ -18038,7 +18047,7 @@ def play_media_file(filepath, remote_host=None):
     print("Please install one of: mpv (brew install mpv), Plex app, or Infuse app", file=sys.stderr)
     return False
 
-def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed_files):
+def update_cache_after_resolution(choice: str, keys: list[str] | None, file1: str, file2: str, all_files: list[str] | None, renamed_files: list[str] | None) -> str | None:
     """Update cache after successful resolution action
 
     Args:
@@ -18440,6 +18449,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
         # Update paths for all renamed files
         files_to_update = all_files if all_files else [file1, file2]
 
+        assert renamed_files is not None   # choice '7' always comes with renamed_files
         for idx, (old_path, new_path) in enumerate(zip(files_to_update, renamed_files)):
             key_to_update = keys[idx] if idx < len(keys) else None
             if key_to_update and (obj := media_record(key_to_update)) is not None:
@@ -18456,7 +18466,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
     # Save updated cache
     update_and_save_cache(build_media_cache_dict())
 
-def get_library_dir_from_path(filepath, library_name):
+def get_library_dir_from_path(filepath: str, library_name: str) -> str:
     """Extract library directory from file path given the library name
 
     Args:
@@ -18480,7 +18490,7 @@ def get_library_dir_from_path(filepath, library_name):
     # Assume structure is: /path/library/movie_folder/file or /path/library/movie_folder/subfolder/file
     return os.path.dirname(os.path.dirname(filepath))
 
-def refresh_cache_metadata(cache_key):
+def refresh_cache_metadata(cache_key: str) -> bool:
     """Refresh metadata in cache from Plex server for a specific item
 
     After updating metadata via Plex API, we need to update the cache to reflect changes.
@@ -18522,7 +18532,24 @@ def refresh_cache_metadata(cache_key):
         print(f"  ⚠ Warning: Could not refresh cache metadata: {e}")
         return False
 
-def merge_metadata_from_duplicates(source_key, target_key):
+class _MetadataMergeChanges(TypedDict):
+    """What merge_metadata_from_duplicates did per kind; None until looked at."""
+    watched: dict[str, object] | None
+    labels: dict[str, object] | None
+    rating: dict[str, object] | None
+
+
+class _MetadataMergeOptional(TypedDict, total=False):
+    error: str
+
+
+class MetadataMerge(_MetadataMergeOptional):
+    """merge_metadata_from_duplicates' answer, written into the resolution log."""
+    success: bool
+    changes: _MetadataMergeChanges
+
+
+def merge_metadata_from_duplicates(source_key: str, target_key: str) -> MetadataMerge:
     """API required: modifies Plex state (markWatched, addLabel, rate) during duplicate resolution.
     Merge metadata (watched status, labels, ratings) from source to target
 
@@ -18544,7 +18571,7 @@ def merge_metadata_from_duplicates(source_key, target_key):
             }
         }
     """
-    result = {
+    result: MetadataMerge = {
         'success': False,
         'changes': {
             'watched': None,
@@ -18679,7 +18706,7 @@ def merge_metadata_from_duplicates(source_key, target_key):
 _AUTO_UPDATE_CACHE_MAX_AGE_S = 30
 
 
-def _maybe_refresh_cache_for_state_changing_command(label=''):
+def _maybe_refresh_cache_for_state_changing_command(label: str = '') -> bool:
     """Fast-path auto-refresh used by state-changing commands.
 
     Three-stage gate, cheap → expensive:
@@ -18715,7 +18742,7 @@ def _maybe_refresh_cache_for_state_changing_command(label=''):
         mode='rows'
     ) or []
     cached_ua = (CACHE.get('library_stats') or {}).get('updatedAt') or {}
-    changed = []
+    changed: list[str] = []
     for row in rows:
         try:
             _name = row[0] if isinstance(row, (list, tuple)) else row.get('name')
@@ -18739,7 +18766,7 @@ def _maybe_refresh_cache_for_state_changing_command(label=''):
     return True
 
 
-def update_cache_for_library(library_name):
+def update_cache_for_library(library_name: str | None) -> int | None:
     """v2.69: Refresh my-plex's cache by delegating to the canonical
     `--update-cache` code path via a subprocess invocation of the my-plex
     script itself, then reloading the freshly-written pickle into the
@@ -18796,7 +18823,7 @@ def update_cache_for_library(library_name):
         print(f"    In-memory state may be stale; restart my-plex to pick up the new cache.")
         return None
 
-def get_movie_dir_from_path(filepath, library_name):
+def get_movie_dir_from_path(filepath: str, library_name: str | None) -> str:
     """Extract the movie directory (first directory within library) from file path
 
     For movies, the structure is: /library/MOVIE_DIR/[subfolders/]file
@@ -18837,7 +18864,7 @@ def get_movie_dir_from_path(filepath, library_name):
     # Ultimate fallback: return the parent directory of the file
     return os.path.dirname(filepath)
 
-def get_episode_dir(obj):
+def get_episode_dir(obj: MediaRecord | CollectionRecord) -> str:
     """Get the directory containing an episode file, from the cache object's 'file' field.
 
     Args:
@@ -18849,7 +18876,7 @@ def get_episode_dir(obj):
     filepath = obj.get('file', '')
     return os.path.dirname(filepath) if filepath else ''
 
-def get_movie_dir(obj):
+def get_movie_dir(obj: MediaRecord | CollectionRecord) -> str:
     """Get the movie directory from cache, using the object's file path and library name.
 
     Delegates to get_movie_dir_from_path() which knows the library directory structure.
@@ -18866,7 +18893,7 @@ def get_movie_dir(obj):
         return ''
     return get_movie_dir_from_path(filepath, library)
 
-def get_season_dir(obj):
+def get_season_dir(obj: MediaRecord | CollectionRecord) -> str:
     """Get the season directory path from cache for an Episode object.
 
     Looks up the Season object via series_key + S_str → OBJ_BY_SERIES → OBJ_BY_ID.
@@ -18887,7 +18914,7 @@ def get_season_dir(obj):
     season_obj = PLEX_Media.OBJ_BY_ID.get(season_key)
     return season_obj.get('file', '') if season_obj else ''
 
-def get_series_dir(obj):
+def get_series_dir(obj: MediaRecord | CollectionRecord) -> str:
     """Get the series/series directory path from cache for an Episode or Season object.
 
     Looks up the Series object via series_key → OBJ_BY_ID.
@@ -18904,7 +18931,7 @@ def get_series_dir(obj):
     series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
     return series_obj.get('file', '') if series_obj else ''
 
-def _index_filepath(filepath, cache_key):
+def _index_filepath(filepath: str, cache_key: str) -> None:
     """Record cache_key under filepath in PLEX_Media.OBJ_BY_FILEPATH, whose
     value is a LIST of keys -- one file can belong to several libraries, and
     every reader walks the list."""
@@ -18913,7 +18940,7 @@ def _index_filepath(filepath, cache_key):
         keys.append(cache_key)
 
 
-def undo_resolution_action(undo_info, remote_host):
+def undo_resolution_action(undo_info: dict[str, Any], remote_host: str | None) -> bool:  # Any: an undo record, as JSON holds it
     """Undo a previously performed resolution action
 
     ⚠️  NOTE: This function demonstrates proper use of my_plex_file_operation()
@@ -19123,7 +19150,7 @@ def undo_resolution_action(undo_info, remote_host):
         print(f"✗ Unknown action type: {action}")
         return False
 
-def _auto_trash_signals_match(keys):
+def _auto_trash_signals_match(keys: list[str]) -> bool:
     """Return True when every key in `keys` represents the same media down to
     title, IDs, language, technical attributes and byte-exact filesize.
 
@@ -19133,7 +19160,7 @@ def _auto_trash_signals_match(keys):
     objs = [PLEX_Media.OBJ_BY_ID.get(k) or {} for k in keys]
     o1, o2 = objs[0], objs[1]
 
-    def _norm(s):
+    def _norm(s: object) -> object:
         return (s or '').strip().lower() if isinstance(s, str) else s
 
     if _norm(o1.get('title')) != _norm(o2.get('title')):
@@ -19174,7 +19201,7 @@ def _auto_trash_signals_match(keys):
     return True
 
 
-def _bad_structure_depth_violation(obj):
+def _bad_structure_depth_violation(obj: MediaRecord | CollectionRecord | dict[str, Any]) -> int:  # {} stands for a key the cache lacks
     """Return the depth-overrun for a Movie/Episode, or 0 if at-or-below max.
 
     A return value > 0 means the file lives N dirs deeper than Plex's
@@ -19205,7 +19232,7 @@ def _bad_structure_depth_violation(obj):
     return max(0, depth - max_depth)
 
 
-def _auto_trash_victim_index(keys):
+def _auto_trash_victim_index(keys: list[str]) -> Literal[1, 2]:
     """Return 1 or 2 — index of the file (within `keys`) to trash.
 
     Decision rule (in order):
@@ -19225,7 +19252,25 @@ def _auto_trash_victim_index(keys):
     return 2 if len(p2) >= len(p1) else 1
 
 
-def apply_pending_operations(pending_operations, resolution_log_data, default_remote_host=None):
+class _PendingResolutionOptional(TypedDict, total=False):
+    reason: str                 # set when the pair was queued without a prompt
+
+
+class PendingResolution(_PendingResolutionOptional):
+    """One duplicate resolution --duplicates --resolve queued for the end of the run."""
+    operation_number: int
+    choice: str                 # the menu choice: '3' .. '7'
+    file1: str
+    file2: str
+    remote_host: str | None
+    all_files: list[str]
+    keys: list[str]
+    same_file: bool
+    dup_key: str
+    is_multi_version: bool
+
+
+def apply_pending_operations(pending_operations: list[PendingResolution], resolution_log_data: dict[str, Any], default_remote_host: str | None = None) -> bool:  # Any: the resolution log, as JSON holds it
     """Apply all pending operations that were recorded during resolution mode
 
     Args:
@@ -19240,7 +19285,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         return True
 
     all_success = True
-    modified_libraries = set()
+    modified_libraries: set[str] = set()
 
     for pending_op in pending_operations:
         operation_number = pending_op['operation_number']
@@ -19269,11 +19314,11 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         # Track libraries that need scanning BEFORE executing operations
         # (for move/delete operations, the source library info may be lost after execution)
         if keys and len(keys) > 0:
-            lib1 = PLEX_Media.OBJ_BY_ID.get(keys[0], {}).get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
+            lib1 = PLEX_Media.OBJ_BY_ID[keys[0]].get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
             if lib1:
                 modified_libraries.add(lib1)
         if keys and len(keys) > 1:
-            lib2 = PLEX_Media.OBJ_BY_ID.get(keys[1], {}).get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
+            lib2 = PLEX_Media.OBJ_BY_ID[keys[1]].get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
             if lib2:
                 modified_libraries.add(lib2)
 
@@ -19297,11 +19342,11 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             # Track any additional libraries that may have been affected after execution
             # (e.g., destination library for move operations)
             if keys and len(keys) > 0:
-                lib1_after = PLEX_Media.OBJ_BY_ID.get(keys[0], {}).get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
+                lib1_after = PLEX_Media.OBJ_BY_ID[keys[0]].get('library') if keys[0] in PLEX_Media.OBJ_BY_ID else None
                 if lib1_after:
                     modified_libraries.add(lib1_after)
             if keys and len(keys) > 1:
-                lib2_after = PLEX_Media.OBJ_BY_ID.get(keys[1], {}).get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
+                lib2_after = PLEX_Media.OBJ_BY_ID[keys[1]].get('library') if keys[1] in PLEX_Media.OBJ_BY_ID else None
                 if lib2_after:
                     modified_libraries.add(lib2_after)
         else:
@@ -19313,10 +19358,9 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         print(f"\n{'='*76}")
         print(f"SCANNING {len(modified_libraries)} MODIFIED LIBRARIES")
         print(f"{'='*76}")
-        import time
 
         # Track which libraries completed scanning successfully
-        successfully_scanned_libraries = set()
+        successfully_scanned_libraries: set[str] = set()
 
         plex = ensure_plex_api()
         for lib_name in sorted(modified_libraries):
@@ -19334,7 +19378,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
         # This ensures DISK, PLEX, and CACHE are fully synchronized
         if successfully_scanned_libraries:
             print(f"  Verifying Plex items are synchronized...", end=' ', flush=True)
-            verification_errors = []
+            verification_errors: list[str] = []
 
             for pending_op in pending_operations:
                 keys = pending_op.get('keys', [])
@@ -19399,7 +19443,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
 
     return all_success
 
-def undo_operation(operation_log, remote_host=None):
+def undo_operation(operation_log: dict[str, Any], remote_host: str | None = None) -> bool:  # Any: an operation log entry, as JSON holds it
     """API required: re-adds items to cache via add_media_obj_via_PLEX_API() after trash restore — needs plexapi
     objects to extract media/part structure. Undo a resolution operation using the stored undo instructions
 
@@ -19420,7 +19464,7 @@ def undo_operation(operation_log, remote_host=None):
         print("✗ No undo instructions available for this operation")
         return False
 
-    choice = operation_log.get("choice")
+    _choice = operation_log.get("choice")
     print(f"Undoing: {operation_log.get('choice_description')}")
     print(f"Original operation timestamp: {operation_log.get('timestamp')}")
 
@@ -19746,7 +19790,7 @@ def undo_operation(operation_log, remote_host=None):
                 current_path = instruction.get("current_path")
                 original_filename = instruction.get("original_filename")
 
-                success, new_path = rename_file(current_path, original_filename, remote_host)
+                success, _new_path = rename_file(current_path, original_filename, remote_host)
                 if success:
                     print(f"  ✓ Renamed file back successfully")
                 else:
@@ -19784,7 +19828,7 @@ def undo_operation(operation_log, remote_host=None):
     print("="*76 + "\n")
     return True
 
-def generate_undo_instructions(choice, operation_log):
+def generate_undo_instructions(choice: str, operation_log: dict[str, Any]) -> list[dict[str, Any]]:  # Any: log entries, as JSON holds them
     """Generate step-by-step undo instructions for an operation
 
     Args:
@@ -19794,7 +19838,7 @@ def generate_undo_instructions(choice, operation_log):
     Returns:
         List of undo instruction dictionaries
     """
-    undo_instructions = []
+    undo_instructions: list[dict[str, Any]] = []
 
     if choice == '3' or choice == '4':
         # Simple trash operation
@@ -19956,7 +20000,7 @@ def generate_undo_instructions(choice, operation_log):
     return undo_instructions
 
 
-def _detect_container_tool(filepath):
+def _detect_container_tool(filepath: str) -> tuple[str | None, str]:
     """Detect container type and return the appropriate tool name.
 
     Returns:
@@ -19971,7 +20015,7 @@ def _detect_container_tool(filepath):
         return (None, ext)
 
 
-def _build_audio_language_args(tool_name, filepath, lang_code_3):
+def _build_audio_language_args(tool_name: str, filepath: str, lang_code_3: str) -> list[str]:
     """Build tool-specific arguments for setting audio language.
 
     Args:
@@ -19989,7 +20033,20 @@ def _build_audio_language_args(tool_name, filepath, lang_code_3):
     return []
 
 
-def resolve_no_audio_language(obj_keys, args):
+class AudioLanguageOperation(TypedDict):
+    """One audio-language tag --no-audio-language --resolve queued for the end of the run."""
+    cache_key: str
+    filepath: str
+    plex_id: int | str          # 'N/A' when the record has none
+    library: str
+    tool_name: str              # 'mp4box' or 'mkvpropedit'
+    lang_code_2: str
+    lang_code_3: str
+    remote_host: str | None
+    title: str
+
+
+def resolve_no_audio_language(obj_keys: list[str], args: argparse.Namespace) -> None:
     """Interactive wizard to fix missing audio language tags in media files.
 
     For each item with no audio language:
@@ -20027,7 +20084,7 @@ def resolve_no_audio_language(obj_keys, args):
     # Unified resolve-log path: ~/.my-plex/logs/<cmd>_<ts>.json
     # (written via _write_resolve_log at end-of-run; we just accumulate
     #  operations in resolution_log_data here)
-    resolution_log_data = {
+    resolution_log_data: dict[str, Any] = {   # Any: written out as JSON
         "session": {
             "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "command": ' '.join(sys.argv),
@@ -20043,8 +20100,8 @@ def resolve_no_audio_language(obj_keys, args):
     #   3. AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY 2-letter code  → use code
     #   4. Plex library.language                                  → use code
     #   5. nothing matched                                        → PROMPT
-    _multi_libs = set()
-    _lib_resolve = {}
+    _multi_libs: set[str] = set()
+    _lib_resolve: dict[str, str] = {}
     for lib_name, value in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
         if str(value).upper() == 'MULTI':
             _multi_libs.add(lib_name)
@@ -20060,7 +20117,7 @@ def resolve_no_audio_language(obj_keys, args):
 
     # Compile filepath patterns once (case-insensitive) from
     # DISK_PLEX_MAP['AUDIO_LANG']['values'][*]['disk2plex'].
-    _filepath_patterns = []
+    _filepath_patterns: list[tuple[re.Pattern[str], str]] = []
     _audio_lang_spec = (DISK_PLEX_MAP or {}).get('AUDIO_LANG', {})
     for _plex_val, _entry_or_list in (_audio_lang_spec.get('values') or {}).items():
         _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
@@ -20084,7 +20141,7 @@ def resolve_no_audio_language(obj_keys, args):
                 else:
                     _filepath_patterns.append((_compiled, str(_plex_val).lower()[:2]))
 
-    def _resolve_lang_for_item(filepath, library):
+    def _resolve_lang_for_item(filepath: str, library: str) -> tuple[str | None, str]:
         """Return (code, source) where code is a 2-letter ISO or None
         (None means: prompt the user). source is a short label for the
         user-facing 'Auto-resolve' line."""
@@ -20108,7 +20165,7 @@ def resolve_no_audio_language(obj_keys, args):
             return _lib_resolve[library], f"library '{library}'"
         return None, "no rule matched (prompt)"
 
-    pending_operations = []
+    pending_operations: list[AudioLanguageOperation] = []
     total_items = len(obj_keys)
 
     try:
@@ -20292,7 +20349,7 @@ def resolve_no_audio_language(obj_keys, args):
         print("\n\nInterrupted. No operations applied.")
 
 
-def _apply_audio_language_operations(pending_operations, resolution_log_data):
+def _apply_audio_language_operations(pending_operations: list[AudioLanguageOperation], resolution_log_data: dict[str, Any]) -> None:  # Any: the log, written out as JSON
     """Apply all pending audio language fix operations.
 
     For each operation:
@@ -20310,7 +20367,7 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data):
 
     success_count = 0
     fail_count = 0
-    items_to_analyze = []  # (plex_id, title, cache_key, lang_code_2) for Plex analyze
+    items_to_analyze: list[tuple[int | str, str, str, str]] = []  # (plex_id, title, cache_key, lang_code_2) for Plex analyze
 
     for idx, op in enumerate(pending_operations, 1):
         filepath = op['filepath']
@@ -20403,7 +20460,7 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data):
     print(summary)
 
 
-def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, operation_log, resolution_log_data):
+def _execute_trash_and_move(choice: str, file1: str, file2: str, keys: list[str] | None, remote_host: str | None, all_files: list[str] | None, operation_log: dict[str, Any] | None, resolution_log_data: dict[str, Any] | None) -> bool:  # Any: the logs, written out as JSON
     """Unified handler for choices 5 and 6: trash one file's directory and move the other to its library.
     Choice 5: trash [1], move [2] to library of [1].  Choice 6: trash [2], move [1] to library of [2]."""
     # Determine which is trashed (src) and which is moved (dst)
@@ -20445,7 +20502,7 @@ def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, 
 
     # Merge metadata from trashed item to kept item
     print(f"Merging metadata (watched status, labels, ratings) from [{trash_idx+1}] to [{keep_idx+1}]...")
-    metadata_result = merge_metadata_from_duplicates(keys[trash_idx], keys[keep_idx])
+    metadata_result = merge_metadata_from_duplicates(keys[trash_idx], keys[keep_idx])  # pyright: ignore[reportOptionalSubscript]  # raises TypeError when keys is None
     if operation_log:
         operation_log["actions"].append({
             "action": "merge_metadata",
@@ -20464,7 +20521,7 @@ def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, 
         if operation_log:
             operation_log["actions"].append({"action": "trash", "target": f"movie_directory_{trash_idx+1}", "original_path": movie_dir_trash, "status": "failed", "error": "Could not trash directory"})
             operation_log["result"] = "failed"
-            resolution_log_data["operations"].append(operation_log)
+            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript]  # operation_log exists only beside resolution_log_data
         return False
 
     print(f"✓ Movie directory [{trash_idx+1}] moved to trash successfully.")
@@ -20477,7 +20534,7 @@ def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, 
         if operation_log:
             operation_log["actions"].append({"action": "move", "target": f"movie_directory_{keep_idx+1}", "original_path": movie_dir_keep, "destination": target_lib_dir, "status": "failed", "error": "Could not move to target library"})
             operation_log["result"] = "failed"
-            resolution_log_data["operations"].append(operation_log)
+            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript]  # operation_log exists only beside resolution_log_data
         return False
 
     print(f"✓ Movie directory [{keep_idx+1}] moved to {target_lib_dir} successfully.")
@@ -20508,14 +20565,14 @@ def _execute_trash_and_move(choice, file1, file2, keys, remote_host, all_files, 
         file2 = dst_file
     else:
         file1 = dst_file
-    modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+    _modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
 
     if operation_log and resolution_log_data is not None:
         resolution_log_data["operations"].append(operation_log)
     return True
 
 
-def execute_resolution_action(choice, file1, file2, remote_host, all_files=None, keys=None, resolution_log_data=None, operation_number=None, same_file=False, is_multi_version=False):
+def execute_resolution_action(choice: str, file1: str, file2: str, remote_host: str | None, all_files: list[str] | None = None, keys: list[str] | None = None, resolution_log_data: dict[str, Any] | None = None, operation_number: int | None = None, same_file: bool = False, is_multi_version: bool = False) -> bool:  # Any: the log, written out as JSON
     """Execute the chosen resolution action for duplicate files
 
     Args:
@@ -20534,7 +20591,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
         True if operation succeeded, False otherwise
     """
     # Initialize operation log entry
-    operation_log = None
+    operation_log: dict[str, Any] | None = None
     if resolution_log_data is not None and operation_number is not None:
         operation_log = {
             "operation_number": operation_number,
@@ -20613,7 +20670,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
 
             # Remove from cache
-            modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+            _modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
 
             if operation_log:
                 operation_log["actions"].append({
@@ -20679,7 +20736,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     operation_log["result"] = "success"
 
                 # Update cache (library scan will be done at end when applying all operations)
-                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+                _modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
 
                 if operation_log and resolution_log_data is not None:
                     operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
@@ -20762,7 +20819,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
 
             # Remove from cache
-            modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+            _modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
 
             if operation_log:
                 operation_log["actions"].append({
@@ -20865,7 +20922,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                             for subfile in subdir_files:
                                 src_path = subfile
                                 dst_path = os.path.join(file2_dir, os.path.basename(subfile))
-                                move_success, moved_path = my_plex_file_operation('MOVE', src_path, remote_host, dest_path=dst_path)
+                                move_success, _moved_path = my_plex_file_operation('MOVE', src_path, remote_host, dest_path=dst_path)
                                 if move_success:
                                     if VRB: print(f"{VRBPFX}Moved: {os.path.basename(subfile)}")
                                     # Update file1 path if this is the file we're keeping
@@ -20933,7 +20990,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                     operation_log["result"] = "success"
 
                 # Update cache (library scan will be done at end when applying all operations)
-                modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
+                _modified_lib = update_cache_after_resolution(choice, keys, file1, file2, all_files, None)
 
                 if operation_log and resolution_log_data is not None:
                     operation_log["undo_instructions"] = generate_undo_instructions(choice, operation_log)
@@ -21042,7 +21099,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
 
     return False
 
-def collect_library_keys(library_name=None, media_type=None):
+def collect_library_keys(library_name: str | None = None, media_type: str | None = None) -> list[str]:
     """Collect media keys from libraries based on criteria
 
     Args:
@@ -21052,7 +21109,7 @@ def collect_library_keys(library_name=None, media_type=None):
     Returns:
         List of media keys
     """
-    obj_keys = []
+    obj_keys: list[str] = []
 
     # OBJ_BY_LIBRARY structure: {library_name: {type_str: [keys], ...}}
     if library_name is None:
@@ -21083,7 +21140,7 @@ def collect_library_keys(library_name=None, media_type=None):
 
     return obj_keys
 
-def resolve_scope_to_keys(scope_val, media_type=None):
+def resolve_scope_to_keys(scope_val: str | list[str] | tuple[str, ...] | bool | None, media_type: str | None = None) -> tuple[list[str], str | None, str]:
     """Resolve a scope value to cache keys — UNIVERSAL scope entry point for
     the listing / problem-detection commands (--broken, --unmatched, --unsorted,
     --mismatched, --missing, --reencode, --problems, ...).
@@ -21146,11 +21203,11 @@ def resolve_scope_to_keys(scope_val, media_type=None):
         #   • single key (Movie / Series / Season / Episode) → that key
         #   • multiple keys all rooted at one Series         → the Series
         #   • everything else                                 → no key suffix
-        _canon_key = None
+        _canon_key: str | None = None
         if len(obj_keys) == 1:
             _canon_key = obj_keys[0]
         else:
-            _series_keys = set()
+            _series_keys: set[str] = set()
             _has_other = False
             for _k in obj_keys:
                 _o = PLEX_Media.OBJ_BY_ID.get(_k, {})
@@ -21183,7 +21240,7 @@ def resolve_scope_to_keys(scope_val, media_type=None):
               f"  - Use --info '{scope_val}' to search")
 
 
-def generate_duplicate_keys(obj):
+def generate_duplicate_keys(obj: MediaRecord | CollectionRecord) -> list[str]:
     """Generate keys for identifying duplicate content.
 
     For movies, returns keys for both title and originalTitle to catch
@@ -21215,7 +21272,7 @@ def generate_duplicate_keys(obj):
     else:
         return []
 
-def generate_duplicate_key(obj):
+def generate_duplicate_key(obj: MediaRecord | CollectionRecord) -> str | None:
     """Generate primary duplicate key (convenience wrapper).
 
     Returns:
@@ -21224,7 +21281,7 @@ def generate_duplicate_key(obj):
     keys = generate_duplicate_keys(obj)
     return keys[0] if keys else None
 
-def classify_multi_version(obj):
+def classify_multi_version(obj: MediaRecord | CollectionRecord) -> Literal['exact_duplicate', 'reencode', 'true_multiversion', 'single']:
     """Classify a multi-version item (single Plex entry with multiple files).
 
     Compares durations encoded in the version strings of the files dict to
@@ -21239,13 +21296,15 @@ def classify_multi_version(obj):
     Returns:
         str: 'exact_duplicate', 'reencode', 'true_multiversion', or 'single' (if <=1 file)
     """
+    if obj['type'] == 'Collection':
+        return 'single'   # a collection has no files
     files_dict = obj.get('files', {})
     if len(files_dict) <= 1:
         return 'single'
 
     # Parse durations (in minutes) from version strings: "23.69min 960x720 (h264 aac)"
     import re
-    durations_ms = []
+    durations_ms: list[float | None] = []
     for version_str in files_dict.keys():
         dur_match = re.match(r'([\d.]+)min', version_str)
         if dur_match:
@@ -21269,8 +21328,8 @@ def classify_multi_version(obj):
         return 'true_multiversion'
 
     # Same duration — check if truly identical (same size + codec) or re-encode
-    sizes = set()
-    codecs = set()
+    sizes: set[int] = set()
+    codecs: set[str] = set()
     for version_str, file_info in files_dict.items():
         if isinstance(file_info, dict):
             size = file_info.get('filesize')
@@ -21285,7 +21344,7 @@ def classify_multi_version(obj):
 
     return 'reencode'
 
-def safe_getattr(obj, attr, default=None):
+def safe_getattr(obj: object, attr: str, default: Any = None) -> Any:  # Any: whatever attribute the caller names
     """Safely get attribute from object using hasattr + getattr pattern
 
     Args:
@@ -21298,16 +21357,26 @@ def safe_getattr(obj, attr, default=None):
     """
     return getattr(obj, attr, default) if hasattr(obj, attr) else default
 
-def get_S_str(season):
+if TYPE_CHECKING:   # for the plexapi annotations below; belongs in the import block at the top
+    import plexapi.video
+
+# A plexapi object the cache builders read (an item, its media, part, library).
+# Any rather than plexapi's classes: plexapi types its ids and indexes as
+# float | bool | None and the items of its tag lists as Optional, so every value
+# the cache stores from one would need a cast or an ignore.
+PlexObject = Any
+
+
+def get_S_str(season: plexapi.video.Season | None) -> str:
     if season is None:  S_str = ""
     else:               S_str = "S??" if season.index is None else f"S{season.index:02}"
     return S_str
-def get_E_str(episode):
+def get_E_str(episode: plexapi.video.Episode | None) -> str:
     if episode is None: E_str = ""
     else:               E_str = "E??" if episode.index is None else f"E{episode.index:02}"
     return E_str
 
-def add_movie_info(val, obj, obj_type, key, version, filepath, lib_title=None):
+def add_movie_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, version: str, filepath: str, lib_title: str | None = None) -> MediaRecord:
     # Update PLEX_Media.OBJ_BY_MOVIE:
     title = obj.title
     match obj_type:
@@ -21325,7 +21394,7 @@ def add_movie_info(val, obj, obj_type, key, version, filepath, lib_title=None):
         case _: err("00071", f"obj = {obj}")
     return val
 
-def add_series_info(val, obj, obj_type, key, item, season, episode, version, lib_title=None):
+def add_series_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, item: PlexObject, season: PlexObject, episode: PlexObject, version: str, lib_title: str | None = None) -> MediaRecord:
     S_str = get_S_str(season)
     E_str = get_E_str(season)
     E_str_full = S_str + E_str
@@ -21388,7 +21457,7 @@ def plex_rate_limit_delay():
         time.sleep(delay)
 
 
-def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, part_idx,part_cnt,part, season=None, episode=None, filepath=None, display_title=None ):
+def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexObject, media_idx: int, media_cnt: int, media: PlexObject, part_idx: int, part_cnt: int, part: PlexObject, season: PlexObject = None, episode: PlexObject = None, filepath: str | None = None, display_title: str | None = None ):
     """API required: expects plexapi objects (item, media, part). Used by undo_operation() (trash restore)
     to re-add items to cache. --update-cache uses DB path (_process_movies/shows_from_database) instead."""
     global FORCE_PLEXDATA
@@ -21546,7 +21615,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
     _audio_langs = plex_retry_operation(lambda: [ audio.language for audio in part.audioStreams() if hasattr(audio, 'language') and audio.language ], context=f"{key} {ctx_title} audioStreams", library=lib_title)
     _subtitle_langs = plex_retry_operation(lambda: [ subtitle.language for subtitle in part.subtitleStreams() if hasattr(subtitle, 'language') and subtitle.language ], context=f"{key} {ctx_title} subtitleStreams", library=lib_title)
-    val={ 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size, 'part_id': part_id, 'audio_languages': list(_audio_langs), 'subtitle_languages': list(_subtitle_langs)}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
+    val: MediaRecord | None = { 'file':filepath, 'files':{version: {'filepath': filepath, 'filesize': part_size, 'part_id': part_id, 'audio_languages': list(_audio_langs), 'subtitle_languages': list(_subtitle_langs)}}, 'type':media_type, 'type_str':media_type_str, 'id':obj_ratingKey, 'title':obj_title, 'originalTitle':obj_originalTitle, 'year':obj_year, 'library':library.title,
           'item_id':item_ratingKey, 'media_id':media_id, 'part_id':part_id, 'version':version,
           'media_nr':f"{media_idx+1}/{media_cnt}", 'media_idx':media_idx, 'media_cnt':media_cnt, # +1 as idx 0.. to match logic of cnt (1..)
           'part_nr':f"{part_idx+1}/{part_cnt}",    'part_idx':part_idx,   'part_cnt':part_cnt,   # +1 as idx 0.. to match logic of cnt (1..)
@@ -21695,10 +21764,10 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
 
 # Batch queue for metadata collection — filled during --update-cache, processed at the end
-_metadata_batch_queue = []  # [(filepath, obj_key, version, display_title), ...]
+_metadata_batch_queue: list[tuple[str, str, str, str | None]] = []  # [(filepath, obj_key, version, display_title), ...]
 
 
-def _collect_missing_file_metadata(cached_obj, display_title):
+def _collect_missing_file_metadata(cached_obj: MediaRecord | CollectionRecord, display_title: str | None) -> int:
     """Queue cached files needing metadata for batch collection.
 
     Called during --update-cache for objects that are otherwise unchanged.
@@ -21708,6 +21777,8 @@ def _collect_missing_file_metadata(cached_obj, display_title):
     """
     if not FORCE_CACHE_UPDATE:
         return 0
+    if cached_obj['type'] == 'Collection':
+        return 0   # a collection has no files
     queued = 0
     obj_key = f"{cached_obj.get('type', 'Unknown')}:{cached_obj.get('id', '?')}"
     for version, file_info in cached_obj.get('files', {}).items():
@@ -21728,7 +21799,7 @@ def _collect_missing_file_metadata(cached_obj, display_title):
     return queued
 
 
-def _run_batch_metadata_collection():
+def _run_batch_metadata_collection() -> None:
     """Batch-collect file metadata for all queued files via parallel SSH workers.
 
     Uses run_tool_on_PLEX_server('ffmpeg', ...) to resolve the ffmpeg path
@@ -21743,7 +21814,7 @@ def _run_batch_metadata_collection():
         return
 
     # Build lookup: filepath -> [(obj_key, version, display_title), ...]
-    filepath_lookup = {}
+    filepath_lookup: dict[str, list[tuple[str, str, str | None]]] = {}
     for filepath, obj_key, version, display_title in _metadata_batch_queue:
         if filepath not in filepath_lookup:
             filepath_lookup[filepath] = []
@@ -21853,7 +21924,7 @@ for line in sys.stdin:
 '''
 
     # Partition unique filepaths across workers
-    partitions = [[] for _ in range(num_workers)]
+    partitions: list[list[str]] = [[] for _ in range(num_workers)]
     for i, fp in enumerate(unique_filepaths):
         partitions[i % num_workers].append(fp)
 
@@ -21861,7 +21932,7 @@ for line in sys.stdin:
     import subprocess as sp
     import time as _time
 
-    def run_worker(worker_id, partition):
+    def run_worker(worker_id: int, partition: list[str]) -> tuple[str, int, list[str]]:
         """Run collector script for a file partition, return (stdout, returncode, stderr_lines)."""
         w_prefix = f"W{worker_id:02d}"
         partition_size = len(partition)
@@ -21882,7 +21953,7 @@ for line in sys.stdin:
             proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
 
             # Stream stderr (progress) in a background thread, but also capture it
-            stderr_lines = []
+            stderr_lines: list[str] = []
             def relay_stderr():
                 for line in proc.stderr:
                     stripped = line.rstrip('\n')
@@ -21923,7 +21994,7 @@ for line in sys.stdin:
 
     # Launch workers in parallel
     from concurrent.futures import ThreadPoolExecutor
-    worker_results = {}
+    worker_results: dict[int, tuple[str, int, list[str]]] = {}
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         futures = {pool.submit(run_worker, i, partitions[i]): i for i in range(num_workers)}
         for future in futures:
@@ -21941,12 +22012,12 @@ for line in sys.stdin:
     error_count = 0
     not_found_count = 0
     no_response_count = 0
-    metadata_broken_details = []  # Collected for JSON update log
+    metadata_broken_details: list[dict[str, Any]] = []  # Collected for JSON update log
 
     for worker_id in sorted(worker_results.keys()):
         stdout, returncode, stderr_lines = worker_results[worker_id]
-        partition_files = set(partitions[worker_id]) if worker_id < len(partitions) else set()
-        responded_files = set()
+        partition_files: set[str] = set(partitions[worker_id]) if worker_id < len(partitions) else set()
+        responded_files: set[str] = set()
 
         # Extract actual error from stderr
         error_lines = [l for l in stderr_lines if any(kw in l.lower() for kw in
@@ -22012,7 +22083,7 @@ for line in sys.stdin:
 
                 # ffmpeg error — mark as broken (details go to JSON update log, not stdout)
                 error_count += 1
-                file_n = entry.get('n', '?')
+                _file_n = entry.get('n', '?')
                 stderr_msg = entry.get('stderr', '')
 
                 targets = filepath_lookup.get(filepath, [])
@@ -22092,11 +22163,11 @@ for line in sys.stdin:
 
     # Retry files lost to SSH connection drops
     global SSH_RETRY_DELAYS
-    all_lost_files = []
+    all_lost_files: list[str] = []
     for worker_id in sorted(worker_results.keys()):
         partition_files = set(partitions[worker_id]) if worker_id < len(partitions) else set()
         stdout, _, _ = worker_results[worker_id]
-        responded = set()
+        responded: set[str] = set()
         if stdout.strip():
             for line in stdout.strip().split('\n'):
                 if line.strip():
@@ -22114,10 +22185,10 @@ for line in sys.stdin:
         _time.sleep(delay)
 
         # Run a single retry worker with all lost files
-        retry_stdout, retry_rc, retry_stderr = run_worker(98 + retry_num, all_lost_files)
+        retry_stdout, _retry_rc, _retry_stderr = run_worker(98 + retry_num, all_lost_files)
 
         # Parse retry results
-        retry_responded = set()
+        retry_responded: set[str] = set()
         if retry_stdout.strip():
             for line in retry_stdout.strip().split('\n'):
                 if not line.strip():
