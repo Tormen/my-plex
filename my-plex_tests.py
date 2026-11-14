@@ -13516,6 +13516,26 @@ class TestAtomicPickleWrites(unittest.TestCase):
         self.assertIn("_atomic_pickle_dump(partial_cache_file, checkpoint_data)", src,
                       "the resume checkpoint must be written atomically")
 
+    def test_an_interrupt_mid_write_leaves_no_temp_file(self):
+        """Ctrl-C while the pickle is being written is not an Exception: a
+        cleanup that caught only Exception left the half-written temp file
+        beside the cache on every interrupt.  The interrupt itself must still
+        reach the caller, and the target must be untouched."""
+        class _Interrupts:
+            def __reduce__(self) -> Any:
+                raise KeyboardInterrupt
+        m = _main_module()
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, 'cache.pkl')
+            with open(target, 'wb') as f:
+                f.write(b'old')
+            with self.assertRaises(KeyboardInterrupt):
+                m._atomic_pickle_dump(target, {'x': _Interrupts()})
+            self.assertEqual(sorted(os.listdir(d)), ['cache.pkl'],
+                             "the interrupted write left its temp file behind")
+            with open(target, 'rb') as f:
+                self.assertEqual(f.read(), b'old', "the target was touched")
+
 
 class TestTopLevelHandlers(unittest.TestCase):
     """No stack trace on the user's screen, ever -- and Ctrl-C is an answer.

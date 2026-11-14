@@ -8917,7 +8917,7 @@ def _atomic_pickle_dump(path, data):
         with os.fdopen(fd, 'wb') as f:
             pickle.dump(data, f)
         os.replace(tmp, path)  # atomic on POSIX
-    except Exception:
+    except BaseException:  # cleanup, then re-raise whatever it was: Ctrl-C mid-write included
         try: os.unlink(tmp)
         except OSError: pass
         raise
