@@ -30099,8 +30099,11 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         Scope-restricted when SCOPE is given (an entry qualifies when its
         path IS one of the scope items' paths or lives underneath one).
         Children revert before parent dirs (deepest paths first)."""
-        candidates: list[tuple[str, dict[str, Any]]] = [(path, entry) for path, entry in sidecar.items()
-                      if isinstance(entry, dict) and entry.get('naming_original')]
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for path, sidecar_value in sidecar.items():
+            sidecar_entry: PlainData = sidecar_value    # the sidecar is JSON: each value is checked here
+            if isinstance(sidecar_entry, dict) and sidecar_entry.get('naming_original'):
+                candidates.append((path, sidecar_entry))
         if scope:
             scope_paths: set[str] = set()
             for _key, _obj in _get_universal_scope(scope):
@@ -31323,7 +31326,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if not filepath or not _nw:
                     return False
                 rel = filepath
-                roots: list[str] = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib_name, []) or []
+                _library_stats: dict[str, Any] = CACHE.get('library_stats', {})
+                _locations: dict[str, list[str]] = _library_stats.get('locations', {}) or {}
+                roots: list[str] = _locations.get(lib_name, []) or []
                 for _root in roots:
                     rn = _root.rstrip('/')
                     if filepath.startswith(rn + '/'):
@@ -31363,10 +31368,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         return True
                     _files: dict[str, dict[str, Any]] = obj.get('files', {}) or {}
                     for _fi in _files.values():
-                        if isinstance(_fi, dict):
-                            _vsw = _fi.get('file_segment_words')
-                            if _vsw is not None and _swm(_vsw):
-                                return True
+                        _vsw = _fi.get('file_segment_words')
+                        if _vsw is not None and _swm(_vsw):
+                            return True
                     return False
                 # Slow fallback (pre-v2.15 cache): live tokenise.
                 lib_name = obj.get('library', '')
@@ -31375,7 +31379,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     return True
                 _files_slow: dict[str, dict[str, Any]] = obj.get('files', {}) or {}
                 for _fi in _files_slow.values():
-                    if isinstance(_fi, dict) and _lpm(_fi.get('filepath', ''), lib_name):
+                    if _lpm(_fi.get('filepath', ''), lib_name):
                         return True
                 return False
             return label, _title_fn
@@ -33050,24 +33054,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 obj = PLEX_Media.OBJ_BY_ID[key]
                 files_dict = obj.get('files', {})
                 if len(files_dict) > 1 and key in multi_version_keys:
-                    sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath') if isinstance(x[1], dict) else x[1])
+                    sorted_files = sorted(files_dict.items(), key=lambda x: x[1].get('filepath'))
                     for version_str, file_info in sorted_files:
                         nr += 1
                         what = get_media_description_original(obj)
                         lang = get_media_language(obj)
                         plex_id = obj.get('id')
-                        if plex_id is None:
-                            err("00110", f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
-                        if isinstance(file_info, str):
-                            filepath = file_info
-                            size_bytes = None
-                        elif isinstance(file_info, dict):
-                            filepath = file_info.get('filepath', 'N/A')
-                            size_bytes = file_info.get('filesize', None)
-                        else:
-                            filepath = 'N/A'
-                            size_bytes = None
-                            if DBG: print(f"{DBGPFX}WARNING: Unexpected file_info type {type(file_info)} for key {key} version {version_str}", file=sys.stderr)
+                        filepath = file_info.get('filepath', 'N/A')
+                        size_bytes = file_info.get('filesize', None)
                         resolution = 'N/A'
                         codec = 'N/A'
                         if version_str:
@@ -33085,8 +33079,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     what = get_media_description_original(obj)
                     lang = get_media_language(obj)
                     plex_id = obj.get('id')
-                    if plex_id is None:
-                        err("00111", f"Plex object is missing 'id' (ratingKey) field. Object key: {key}, Object: {obj}")
                     filepath = obj.get('file') or 'N/A'
                     codec = obj.get('video_codec') or 'N/A'
                     resolution = obj.get('resolution_full') or 'N/A'
@@ -34027,7 +34019,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 v = format_duration(v, 'm')
 
             if isinstance(v, list):
-                v_list: list[object] = [x for x in v]
+                v_list: list[object] = [x for x in v]  # pyright: ignore[reportUnknownVariableType]  -- a record value is read as object, so isinstance gives list[Unknown]; each item is only str()-ed
                 match k:
                     case 'LABELS':              label = 'LABEL:' if labeled else ''
                     case 'ACTORS':              label = 'ACTOR:' if labeled else ''
@@ -34262,7 +34254,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     season = PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key].get(s_str, {})
                     if e_str in season:
                         for ver, ep_keys in list(season[e_str].items()):
-                            if isinstance(ep_keys, list) and key in ep_keys:
+                            if key in ep_keys:
                                 ep_keys.remove(key)
                                 if not ep_keys:
                                     del season[e_str][ver]
@@ -34620,7 +34612,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             media_items: list[Any] = []     # plexapi objects, as resolve_plex_media_obj returns them
             for identifier in media_identifiers:
                 media_items += resolve_plex_media_obj(identifier)
-            Playlist.create(server=plex, title=playlist_name, items=media_items)
+            Playlist.create(server=plex, title=playlist_name, items=media_items)  # pyright: ignore[reportUnknownMemberType]  -- plexapi leaves some of Playlist.create's parameters unannotated
             print(f"Playlist '{playlist_name}' created successfully.")
         except PLEX_ERRORS as e:
             err("00134", f"Error creating playlist: {e}")
@@ -35137,10 +35129,11 @@ def _load_custom_date_extractors() -> None:
             return
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        if hasattr(mod, 'EXTRACTORS') and isinstance(mod.EXTRACTORS, dict):
-            _custom_extractors.update(mod.EXTRACTORS)
+        extractors: PlainData = getattr(mod, 'EXTRACTORS', None)    # the user's own Python: name -> function
+        if isinstance(extractors, dict):
+            _custom_extractors.update(extractors)
             if VRB:
-                print(f"  Loaded {len(mod.EXTRACTORS)} custom date extractor(s) from {module_path}")
+                print(f"  Loaded {len(extractors)} custom date extractor(s) from {module_path}")
         else:
             print(f"WARNING: CUSTOM_DATE_EXTRACTORS module has no EXTRACTORS dict: {module_path}", file=sys.stderr)
     except Exception as e:  # the module is the user's own Python: whatever it raises is the module's
@@ -35278,9 +35271,7 @@ def is_special_episode(filename: str, specials_pattern: str | None = None) -> bo
 
 def _pc_excess(obj_keys: list[str], library: str | None, tsv_only: bool) -> int:
     r = PLEX_Media._list_excess_versions(obj_keys, None, 3)
-    if isinstance(r, tuple) and len(r) >= 2:
-        return int(r[1] or 0)
-    return int(r or 0)
+    return int(r[1] or 0)
 
 class ProblemCategory(TypedDict):
     """One --problems category of PROBLEM_CATEGORIES_REGISTRY."""
@@ -35589,7 +35580,7 @@ def scrape_episodes(series_title: str, series_dir: str, source: str | None = Non
 
     # Fallback chain: if primary source failed or returned 0 episodes, try alternatives
     original_source = source
-    result_empty = result is not None and isinstance(result, tuple) and not result[1]
+    result_empty = result is not None and not result[1]
     if (result is None or result_empty) and external_ids:
         fallback_sources: list[str] = []
         if source != 'tmdb' and external_ids.get('tmdb'):
@@ -35607,7 +35598,7 @@ def scrape_episodes(series_title: str, series_dir: str, source: str | None = Non
                     result = _scrape_tmdb(series_title, metadata, existing_episodes, external_ids)
                 case _:     # the list above holds no other
                     pass
-            if result is not None and (not isinstance(result, tuple) or result[1]):
+            if result is not None and result[1]:
                 source = fb_source
                 metadata['_fallback_from'] = original_source  # record original source that failed
                 break
@@ -35753,7 +35744,7 @@ def _scrape_tvdb(series_title: str, metadata: dict[str, str], existing_episodes:
 
         # Capture series name from first page response
         if page == 0:
-            series_info = data.get('data', {}).get('series', {})
+            series_info: PlainData = data.get('data', {}).get('series', {})     # TVDB's JSON
             if series_info and isinstance(series_info, dict):
                 _tvdb_state['series_name'] = series_info.get('name', '')
             else:
@@ -36540,10 +36531,8 @@ def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
         s_str = f"S{s_num:02d}"
         e_str = f"E{e_num:02d}"
         # Look up in cache for filepath/title
-        ep_keys = (PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
-                   .get(f"S{s_num:02d}", {}).get(f"E{e_num:02d}", {}).get('default', [])
-                   or next(iter((PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
-                                 .get(f"S{s_num:02d}", {}).get(f"E{e_num:02d}", {}) or {}).values()), []))
+        ep_versions = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {}).get(s_str, {}).get(e_str, {})
+        ep_keys: list[str] = ep_versions.get('default', []) or next(iter(ep_versions.values()), None) or []
         title = ''
         for ek in ep_keys:
             obj = media_record(ek)
@@ -36581,13 +36570,17 @@ def _resolve_audio_lang_from_filename(filename: str | None) -> str | None:
     Mirrors the disk-side logic in resolve_no_audio_language (--resolve)
     but operates on a basename only and returns just the code (or None).
     """
-    cfg = (DISK_PLEX_MAP or {}).get('AUDIO_LANG', {})
+    disk_plex_map: dict[str, Any] = DISK_PLEX_MAP or {}     # the user's config
+    cfg: dict[str, Any] = disk_plex_map.get('AUDIO_LANG', {})
     if not cfg:
         return None
     base = os.path.basename(filename or '')
-    for plex_val, entry_or_list in (cfg.get('values') or {}).items():
-        entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
-        for entry in entries:
+    values: dict[str, Any] = cfg.get('values') or {}
+    for plex_val, entry_or_list_v in values.items():
+        entry_or_list: PlainData = entry_or_list_v
+        entries: list[Any] = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+        for entry_v in entries:
+            entry: PlainData = entry_v
             if not isinstance(entry, dict):
                 continue
             for rg in _dpm_resolve_disk2plex(entry, 'file'):
@@ -36645,7 +36638,7 @@ def _classify_migration_action(obj: Mapping[str, Any], version: str | None = Non
         return {'action': 'none', 'reasons': [], 'lang': None,
                 'filepath': '', 'version': None, 'bitrate_mbps': None, 'ext': ''}
 
-    files_dict = obj.get('files', {}) or {}
+    files_dict: dict[str, FileEntry] = obj.get('files', {}) or {}
     if version is None:
         # Auto-pick first version
         version = next(iter(files_dict), None)
@@ -37094,7 +37087,8 @@ def _resolve_scope_filter_expr(expr) -> list[ScopeItem]:  # pyright: ignore[repo
     if has_layout_filter:
         layout_index = _build_layout_index()
         known_paths = _get_known_filepaths_from_plex_db()
-        locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+        library_stats: dict[str, Any] = CACHE.get('library_stats', {})
+        locations_by_lib: dict[str, list[str]] = library_stats.get('locations', {}) or {}
         for lib_name, rootpaths in locations_by_lib.items():
             for rp in rootpaths:
                 rp_norm = rp.rstrip('/')
@@ -37313,16 +37307,15 @@ def _get_all_filepaths(obj: ScopeRecord) -> list[str]:
         list of filepath strings
     """
     paths: list[str] = []
+    if obj['type'] == 'Collection':
+        return paths
     files = obj.get('files')
-    if files and isinstance(files, dict):
-        for _version_str, file_info in files.items():
-            if isinstance(file_info, dict):
-                fp = file_info.get('filepath', '')
-            else:
-                fp = file_info
+    if files:
+        for file_info in files.values():
+            fp = file_info.get('filepath', '')
             if fp:
                 paths.append(fp)
-    elif obj['type'] != 'Collection' and obj.get('file'):
+    elif obj.get('file'):
         paths.append(obj['file'])
     return paths
 
@@ -37465,9 +37458,12 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
             scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
             if scope not in scope_set:
                 continue
-            for _plex_val, entry_or_list in (var_spec.get('values') or {}).items():
-                entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
-                for entry in entries:
+            values: dict[str, Any] = var_spec.get('values') or {}
+            for _plex_val, entry_or_list_v in values.items():
+                entry_or_list: PlainData = entry_or_list_v
+                entries: list[Any] = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
+                for entry_v in entries:
+                    entry: PlainData = entry_v
                     if not isinstance(entry, dict):
                         continue
                     for rg in _dpm_resolve_disk2plex(entry, scope):
@@ -37510,14 +37506,17 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
         for _aspect, _new_val in new_markers.items():
             if not _new_val:
                 continue
-            _var_spec = DISK_PLEX_MAP.get(_aspect) or {}
+            _var_spec: dict[str, Any] = DISK_PLEX_MAP.get(_aspect) or {}
             _scope_set = _normalise_disk_plex_scope(_var_spec.get('scope', 'file')) or ()
             if scope not in _scope_set:
                 continue
             _aspect_patterns: list[re.Pattern[str]] = []
-            for _, _entry_or_list in (_var_spec.get('values') or {}).items():
-                _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
-                for _entry in _entries:
+            _values: dict[str, Any] = _var_spec.get('values') or {}
+            for _entry_or_list_v in _values.values():
+                _entry_or_list: PlainData = _entry_or_list_v
+                _entries: list[Any] = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
+                for _entry_v in _entries:
+                    _entry: PlainData = _entry_v
                     if not isinstance(_entry, dict):
                         continue
                     for _rg in _dpm_resolve_disk2plex(_entry, scope):
@@ -37549,7 +37548,7 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
         if sidecar_entry and 'markers' in sidecar_entry and not (replace or force):
             for aspect, old_val in sidecar_entry['markers'].items():
                 if old_val and not new_markers.get(aspect):
-                    _aspec = (DISK_PLEX_MAP.get(aspect) or {})
+                    _aspec: PlainData = (DISK_PLEX_MAP.get(aspect) or {})
                     _merge_mode = _aspec.get('merge', 'disk') if isinstance(_aspec, dict) else 'disk'
                     if _merge_mode in ('plex', 'newer'):
                         # Plex is authoritative for this aspect — drop the
@@ -37625,22 +37624,15 @@ def _update_cache_child_paths(old_dir: str, new_dir: str) -> None:
             obj['file'] = new_dir
         elif f.startswith(old_prefix):
             obj['file'] = new_prefix + f[len(old_prefix):]
-        # Update 'files' dict.  Any: a version's value is a file entry, or the
-        # bare path older caches held
-        files: dict[str, Any] | None = obj.get('files')
-        if files and isinstance(files, dict):
-            for version_str, file_info in files.items():
-                if isinstance(file_info, dict):
-                    fp = file_info.get('filepath', '')
-                    if fp == old_dir:
-                        file_info['filepath'] = new_dir
-                    elif fp.startswith(old_prefix):
-                        file_info['filepath'] = new_prefix + fp[len(old_prefix):]
-                elif isinstance(file_info, str):
-                    if file_info == old_dir:
-                        files[version_str] = new_dir
-                    elif file_info.startswith(old_prefix):
-                        files[version_str] = new_prefix + file_info[len(old_prefix):]
+        # Update 'files' dict
+        files = obj.get('files')
+        if files:
+            for file_info in files.values():
+                fp = file_info.get('filepath', '')
+                if fp == old_dir:
+                    file_info['filepath'] = new_dir
+                elif fp.startswith(old_prefix):
+                    file_info['filepath'] = new_prefix + fp[len(old_prefix):]
     # Update OBJ_BY_FILEPATH
     if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') and PLEX_Media.OBJ_BY_FILEPATH:
         updates: dict[str, list[str]] = {}
@@ -37729,7 +37721,8 @@ def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
 
     # Count distinct scopes the DPM config reaches.
     _dpm_scopes: set[str] = set()
-    for _v in DISK_PLEX_MAP.values():
+    _disk_plex_map: dict[str, PlainData] = DISK_PLEX_MAP     # the user's config
+    for _v in _disk_plex_map.values():
         if isinstance(_v, dict):
             for _s in _normalise_disk_plex_scope(_v.get('scope', 'file')) or ():
                 _dpm_scopes.add(_s)
@@ -37751,7 +37744,7 @@ def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
 
     # Determine which scopes to collect from the DPM config.
     _dpm_collect_scopes: set[str] = set()
-    for _vspec in DISK_PLEX_MAP.values():
+    for _vspec in _disk_plex_map.values():
         if isinstance(_vspec, dict):
             for _s in _normalise_disk_plex_scope(_vspec.get('scope', 'file')) or ():
                 _dpm_collect_scopes.add(_s)
@@ -37848,9 +37841,7 @@ def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
     if not dry_run and total_renamed > 0 and not OFFLINE and not READ_ONLY_MODE:
         _affected_libs: set[str] = set()
         for _entry in items:
-            _obj = _entry[1] if isinstance(_entry, tuple) and len(_entry) >= 2 else None
-            if not isinstance(_obj, dict):
-                continue
+            _obj = _entry[1]
             _lib = _obj.get('library', '')
             if _lib:
                 _affected_libs.add(_lib)
@@ -38245,7 +38236,8 @@ def cmd_disk2plex(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
 
             # Sidecar previously-written markers (sidecar uses plex_var names
             # as aspect keys in v1.1 → still valid):
-            sc_markers = (sidecar.get(fullpath) or {}).get('markers') or {}
+            sc_entry: dict[str, Any] = sidecar.get(fullpath) or {}
+            sc_markers: dict[str, Any] = sc_entry.get('markers') or {}
             for aspect, val in sc_markers.items():
                 if aspect in disk_assignments:
                     continue  # filename match takes precedence
@@ -38382,7 +38374,7 @@ def cmd_disk2plex(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
     print(f"\nDone: pushed {pushed}, skipped {skipped + skipped_unknown_handler}, errors {errors}.")
 
 
-def _disk2plex_values_equal(plex_val: object, disk_val: object) -> bool:
+def _disk2plex_values_equal(plex_val: PlainData, disk_val: PlainData) -> bool:
     """Compare a Plex variable's current value to a disk-derived value
     in a tolerant way (str, bool, list, None)."""
     if plex_val is None and disk_val in (None, '', 'unknown'):
@@ -38402,16 +38394,15 @@ def _update_cache_filepath(obj: ScopeRecord, old_path: str, new_path: str) -> No
         old_path: Previous filepath
         new_path: New filepath
     """
-    if obj['type'] != 'Collection' and obj.get('file') == old_path:
+    if obj['type'] == 'Collection':
+        return
+    if obj.get('file') == old_path:
         obj['file'] = new_path
-    # Any: a version's value is a file entry, or the bare path older caches held
-    files: dict[str, Any] | None = obj.get('files')
-    if files and isinstance(files, dict):
-        for version_str, file_info in files.items():
-            if isinstance(file_info, dict) and file_info.get('filepath') == old_path:
+    files = obj.get('files')
+    if files:
+        for file_info in files.values():
+            if file_info.get('filepath') == old_path:
                 file_info['filepath'] = new_path
-            elif file_info == old_path:
-                files[version_str] = new_path
 
 def cmd_remux(target: ScopeTarget, yes: bool = False, no_audio_language_only: bool = False) -> tuple[int, int, int]:
     """v1.4: --remux — migrate outdated-container files to MKV via ffmpeg
@@ -38921,16 +38912,16 @@ def _build_playlist_membership_map(plex: PlexServer | None) -> dict[int, list[st
     if plex is None:
         return out
     try:
-        for pl in plex.playlists():
+        for pl in plex.playlists():  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  -- plexapi: playlists() is unannotated
             try:
                 # plexapi types a container's items Optional (an element of
                 # unknown type builds None); a None raises here, as it did
-                title = pl.title  # pyright: ignore[reportOptionalMemberAccess]
-                for it in pl.items():  # pyright: ignore[reportOptionalMemberAccess]
+                title = pl.title  # pyright: ignore[reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownVariableType]  -- plexapi: an untyped attribute
+                for it in pl.items():  # pyright: ignore[reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownVariableType]  -- plexapi: items() is unannotated
                     try:
-                        rk = int(getattr(it, 'ratingKey', 0) or 0)
+                        rk = int(getattr(it, 'ratingKey', 0) or 0)  # pyright: ignore[reportUnknownArgumentType]  -- a plexapi item
                         if rk:
-                            out.setdefault(rk, []).append(title)
+                            out.setdefault(rk, []).append(title)  # pyright: ignore[reportUnknownArgumentType]  -- a plexapi playlist's title
                     except (ValueError, TypeError):
                         continue
             except PLEX_ERRORS:
