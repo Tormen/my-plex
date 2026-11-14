@@ -33166,7 +33166,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return filtered_keys
 
     @staticmethod
-    def list(args, obj_args: object, library_name: str | None, media_type: str | None, duplicates_only: bool = False, resolve_mode: bool = False, broken_only: bool = False, watched_only: bool = False, unwatched_only: bool = False, audio_filter: str | None = None, no_audio_language: bool = False, excess_versions: int | None = None, audio_lang_field: Literal['audio_languages', 'audio_languages_plex'] = 'audio_languages') -> None:  # pyright: ignore[reportGeneralTypeIssues, reportMissingParameterType, reportUnknownParameterType]  -- args: an argparse.Namespace; the suite matches 'def list(args, obj_args'
+    def list(args, obj_args: object, library_name: str | None, media_type: str | None, duplicates_only: bool = False, resolve_mode: bool = False, broken_only: bool = False, watched_only: bool = False, unwatched_only: bool = False, audio_filter: str | None = None, no_audio_language: bool = False, excess_versions: int | None = None, audio_lang_field: Literal['audio_languages', 'audio_languages_plex'] = 'audio_languages') -> None:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- args: an argparse.Namespace; the suite matches 'def list(args, obj_args'
         global FORMAT
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
 
@@ -33214,727 +33214,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             # Interactive resolution mode
             if resolve_mode:
-                print("\n" + "="*76)
-                print("INTERACTIVE RESOLUTION MODE")
-                print("="*76)
-                print("\nNOTE: If files are not found locally, the script will automatically attempt")
-                print("to access them via SSH on host 'my-plex'. Please ensure:")
-                print("  - SSH host 'my-plex' is configured in ~/.ssh/config")
-                print("  - You can connect without password: ssh my-plex")
-                print("  - SSH keys are properly set up")
-                print("="*76)
-
-                # Resolution log: accumulated here, written via the unified
-                # _write_resolve_log helper at end-of-run (path resolves to
-                # ~/.my-plex/logs/duplicates_<ts>.json).
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-                resolution_log_data = {
-                    "session": {
-                        "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        "command": ' '.join(sys.argv),
-                        "timestamp": timestamp,
-                        "log_format_version": "1.0"
-                    },
-                    "operations": []
-                }
-
-                operation_counter = 0
-                pending_operations = []  # Track pending operations (not yet applied)
-                operations_all_succeeded = True  # Track if all applied operations succeeded
-
-                # DEBUG: Show how many duplicates we're going to process
-                total_duplicates = len(sorted_duplicates)
-                if DBG:
-                    print(f"{DBGPFX}Total duplicate groups to process: {total_duplicates}")
-
-                try:
-                    for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
-                        if DBG:
-                            print(f"{DBGPFX}Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
-
-                        # Check if this is a multi-version item (single Plex entry with multiple file versions)
-                        is_multi_version = False
-                        multi_version_files = []
-                        if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
-                            files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
-                            if len(files_dict) > 1:
-                                is_multi_version = True
-                                # Store (version_str, filepath) for each version
-                                # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
-                                multi_version_files = []
-                                for ver, file_info in files_dict.items():
-                                    if isinstance(file_info, str):
-                                        # Old cache format: files_dict = {ver: filepath_string}
-                                        multi_version_files.append((ver, file_info))
-                                    elif isinstance(file_info, dict):
-                                        # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
-                                        multi_version_files.append((ver, file_info['filepath']))
-                                    else:
-                                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
-                                if DBG:
-                                    print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
-
-                        # Skip only if we have less than 2 keys AND it's not a multi-version item
-                        if len(keys) < 2 and not is_multi_version:
-                            if DBG:
-                                print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
-                            continue  # Skip if not actually duplicates
-
-                        # Format the duplicate key for display (add parentheses around year for movies)
-                        display_key = dup_key
-                        if dup_key.startswith('movie:'):
-                            parts = dup_key.split(':')
-                            if len(parts) == 3:
-                                display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
-
-                        # Display the duplicate pair/group
-                        print(f"\n{'='*76}")
-                        print(f"RESOLVING DUPLICATES FOR: {display_key}")
-                        print(f"{'='*76}")
-
-                        # For multi-version items, expand into separate virtual entries
-                        # Create temporary objects for each version so the rest of the code can handle them uniformly
-                        if is_multi_version:
-                            print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
-                            print(f"       Expanding into separate entries for resolution.\n")
-
-                            # Get the original object
-                            original_obj = PLEX_Media.OBJ_BY_ID[keys[0]]
-                            original_key = keys[0]
-
-                            # Create synthetic objects for each file version
-                            synthetic_keys = []
-                            for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
-                                # Create a synthetic key
-                                synthetic_key = f"{original_key}_version{idx}"
-
-                                # Create a copy of the original object but with updated file info
-                                synthetic_obj = dict(original_obj)
-                                synthetic_obj['file'] = filepath
-                                synthetic_obj['version'] = version_str
-
-                                # Get filesize for this specific version from files dict
-                                files_dict = original_obj.get('files', {})
-                                if version_str in files_dict:
-                                    file_info = files_dict[version_str]
-                                    # BUG FIX: Handle both old and new cache formats
-                                    if isinstance(file_info, dict):
-                                        # New format: filesize is stored in the dict
-                                        synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
-                                    else:
-                                        # Old format: file_info is just a filepath string, no filesize stored per version
-                                        # Need to get actual filesize from Plex server for accurate display
-                                        # For now, use None to indicate filesize is unknown (will show "N/A")
-                                        # This will be corrected when cache is updated with --update-cache
-                                        synthetic_obj['filesize'] = None
-
-                                synthetic_obj['_is_synthetic'] = True
-                                synthetic_obj['_original_key'] = original_key
-                                synthetic_obj['_version_index'] = idx
-
-                                # Temporarily add to OBJ_BY_ID so display/resolution code can access it
-                                PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
-                                synthetic_keys.append(synthetic_key)
-
-                            # Replace keys with synthetic keys
-                            keys = synthetic_keys
-                        else:
-                            # Always sort keys by file path for consistent display
-                            # This ensures entries are shown in alphabetical order by file location
-                            keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
-    
-                        # Check if both files point to the same physical file (Plex database corruption)
-                        same_file = False
-                        if len(keys) == 2:
-                            file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
-                            file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A')
-                            same_file = (file1_path == file2_path)
-
-                        # Check if directories are different (for option 7)
-                        # Option 7 should be available when there are 2+ files in different directories
-                        show_rename_option = False
-                        if len(keys) >= 2:
-                            # Get all directories
-                            dirs = []
-                            all_files_valid = True
-                            for key in keys:
-                                file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
-                                if file_path == 'N/A':
-                                    all_files_valid = False
-                                    break
-                                dirs.append(os.path.dirname(file_path))
-    
-                            # Series rename option if all files are valid and at least 2 are in different directories
-                            if all_files_valid and len(set(dirs)) > 1:
-                                show_rename_option = True
-    
-                        # Get file paths and library info for menu
-                        file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A') if len(keys) > 0 else 'N/A'
-                        file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) > 1 else 'N/A'
-    
-                        # Get library names and directories for options 5 and 6
-                        lib1_name = PLEX_Media.OBJ_BY_ID[keys[0]].get('library', '') if len(keys) > 0 else ''
-                        lib2_name = PLEX_Media.OBJ_BY_ID[keys[1]].get('library', '') if len(keys) > 1 else ''
-                        lib1_dir = get_library_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' and lib1_name else ''
-                        lib2_dir = get_library_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' and lib2_name else ''
-    
-                        # Get movie directories (directory directly within library) for display in menu
-                        # Always call get_movie_dir_from_path even if lib_name is empty - it has a fallback
-                        movie_dir1 = get_movie_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' else file1_path
-                        movie_dir2 = get_movie_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' else file2_path
-                        file1_folder = os.path.basename(movie_dir1) if movie_dir1 != 'N/A' else ''
-                        file2_folder = os.path.basename(movie_dir2) if movie_dir2 != 'N/A' else ''
-
-                        # Play options - use two-stage menu for 4+ files
-                        num_files = len(keys)
-
-                        # AUTO_TRASH_DUPLICATES — silently queue byte-identical
-                        # pairs.  The user gets one batch confirm at the end
-                        # via the existing "Apply N pending operations" prompt.
-                        if AUTO_TRASH_DUPLICATES and num_files == 2 and not same_file and _auto_trash_signals_match(keys):
-                            victim_idx = _auto_trash_victim_index(keys)  # 1 or 2
-                            victim_path = file1_path if victim_idx == 1 else file2_path
-                            keeper_path = file2_path if victim_idx == 1 else file1_path
-                            print()
-                            print(f"  ▶ AUTO-TRASH (byte-identical, signals match):")
-                            print(f"      keep [{3 - victim_idx}]: {keeper_path}")
-                            print(f"      trash [{victim_idx}]:  {victim_path}")
-                            _auto_remote_host, _, _ = determine_remote_host(file1_path)
-                            operation_counter += 1
-                            actual_keys = keys
-                            if is_multi_version and keys:
-                                _first = PLEX_Media.OBJ_BY_ID.get(keys[0], {}) or {}
-                                _ok = _first.get('_original_key')
-                                if _ok:
-                                    actual_keys = [_ok]
-                            pending_operations.append({
-                                'operation_number': operation_counter,
-                                'choice': '3' if victim_idx == 1 else '4',
-                                'file1': file1_path,
-                                'file2': file2_path,
-                                'remote_host': _auto_remote_host,
-                                'all_files': [file1_path, file2_path],
-                                'keys': actual_keys,
-                                'same_file': same_file,
-                                'dup_key': dup_key,
-                                'is_multi_version': is_multi_version,
-                                'reason': 'byte-identical-auto',
-                            })
-                            # Cleanup synthetic objects same as the bottom of the loop body.
-                            if is_multi_version:
-                                for k in keys:
-                                    if k in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[k].get('_is_synthetic'):
-                                        del PLEX_Media.OBJ_BY_ID[k]
-                            continue  # next duplicate group
-
-                        while True:
-                            # Display menu inside loop so it refreshes after each undo
-                            # Series file information each time
-                            print()
-                            for nr, key in enumerate(keys, 1):
-                                obj = PLEX_Media.OBJ_BY_ID[key]
-                                display_duplicate_details(nr, obj)
-
-                            print("\nChoose action:")
-
-                            if num_files <= 3:
-                                # Direct play options for 1-3 files
-                                for i in range(num_files):
-                                    print(f"  {i+1} = Play file [{i+1}] (mpv/Plex/Infuse)")
-                            else:
-                                # Two-stage menu for 4+ files
-                                print(f"  1 = Play file (select from {num_files} files)")
-
-                            # Trash options
-                            if num_files <= 3:
-                                # Direct trash options for files 1-3
-                                for i in range(num_files):
-                                    option_num = i + 1 + num_files  # Offset by number of play options
-                                    if same_file:
-                                        print(f"  {option_num} = Remove Plex entry [{i+1}] (database only - file will NOT be trashed)")
-                                    else:
-                                        # Get file path and directory info for this file
-                                        file_key = keys[i]
-                                        file_obj = PLEX_Media.OBJ_BY_ID[file_key]
-                                        file_path = file_obj.get('file', 'N/A')
-                                        lib_name = file_obj.get('library', '')
-                                        movie_dir = get_movie_dir_from_path(file_path, lib_name) if file_path != 'N/A' and lib_name else os.path.dirname(file_path)
-
-                                        # Check if file is in a subdirectory (movie_dir != file's parent dir)
-                                        file_parent = os.path.dirname(file_path)
-                                        is_in_subdir = (movie_dir != file_parent) if file_path != 'N/A' else False
-
-                                        # For multi-version items with 2 files, check the relationship
-                                        other_file_in_subdir = False
-                                        subdir_name = ""
-                                        if is_multi_version and num_files == 2:
-                                            other_idx = 1 - i  # Get the other file index (0->1, 1->0)
-                                            other_key = keys[other_idx]
-                                            other_obj = PLEX_Media.OBJ_BY_ID[other_key]
-                                            other_path = other_obj.get('file', 'N/A')
-                                            other_parent = os.path.dirname(other_path)
-
-                                            # Check if other file is in a subdirectory relative to this file
-                                            if i == 1:  # This is file [2]
-                                                # Check if file [1] is in subdirectory of file [2]'s directory
-                                                file1_parent = os.path.dirname(file1_path)
-                                                file2_parent = os.path.dirname(file2_path)
-                                                if file1_parent.startswith(file2_parent + os.sep) and file1_parent != file2_parent:
-                                                    other_file_in_subdir = True
-                                                    subdir_name = os.path.basename(file1_parent)
-
-                                        if is_in_subdir:
-                                            # This file is in a subdirectory - will be trashed with subdirectory
-                                            subdir_name = os.path.basename(file_parent)
-                                            print(f"  {option_num} = Trash file [{i+1}] (including subdirectory '{subdir_name}')")
-                                        elif other_file_in_subdir:
-                                            # Other file is in subdirectory - trashing this will move other file up
-                                            print(f"  {option_num} = Trash file [{i+1}] and move file [{1-i+1}] from subdirectory '{subdir_name}' to parent (then remove subdirectory)")
-                                        else:
-                                            print(f"  {option_num} = Trash file [{i+1}]")
-                            else:
-                                # For 4+ files, only offer trash via two-stage menu
-                                print(f"  2 = Trash file (select from {num_files} files)")
-
-                            if len(keys) == 2:
-                                if same_file:
-                                    print(f"  NOTE: Both entries point to the SAME file (Plex database corruption)")
-                                    print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove the duplicate Plex entry.")
-                                elif is_multi_version:
-                                    print(f"  NOTE: This is a multi-version item (single Plex entry with multiple file versions)")
-                                    print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove a specific version.")
-                                else:
-                                    print(f"  5 = Trash [1] and move [2] to library of [1]. Trash \"{file1_folder}\" && mv \"{file2_folder}\" \"{lib1_dir}/\"")
-                                    print(f"  6 = Trash [2] and move [1] to library of [2]. Trash \"{file2_folder}\" && mv \"{file1_folder}\" \"{lib2_dir}/\"")
-                            if show_rename_option:
-                                print("  7 = Rename all files using directory name")
-                            if pending_operations:
-                                last_pending = pending_operations[-1]
-                                last_choice = last_pending.get('choice', '')
-
-                                # Get the filename from the pending operation
-                                file1 = last_pending.get('file1', '')
-                                file2 = last_pending.get('file2', '')
-                                if last_choice == '3':
-                                    filename = os.path.basename(file1)
-                                    undo_desc = f"Remove 'Trash file {filename}'"
-                                elif last_choice == '4':
-                                    filename = os.path.basename(file2)
-                                    undo_desc = f"Remove 'Trash file {filename}'"
-                                elif last_choice == '5':
-                                    file1_name = os.path.basename(file1)
-                                    file2_name = os.path.basename(file2)
-                                    undo_desc = f"Remove 'Trash {file1_name} and move {file2_name}'"
-                                elif last_choice == '6':
-                                    file1_name = os.path.basename(file1)
-                                    file2_name = os.path.basename(file2)
-                                    undo_desc = f"Remove 'Trash {file2_name} and move {file1_name}'"
-                                elif last_choice == '7':
-                                    undo_desc = "Remove 'Rename files using directory name'"
-                                else:
-                                    undo_desc = f"Remove operation"
-
-                                print(f"  U = Undo last pending operation ({len(pending_operations)} pending): {undo_desc}")
-                            print("  N = Next (skip this pair)")
-                            if pending_operations:
-                                print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
-                            print("  Q = Quit resolution mode (without applying pending operations)")
-                            try:
-                                print("\nYour choice: ", end='', flush=True)
-                                choice = readchar.readchar()
-                                # Echo the choice as entered (user must type uppercase)
-                                print(choice)
-
-                                if choice == 'Q':
-                                    if pending_operations:
-                                        print(f"\n⚠ Warning: You have {len(pending_operations)} pending operation(s) that will NOT be applied!")
-                                        print("Are you sure you want to quit without applying them?")
-                                        print("  Y = Yes, quit without applying")
-                                        print("  N = No, go back")
-                                        print("\nYour choice: ", end='', flush=True)
-                                        confirm = readchar.readchar()
-                                        print(confirm)
-                                        if confirm != 'Y':
-                                            print("Cancelled. Returning to resolution mode.")
-                                            continue
-
-                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
-                                    # Synthetic objects are temporary and should NEVER be saved to cache
-                                    print(f"\nCleaning up synthetic objects...", end=' ', flush=True)
-                                    synthetic_keys_to_remove = [
-                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
-                                        if obj.get('_is_synthetic')
-                                    ]
-                                    for key in synthetic_keys_to_remove:
-                                        del PLEX_Media.OBJ_BY_ID[key]
-                                    if synthetic_keys_to_remove:
-                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
-                                    else:
-                                        print("✓ (none found)")
-
-                                    print("Exiting resolution mode without applying pending operations.")
-                                    return
-
-                                if choice == 'A':
-                                    if not pending_operations:
-                                        print("No pending operations to apply.")
-                                        continue
-
-                                    # First, clean up synthetic objects for the CURRENT duplicate being displayed
-                                    # (before applying operations)
-                                    if is_multi_version and keys:
-                                        for key in keys:
-                                            if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
-                                                del PLEX_Media.OBJ_BY_ID[key]
-
-                                    print(f"\n{'='*76}")
-                                    print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
-                                    print(f"{'='*76}")
-                                    # Apply all pending operations
-                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
-                                    if not all_success:
-                                        operations_all_succeeded = False
-                                    num_ops = len(pending_operations)
-                                    # Clear pending operations since they've been applied
-                                    pending_operations.clear()
-
-                                    # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
-                                    # Synthetic objects are temporary and should NEVER be saved to cache
-                                    print(f"\n  Cleaning up synthetic objects...", end=' ', flush=True)
-                                    synthetic_keys_to_remove = [
-                                        key for key, obj in PLEX_Media.OBJ_BY_ID.items()
-                                        if obj.get('_is_synthetic')
-                                    ]
-                                    for key in synthetic_keys_to_remove:
-                                        del PLEX_Media.OBJ_BY_ID[key]
-                                    if synthetic_keys_to_remove:
-                                        print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
-                                    else:
-                                        print("✓ (none found)")
-
-                                    if all_success:
-                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
-                                    else:
-                                        print(f"\n⚠ Some operations failed. Check output above for details.")
-                                    print("Exiting resolution mode.")
-                                    return
-
-                                if choice == 'N':
-                                    print("Skipping this duplicate pair.")
-                                    break
-
-                                if choice == 'U':
-                                    if not pending_operations:
-                                        print("No pending operations to undo.")
-                                        continue
-
-                                    # Remove the last pending operation
-                                    last_pending = pending_operations.pop()
-                                    operation_counter -= 1
-
-                                    choice_desc = {
-                                        '3': f'Trash file [1]',
-                                        '4': f'Trash file [2]',
-                                        '5': f'Trash [1] and move [2] to library of [1]',
-                                        '6': f'Trash [2] and move [1] to library of [2]',
-                                        '7': 'Rename files using directory name'
-                                    }.get(last_pending['choice'], f'Unknown choice: {last_pending["choice"]}')
-
-                                    print(f"\n✓ Removed pending operation #{last_pending['operation_number']}: {choice_desc}")
-                                    print(f"  (Total pending: {len(pending_operations)})")
-                                    print("\nReturning to current duplicate pair...\n")
-
-                                    # Don't break - stay on current duplicate pair
-                                    continue
-    
-                                # Build list of valid choices based on number of files
-                                valid_choices = []
-                                if num_files <= 3:
-                                    # Direct options: 1-N for play, (N+1)-(2N) for trash
-                                    for i in range(1, num_files + 1):
-                                        valid_choices.append(str(i))  # Play options
-                                    for i in range(num_files + 1, 2 * num_files + 1):
-                                        valid_choices.append(str(i))  # Trash options
-                                else:
-                                    # Two-stage menu: 1 = play, 2 = trash
-                                    valid_choices = ['1', '2']
-    
-                                if len(keys) == 2 and not same_file:
-                                    valid_choices.extend(['5', '6'])
-                                if show_rename_option:
-                                    valid_choices.append('7')
-    
-                                if choice not in valid_choices:
-                                    valid_str = ', '.join(valid_choices)
-                                    print(f"Invalid choice. Please enter {valid_str}, N, or Q.")
-                                    continue
-    
-                                # Handle two-stage menu for 4+ files
-                                if num_files > 3 and choice in ['1', '2']:
-                                    action = 'play' if choice == '1' else 'trash'
-                                    print(f"\nSelect file to {action} (1-{min(num_files, 9)}):")
-                                    for i in range(min(num_files, 9)):
-                                        file_path = PLEX_Media.OBJ_BY_ID[keys[i]].get('file', 'N/A')
-                                        print(f"  {i+1} = {os.path.basename(file_path)}")
-                                    if num_files > 9:
-                                        print(f"  (Only showing first 9 of {num_files} files)")
-    
-                                    print("\nYour selection: ", end='', flush=True)
-                                    file_choice = readchar.readchar()
-                                    print(file_choice)
-    
-                                    if file_choice not in [str(i) for i in range(1, min(num_files, 9) + 1)]:
-                                        print(f"Invalid selection. Please enter 1-{min(num_files, 9)}.")
-                                        continue
-    
-                                    # Map to direct choice number
-                                    file_idx = int(file_choice) - 1
-                                    if action == 'play':
-                                        choice = file_choice  # Play is 1-9
-                                    else:
-                                        # Trash: need to map to appropriate choice
-                                        # For now, we'll handle this differently
-                                        choice = str(num_files + file_idx + 1)
-    
-                                # Handle choices for pairs only (5 and 6 require exactly 2 files)
-                                # Option 7 works for 2+ files
-                                if choice in ['5', '6'] and len(keys) != 2:
-                                    print(f"Options 5 and 6 only work with pairs (2 files), but this group has {len(keys)} files.")
-                                    continue
-    
-                                # Prevent options 5 and 6 when both entries point to the same file
-                                if choice in ['5', '6'] and same_file:
-                                    print(f"Options 5 and 6 are not available when both entries point to the same file.")
-                                    print(f"This is a Plex database corruption. Use option 3 or 4 to trash the duplicate entry.")
-                                    continue
-
-                                # Prevent options 5 and 6 for multi-version items
-                                if choice in ['5', '6'] and is_multi_version:
-                                    print(f"Options 5 and 6 are not available for multi-version items (single Plex entry with multiple file versions).")
-                                    print(f"Use option 3 or 4 to remove a specific version.")
-                                    continue
-    
-                                # Handle option 7 only when directories are different
-                                if choice == '7' and not show_rename_option:
-                                    print("Option 7 is only available when files are in different directories.")
-                                    continue
-    
-                                # Determine which files are involved based on choice
-                                file1 = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
-                                file2 = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) >= 2 else 'N/A'
-    
-                                # Check if this is a play action for file 3 (when we have 3 files)
-                                if num_files == 3 and choice == '3':
-                                    # This is "Play file [3]"
-                                    file_to_play = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')
-                                    remote_host_play, exists_play, resolved_file_to_play = determine_remote_host(file_to_play)
-                                    if exists_play:
-                                        print(f"Playing file [3]: {file_to_play}")
-                                        play_media_file(resolved_file_to_play, remote_host_play)
-                                        print("\nFile player launched. You can continue with other actions on this pair.")
-                                    else:
-                                        print(f"ERROR: Cannot find file: {file_to_play}", file=sys.stderr)
-                                    continue  # Go back to menu for next choice
-    
-                                # Check if this is a trash action for file 3
-                                if num_files == 3 and choice == '6':
-                                    # This is "Trash file [3]"
-                                    file1 = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')  # Use keys[2] as file1
-                                    file2 = 'N/A'  # Not needed for single file trash
-                                    # Remap choice to '3' or '4' for execute_resolution_action
-                                    choice = '3'  # Will trash file1 (which is actually file [3])
-    
-                                # Get all files for option 7 (when there are 3+ files)
-                                all_files = None
-                                if choice == '7' and len(keys) > 2:
-                                    all_files = [PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A') for key in keys]
-    
-                                # Determine if files are local or remote, and resolve file paths
-                                remote_host, exists, resolved_file1 = determine_remote_host(file1)
-                                if not exists:
-                                    print(f"ERROR: Cannot find file locally or on remote host: {file1}", file=sys.stderr)
-                                    print("Skipping this pair.", file=sys.stderr)
-                                    break
-
-                                # For play actions with file2, resolve file2 as well
-                                resolved_file2 = file2
-                                if choice == '2' and file2 != 'N/A':
-                                    _, exists2, resolved_file2 = determine_remote_host(file2)
-                                    if not exists2:
-                                        print(f"ERROR: Cannot find file locally or on remote host: {file2}", file=sys.stderr)
-                                        print("Skipping this pair.", file=sys.stderr)
-                                        break
-
-                                # Handle the chosen action
-                                # Play actions: 1, 2 (and 3 for 3-file case, but handled above)
-                                is_play_action = choice in ['1', '2']
-
-                                if is_play_action:
-                                    # Execute play actions immediately (not recorded)
-                                    # Use resolved paths for play actions
-                                    success = execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
-                                    print("\nFile player launched. You can continue with other actions on this pair.")
-                                    # Continue loop to allow more choices
-                                else:
-                                    # Record non-play actions for later execution
-                                    operation_counter += 1
-
-                                    # For multi-version items, replace synthetic keys with original key
-                                    # This is because synthetic objects are cleaned up after each duplicate
-                                    actual_keys = keys
-                                    if is_multi_version and len(keys) > 0:
-                                        # Get the original key from the first synthetic object
-                                        first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
-                                        original_key = first_obj.get('_original_key')
-                                        if original_key:
-                                            # For multi-version, store original key only (not synthetic keys)
-                                            # The file paths in file1/file2 tell us which version to operate on
-                                            actual_keys = [original_key]
-
-                                    pending_op = {
-                                        'operation_number': operation_counter,
-                                        'choice': choice,
-                                        'file1': file1,
-                                        'file2': file2,
-                                        'remote_host': remote_host,
-                                        'all_files': all_files,
-                                        'keys': actual_keys,
-                                        'same_file': same_file,
-                                        'dup_key': dup_key,
-                                        'is_multi_version': is_multi_version
-                                    }
-                                    pending_operations.append(pending_op)
-
-                                    # Series confirmation
-                                    choice_desc = {
-                                        '3': f'Trash file [1]: {os.path.basename(file1)}',
-                                        '4': f'Trash file [2]: {os.path.basename(file2)}',
-                                        '5': f'Trash [1] and move [2] to library of [1]',
-                                        '6': f'Trash [2] and move [1] to library of [2]',
-                                        '7': 'Rename files using directory name'
-                                    }.get(choice, f'Unknown choice: {choice}')
-                                    print(f"\n✓ Operation #{operation_counter} recorded: {choice_desc}")
-                                    print(f"  (Total pending: {len(pending_operations)})")
-
-                                    # Move to next duplicate pair
-                                    break
-
-                            except KeyboardInterrupt:
-                                print("\n\nInterrupted by user. Exiting resolution mode.")
-                                break  # Break out of duplicate pairs loop, will still save cache
-                            except PLEX_ERRORS as e:
-                                print(f"ERROR: {e}", file=sys.stderr)
-                                print("Skipping this pair.", file=sys.stderr)
-                                break
-
-                        # DEBUG: Confirm we finished processing this duplicate
-                        if DBG:
-                            print(f"{DBGPFX}Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
-
-                        # Cleanup: Remove synthetic objects from OBJ_BY_ID to prevent them from being saved to cache
-                        if is_multi_version:
-                            for key in keys:
-                                if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
-                                    del PLEX_Media.OBJ_BY_ID[key]
-                            if DBG:
-                                print(f"{DBGPFX}Cleaned up {len(keys)} synthetic objects for multi-version item")
-
-                    # After processing all duplicates, prompt user for final action if there are pending operations
-                    # Also check if no duplicates were actually processed (all skipped)
-                    if not pending_operations and dup_idx == total_duplicates:
-                        # Check if all duplicates were skipped
-                        # This happens when the cache is stale and contains duplicates that were already resolved
-                        print(f"\n{'='*139}")
-                        print(f"ALL DUPLICATES ALREADY RESOLVED")
-                        print(f"{'='*139}")
-                        print(f"\nAll {total_duplicates} duplicate(s) in the list have already been resolved (only 1 item remaining).")
-                        print(f"This means your cache is stale and needs to be refreshed from the Plex server.")
-                        print(f"\nTo update the cache and see only current duplicates, run:")
-                        print(f"  my-plex --update-cache")
-                    elif pending_operations:
-                        print(f"\n{'='*139}")
-                        print(f"ALL DUPLICATES PROCESSED")
-                        print(f"{'='*139}")
-                        print(f"\nYou have {len(pending_operations)} pending operation(s) that need to be applied.")
-                        print("Choose final action:")
-                        print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
-                        print("  Q = Quit without applying pending operations")
-
-                        while True:
-                            try:
-                                print("\nYour choice: ", end='', flush=True)
-                                final_choice = readchar.readchar()
-                                print(final_choice)
-
-                                if final_choice == 'A':
-                                    print(f"\n{'='*76}")
-                                    print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
-                                    print(f"{'='*76}")
-                                    # Apply all pending operations
-                                    all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
-                                    if not all_success:
-                                        operations_all_succeeded = False
-                                    num_ops = len(pending_operations)
-                                    # Clear pending operations since they've been applied
-                                    pending_operations.clear()
-                                    if all_success:
-                                        print(f"\n✓ All {num_ops} operation(s) successfully applied.")
-                                    else:
-                                        print(f"\n⚠ Some operations failed. Check output above for details.")
-                                    break
-                                elif final_choice == 'Q':
-                                    print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
-                                    print("Are you sure you want to quit without applying them?")
-                                    print("  Y = Yes, quit without applying")
-                                    print("  N = No, go back")
-                                    print("\nYour choice: ", end='', flush=True)
-                                    confirm = readchar.readchar()
-                                    print(confirm)
-                                    if confirm == 'Y':
-                                        print("Exiting without applying pending operations.")
-                                        break
-                                    else:
-                                        print("Cancelled. Choose A or Q.")
-                                        continue
-                                else:
-                                    print(f"Invalid choice. Please enter A or Q.")
-                                    continue
-                            except KeyboardInterrupt:
-                                print("\n\nInterrupted by user.")
-                                break
-
-                except KeyboardInterrupt:
-                    # Ctrl+C pressed during resolution
-                    print("\n\n⚠ Resolution interrupted by user.")
-                finally:
-                    # DEBUG: Show loop completion info
-                    if DBG:
-                        print(f"{DBGPFX}For loop exited. Expected {total_duplicates} duplicates, processed through dup_idx={locals().get('dup_idx', 'N/A')}")
-
-                    # Write resolution log to JSON file
-                    if resolution_log_data:
-                        resolution_log_data["session"]["ended"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        resolution_log_data["session"]["total_operations"] = len(resolution_log_data.get("operations", []))
-                        log_path = _write_resolve_log('duplicates', resolution_log_data)
-                        if log_path:
-                            print(f"\n📝 Resolution log saved: {log_path}")
-
-                    print("\n" + "="*76)
-                    print("RESOLUTION MODE COMPLETE")
-                    print("="*76)
-
-                    # Series summary
-                    if pending_operations:
-                        print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) were NOT applied.")
-                        print(f"   To apply them, re-run resolution mode and press 'A' to apply and quit.")
-                    elif operation_counter > 0:
-                        if operations_all_succeeded:
-                            print(f"\n✓ All {operation_counter} operation(s) were successfully applied.")
-                        else:
-                            print(f"\n⚠ Some operations failed. Check output above for details.")
-                    else:
-                        print(f"\n   No operations were performed.")
+                PLEX_Media._resolve_duplicates_interactively(sorted_duplicates)
         else:
             if watched_only or unwatched_only or audio_filter or no_audio_language:
                 filtered = PLEX_Media._filter_by_watch_and_audio(obj_keys, library_name, watched_only, unwatched_only, audio_filter, no_audio_language, audio_lang_field=audio_lang_field)
@@ -33962,6 +33242,732 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
 
             if no_audio_language and resolve_mode:
                 resolve_no_audio_language(obj_keys, args)
+
+    @staticmethod
+    def _resolve_duplicates_interactively(sorted_duplicates: list[tuple[str, list[str]]]) -> None:  # pyright: ignore[reportGeneralTypeIssues]  -- too complex for pyright to analyse: the per-group prompt loop shares ~20 locals with the walk around it; splitting it needs a state object (TODO)
+        """--duplicates --resolve: walk the duplicate groups one by one and
+        apply the action the operator picks for each (see --help duplicates)."""
+        print("\n" + "="*76)
+        print("INTERACTIVE RESOLUTION MODE")
+        print("="*76)
+        print("\nNOTE: If files are not found locally, the script will automatically attempt")
+        print("to access them via SSH on host 'my-plex'. Please ensure:")
+        print("  - SSH host 'my-plex' is configured in ~/.ssh/config")
+        print("  - You can connect without password: ssh my-plex")
+        print("  - SSH keys are properly set up")
+        print("="*76)
+
+        # Resolution log: accumulated here, written via the unified
+        # _write_resolve_log helper at end-of-run (path resolves to
+        # ~/.my-plex/logs/duplicates_<ts>.json).
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        resolution_log_data = {
+            "session": {
+                "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "command": ' '.join(sys.argv),
+                "timestamp": timestamp,
+                "log_format_version": "1.0"
+            },
+            "operations": []
+        }
+
+        operation_counter = 0
+        pending_operations = []  # Track pending operations (not yet applied)
+        operations_all_succeeded = True  # Track if all applied operations succeeded
+
+        # DEBUG: Show how many duplicates we're going to process
+        total_duplicates = len(sorted_duplicates)
+        if DBG:
+            print(f"{DBGPFX}Total duplicate groups to process: {total_duplicates}")
+
+        try:
+            for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
+                if DBG:
+                    print(f"{DBGPFX}Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
+
+                # Check if this is a multi-version item (single Plex entry with multiple file versions)
+                is_multi_version = False
+                multi_version_files = []
+                if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
+                    files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
+                    if len(files_dict) > 1:
+                        is_multi_version = True
+                        # Store (version_str, filepath) for each version
+                        # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
+                        multi_version_files = []
+                        for ver, file_info in files_dict.items():
+                            if isinstance(file_info, str):
+                                # Old cache format: files_dict = {ver: filepath_string}
+                                multi_version_files.append((ver, file_info))
+                            elif isinstance(file_info, dict):
+                                # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
+                                multi_version_files.append((ver, file_info['filepath']))
+                            else:
+                                print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
+                        if DBG:
+                            print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
+
+                # Skip only if we have less than 2 keys AND it's not a multi-version item
+                if len(keys) < 2 and not is_multi_version:
+                    if DBG:
+                        print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
+                    continue  # Skip if not actually duplicates
+
+                # Format the duplicate key for display (add parentheses around year for movies)
+                display_key = dup_key
+                if dup_key.startswith('movie:'):
+                    parts = dup_key.split(':')
+                    if len(parts) == 3:
+                        display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
+
+                # Display the duplicate pair/group
+                print(f"\n{'='*76}")
+                print(f"RESOLVING DUPLICATES FOR: {display_key}")
+                print(f"{'='*76}")
+
+                # For multi-version items, expand into separate virtual entries
+                # Create temporary objects for each version so the rest of the code can handle them uniformly
+                if is_multi_version:
+                    print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
+                    print(f"       Expanding into separate entries for resolution.\n")
+
+                    # Get the original object
+                    original_obj = PLEX_Media.OBJ_BY_ID[keys[0]]
+                    original_key = keys[0]
+
+                    # Create synthetic objects for each file version
+                    synthetic_keys = []
+                    for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
+                        # Create a synthetic key
+                        synthetic_key = f"{original_key}_version{idx}"
+
+                        # Create a copy of the original object but with updated file info
+                        synthetic_obj = dict(original_obj)
+                        synthetic_obj['file'] = filepath
+                        synthetic_obj['version'] = version_str
+
+                        # Get filesize for this specific version from files dict
+                        files_dict = original_obj.get('files', {})
+                        if version_str in files_dict:
+                            file_info = files_dict[version_str]
+                            # BUG FIX: Handle both old and new cache formats
+                            if isinstance(file_info, dict):
+                                # New format: filesize is stored in the dict
+                                synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+                            else:
+                                # Old format: file_info is just a filepath string, no filesize stored per version
+                                # Need to get actual filesize from Plex server for accurate display
+                                # For now, use None to indicate filesize is unknown (will show "N/A")
+                                # This will be corrected when cache is updated with --update-cache
+                                synthetic_obj['filesize'] = None
+
+                        synthetic_obj['_is_synthetic'] = True
+                        synthetic_obj['_original_key'] = original_key
+                        synthetic_obj['_version_index'] = idx
+
+                        # Temporarily add to OBJ_BY_ID so display/resolution code can access it
+                        PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
+                        synthetic_keys.append(synthetic_key)
+
+                    # Replace keys with synthetic keys
+                    keys = synthetic_keys
+                else:
+                    # Always sort keys by file path for consistent display
+                    # This ensures entries are shown in alphabetical order by file location
+                    keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
+
+                # Check if both files point to the same physical file (Plex database corruption)
+                same_file = False
+                if len(keys) == 2:
+                    file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
+                    file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A')
+                    same_file = (file1_path == file2_path)
+
+                # Check if directories are different (for option 7)
+                # Option 7 should be available when there are 2+ files in different directories
+                show_rename_option = False
+                if len(keys) >= 2:
+                    # Get all directories
+                    dirs = []
+                    all_files_valid = True
+                    for key in keys:
+                        file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
+                        if file_path == 'N/A':
+                            all_files_valid = False
+                            break
+                        dirs.append(os.path.dirname(file_path))
+
+                    # Series rename option if all files are valid and at least 2 are in different directories
+                    if all_files_valid and len(set(dirs)) > 1:
+                        show_rename_option = True
+
+                # Get file paths and library info for menu
+                file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A') if len(keys) > 0 else 'N/A'
+                file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) > 1 else 'N/A'
+
+                # Get library names and directories for options 5 and 6
+                lib1_name = PLEX_Media.OBJ_BY_ID[keys[0]].get('library', '') if len(keys) > 0 else ''
+                lib2_name = PLEX_Media.OBJ_BY_ID[keys[1]].get('library', '') if len(keys) > 1 else ''
+                lib1_dir = get_library_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' and lib1_name else ''
+                lib2_dir = get_library_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' and lib2_name else ''
+
+                # Get movie directories (directory directly within library) for display in menu
+                # Always call get_movie_dir_from_path even if lib_name is empty - it has a fallback
+                movie_dir1 = get_movie_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' else file1_path
+                movie_dir2 = get_movie_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' else file2_path
+                file1_folder = os.path.basename(movie_dir1) if movie_dir1 != 'N/A' else ''
+                file2_folder = os.path.basename(movie_dir2) if movie_dir2 != 'N/A' else ''
+
+                # Play options - use two-stage menu for 4+ files
+                num_files = len(keys)
+
+                # AUTO_TRASH_DUPLICATES — silently queue byte-identical
+                # pairs.  The user gets one batch confirm at the end
+                # via the existing "Apply N pending operations" prompt.
+                if AUTO_TRASH_DUPLICATES and num_files == 2 and not same_file and _auto_trash_signals_match(keys):
+                    victim_idx = _auto_trash_victim_index(keys)  # 1 or 2
+                    victim_path = file1_path if victim_idx == 1 else file2_path
+                    keeper_path = file2_path if victim_idx == 1 else file1_path
+                    print()
+                    print(f"  ▶ AUTO-TRASH (byte-identical, signals match):")
+                    print(f"      keep [{3 - victim_idx}]: {keeper_path}")
+                    print(f"      trash [{victim_idx}]:  {victim_path}")
+                    _auto_remote_host, _, _ = determine_remote_host(file1_path)
+                    operation_counter += 1
+                    actual_keys = keys
+                    if is_multi_version and keys:
+                        _first = PLEX_Media.OBJ_BY_ID.get(keys[0], {}) or {}
+                        _ok = _first.get('_original_key')
+                        if _ok:
+                            actual_keys = [_ok]
+                    pending_operations.append({
+                        'operation_number': operation_counter,
+                        'choice': '3' if victim_idx == 1 else '4',
+                        'file1': file1_path,
+                        'file2': file2_path,
+                        'remote_host': _auto_remote_host,
+                        'all_files': [file1_path, file2_path],
+                        'keys': actual_keys,
+                        'same_file': same_file,
+                        'dup_key': dup_key,
+                        'is_multi_version': is_multi_version,
+                        'reason': 'byte-identical-auto',
+                    })
+                    # Cleanup synthetic objects same as the bottom of the loop body.
+                    if is_multi_version:
+                        for k in keys:
+                            if k in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[k].get('_is_synthetic'):
+                                del PLEX_Media.OBJ_BY_ID[k]
+                    continue  # next duplicate group
+
+                while True:
+                    # Display menu inside loop so it refreshes after each undo
+                    # Series file information each time
+                    print()
+                    for nr, key in enumerate(keys, 1):
+                        obj = PLEX_Media.OBJ_BY_ID[key]
+                        display_duplicate_details(nr, obj)
+
+                    print("\nChoose action:")
+
+                    if num_files <= 3:
+                        # Direct play options for 1-3 files
+                        for i in range(num_files):
+                            print(f"  {i+1} = Play file [{i+1}] (mpv/Plex/Infuse)")
+                    else:
+                        # Two-stage menu for 4+ files
+                        print(f"  1 = Play file (select from {num_files} files)")
+
+                    # Trash options
+                    if num_files <= 3:
+                        # Direct trash options for files 1-3
+                        for i in range(num_files):
+                            option_num = i + 1 + num_files  # Offset by number of play options
+                            if same_file:
+                                print(f"  {option_num} = Remove Plex entry [{i+1}] (database only - file will NOT be trashed)")
+                            else:
+                                # Get file path and directory info for this file
+                                file_key = keys[i]
+                                file_obj = PLEX_Media.OBJ_BY_ID[file_key]
+                                file_path = file_obj.get('file', 'N/A')
+                                lib_name = file_obj.get('library', '')
+                                movie_dir = get_movie_dir_from_path(file_path, lib_name) if file_path != 'N/A' and lib_name else os.path.dirname(file_path)
+
+                                # Check if file is in a subdirectory (movie_dir != file's parent dir)
+                                file_parent = os.path.dirname(file_path)
+                                is_in_subdir = (movie_dir != file_parent) if file_path != 'N/A' else False
+
+                                # For multi-version items with 2 files, check the relationship
+                                other_file_in_subdir = False
+                                subdir_name = ""
+                                if is_multi_version and num_files == 2:
+                                    other_idx = 1 - i  # Get the other file index (0->1, 1->0)
+                                    other_key = keys[other_idx]
+                                    other_obj = PLEX_Media.OBJ_BY_ID[other_key]
+                                    other_path = other_obj.get('file', 'N/A')
+                                    other_parent = os.path.dirname(other_path)
+
+                                    # Check if other file is in a subdirectory relative to this file
+                                    if i == 1:  # This is file [2]
+                                        # Check if file [1] is in subdirectory of file [2]'s directory
+                                        file1_parent = os.path.dirname(file1_path)
+                                        file2_parent = os.path.dirname(file2_path)
+                                        if file1_parent.startswith(file2_parent + os.sep) and file1_parent != file2_parent:
+                                            other_file_in_subdir = True
+                                            subdir_name = os.path.basename(file1_parent)
+
+                                if is_in_subdir:
+                                    # This file is in a subdirectory - will be trashed with subdirectory
+                                    subdir_name = os.path.basename(file_parent)
+                                    print(f"  {option_num} = Trash file [{i+1}] (including subdirectory '{subdir_name}')")
+                                elif other_file_in_subdir:
+                                    # Other file is in subdirectory - trashing this will move other file up
+                                    print(f"  {option_num} = Trash file [{i+1}] and move file [{1-i+1}] from subdirectory '{subdir_name}' to parent (then remove subdirectory)")
+                                else:
+                                    print(f"  {option_num} = Trash file [{i+1}]")
+                    else:
+                        # For 4+ files, only offer trash via two-stage menu
+                        print(f"  2 = Trash file (select from {num_files} files)")
+
+                    if len(keys) == 2:
+                        if same_file:
+                            print(f"  NOTE: Both entries point to the SAME file (Plex database corruption)")
+                            print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove the duplicate Plex entry.")
+                        elif is_multi_version:
+                            print(f"  NOTE: This is a multi-version item (single Plex entry with multiple file versions)")
+                            print(f"        Options 5 & 6 are not available. Use option 3 or 4 to remove a specific version.")
+                        else:
+                            print(f"  5 = Trash [1] and move [2] to library of [1]. Trash \"{file1_folder}\" && mv \"{file2_folder}\" \"{lib1_dir}/\"")
+                            print(f"  6 = Trash [2] and move [1] to library of [2]. Trash \"{file2_folder}\" && mv \"{file1_folder}\" \"{lib2_dir}/\"")
+                    if show_rename_option:
+                        print("  7 = Rename all files using directory name")
+                    if pending_operations:
+                        last_pending = pending_operations[-1]
+                        last_choice = last_pending.get('choice', '')
+
+                        # Get the filename from the pending operation
+                        file1 = last_pending.get('file1', '')
+                        file2 = last_pending.get('file2', '')
+                        if last_choice == '3':
+                            filename = os.path.basename(file1)
+                            undo_desc = f"Remove 'Trash file {filename}'"
+                        elif last_choice == '4':
+                            filename = os.path.basename(file2)
+                            undo_desc = f"Remove 'Trash file {filename}'"
+                        elif last_choice == '5':
+                            file1_name = os.path.basename(file1)
+                            file2_name = os.path.basename(file2)
+                            undo_desc = f"Remove 'Trash {file1_name} and move {file2_name}'"
+                        elif last_choice == '6':
+                            file1_name = os.path.basename(file1)
+                            file2_name = os.path.basename(file2)
+                            undo_desc = f"Remove 'Trash {file2_name} and move {file1_name}'"
+                        elif last_choice == '7':
+                            undo_desc = "Remove 'Rename files using directory name'"
+                        else:
+                            undo_desc = f"Remove operation"
+
+                        print(f"  U = Undo last pending operation ({len(pending_operations)} pending): {undo_desc}")
+                    print("  N = Next (skip this pair)")
+                    if pending_operations:
+                        print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                    print("  Q = Quit resolution mode (without applying pending operations)")
+                    try:
+                        print("\nYour choice: ", end='', flush=True)
+                        choice = readchar.readchar()
+                        # Echo the choice as entered (user must type uppercase)
+                        print(choice)
+
+                        if choice == 'Q':
+                            if pending_operations:
+                                print(f"\n⚠ Warning: You have {len(pending_operations)} pending operation(s) that will NOT be applied!")
+                                print("Are you sure you want to quit without applying them?")
+                                print("  Y = Yes, quit without applying")
+                                print("  N = No, go back")
+                                print("\nYour choice: ", end='', flush=True)
+                                confirm = readchar.readchar()
+                                print(confirm)
+                                if confirm != 'Y':
+                                    print("Cancelled. Returning to resolution mode.")
+                                    continue
+
+                            # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                            # Synthetic objects are temporary and should NEVER be saved to cache
+                            print(f"\nCleaning up synthetic objects...", end=' ', flush=True)
+                            synthetic_keys_to_remove = [
+                                key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                if obj.get('_is_synthetic')
+                            ]
+                            for key in synthetic_keys_to_remove:
+                                del PLEX_Media.OBJ_BY_ID[key]
+                            if synthetic_keys_to_remove:
+                                print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                            else:
+                                print("✓ (none found)")
+
+                            print("Exiting resolution mode without applying pending operations.")
+                            return
+
+                        if choice == 'A':
+                            if not pending_operations:
+                                print("No pending operations to apply.")
+                                continue
+
+                            # First, clean up synthetic objects for the CURRENT duplicate being displayed
+                            # (before applying operations)
+                            if is_multi_version and keys:
+                                for key in keys:
+                                    if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                                        del PLEX_Media.OBJ_BY_ID[key]
+
+                            print(f"\n{'='*76}")
+                            print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
+                            print(f"{'='*76}")
+                            # Apply all pending operations
+                            all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                            if not all_success:
+                                operations_all_succeeded = False
+                            num_ops = len(pending_operations)
+                            # Clear pending operations since they've been applied
+                            pending_operations.clear()
+
+                            # CRITICAL: Clean up ALL synthetic objects from OBJ_BY_ID before exiting
+                            # Synthetic objects are temporary and should NEVER be saved to cache
+                            print(f"\n  Cleaning up synthetic objects...", end=' ', flush=True)
+                            synthetic_keys_to_remove = [
+                                key for key, obj in PLEX_Media.OBJ_BY_ID.items()
+                                if obj.get('_is_synthetic')
+                            ]
+                            for key in synthetic_keys_to_remove:
+                                del PLEX_Media.OBJ_BY_ID[key]
+                            if synthetic_keys_to_remove:
+                                print(f"✓ (removed {len(synthetic_keys_to_remove)} synthetic objects)")
+                            else:
+                                print("✓ (none found)")
+
+                            if all_success:
+                                print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                            else:
+                                print(f"\n⚠ Some operations failed. Check output above for details.")
+                            print("Exiting resolution mode.")
+                            return
+
+                        if choice == 'N':
+                            print("Skipping this duplicate pair.")
+                            break
+
+                        if choice == 'U':
+                            if not pending_operations:
+                                print("No pending operations to undo.")
+                                continue
+
+                            # Remove the last pending operation
+                            last_pending = pending_operations.pop()
+                            operation_counter -= 1
+
+                            choice_desc = {
+                                '3': f'Trash file [1]',
+                                '4': f'Trash file [2]',
+                                '5': f'Trash [1] and move [2] to library of [1]',
+                                '6': f'Trash [2] and move [1] to library of [2]',
+                                '7': 'Rename files using directory name'
+                            }.get(last_pending['choice'], f'Unknown choice: {last_pending["choice"]}')
+
+                            print(f"\n✓ Removed pending operation #{last_pending['operation_number']}: {choice_desc}")
+                            print(f"  (Total pending: {len(pending_operations)})")
+                            print("\nReturning to current duplicate pair...\n")
+
+                            # Don't break - stay on current duplicate pair
+                            continue
+
+                        # Build list of valid choices based on number of files
+                        valid_choices = []
+                        if num_files <= 3:
+                            # Direct options: 1-N for play, (N+1)-(2N) for trash
+                            for i in range(1, num_files + 1):
+                                valid_choices.append(str(i))  # Play options
+                            for i in range(num_files + 1, 2 * num_files + 1):
+                                valid_choices.append(str(i))  # Trash options
+                        else:
+                            # Two-stage menu: 1 = play, 2 = trash
+                            valid_choices = ['1', '2']
+
+                        if len(keys) == 2 and not same_file:
+                            valid_choices.extend(['5', '6'])
+                        if show_rename_option:
+                            valid_choices.append('7')
+
+                        if choice not in valid_choices:
+                            valid_str = ', '.join(valid_choices)
+                            print(f"Invalid choice. Please enter {valid_str}, N, or Q.")
+                            continue
+
+                        # Handle two-stage menu for 4+ files
+                        if num_files > 3 and choice in ['1', '2']:
+                            action = 'play' if choice == '1' else 'trash'
+                            print(f"\nSelect file to {action} (1-{min(num_files, 9)}):")
+                            for i in range(min(num_files, 9)):
+                                file_path = PLEX_Media.OBJ_BY_ID[keys[i]].get('file', 'N/A')
+                                print(f"  {i+1} = {os.path.basename(file_path)}")
+                            if num_files > 9:
+                                print(f"  (Only showing first 9 of {num_files} files)")
+
+                            print("\nYour selection: ", end='', flush=True)
+                            file_choice = readchar.readchar()
+                            print(file_choice)
+
+                            if file_choice not in [str(i) for i in range(1, min(num_files, 9) + 1)]:
+                                print(f"Invalid selection. Please enter 1-{min(num_files, 9)}.")
+                                continue
+
+                            # Map to direct choice number
+                            file_idx = int(file_choice) - 1
+                            if action == 'play':
+                                choice = file_choice  # Play is 1-9
+                            else:
+                                # Trash: need to map to appropriate choice
+                                # For now, we'll handle this differently
+                                choice = str(num_files + file_idx + 1)
+
+                        # Handle choices for pairs only (5 and 6 require exactly 2 files)
+                        # Option 7 works for 2+ files
+                        if choice in ['5', '6'] and len(keys) != 2:
+                            print(f"Options 5 and 6 only work with pairs (2 files), but this group has {len(keys)} files.")
+                            continue
+
+                        # Prevent options 5 and 6 when both entries point to the same file
+                        if choice in ['5', '6'] and same_file:
+                            print(f"Options 5 and 6 are not available when both entries point to the same file.")
+                            print(f"This is a Plex database corruption. Use option 3 or 4 to trash the duplicate entry.")
+                            continue
+
+                        # Prevent options 5 and 6 for multi-version items
+                        if choice in ['5', '6'] and is_multi_version:
+                            print(f"Options 5 and 6 are not available for multi-version items (single Plex entry with multiple file versions).")
+                            print(f"Use option 3 or 4 to remove a specific version.")
+                            continue
+
+                        # Handle option 7 only when directories are different
+                        if choice == '7' and not show_rename_option:
+                            print("Option 7 is only available when files are in different directories.")
+                            continue
+
+                        # Determine which files are involved based on choice
+                        file1 = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
+                        file2 = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) >= 2 else 'N/A'
+
+                        # Check if this is a play action for file 3 (when we have 3 files)
+                        if num_files == 3 and choice == '3':
+                            # This is "Play file [3]"
+                            file_to_play = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')
+                            remote_host_play, exists_play, resolved_file_to_play = determine_remote_host(file_to_play)
+                            if exists_play:
+                                print(f"Playing file [3]: {file_to_play}")
+                                play_media_file(resolved_file_to_play, remote_host_play)
+                                print("\nFile player launched. You can continue with other actions on this pair.")
+                            else:
+                                print(f"ERROR: Cannot find file: {file_to_play}", file=sys.stderr)
+                            continue  # Go back to menu for next choice
+
+                        # Check if this is a trash action for file 3
+                        if num_files == 3 and choice == '6':
+                            # This is "Trash file [3]"
+                            file1 = PLEX_Media.OBJ_BY_ID[keys[2]].get('file', 'N/A')  # Use keys[2] as file1
+                            file2 = 'N/A'  # Not needed for single file trash
+                            # Remap choice to '3' or '4' for execute_resolution_action
+                            choice = '3'  # Will trash file1 (which is actually file [3])
+
+                        # Get all files for option 7 (when there are 3+ files)
+                        all_files = None
+                        if choice == '7' and len(keys) > 2:
+                            all_files = [PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A') for key in keys]
+
+                        # Determine if files are local or remote, and resolve file paths
+                        remote_host, exists, resolved_file1 = determine_remote_host(file1)
+                        if not exists:
+                            print(f"ERROR: Cannot find file locally or on remote host: {file1}", file=sys.stderr)
+                            print("Skipping this pair.", file=sys.stderr)
+                            break
+
+                        # For play actions with file2, resolve file2 as well
+                        resolved_file2 = file2
+                        if choice == '2' and file2 != 'N/A':
+                            _, exists2, resolved_file2 = determine_remote_host(file2)
+                            if not exists2:
+                                print(f"ERROR: Cannot find file locally or on remote host: {file2}", file=sys.stderr)
+                                print("Skipping this pair.", file=sys.stderr)
+                                break
+
+                        # Handle the chosen action
+                        # Play actions: 1, 2 (and 3 for 3-file case, but handled above)
+                        is_play_action = choice in ['1', '2']
+
+                        if is_play_action:
+                            # Execute play actions immediately (not recorded)
+                            # Use resolved paths for play actions
+                            success = execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
+                            print("\nFile player launched. You can continue with other actions on this pair.")
+                            # Continue loop to allow more choices
+                        else:
+                            # Record non-play actions for later execution
+                            operation_counter += 1
+
+                            # For multi-version items, replace synthetic keys with original key
+                            # This is because synthetic objects are cleaned up after each duplicate
+                            actual_keys = keys
+                            if is_multi_version and len(keys) > 0:
+                                # Get the original key from the first synthetic object
+                                first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
+                                original_key = first_obj.get('_original_key')
+                                if original_key:
+                                    # For multi-version, store original key only (not synthetic keys)
+                                    # The file paths in file1/file2 tell us which version to operate on
+                                    actual_keys = [original_key]
+
+                            pending_op = {
+                                'operation_number': operation_counter,
+                                'choice': choice,
+                                'file1': file1,
+                                'file2': file2,
+                                'remote_host': remote_host,
+                                'all_files': all_files,
+                                'keys': actual_keys,
+                                'same_file': same_file,
+                                'dup_key': dup_key,
+                                'is_multi_version': is_multi_version
+                            }
+                            pending_operations.append(pending_op)
+
+                            # Series confirmation
+                            choice_desc = {
+                                '3': f'Trash file [1]: {os.path.basename(file1)}',
+                                '4': f'Trash file [2]: {os.path.basename(file2)}',
+                                '5': f'Trash [1] and move [2] to library of [1]',
+                                '6': f'Trash [2] and move [1] to library of [2]',
+                                '7': 'Rename files using directory name'
+                            }.get(choice, f'Unknown choice: {choice}')
+                            print(f"\n✓ Operation #{operation_counter} recorded: {choice_desc}")
+                            print(f"  (Total pending: {len(pending_operations)})")
+
+                            # Move to next duplicate pair
+                            break
+
+                    except KeyboardInterrupt:
+                        print("\n\nInterrupted by user. Exiting resolution mode.")
+                        break  # Break out of duplicate pairs loop, will still save cache
+                    except PLEX_ERRORS as e:
+                        print(f"ERROR: {e}", file=sys.stderr)
+                        print("Skipping this pair.", file=sys.stderr)
+                        break
+
+                # DEBUG: Confirm we finished processing this duplicate
+                if DBG:
+                    print(f"{DBGPFX}Finished processing duplicate {dup_idx}/{total_duplicates}, moving to next...")
+
+                # Cleanup: Remove synthetic objects from OBJ_BY_ID to prevent them from being saved to cache
+                if is_multi_version:
+                    for key in keys:
+                        if key in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[key].get('_is_synthetic'):
+                            del PLEX_Media.OBJ_BY_ID[key]
+                    if DBG:
+                        print(f"{DBGPFX}Cleaned up {len(keys)} synthetic objects for multi-version item")
+
+            # After processing all duplicates, prompt user for final action if there are pending operations
+            # Also check if no duplicates were actually processed (all skipped)
+            if not pending_operations and dup_idx == total_duplicates:
+                # Check if all duplicates were skipped
+                # This happens when the cache is stale and contains duplicates that were already resolved
+                print(f"\n{'='*139}")
+                print(f"ALL DUPLICATES ALREADY RESOLVED")
+                print(f"{'='*139}")
+                print(f"\nAll {total_duplicates} duplicate(s) in the list have already been resolved (only 1 item remaining).")
+                print(f"This means your cache is stale and needs to be refreshed from the Plex server.")
+                print(f"\nTo update the cache and see only current duplicates, run:")
+                print(f"  my-plex --update-cache")
+            elif pending_operations:
+                print(f"\n{'='*139}")
+                print(f"ALL DUPLICATES PROCESSED")
+                print(f"{'='*139}")
+                print(f"\nYou have {len(pending_operations)} pending operation(s) that need to be applied.")
+                print("Choose final action:")
+                print(f"  A = Apply all {len(pending_operations)} pending operation(s) and quit")
+                print("  Q = Quit without applying pending operations")
+
+                while True:
+                    try:
+                        print("\nYour choice: ", end='', flush=True)
+                        final_choice = readchar.readchar()
+                        print(final_choice)
+
+                        if final_choice == 'A':
+                            print(f"\n{'='*76}")
+                            print(f"APPLYING {len(pending_operations)} PENDING OPERATION(S)")
+                            print(f"{'='*76}")
+                            # Apply all pending operations
+                            all_success = apply_pending_operations(pending_operations, resolution_log_data, remote_host)
+                            if not all_success:
+                                operations_all_succeeded = False
+                            num_ops = len(pending_operations)
+                            # Clear pending operations since they've been applied
+                            pending_operations.clear()
+                            if all_success:
+                                print(f"\n✓ All {num_ops} operation(s) successfully applied.")
+                            else:
+                                print(f"\n⚠ Some operations failed. Check output above for details.")
+                            break
+                        elif final_choice == 'Q':
+                            print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) will NOT be applied!")
+                            print("Are you sure you want to quit without applying them?")
+                            print("  Y = Yes, quit without applying")
+                            print("  N = No, go back")
+                            print("\nYour choice: ", end='', flush=True)
+                            confirm = readchar.readchar()
+                            print(confirm)
+                            if confirm == 'Y':
+                                print("Exiting without applying pending operations.")
+                                break
+                            else:
+                                print("Cancelled. Choose A or Q.")
+                                continue
+                        else:
+                            print(f"Invalid choice. Please enter A or Q.")
+                            continue
+                    except KeyboardInterrupt:
+                        print("\n\nInterrupted by user.")
+                        break
+
+        except KeyboardInterrupt:
+            # Ctrl+C pressed during resolution
+            print("\n\n⚠ Resolution interrupted by user.")
+        finally:
+            # DEBUG: Show loop completion info
+            if DBG:
+                print(f"{DBGPFX}For loop exited. Expected {total_duplicates} duplicates, processed through dup_idx={locals().get('dup_idx', 'N/A')}")
+
+            # Write resolution log to JSON file
+            if resolution_log_data:
+                resolution_log_data["session"]["ended"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                resolution_log_data["session"]["total_operations"] = len(resolution_log_data.get("operations", []))
+                log_path = _write_resolve_log('duplicates', resolution_log_data)
+                if log_path:
+                    print(f"\n📝 Resolution log saved: {log_path}")
+
+            print("\n" + "="*76)
+            print("RESOLUTION MODE COMPLETE")
+            print("="*76)
+
+            # Series summary
+            if pending_operations:
+                print(f"\n⚠ Warning: {len(pending_operations)} pending operation(s) were NOT applied.")
+                print(f"   To apply them, re-run resolution mode and press 'A' to apply and quit.")
+            elif operation_counter > 0:
+                if operations_all_succeeded:
+                    print(f"\n✓ All {operation_counter} operation(s) were successfully applied.")
+                else:
+                    print(f"\n⚠ Some operations failed. Check output above for details.")
+            else:
+                print(f"\n   No operations were performed.")
 
     @staticmethod
     def list_collections(library_name: str) -> None:
