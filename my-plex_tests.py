@@ -1593,7 +1593,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         content = self._read_script()
         import re
         # Find the list method - it should contain query_plex_database
-        match = re.search(r'class PLEX_Playlist.*?def list\(playlist_name\):\n(.*?)(?=\n    @staticmethod|\n    def )', content, re.DOTALL)
+        match = re.search(r'class PLEX_Playlist.*?def list\(playlist_name[^)]*\)[^:\n]*:\n(.*?)(?=\n    @staticmethod|\n    def )', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
@@ -1794,7 +1794,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         """--broken must show every broken file version, not just one per object."""
         content = self._read_script()
         import re
-        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files(?:: [^=\n]*)? = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
@@ -1809,7 +1809,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         """--broken must include PROBE ERR/NOT FOUND files even when plex duration is None."""
         content = self._read_script()
         import re
-        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
+        match = re.search(r'(def _list_broken_files\(.*?\n.*?broken_files(?:: [^=\n]*)? = \[\].*?)(?=\n        if not broken_files:)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find _list_broken_files method")
         broken_block = match.group(1)
@@ -2767,7 +2767,7 @@ class TestReencode(unittest.TestCase):
     def test_mark_supports_force(self):
         """_mark_reencode_candidates_on_disk must accept force parameter."""
         src = self._read_script()
-        self.assertIn("force=False", src)
+        self.assertRegex(src, r"force(?:: bool)? ?= ?False")
 
     def test_mark_prints_summary(self):
         """_mark_reencode_candidates_on_disk must print REENCODE MARK SUMMARY."""
@@ -4261,14 +4261,14 @@ class TestDefaultScope(unittest.TestCase):
         src = self._read_script()
         # Find _list_filtered and check it calls _apply_default_scope
         idx = src.index('def _list_filtered(')
-        snippet = src[idx:idx+1000]
+        snippet = src[idx:src.index('\n    @staticmethod', idx)]
         self.assertIn('_apply_default_scope', snippet)
 
     def test_apply_default_scope_called_in_list(self):
         """PLEX_Media.list() must call _apply_default_scope."""
         src = self._read_script()
-        idx = src.index('def list(args, obj_args, library_name, media_type')
-        snippet = src[idx:idx+1000]
+        idx = src.index('def list(args, obj_args')
+        snippet = src[idx:idx+3000]
         self.assertIn('_apply_default_scope', snippet)
 
     def test_default_scope_in_example_conf(self):
@@ -8949,8 +8949,8 @@ class TestDiskMap(unittest.TestCase):
         """Series dir routing uses get_series_dir() helper, which looks up Show object's file field."""
         content = self._read_script()
         # get_series_dir must exist and use series_key → OBJ_BY_ID lookup
-        self.assertIn("def get_series_dir(obj):", content)
-        func_start = content.find('def get_series_dir(obj):')
+        self.assertIn("def get_series_dir(obj", content)
+        func_start = content.find('def get_series_dir(obj')
         func_end = content.find('\ndef ', func_start + 1)
         func_body = content[func_start:func_end]
         self.assertIn("series_key", func_body)
@@ -8994,10 +8994,10 @@ class TestDiskMap(unittest.TestCase):
     def test_cache_dir_helpers_exist(self):
         """get_episode_dir, get_movie_dir, get_season_dir, get_series_dir helpers must exist."""
         content = self._read_script()
-        self.assertIn('def get_episode_dir(obj):', content)
-        self.assertIn('def get_movie_dir(obj):', content)
-        self.assertIn('def get_season_dir(obj):', content)
-        self.assertIn('def get_series_dir(obj):', content)
+        self.assertIn('def get_episode_dir(obj', content)
+        self.assertIn('def get_movie_dir(obj', content)
+        self.assertIn('def get_season_dir(obj', content)
+        self.assertIn('def get_series_dir(obj', content)
 
     def test_normalize_alpha(self):
         """_normalize_alpha strips non-a-z characters for fuzzy path matching."""
@@ -10024,7 +10024,7 @@ class TestUniversalScope(unittest.TestCase):
     def test_collapse_scope_arg_helper(self):
         """_collapse_scope_arg helper must exist inside execute_global_commands to normalise list/str/True/None."""
         src = self._read_script()
-        self.assertIn("def _collapse_scope_arg(val)", src)
+        self.assertIn("def _collapse_scope_arg(val", src)
 
     def test_help_mv_documents_compound_scope(self):
         """--help mv must document the COMPOUND SCOPE section with country: / original_lang: examples."""
@@ -11154,7 +11154,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         src = self._read_script()
         self.assertRegex(src, r"if OFFLINE or READ_ONLY_MODE or not PLEX_DB_PATH:\s*\n\s*return False")
         self.assertRegex(src, r"if _age < _AUTO_UPDATE_CACHE_MAX_AGE_S:\s*\n.*\n.*return False")
-        self.assertRegex(src, r"changed\s*=\s*\[\]")
+        self.assertRegex(src, r"changed(?:\s*:[^=\n]+)?\s*=\s*\[\]")
 
     def test_auto_refresh_max_age_30s(self):
         """Stale-window default must remain 30 seconds (settled with user)."""
@@ -11301,7 +11301,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         src = self._read_script()
         # The 'o' branch (TMDB fallback) must exist, and the display
         # legend must distinguish it from 'p'.
-        self.assertRegex(src, r"_via_markers\s*=\s*\{['\"]p['\"]:\s*['\"]['\"]")
+        self.assertRegex(src, r"_via_markers(?:\s*:[^=\n]+)?\s*=\s*\{['\"]p['\"]:\s*['\"]['\"]")
         self.assertRegex(src, r"['\"]o['\"]:\s*['\"]\*['\"]")
         # The fallback assignment to original_language:
         self.assertRegex(src, r"original_language|_o_lang")
@@ -11744,7 +11744,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         # Variadic reinject
         self.assertRegex(src, r"_reinject_variadic\('orphaned',\s*'--orphaned'\)")
         # Dispatcher path
-        self.assertIn("orphaned_val = safe_getattr(cmd_args, 'orphaned', None)", src)
+        self.assertRegex(src, r"orphaned_val(?:\s*:[^=\n]+)? = safe_getattr\(cmd_args, 'orphaned', None\)")
         self.assertIn("PLEX_Media._list_orphaned(do_files=do_files", src)
 
     def test_orphaned_default_runs_all_three_categories(self):
