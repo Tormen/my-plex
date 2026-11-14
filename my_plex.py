@@ -23762,7 +23762,7 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
             media = library.get(media_identifier)
             if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND 1 matching media by title!")
             return [media]
-        except Exception:
+        except PLEX_ERRORS:
             if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> Did NOT find media by title in library '{library_name}'!")
 
     # Search across all libraries
@@ -23773,7 +23773,7 @@ def resolve_plex_media_obj(media_identifier, library_name=None):
         mediae = plex.library.search(media_identifier) if plex else []
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> FOUND {len(mediae)} media(s) by search in library!")
         return mediae
-    except Exception:
+    except PLEX_ERRORS:
         if DBG: print(f"{DBGPFX}resolve_plex_media_obj(): {stage} --> NOT found media by search in library!")
         return []
 
@@ -24176,7 +24176,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             # Check if library processing was interrupted
             if library.type in ('movie', 'show') and result is False:
                 completed = False  # Library was interrupted, not completed
-        except Exception as e:
+        except PLEX_ERRORS as e:
             # Library was deleted or became inaccessible during processing
             lib_label = f"library '{display_title}'"
             print(f"{_get_worker_prefix()}{lib_label:<31s}: SKIPPED - library became inaccessible (may have been deleted): {e}")
@@ -24560,7 +24560,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     'platform': plex.platform,
                     'myPlexUsername': getattr(plex, 'myPlexUsername', ''),
                 }
-            except Exception:
+            except PLEX_ERRORS:
                 pass  # Keep existing server_info from cache
 
         # Persist the per-library audio-language index built above
@@ -24673,7 +24673,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 # Recompute PATHS_DICT now that we have root_path from section_locations
                 PLEX_Library.PATHS_DICT = PLEX_Library.get_PATHS_DICT()
 
-            except Exception as e:
+            except (ValueError, IndexError) as e:
                 print(f"\nERROR: Failed to fetch libraries from database: {e}", file=sys.stderr)
                 if DBG:
                     import traceback
@@ -24799,7 +24799,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                     scan_start_times[lib_name] = time.time()
                     print(f"  ✓ Started {action} for: {lib_name}")
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"  ✗ Failed to start scan for {lib_name}: {e}")
 
             # Phase 2: Wait for all libraries to complete (including internal indexing)
@@ -25078,7 +25078,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             # Not a large Show/Movie library or too small - keep as-is
                             # Use None for partition info to indicate no partitioning
                             partitioned_libraries.append((title, library, None, None, None, None))
-                    except Exception:
+                    except PLEX_ERRORS:
                         # If anything fails, just keep library as-is
                         partitioned_libraries.append((title, library, None, None, None, None))
 
@@ -25104,7 +25104,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             return library.totalSize * 100  # Multiply to prioritize shows
                         else:
                             return library.totalSize
-                    except Exception:
+                    except PLEX_ERRORS:
                         return 0  # Unknown size, process last
 
                 sorted_libraries = sorted(libraries_to_process,
@@ -25143,16 +25143,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     try:
                         for future in as_completed(futures.keys(), timeout=0.5):
                             title = futures.pop(future)
-                            try:
-                                was_updated = future.result()
-                                if was_updated:
-                                    cache_needs_save = True
-                            except Exception as e:
-                                if not _shutdown_requested:  # Don't print errors during shutdown
-                                    print(f"ERROR: Library '{title}' failed to update: {e}", file=sys.stderr)
-                                    if DBG:
-                                        import traceback
-                                        traceback.print_exc()
+                            was_updated = future.result()
+                            if was_updated:
+                                cache_needs_save = True
 
                             # Submit next library if available and not shutting down
                             if not _shutdown_requested:
@@ -25202,8 +25195,6 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                 future.result(timeout=remaining)
                             except TimeoutError:
                                 print(f"Worker timed out after {shutdown_timeout}s, will be terminated")
-                            except Exception:
-                                pass  # Ignore errors during shutdown
 
                             # Stop waiting if we've exceeded overall timeout
                             if time_module.time() - shutdown_start >= shutdown_timeout:
@@ -25314,7 +25305,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             else:
                                 # Not a large library - process as a whole
                                 partitioned_libraries.append((title, library, None, None, None, None))
-                        except Exception:
+                        except PLEX_ERRORS:
                             # If anything fails, process as a whole
                             partitioned_libraries.append((title, library, None, None, None, None))
 
@@ -25359,12 +25350,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                             try:
                                 for future in as_completed(futures.keys(), timeout=0.5):
                                     display_title = futures.pop(future)
-                                    try:
-                                        was_updated = future.result()
-                                        if was_updated:
-                                            cache_needs_save = True
-                                    except Exception as e:
-                                        print(f"Error processing {display_title}: {e}")
+                                    was_updated = future.result()
+                                    if was_updated:
+                                        cache_needs_save = True
 
                                     # Submit next task if available
                                     try:
@@ -25514,15 +25502,12 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                         if series_obj:
                             PLEX_Media.rename_episodes(series_obj, dry_run=dry_run)
                     # v2.69: parity log per resolve memory rule.
-                    try:
-                        import datetime as _dt
-                        _write_resolve_log('rename', {
-                            'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-                            'dry_run': bool(dry_run), 'scope_kind': 'library',
-                            'scope':   lib_name, 'series_count': len(series_keys),
-                        })
-                    except Exception as _e:
-                        print(f">>> (resolve log skipped: {_e})")
+                    import datetime as _dt
+                    _write_resolve_log('rename', {
+                        'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                        'dry_run': bool(dry_run), 'scope_kind': 'library',
+                        'scope':   lib_name, 'series_count': len(series_keys),
+                    })
 
         # Handle --unmatched: list unmatched items in this library
         if safe_getattr(obj_args, 'unmatched', False):
@@ -25598,7 +25583,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             print(f"\nAdvanced search results:")
             for media in results:
                 print(f"- {media.title} ({media.year}) [{media.type}]")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00096", f"Error in advanced search: {e}")
 
     @staticmethod
@@ -25665,7 +25650,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
             print(f"\nCollections in library '{library_name}':")
             for collection in library.collections():
                 print(f"- {collection.title}")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00097", f"Error listing collections: {e}")
 
     @staticmethod
@@ -25679,7 +25664,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
         plex = ensure_plex_api()
         try:
             collection = plex.library.collection(collection_name)
-        except Exception:
+        except PLEX_ERRORS:
             err("00098", f"Collection with name '{collection_name}' not found.")
 
         for identifier in media_identifiers:
@@ -25697,7 +25682,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
                 for media in resolve_plex_media_obj(identifier):
                     media.removeCollection(collection_name)
                     print(f"Media '{media.title}' removed from collection '{collection_name}'.")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             err("00099", f"Error removing media from collection: {e}")
 
 
@@ -25774,7 +25759,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     try:
                         os.rename(CACHE_FILE, backup_cache_file)
                         print(f"Moved old cache aside: {backup_cache_file}")
-                    except Exception as e:
+                    except OSError as e:
                         print(f"Warning: Could not move old cache aside: {e}", file=sys.stderr)
 
                 # Delete partial cache if it exists - we want a completely fresh rebuild with --force-plex
@@ -25782,7 +25767,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     try:
                         os.remove(partial_cache_file)
                         if VRB: print(f"{VRBPFX}Deleted partial cache for fresh rebuild: {partial_cache_file}")
-                    except Exception as e:
+                    except OSError as e:
                         print(f"Warning: Could not delete partial cache: {e}", file=sys.stderr)
 
                 if VRB: print(f"{VRBPFX}Force-plex rebuild mode (--force-plex): starting with empty cache...")
@@ -25811,7 +25796,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 if fm and fp:
                                     PLEX_Media._preserved_file_metadata[fp] = fm
                         del old_cache, old_obj_by_id
-                    except Exception as e:
+                    except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
                         print(f"  Warning: Could not read file metadata from backup: {e}", file=sys.stderr)
                 if PLEX_Media._preserved_file_metadata:
                     print(f"\n  ⚠ Preserving ffmpeg file metadata for {len(PLEX_Media._preserved_file_metadata)} files (use --force-metadata to re-scan)")
@@ -25839,7 +25824,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     PLEX_Media.library_timings = partial_cache.get('library_timings', {})
                     completed_count = len(PLEX_Media.completed_libraries)
                     print(f"Resuming from checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects, {completed_count} libraries completed")
-                except Exception as e:
+                except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
                     print(f"Failed to load partial cache: {e}, starting fresh...")
                     PLEX_Media.OBJ_BY_ID = {}
                     PLEX_Media.OBJ_BY_MOVIE = {}
@@ -26306,11 +26291,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 with ThreadPoolExecutor(max_workers=max(1, int(MAX_PARALLEL_WORKERS))) as _pool:
                     _futs = [_pool.submit(_bf_one, _k, _o, _tmdb_id) for (_k, _o, _tmdb_id) in _backfill_targets]
                     for _fut in as_completed(_futs):
-                        try:
-                            _k, _o, _tmdb_id, _basics = _fut.result()
-                        except Exception as _e:
-                            if DBG: print(f"{DBGPFX}movie-basics backfill worker raised: {_e!r}")
-                            continue
+                        _k, _o, _tmdb_id, _basics = _fut.result()
                         _basics = _basics or {}
                         _cid   = _basics.get('tmdb_collection_id')
                         _cname = _basics.get('tmdb_collection_name')
@@ -26362,10 +26343,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _pc_renumber_nodata= _silent(PLEX_Media._list_renumber_lack_of_data, all_obj_keys, None) or 0
         _pc_renumber_season= _silent(PLEX_Media._list_renumber_season_mismatch, all_obj_keys, None) or 0
         _pc_renumber_abs   = _silent(PLEX_Media._list_renumber_abs_mismatch, all_obj_keys, None) or 0
-        try:
-            _pc_unrecognized = _count_unrecognized_top_level()
-        except Exception:
-            _pc_unrecognized = 0
+        _pc_unrecognized = _count_unrecognized_top_level()
         _pc_numbering= _silent(PLEX_Media._list_episode_numbering_issues, all_obj_keys, None) or 0
         _pc_reencode = _silent(PLEX_Media._list_reencode_candidates, all_obj_keys, None) or 0
         _pc_remux    = _silent(PLEX_Media._count_remux_candidates, all_obj_keys, None) or 0
@@ -26405,16 +26383,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # v1.21: persist the layout-index + plex_known_filepaths into the
         # cache pickle so non-update commands (--unrecognized, layout: filter)
         # work entirely offline.  CACHE FIRST principle.
-        try:
-            _layout_idx_live = _compute_layout_index_live()
-        except Exception as _e:
-            if VRB: print(f"WARNING: layout_index live build failed: {_e}", file=sys.stderr)
-            _layout_idx_live = CACHE.get('layout_index') or {}
-        try:
-            _known_paths_live = sorted(_compute_known_filepaths_from_plex_db_live())
-        except Exception as _e:
-            if VRB: print(f"WARNING: plex_known_filepaths live build failed: {_e}", file=sys.stderr)
-            _known_paths_live = sorted(CACHE.get('plex_known_filepaths') or [])
+        _layout_idx_live = _compute_layout_index_live()
+        _known_paths_live = sorted(_compute_known_filepaths_from_plex_db_live())
 
         # v3 step 4c: prune orphans from sidecar files we manage.
         # --update-cache owns disk_map.json and episodes.err — anything pointing
@@ -26423,7 +26393,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # manage (state-preservation, raw library walks).
         try:
             _cleanup_managed_orphans()
-        except Exception as _e:
+        except (OSError, subprocess.SubprocessError) as _e:
             print(f"  WARNING: managed-orphan cleanup failed: {_e}", file=sys.stderr)
             if DBG:
                 import traceback
@@ -26439,7 +26409,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if TMDB_API_KEY:
             try:
                 cmd_original_languages(target=None, dry_run=False)
-            except Exception as _e:
+            except (OSError, pickle.PicklingError) as _e:
                 print(f"  WARNING: original-language backfill failed: {_e}", file=sys.stderr)
                 if DBG:
                     import traceback
@@ -26470,7 +26440,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 try:
                     os.remove(partial_cache_file)
                     if VERYVRB: print(f"{VRBPFX}Removed partial cache file (rebuild complete)")
-                except Exception as e:
+                except OSError as e:
                     if DBG: print(f"{DBGPFX}Failed to remove partial cache file: {e}")
 
             # Calculate totals from library_delta_counters if available
@@ -26859,7 +26829,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         print(f"{_get_worker_prefix()}library '{lib:<22s}': processed {idx}/{total} {item_type} ({pct}%) - saving checkpoint with {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects", flush=True)
                     else:
                         print(f"{_get_worker_prefix()}checkpoint: {PLEX_Media.items_processed} media files, {len(PLEX_Media.OBJ_BY_ID)} unique objects", flush=True)
-        except Exception as e:
+        except (OSError, pickle.PicklingError, RuntimeError) as e:
             if DBG: print(f"{DBGPFX}Failed to save checkpoint: {e}")
 
     argparser = argparse.ArgumentParser( add_help=False, usage=f"{US} [--media] <media_item> [<MEDIA_COMMAND> [..]]", description="Without any <MEDIA_COMMAND> this does the same as with <MEDIA_COMMAND> '--info'.", allow_abbrev=False, exit_on_error=False, epilog="""Examples:
@@ -26971,16 +26941,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             PLEX_Media.rename_episodes(obj, dry_run=dry_run)
             # v2.69: parity log per resolve memory rule.
-            try:
-                import datetime as _dt
-                _scope_label = obj.get('title') if isinstance(obj, dict) else str(obj)
-                _write_resolve_log('rename', {
-                    'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-                    'dry_run': bool(dry_run), 'scope_kind': 'object',
-                    'scope':   _scope_label,
-                })
-            except Exception as _e:
-                print(f">>> (resolve log skipped: {_e})")
+            import datetime as _dt
+            _scope_label = obj.get('title') if isinstance(obj, dict) else str(obj)
+            _write_resolve_log('rename', {
+                'command': 'rename', 'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+                'dry_run': bool(dry_run), 'scope_kind': 'object',
+                'scope':   _scope_label,
+            })
         if safe_getattr(obj_args, 'reencode', False):
             dry_run = safe_getattr(obj_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)
             force_mark = safe_getattr(obj_args, 'mark', False)
@@ -29178,7 +29145,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             wrapper = ''
             try:
                 wrapper = _derive_wrapper_path(obj) or ''
-            except Exception:
+            except AttributeError:
                 wrapper = ''
             if not wrapper:
                 fp = obj.get('file') or ''
@@ -29544,7 +29511,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 try:
                     os.remove(sp)
                     ok = True
-                except Exception:
+                except OSError:
                     ok = False
                 log_entries.append({'category': 'my_plex', 'path': sp,
                                     'reason': reason,
@@ -32272,7 +32239,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         if not dry_run:
             try:
                 remote_host = determine_remote_host(None)[0]
-            except Exception:
+            except (TypeError, OSError, subprocess.SubprocessError):
                 remote_host = None
 
         # --- Build above/below threshold sets from cache ---
@@ -32785,19 +32752,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 # ~/.my-plex/logs/duplicates_<ts>.json).
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-                try:
-                    resolution_log_data = {
-                        "session": {
-                            "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            "command": ' '.join(sys.argv),
-                            "timestamp": timestamp,
-                            "log_format_version": "1.0"
-                        },
-                        "operations": []
-                    }
-                except Exception as e:
-                    print(f"⚠ Warning: Could not initialize resolution log: {e}")
-                    resolution_log_data = None
+                resolution_log_data = {
+                    "session": {
+                        "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        "command": ' '.join(sys.argv),
+                        "timestamp": timestamp,
+                        "log_format_version": "1.0"
+                    },
+                    "operations": []
+                }
 
                 operation_counter = 0
                 pending_operations = []  # Track pending operations (not yet applied)
@@ -33383,7 +33346,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             except KeyboardInterrupt:
                                 print("\n\nInterrupted by user. Exiting resolution mode.")
                                 break  # Break out of duplicate pairs loop, will still save cache
-                            except Exception as e:
+                            except PLEX_ERRORS as e:
                                 print(f"ERROR: {e}", file=sys.stderr)
                                 print("Skipping this pair.", file=sys.stderr)
                                 break
