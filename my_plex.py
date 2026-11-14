@@ -797,6 +797,9 @@ class _MediaRecordOptional(TypedDict, total=False):
     file_segment_words: list[list[str]]
     ondisk_labels: list[str]
     scraped_E_str: str | None          # the scraped number, where it differs from Plex's
+    _is_synthetic: bool                 # --duplicates --resolve: one version of a multi-version
+    _original_key: str                  #   item, in OBJ_BY_ID only while the resolver shows it
+    _version_index: int
 
 
 class MediaRecord(_MediaRecordOptional):
@@ -33245,8 +33248,174 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if no_audio_language and resolve_mode:
                 resolve_no_audio_language(obj_keys, args)
 
+    @dataclass(frozen=True)
+    class _DuplicateGroup:
+        """One duplicate group as the resolver shows it: its keys sorted by
+        file (a multi-version item expanded into synthetic per-version keys),
+        the two first files and their library and movie folders."""
+        keys: list[str]
+        is_multi_version: bool
+        original_key: str | None     # a multi-version item's real key
+        same_file: bool
+        show_rename_option: bool
+        file1_path: str
+        file2_path: str
+        lib1_dir: str
+        lib2_dir: str
+        file1_folder: str
+        file2_folder: str
+        num_files: int
+
     @staticmethod
-    def _resolve_duplicates_interactively(sorted_duplicates: list[tuple[str, list[str]]]) -> None:  # pyright: ignore[reportGeneralTypeIssues]  -- too complex for pyright to analyse: the per-group prompt loop shares ~20 locals with the walk around it; splitting it needs a state object (TODO)
+    def _duplicate_group(dup_idx: int, dup_key: str, keys: list[str]) -> PLEX_Media._DuplicateGroup | None:
+        """The resolver's view of one duplicate group; None when the group is
+        no longer a duplicate (fewer than two items left, one version)."""
+        # Check if this is a multi-version item (single Plex entry with multiple file versions)
+        is_multi_version = False
+        original_key: str | None = None
+        multi_version_files = []
+        if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
+            files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
+            if len(files_dict) > 1:
+                is_multi_version = True
+                # Store (version_str, filepath) for each version
+                # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
+                multi_version_files = []
+                for ver, file_info in files_dict.items():
+                    if isinstance(file_info, str):
+                        # Old cache format: files_dict = {ver: filepath_string}
+                        multi_version_files.append((ver, file_info))
+                    elif isinstance(file_info, dict):
+                        # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
+                        multi_version_files.append((ver, file_info['filepath']))
+                    else:
+                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
+                if DBG:
+                    print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
+
+        # Skip only if we have less than 2 keys AND it's not a multi-version item
+        if len(keys) < 2 and not is_multi_version:
+            if DBG:
+                print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
+            return None  # Skip if not actually duplicates
+
+        # Format the duplicate key for display (add parentheses around year for movies)
+        display_key = dup_key
+        if dup_key.startswith('movie:'):
+            parts = dup_key.split(':')
+            if len(parts) == 3:
+                display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
+
+        # Display the duplicate pair/group
+        print(f"\n{'='*76}")
+        print(f"RESOLVING DUPLICATES FOR: {display_key}")
+        print(f"{'='*76}")
+
+        # For multi-version items, expand into separate virtual entries
+        # Create temporary objects for each version so the rest of the code can handle them uniformly
+        if is_multi_version:
+            print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
+            print(f"       Expanding into separate entries for resolution.\n")
+
+            # Get the original object
+            original_obj = media_record(keys[0])
+            assert original_obj is not None   # it has file versions: never a collection
+            original_key = keys[0]
+
+            # Create synthetic objects for each file version
+            synthetic_keys = []
+            for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
+                # Create a synthetic key
+                synthetic_key = f"{original_key}_version{idx}"
+
+                # Create a copy of the original object but with updated file info
+                synthetic_obj = original_obj.copy()
+                synthetic_obj['file'] = filepath
+                synthetic_obj['version'] = version_str
+
+                # Get filesize for this specific version from files dict
+                files_dict = original_obj.get('files', {})
+                if version_str in files_dict:
+                    file_info = files_dict[version_str]
+                    # BUG FIX: Handle both old and new cache formats
+                    if isinstance(file_info, dict):
+                        # New format: filesize is stored in the dict
+                        synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
+                    else:
+                        # Old format: file_info is just a filepath string, no filesize stored per version
+                        # Need to get actual filesize from Plex server for accurate display
+                        # For now, use None to indicate filesize is unknown (will show "N/A")
+                        # This will be corrected when cache is updated with --update-cache
+                        synthetic_obj['filesize'] = None
+
+                synthetic_obj['_is_synthetic'] = True
+                synthetic_obj['_original_key'] = original_key
+                synthetic_obj['_version_index'] = idx
+
+                # Temporarily add to OBJ_BY_ID so display/resolution code can access it
+                PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
+                synthetic_keys.append(synthetic_key)
+
+            # Replace keys with synthetic keys
+            keys = synthetic_keys
+        else:
+            # Always sort keys by file path for consistent display
+            # This ensures entries are shown in alphabetical order by file location
+            keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
+
+        # Check if both files point to the same physical file (Plex database corruption)
+        same_file = False
+        if len(keys) == 2:
+            file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
+            file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A')
+            same_file = (file1_path == file2_path)
+
+        # Check if directories are different (for option 7)
+        # Option 7 should be available when there are 2+ files in different directories
+        show_rename_option = False
+        if len(keys) >= 2:
+            # Get all directories
+            dirs = []
+            all_files_valid = True
+            for key in keys:
+                file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
+                if file_path == 'N/A':
+                    all_files_valid = False
+                    break
+                dirs.append(os.path.dirname(file_path))
+
+            # Series rename option if all files are valid and at least 2 are in different directories
+            if all_files_valid and len(set(dirs)) > 1:
+                show_rename_option = True
+
+        # Get file paths and library info for menu
+        file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A') if len(keys) > 0 else 'N/A'
+        file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) > 1 else 'N/A'
+
+        # Get library names and directories for options 5 and 6
+        lib1_name = PLEX_Media.OBJ_BY_ID[keys[0]].get('library', '') if len(keys) > 0 else ''
+        lib2_name = PLEX_Media.OBJ_BY_ID[keys[1]].get('library', '') if len(keys) > 1 else ''
+        lib1_dir = get_library_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' and lib1_name else ''
+        lib2_dir = get_library_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' and lib2_name else ''
+
+        # Get movie directories (directory directly within library) for display in menu
+        # Always call get_movie_dir_from_path even if lib_name is empty - it has a fallback
+        movie_dir1 = get_movie_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' else file1_path
+        movie_dir2 = get_movie_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' else file2_path
+        file1_folder = os.path.basename(movie_dir1) if movie_dir1 != 'N/A' else ''
+        file2_folder = os.path.basename(movie_dir2) if movie_dir2 != 'N/A' else ''
+
+        # Play options - use two-stage menu for 4+ files
+        num_files = len(keys)
+        return PLEX_Media._DuplicateGroup(
+            keys=keys, is_multi_version=is_multi_version,
+            original_key=original_key if is_multi_version else None,
+            same_file=same_file, show_rename_option=show_rename_option,
+            file1_path=file1_path, file2_path=file2_path, lib1_dir=lib1_dir, lib2_dir=lib2_dir,
+            file1_folder=file1_folder, file2_folder=file2_folder, num_files=num_files)
+
+    @staticmethod
+    def _resolve_duplicates_interactively(sorted_duplicates: list[tuple[str, list[str]]]) -> None:
         """--duplicates --resolve: walk the duplicate groups one by one and
         apply the action the operator picks for each (see --help duplicates)."""
         print("\n" + "="*76)
@@ -33285,145 +33454,20 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"{DBGPFX}Total duplicate groups to process: {total_duplicates}")
 
         try:
+            dup_idx = 0
             for dup_idx, (dup_key, keys) in enumerate(sorted_duplicates, 1):
                 if DBG:
                     print(f"{DBGPFX}Processing duplicate {dup_idx}/{total_duplicates}: {dup_key}")
 
-                # Check if this is a multi-version item (single Plex entry with multiple file versions)
-                is_multi_version = False
-                multi_version_files = []
-                if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
-                    files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
-                    if len(files_dict) > 1:
-                        is_multi_version = True
-                        # Store (version_str, filepath) for each version
-                        # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
-                        multi_version_files = []
-                        for ver, file_info in files_dict.items():
-                            if isinstance(file_info, str):
-                                # Old cache format: files_dict = {ver: filepath_string}
-                                multi_version_files.append((ver, file_info))
-                            elif isinstance(file_info, dict):
-                                # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
-                                multi_version_files.append((ver, file_info['filepath']))
-                            else:
-                                print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
-                        if DBG:
-                            print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
-
-                # Skip only if we have less than 2 keys AND it's not a multi-version item
-                if len(keys) < 2 and not is_multi_version:
-                    if DBG:
-                        print(f"{DBGPFX}Skipping duplicate {dup_idx} - only {len(keys)} item(s) remaining (likely already resolved)")
+                group = PLEX_Media._duplicate_group(dup_idx, dup_key, keys)
+                if group is None:
                     continue  # Skip if not actually duplicates
-
-                # Format the duplicate key for display (add parentheses around year for movies)
-                display_key = dup_key
-                if dup_key.startswith('movie:'):
-                    parts = dup_key.split(':')
-                    if len(parts) == 3:
-                        display_key = f"{parts[0]}:{parts[1]} ({parts[2]})"
-
-                # Display the duplicate pair/group
-                print(f"\n{'='*76}")
-                print(f"RESOLVING DUPLICATES FOR: {display_key}")
-                print(f"{'='*76}")
-
-                # For multi-version items, expand into separate virtual entries
-                # Create temporary objects for each version so the rest of the code can handle them uniformly
-                if is_multi_version:
-                    print(f"\n[INFO] This Plex entry (ID: {keys[0]}) contains {len(multi_version_files)} file versions.")
-                    print(f"       Expanding into separate entries for resolution.\n")
-
-                    # Get the original object
-                    original_obj = PLEX_Media.OBJ_BY_ID[keys[0]]
-                    original_key = keys[0]
-
-                    # Create synthetic objects for each file version
-                    synthetic_keys = []
-                    for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
-                        # Create a synthetic key
-                        synthetic_key = f"{original_key}_version{idx}"
-
-                        # Create a copy of the original object but with updated file info
-                        synthetic_obj = dict(original_obj)
-                        synthetic_obj['file'] = filepath
-                        synthetic_obj['version'] = version_str
-
-                        # Get filesize for this specific version from files dict
-                        files_dict = original_obj.get('files', {})
-                        if version_str in files_dict:
-                            file_info = files_dict[version_str]
-                            # BUG FIX: Handle both old and new cache formats
-                            if isinstance(file_info, dict):
-                                # New format: filesize is stored in the dict
-                                synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
-                            else:
-                                # Old format: file_info is just a filepath string, no filesize stored per version
-                                # Need to get actual filesize from Plex server for accurate display
-                                # For now, use None to indicate filesize is unknown (will show "N/A")
-                                # This will be corrected when cache is updated with --update-cache
-                                synthetic_obj['filesize'] = None
-
-                        synthetic_obj['_is_synthetic'] = True
-                        synthetic_obj['_original_key'] = original_key
-                        synthetic_obj['_version_index'] = idx
-
-                        # Temporarily add to OBJ_BY_ID so display/resolution code can access it
-                        PLEX_Media.OBJ_BY_ID[synthetic_key] = synthetic_obj
-                        synthetic_keys.append(synthetic_key)
-
-                    # Replace keys with synthetic keys
-                    keys = synthetic_keys
-                else:
-                    # Always sort keys by file path for consistent display
-                    # This ensures entries are shown in alphabetical order by file location
-                    keys = sorted(keys, key=lambda k: PLEX_Media.OBJ_BY_ID[k].get('file', ''))
-
-                # Check if both files point to the same physical file (Plex database corruption)
-                same_file = False
-                if len(keys) == 2:
-                    file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A')
-                    file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A')
-                    same_file = (file1_path == file2_path)
-
-                # Check if directories are different (for option 7)
-                # Option 7 should be available when there are 2+ files in different directories
-                show_rename_option = False
-                if len(keys) >= 2:
-                    # Get all directories
-                    dirs = []
-                    all_files_valid = True
-                    for key in keys:
-                        file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
-                        if file_path == 'N/A':
-                            all_files_valid = False
-                            break
-                        dirs.append(os.path.dirname(file_path))
-
-                    # Series rename option if all files are valid and at least 2 are in different directories
-                    if all_files_valid and len(set(dirs)) > 1:
-                        show_rename_option = True
-
-                # Get file paths and library info for menu
-                file1_path = PLEX_Media.OBJ_BY_ID[keys[0]].get('file', 'N/A') if len(keys) > 0 else 'N/A'
-                file2_path = PLEX_Media.OBJ_BY_ID[keys[1]].get('file', 'N/A') if len(keys) > 1 else 'N/A'
-
-                # Get library names and directories for options 5 and 6
-                lib1_name = PLEX_Media.OBJ_BY_ID[keys[0]].get('library', '') if len(keys) > 0 else ''
-                lib2_name = PLEX_Media.OBJ_BY_ID[keys[1]].get('library', '') if len(keys) > 1 else ''
-                lib1_dir = get_library_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' and lib1_name else ''
-                lib2_dir = get_library_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' and lib2_name else ''
-
-                # Get movie directories (directory directly within library) for display in menu
-                # Always call get_movie_dir_from_path even if lib_name is empty - it has a fallback
-                movie_dir1 = get_movie_dir_from_path(file1_path, lib1_name) if file1_path != 'N/A' else file1_path
-                movie_dir2 = get_movie_dir_from_path(file2_path, lib2_name) if file2_path != 'N/A' else file2_path
-                file1_folder = os.path.basename(movie_dir1) if movie_dir1 != 'N/A' else ''
-                file2_folder = os.path.basename(movie_dir2) if movie_dir2 != 'N/A' else ''
-
-                # Play options - use two-stage menu for 4+ files
-                num_files = len(keys)
+                (keys, is_multi_version, original_key, same_file, show_rename_option,
+                 file1_path, file2_path, lib1_dir, lib2_dir, file1_folder, file2_folder,
+                 num_files) = (group.keys, group.is_multi_version, group.original_key,
+                               group.same_file, group.show_rename_option, group.file1_path,
+                               group.file2_path, group.lib1_dir, group.lib2_dir,
+                               group.file1_folder, group.file2_folder, group.num_files)
 
                 # AUTO_TRASH_DUPLICATES — silently queue byte-identical
                 # pairs.  The user gets one batch confirm at the end
