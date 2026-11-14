@@ -2091,14 +2091,14 @@ class TestMediaApiActionConsolidation(unittest.TestCase):
         self.assertIn("def _media_api_action(", content)
 
     def test_media_api_action_has_error_handling(self):
-        """_media_api_action must catch exceptions and call err()."""
+        """_media_api_action catches what a Plex call raises (PLEX_ERRORS) and calls err()."""
         content = self._read_script()
         import re
         match = re.search(r'def _media_api_action\(.*?\n(.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("except Exception", body)
+        self.assertIn("except PLEX_ERRORS", body)
         self.assertIn("err(err_code", body)
 
     def test_all_wrappers_use_media_api_action(self):
@@ -16523,7 +16523,7 @@ class TestPlexDbPathRequired(unittest.TestCase):
         r = self.run_cmd(self.conf(f"PLEX_DB_PATH = {path!r}\n"), '--update-cache')
         self.assertNotIn('PLEX_DB_PATH is empty', r.stderr)
         calls = self.ssh_calls()
-        self.assertTrue(any('plex-test-host' in c and f"sqlite3 -header -csv '{path}'" in c
+        self.assertTrue(any('plex-test-host' in c and f"sqlite3 -header -csv {shlex.quote(path)}" in c
                             for c in calls), calls)
 
     def _disk2plex(self, mod: Any, db_path: str, extras: dict[str, str]) -> tuple[list[int], str]:
