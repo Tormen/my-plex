@@ -12911,6 +12911,72 @@ class TestListPrinters(unittest.TestCase):
         self.assertIn('SERIES\tShow S01E01: Pilot', out)
 
 
+class TestFilepathIndexReaders(unittest.TestCase):
+    """Two movers looked a path up in PLEX_Media.OBJ_BY_FILEPATH as if it held
+    ONE key: OBJ_BY_ID.get(<the list>) raised TypeError (a list is not
+    hashable) once the file was renamed or moved, so --naming --revert and
+    --sort-new's wrapper consolidation died halfway, cache unsaved."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        self._saved = (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, self.mp.CACHE,
+                       self.mp.PLEX_DB_REMOTE_HOST)
+        media.OBJ_BY_ID, media.OBJ_BY_FILEPATH = {}, {}
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, self.mp.CACHE,
+         self.mp.PLEX_DB_REMOTE_HOST) = self._saved
+
+    def _quiet_saves(self):
+        from unittest import mock
+        stack = contextlib.ExitStack()
+        for name in ('save_disk_map_sidecar', 'update_and_save_cache', 'build_media_cache_dict'):
+            stack.enter_context(mock.patch.object(self.mp, name))
+        stack.enter_context(mock.patch.object(self.mp, '_write_resolve_log', return_value=None))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        return stack
+
+    def test_naming_revert_moves_the_record_with_its_file(self):
+        from unittest import mock
+        media = self.mp.PLEX_Media
+        media.OBJ_BY_ID['Movie:1'] = _make_movie(1, 'Film', '/lib/new.mkv', version='v1')
+        media.OBJ_BY_FILEPATH['/lib/new.mkv'] = ['Movie:1']
+        sidecar = {'/lib/new.mkv': {'naming_original': 'old.mkv'}}
+        with self._quiet_saves(), \
+             mock.patch.object(self.mp, 'rename_file', return_value=(True, None)), \
+             mock.patch.object(self.mp, 'rename_file_siblings'):
+            reverted = media._naming_revert(sidecar, yes=True)
+        self.assertEqual(reverted, 1)
+        self.assertEqual(media.OBJ_BY_ID['Movie:1']['file'], '/lib/old.mkv')
+        self.assertEqual(media.OBJ_BY_FILEPATH, {'/lib/old.mkv': ['Movie:1']})
+
+    def test_season_wrapper_consolidation_moves_the_episode_records(self):
+        from unittest import mock
+        media = self.mp.PLEX_Media
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        wrapper = os.path.join(root, 'Show.s01.release')
+        os.makedirs(wrapper)
+        src = os.path.join(wrapper, 'Show.e01.mkv')
+        open(src, 'w').close()
+        series = _make_movie(10, 'Show', wrapper, version='Series', library='lib6')
+        series['type'] = 'Series'
+        episode = _make_episode(12, 'Pilot', src, 'Series:10', 'Show', 1, 1)
+        media.OBJ_BY_ID = {'Series:10': series, 'Episode:12': episode}
+        media.OBJ_BY_FILEPATH = {src: ['Episode:12']}
+        self.mp.CACHE = {'library_stats': {'locations': {'lib6': [root]}}}
+        self.mp.PLEX_DB_REMOTE_HOST = None
+        with self._quiet_saves(), \
+             mock.patch.object(self.mp, 'load_disk_map_sidecar', return_value={}):
+            self.mp._sort_new_consolidate_season_wrappers([('Series:10', series, 'lib6')], yes=True)
+        dest = os.path.join(root, 'Show', 's01', 'Show.e01.mkv')
+        self.assertTrue(os.path.exists(dest), os.listdir(root))
+        self.assertEqual(media.OBJ_BY_ID['Episode:12']['file'], dest)
+        self.assertEqual(media.OBJ_BY_FILEPATH.get(dest), ['Episode:12'])
+
+
 class TestSortNewSeasonWrapper(unittest.TestCase):
     """--sort-new consolidates a release wrapper ('Show.s01.release') into
     <library>/Show/s01/.  A wrapper found as a series' OWN directory was
@@ -18521,7 +18587,8 @@ _UNITTEST_SCOPES = {
                    TestVerifyCacheIntegrity, TestCacheFormatValidation,
                    TestCacheStructureParity, TestVerifyCacheSplit,
                    TestUpdateCacheSplit, TestCacheUpdateLog,
-                   TestObjByLibraryDedup, TestFilepathIndexIsAList],
+                   TestObjByLibraryDedup, TestFilepathIndexIsAList,
+                   TestFilepathIndexReaders],
     'duplicates': [TestMultiVersionMerge, TestDuplicateKeyGeneration,
                    TestClassifyMultiVersion, TestDuplicatesIgnoreLibraryCombinations,
                    TestExcessVersions, TestExcessVersionsMainParser,

@@ -29786,10 +29786,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 _update_cache_child_paths(path, restored_path)
                 _update_sidecar_child_paths(sidecar, path, restored_path)
             else:
-                owner_key = PLEX_Media.OBJ_BY_FILEPATH.get(path)
-                obj = PLEX_Media.OBJ_BY_ID.get(owner_key) if owner_key else None
-                if obj is not None:
-                    _update_cache_filepath(obj, path, restored_path)
+                for owner_key in PLEX_Media.OBJ_BY_FILEPATH.get(path, []):
+                    obj = PLEX_Media.OBJ_BY_ID.get(owner_key)
+                    if obj is not None:
+                        _update_cache_filepath(obj, path, restored_path)
                 if path in PLEX_Media.OBJ_BY_FILEPATH:
                     PLEX_Media.OBJ_BY_FILEPATH[restored_path] = PLEX_Media.OBJ_BY_FILEPATH.pop(path)
                 rename_file_siblings(path, restored_path,
@@ -39879,10 +39879,10 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
                 moved_total += 1
                 # Per-file cache + sidecar integrity (layered wrappers strip
                 # the sNN component, so a plain prefix rewrite cannot cover this).
-                owner_key = PLEX_Media.OBJ_BY_FILEPATH.get(src_path)
-                owner_obj = PLEX_Media.OBJ_BY_ID.get(owner_key) if owner_key else None
-                if owner_obj is not None:
-                    _update_cache_filepath(owner_obj, src_path, dest_path)
+                for owner_key in PLEX_Media.OBJ_BY_FILEPATH.get(src_path, []):
+                    owner_obj = PLEX_Media.OBJ_BY_ID.get(owner_key)
+                    if owner_obj is not None:
+                        _update_cache_filepath(owner_obj, src_path, dest_path)
                 if src_path in PLEX_Media.OBJ_BY_FILEPATH:
                     PLEX_Media.OBJ_BY_FILEPATH[dest_path] = PLEX_Media.OBJ_BY_FILEPATH.pop(src_path)
                 if src_path in sidecar:
