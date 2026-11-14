@@ -36930,11 +36930,11 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
     # non-canonical markers before writing.
     _replace_patterns = []  # type: list[re.Pattern[str]]  # (a type comment: --run-tests v269 pins this text)
     if replace:
-        for plex_var, var_spec in DISK_PLEX_MAP.items():
+        for plex_var, var_spec in DISK_PLEX_MAP.items():  # pyright: ignore[reportUnusedVariable]  -- --run-tests v269 pins this text
             scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
             if scope not in scope_set:
                 continue
-            for plex_val, entry_or_list in (var_spec.get('values') or {}).items():
+            for _plex_val, entry_or_list in (var_spec.get('values') or {}).items():
                 entries = entry_or_list if isinstance(entry_or_list, list) else [entry_or_list]
                 for entry in entries:
                     if not isinstance(entry, dict):
@@ -37085,7 +37085,7 @@ def _update_cache_child_paths(old_dir: str, new_dir: str) -> None:
     """After renaming a directory, update all file paths in the cache that reference old_dir (exact match or children)."""
     old_prefix = old_dir + os.sep
     new_prefix = new_dir + os.sep
-    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+    for _key, obj in PLEX_Media.OBJ_BY_ID.items():
         if obj['type'] == 'Collection':
             continue
         # Update 'file' field — exact match (dir objects) or child paths
@@ -37431,7 +37431,7 @@ def cmd_plex2disk_clean(target: ScopeTarget, dry_run: bool = False) -> None:
     season_dir_paths: set[str] = set()
     series_dir_paths: set[str] = set()
 
-    for cache_key, obj in items:
+    for _cache_key, obj in items:
         obj_type = obj.get('type', '')
         filepaths = _get_all_filepaths(obj)
         for filepath in filepaths:
@@ -37758,7 +37758,7 @@ def cmd_disk2plex(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
     for c in flat:
         by_var.setdefault(c['plex_var'], []).append(c)
 
-    handler_count = sum(1 for v in by_var if v in _DISK2PLEX_PUSH_HANDLERS)
+    _handler_count = sum(1 for v in by_var if v in _DISK2PLEX_PUSH_HANDLERS)
     no_handler_vars = sorted(v for v in by_var if v not in _DISK2PLEX_PUSH_HANDLERS)
 
     print(f"\n--disk2plex would apply {len(flat)} change(s) "
@@ -40657,7 +40657,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     lookup_info = f"{prev_iso} (rebroadcast)"
 
             if result:
-                season, ep_num, title = result
+                season, ep_num, _title = result
                 target_dir = os.path.join(series_dir, f"s{season:02d}")
                 new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                 _target_path = os.path.join(target_dir, new_name)
