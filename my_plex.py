@@ -743,7 +743,6 @@ print = functools.partial(print, flush=True)
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from functools import reduce
-from pathlib import Path
 from pprint import pformat
 import threading
 
@@ -17091,7 +17090,7 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
                             it.addCollection(coll_name)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                             added += 1
                         except PLEX_ERRORS as _ie:
-                            print(f"  ⚠ addCollection({coll_name!r}) failed for item {it.ratingKey}: {_ie}")
+                            print(f"  ⚠ addCollection({coll_name!r}) failed for item {it.ratingKey}: {_ie}")  # pyright: ignore[reportUnknownMemberType]  # plexapi types ratingKey through its untyped cast()
                     print(f"  {'✓' if added == len(items) else '⚠'} tagged {added}/{len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
             if created or added:
                 changed += 1
@@ -19305,7 +19304,7 @@ class PendingResolution(_PendingResolutionOptional):
     file1: str
     file2: str
     remote_host: str | None
-    all_files: list[str]
+    all_files: list[str] | None       # the files option 7 renames; None for the other choices
     keys: list[str]
     same_file: bool
     dup_key: str
@@ -33157,23 +33156,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Check if this is a multi-version item (single Plex entry with multiple file versions)
         is_multi_version = False
         original_key: str | None = None
-        multi_version_files = []
-        if len(keys) == 1 and keys[0] in PLEX_Media.OBJ_BY_ID:
-            files_dict = PLEX_Media.OBJ_BY_ID[keys[0]].get('files', {})
+        multi_version_files: list[tuple[str, str]] = []
+        only = media_record(keys[0]) if len(keys) == 1 else None
+        if only is not None:
+            files_dict = only['files']
             if len(files_dict) > 1:
                 is_multi_version = True
                 # Store (version_str, filepath) for each version
-                # Handle both old format (ver -> filepath string) and new format (ver -> dict with 'filepath' key)
-                multi_version_files = []
-                for ver, file_info in files_dict.items():
-                    if isinstance(file_info, str):
-                        # Old cache format: files_dict = {ver: filepath_string}
-                        multi_version_files.append((ver, file_info))
-                    elif isinstance(file_info, dict):
-                        # New cache format: files_dict = {ver: {'filepath': ..., 'filesize': ...}}
-                        multi_version_files.append((ver, file_info['filepath']))
-                    else:
-                        print(f"[WARNING] Unexpected file_info type: {type(file_info)}", file=sys.stderr)
+                multi_version_files = [(ver, file_info['filepath']) for ver, file_info in files_dict.items()]
                 if DBG:
                     print(f"{DBGPFX}This is a multi-version item with {len(files_dict)} file versions in single Plex entry")
 
@@ -33207,7 +33197,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             original_key = keys[0]
 
             # Create synthetic objects for each file version
-            synthetic_keys = []
+            synthetic_keys: list[str] = []
             for idx, (version_str, filepath) in enumerate(sorted(multi_version_files, key=lambda x: x[1]), 1):
                 # Create a synthetic key
                 synthetic_key = f"{original_key}_version{idx}"
@@ -33222,15 +33212,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 if version_str in files_dict:
                     file_info = files_dict[version_str]
                     # BUG FIX: Handle both old and new cache formats
-                    if isinstance(file_info, dict):
-                        # New format: filesize is stored in the dict
-                        synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
-                    else:
-                        # Old format: file_info is just a filepath string, no filesize stored per version
-                        # Need to get actual filesize from Plex server for accurate display
-                        # For now, use None to indicate filesize is unknown (will show "N/A")
-                        # This will be corrected when cache is updated with --update-cache
-                        synthetic_obj['filesize'] = None
+                    synthetic_obj['filesize'] = file_info.get('filesize', original_obj.get('filesize'))
 
                 synthetic_obj['_is_synthetic'] = True
                 synthetic_obj['_original_key'] = original_key
@@ -33259,7 +33241,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         show_rename_option = False
         if len(keys) >= 2:
             # Get all directories
-            dirs = []
+            dirs: list[str] = []
             all_files_valid = True
             for key in keys:
                 file_path = PLEX_Media.OBJ_BY_ID[key].get('file', 'N/A')
@@ -33317,7 +33299,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # ~/.my-plex/logs/duplicates_<ts>.json).
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        resolution_log_data = {
+        resolution_log_data: dict[str, Any] = {   # the resolve log, as JSON
             "session": {
                 "started": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "command": ' '.join(sys.argv),
@@ -33328,7 +33310,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         }
 
         operation_counter = 0
-        pending_operations = []  # Track pending operations (not yet applied)
+        pending_operations: list[PendingResolution] = []  # Track pending operations (not yet applied)
         operations_all_succeeded = True  # Track if all applied operations succeeded
         remote_host: str | None = None   # set by the first action run here; an auto-trash queues without one
 
@@ -33368,8 +33350,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     operation_counter += 1
                     actual_keys = keys
                     if is_multi_version and keys:
-                        _first = PLEX_Media.OBJ_BY_ID.get(keys[0], {}) or {}
-                        _ok = _first.get('_original_key')
+                        _first = media_record(keys[0])
+                        _ok = _first.get('_original_key') if _first is not None else None
                         if _ok:
                             actual_keys = [_ok]
                     pending_operations.append({
@@ -33433,12 +33415,6 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                 other_file_in_subdir = False
                                 subdir_name = ""
                                 if is_multi_version and num_files == 2:
-                                    other_idx = 1 - i  # Get the other file index (0->1, 1->0)
-                                    other_key = keys[other_idx]
-                                    other_obj = PLEX_Media.OBJ_BY_ID[other_key]
-                                    other_path = other_obj.get('file', 'N/A')
-                                    other_parent = os.path.dirname(other_path)
-
                                     # Check if other file is in a subdirectory relative to this file
                                     if i == 1:  # This is file [2]
                                         # Check if file [1] is in subdirectory of file [2]'s directory
@@ -33613,7 +33589,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             continue
 
                         # Build list of valid choices based on number of files
-                        valid_choices = []
+                        valid_choices: list[str] = []
                         if num_files <= 3:
                             # Direct options: 1-N for play, (N+1)-(2N) for trash
                             for i in range(1, num_files + 1):
@@ -33737,7 +33713,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         if is_play_action:
                             # Execute play actions immediately (not recorded)
                             # Use resolved paths for play actions
-                            success = execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
+                            execute_resolution_action(choice, resolved_file1, resolved_file2, remote_host, all_files, keys, None, None, same_file)
                             print("\nFile player launched. You can continue with other actions on this pair.")
                             # Continue loop to allow more choices
                         else:
@@ -33749,14 +33725,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                             actual_keys = keys
                             if is_multi_version and len(keys) > 0:
                                 # Get the original key from the first synthetic object
-                                first_obj = PLEX_Media.OBJ_BY_ID.get(keys[0], {})
-                                original_key = first_obj.get('_original_key')
+                                first_obj = media_record(keys[0])
+                                original_key = first_obj.get('_original_key') if first_obj is not None else None
                                 if original_key:
                                     # For multi-version, store original key only (not synthetic keys)
                                     # The file paths in file1/file2 tell us which version to operate on
                                     actual_keys = [original_key]
 
-                            pending_op = {
+                            pending_op: PendingResolution = {
                                 'operation_number': operation_counter,
                                 'choice': choice,
                                 'file1': file1,
@@ -37095,7 +37071,7 @@ def _get_universal_scope(scope_tokens: ScopeTarget) -> list[ScopeItem]:
         per_token_keysets.append(sub_keys)
         if first_order is None:
             first_order = [k for k, _ in sub_items]
-    survivors: set[str] = set.intersection(*per_token_keysets) if per_token_keysets else set()
+    survivors: set[str] = per_token_keysets[0].intersection(*per_token_keysets[1:]) if per_token_keysets else set()
     seen: set[str] = set()
     result: list[ScopeItem] = []
     for k in (first_order or []):
