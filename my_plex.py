@@ -1150,6 +1150,33 @@ if _TEST_RUN:
     SITE_CONF = os.environ.get(TEST_SITE_ENV, '/nonexistent/site.conf')
 _dropped = [v for v in (CONFIG_ENV, CONFIG_INHERITED_ENV)
             if _SUITE_RUN and os.environ.pop(v, None) is not None]
+# A test run keeps its per-user files -- cache, lock, disk map, logs, move
+# state -- in a home of its own, made once by the suite and inherited by every
+# my-plex it starts.  A test that runs a command with no --config would
+# otherwise read AND WRITE the real ~/.my-plex of whoever runs the suite: on
+# 2026-11-14 the suite left horse's cache empty five times in an afternoon.
+# HOME itself stays: the venv and the shell completion live under it.
+TEST_HOME_ENV = 'MY_PLEX_TEST_HOME'
+
+
+def _data_home() -> str:
+    """The folder my-plex's per-user files (.my-plex/...) are relative to:
+    HOME, or in a test run the run's own home, so no test can reach the
+    files of the person running the suite."""
+    if not _TEST_RUN:
+        return _home()
+    d = os.environ.get(TEST_HOME_ENV)
+    if not d or not os.path.isdir(d):
+        import atexit, shutil, tempfile
+        d = tempfile.mkdtemp(prefix='my-plex-test-home-')
+        atexit.register(shutil.rmtree, d, True)
+        os.environ[TEST_HOME_ENV] = d  # the my-plex this one starts share it
+    return d
+
+
+if _SUITE_RUN:
+    os.environ.pop(TEST_HOME_ENV, None)  # a fresh one per suite run
+    _data_home()
 if _dropped:
     # An action nobody asked for says what it did and why.
     print(f" >>> {', '.join('$' + v for v in _dropped)} ignored for this test run -- "
@@ -9053,7 +9080,7 @@ def is_library_name(name: str) -> bool:
     if _LIBRARY_NAMES_IN_CACHE_FILE is None:
         names: frozenset[str] = frozenset()
         try:
-            with open(os.path.join(Path.home(), CACHE_FILE), 'rb') as f:
+            with open(os.path.join(_data_home(), CACHE_FILE), 'rb') as f:
                 names = frozenset(pickle.load(f).get('obj_by_library', {}))
         except Exception:  # pickle.load of a damaged file raises any exception (pickle's own docs)
             pass
@@ -9117,7 +9144,7 @@ def _write_crash_trace() -> str:
             fd, path = tempfile.mkstemp(prefix=f"my-plex-{stamp}_", suffix='.log')
             os.close(fd)
         else:
-            log_dir = os.path.join(os.path.expanduser('~'), '.my-plex', 'logs')
+            log_dir = os.path.join(_data_home(), '.my-plex', 'logs')
             os.makedirs(log_dir, exist_ok=True)
             path = os.path.join(log_dir, f"{stamp}.log")
         with open(path, 'w') as f:
@@ -11504,7 +11531,7 @@ def _write_resolve_log(command_name: str, payload: Any) -> str | None:
     try:
         import json
         from datetime import datetime as _dt
-        log_dir = os.path.join(os.path.expanduser('~'), '.my-plex', 'logs')
+        log_dir = os.path.join(_data_home(), '.my-plex', 'logs')
         os.makedirs(log_dir, exist_ok=True)
         ts = _dt.now().strftime('%Y%m%d_%H%M%S')
         path = os.path.join(log_dir, f'{command_name}_{ts}.json')
@@ -23887,27 +23914,27 @@ def init(args: argparse.Namespace) -> None:
     if not _AS_ROOT:
         _init_my_plex_dir()
 
-    # Resolve relative paths to absolute (relative to home directory)
-    CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
-    LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
-    DISK_MAP_FILE = os.path.join(Path.home(), DISK_MAP_FILE)
+    # Resolve relative paths to absolute (relative to the home of my-plex's files)
+    CACHE_FILE = os.path.join(_data_home(), CACHE_FILE)
+    LOCK_FILE = os.path.join(_data_home(), LOCK_FILE)
+    DISK_MAP_FILE = os.path.join(_data_home(), DISK_MAP_FILE)
 
 
 def _init_my_plex_dir() -> None:
     """Create ~/.my-plex/ and move the legacy ~/.plex_media_cache.* into it."""
-    plex_dir = os.path.join(Path.home(), '.my-plex')
+    plex_dir = os.path.join(_data_home(), '.my-plex')
     if not os.path.isdir(plex_dir):
         os.makedirs(plex_dir, exist_ok=True)
         if VRB: print(f"{VRBPFX}Created directory: {plex_dir}")
 
-    legacy_cache = os.path.join(Path.home(), '.plex_media_cache.pkl')
-    new_cache = os.path.join(Path.home(), '.my-plex', 'cache.pkl')
+    legacy_cache = os.path.join(_data_home(), '.plex_media_cache.pkl')
+    new_cache = os.path.join(_data_home(), '.my-plex', 'cache.pkl')
     if os.path.isfile(legacy_cache) and not os.path.isfile(new_cache):
         import shutil
         shutil.move(legacy_cache, new_cache)
         print(f"  Migrated cache: {legacy_cache} → {new_cache}")
-    legacy_lock = os.path.join(Path.home(), '.plex_media_cache.lock')
-    new_lock = os.path.join(Path.home(), '.my-plex', 'cache.lock')
+    legacy_lock = os.path.join(_data_home(), '.plex_media_cache.lock')
+    new_lock = os.path.join(_data_home(), '.my-plex', 'cache.lock')
     if os.path.isfile(legacy_lock) and not os.path.isfile(new_lock):
         import shutil
         shutil.move(legacy_lock, new_lock)
@@ -38883,7 +38910,7 @@ VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv
 # A 'failed' status with restore_errors keeps the file for diagnosis.
 # ---------------------------------------------------------------------------
 
-_MOVE_STATE_DIR = os.path.expanduser('~/.my-plex/state-preservation')
+_MOVE_STATE_DIR = os.path.join(_data_home(), '.my-plex', 'state-preservation')
 
 
 def _move_state_dir() -> str:
@@ -42236,7 +42263,7 @@ def show_system_info() -> None:
     print("\nCACHE:")
     cache_path = Path(CACHE_FILE).expanduser()
     if not cache_path.is_absolute():
-        cache_path = Path.home() / CACHE_FILE
+        cache_path = Path(_data_home()) / CACHE_FILE
 
     if cache_path.exists():
         size_bytes = cache_path.stat().st_size
@@ -45876,9 +45903,9 @@ def main():
         _complete_what = sys.argv[_ci + 1].lower() if _ci + 1 < len(sys.argv) else ''
         global CACHE_FILE, LOCK_FILE
         if not os.path.isabs(CACHE_FILE):
-            CACHE_FILE = os.path.join(Path.home(), CACHE_FILE)
+            CACHE_FILE = os.path.join(_data_home(), CACHE_FILE)
         if not os.path.isabs(LOCK_FILE):
-            LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
+            LOCK_FILE = os.path.join(_data_home(), LOCK_FILE)
         load_cache()
         load_media_cache(CACHE)
         seen: set[str]

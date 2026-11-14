@@ -18166,6 +18166,36 @@ class TestConfigEnvVar(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_a_test_run_writes_nothing_into_the_home_of_whoever_runs_it(self):
+        """A test run keeps its cache, logs and move state in a home of its
+        own ($MY_PLEX_TEST_HOME), never under HOME.  It did not:
+        test_reencode_mark_renames_on_the_plex_server saves the cache from
+        inside the suite's own process, and that save went to HOME's
+        ~/.my-plex/cache.pkl -- horse's real cache was left empty five times
+        on 2026-11-14.  So the suite runs that test here, as a fresh run whose
+        HOME is a temp dir holding a sentinel cache (the fixture's: a real
+        cache's shape), which must come back byte for byte, alone."""
+        d = tempfile.mkdtemp(prefix='my-plex-testhome-')
+        try:
+            home = os.path.join(d, 'home')
+            os.makedirs(os.path.join(home, '.my-plex'))
+            # The fake home needs the tool's own venv, or the run bootstraps one.
+            os.symlink(os.path.expanduser('~/.python.venv'), os.path.join(home, '.python.venv'))
+            sentinel = os.path.join(home, '.my-plex', 'cache.pkl')
+            shutil.copy(os.path.join(os.path.dirname(_fixture_conf()), 'cache.pkl'), sentinel)
+            with open(sentinel, 'rb') as f:
+                before = f.read()
+            r = self._run('--run-tests', 'test_reencode_mark_renames_on_the_plex_server',
+                          HOME=home, MY_PLEX_TEST_RUN=None, MY_PLEX_TEST_HOME=None)
+            self.assertIn('ok 1 - TestOndiskLabels.test_reencode_mark_renames_on_the_plex_server', r.stdout,
+                          r.stdout[-800:] + r.stderr[-800:])
+            with open(sentinel, 'rb') as f:
+                self.assertEqual(f.read(), before, "the test run rewrote HOME's cache")
+            self.assertEqual(sorted(os.listdir(os.path.join(home, '.my-plex'))), ['cache.pkl'],
+                             "the test run wrote beside HOME's cache")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def _secret_conf(self, extra: str = '') -> tuple[str, str]:
         """A config holding a Plex token in a URL and an API key."""
         d = tempfile.mkdtemp(prefix='my-plex-cfgsecret-')
