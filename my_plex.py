@@ -16729,7 +16729,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     import os, datetime as _dt
     try:
         from plexapi.collection import Collection as _PlexCollection
-    except Exception:
+    except ImportError:
         _PlexCollection = None
 
     # 1. Build the candidate list.
@@ -16868,7 +16868,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # Look up the live Plex items.
         try:
             section = plex.library.section(lib_name)
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ⚠ plex.library.section({lib_name!r}) failed: {e}")
             skipped += 1
             log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': f'section: {e}'})
@@ -16881,9 +16881,9 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     continue
                 try:
                     items.append(plex.fetchItem(rk))
-                except Exception as _e:
+                except PLEX_ERRORS as _e:
                     print(f"  ⚠ fetchItem({rk}) failed for {k}: {_e}")
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             print(f"  ⚠ Plex item lookup failed: {e}")
             skipped += 1
             log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': f'fetchItem: {e}'})
@@ -16904,19 +16904,19 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 try:
                     existing = _PlexCollection.create(plex, title=coll_name, section=section, items=items)
                     print(f"  ✓ created Plex Collection {coll_name!r} with {len(items)} item(s)")
-                except Exception as _e:
+                except PLEX_ERRORS as _e:
                     print(f"  ⚠ Plex Collection.create({coll_name!r}) failed: {_e}")
                     existing = None
             if existing is not None:
                 try:
                     existing.addItems(items)
                     print(f"  ✓ added {len(items)} item(s) to Plex Collection {coll_name!r}")
-                except Exception as _e:
+                except PLEX_ERRORS as _e:
                     # Per-item fallback for older plexapi
                     for it in items:
                         try:
                             it.addCollection(coll_name)
-                        except Exception:
+                        except PLEX_ERRORS:
                             pass
                     print(f"  ✓ tagged {len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
             fixed += 1
@@ -16924,7 +16924,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name,
                 'plex_collection': coll_name, 'members': [k for k, _ in members], 'status': 'fixed',
             })
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ⚠ Plex Collection mirror for {coll_name!r} failed: {e}")
             skipped += 1
             log_payload['actions'].append({'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name, 'status': 'fail', 'reason': str(e)})
@@ -16939,11 +16939,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     if fixed and not dry_run:
         print()
         print(f">>> Refreshing my-plex cache (via subprocess --update-cache) so the {fixed} new Plex Collection(s) are reflected…")
-        try:
-            update_cache_for_library(None)
-        except Exception as e:
-            print(f"  ⚠ in-process cache refresh failed: {e}")
-            print(f"    Fall back to: my-plex --update-cache")
+        update_cache_for_library(None)
 
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
     log_payload['summary']  = {'fixed': fixed, 'skipped': skipped, 'total': len(candidates)}
@@ -17105,7 +17101,7 @@ def cmd_original_languages(target=None, dry_run=False):
             update_and_save_cache(CACHE)
             if VRB and reason:
                 print(f"  ✓ Cache checkpoint saved ({reason}).")
-        except Exception as _e:
+        except (OSError, pickle.PicklingError) as _e:
             print(f"  ! Cache checkpoint save failed: {_e}")
 
     i = 0   # reported by the ctrl-c handler: an interrupt before item 1 must not NameError
@@ -17241,7 +17237,7 @@ def _list_top_level_entries(rootpath, remote_host=None):
             p = p.strip()
             if p:
                 out.append((p, 'file'))
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"WARNING: list_top_level_entries error for {rootpath}: {e}", file=sys.stderr)
         return []
     return sorted(out, key=lambda t: t[0])
@@ -17344,7 +17340,7 @@ def _compute_layout_index_live():
             try:
                 rd = subprocess.run(cmd_d, capture_output=True, text=True, timeout=300)
                 rf = subprocess.run(cmd_f, capture_output=True, text=True, timeout=300)
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 if VRB: print(f"WARNING: _build_layout_index find failed for {rp_norm}: {e}", file=sys.stderr)
                 continue
             level1_dirs   = []   # top-level dirs (direct child of rp_norm)
@@ -17872,7 +17868,7 @@ def play_media_file(filepath, remote_host=None):
             ssh_proc.stdout.close()
             print("✓ mpv command launched (check terminal for any mpv error messages)")
             return True
-        except Exception as e:
+        except OSError as e:
             print(f"✗ Failed to launch mpv: {e}")
 
         # For remote files, we can't easily use Plex/Infuse apps, so return
@@ -17906,7 +17902,7 @@ def play_media_file(filepath, remote_host=None):
             subprocess.Popen(['mpv', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("✓ mpv launched successfully")
             return True
-        except Exception as e:
+        except OSError as e:
             print(f"✗ Failed to launch mpv: {e}")
     else:
         print("mpv not found in PATH")
@@ -17921,7 +17917,7 @@ def play_media_file(filepath, remote_host=None):
                 subprocess.Popen(['open', '-a', 'Plex', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 print("✓ Plex app launched successfully")
                 return True
-            except Exception as e:
+            except OSError as e:
                 print(f"✗ Failed to launch Plex app: {e}")
         else:
             print("Plex app not found")
@@ -17934,7 +17930,7 @@ def play_media_file(filepath, remote_host=None):
                 subprocess.Popen(['open', '-a', 'Infuse', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 print("✓ Infuse app launched successfully")
                 return True
-            except Exception as e:
+            except OSError as e:
                 print(f"✗ Failed to launch Infuse app: {e}")
         else:
             print("Infuse app not found")
@@ -18024,7 +18020,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                                 media.refresh()
                                 print(f"  ✓ Plex item refreshed")
                                 break
-                        except Exception as e:
+                        except PLEX_ERRORS as e:
                             print(f"  ⚠ Warning: Could not refresh Plex item: {e}")
 
                     # Don't delete the object, just modified it
@@ -18123,7 +18119,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
                                 media.refresh()
                                 print(f"  ✓ Plex item refreshed")
                                 break
-                        except Exception as e:
+                        except PLEX_ERRORS as e:
                             print(f"  ⚠ Warning: Could not refresh Plex item: {e}")
 
                     # Don't delete the object, just modified it
@@ -18429,7 +18425,7 @@ def refresh_cache_metadata(cache_key):
 
         return True
 
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"  ⚠ Warning: Could not refresh cache metadata: {e}")
         return False
 
@@ -18581,7 +18577,7 @@ def merge_metadata_from_duplicates(source_key, target_key):
         result['success'] = True
         return result
 
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"  ⚠ Warning: Could not merge metadata: {e}")
         result['error'] = str(e)
         return result
@@ -18671,7 +18667,7 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
                                 if VRB: print(f"{VRBPFX}Cache updated: {file_path} -> {cache_key}")
                                 return cache_key
 
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 if DBG: print(f"{DBGPFX}Error checking item: {e}")
                 continue
 
@@ -18679,7 +18675,7 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
         if VRB: print(f"{VRBPFX}File not found in Plex: {file_path}")
         return None
 
-    except Exception as e:
+    except PLEX_ERRORS as e:
         print(f"  ⚠ Warning: Could not update cache for file: {e}")
         return None
 
@@ -18715,24 +18711,20 @@ def _maybe_refresh_cache_for_state_changing_command(label=''):
             if _age < _AUTO_UPDATE_CACHE_MAX_AGE_S:
                 if DBG: print(f"{DBGPFX}auto-refresh skipped: cache pickle is {_age:.1f}s old (< {_AUTO_UPDATE_CACHE_MAX_AGE_S}s)")
                 return False
-    except Exception:
+    except OSError:
         pass
     # Stage 2: Plex DB scanned_at delta check
-    try:
-        rows = query_plex_database(
-            "SELECT name, scanned_at FROM library_sections",
-            mode='rows'
-        ) or []
-    except Exception as _e:
-        if DBG: print(f"{DBGPFX}auto-refresh: scanned_at query failed: {_e}")
-        return False
+    rows = query_plex_database(
+        "SELECT name, scanned_at FROM library_sections",
+        mode='rows'
+    ) or []
     cached_ua = (CACHE.get('library_stats') or {}).get('updatedAt') or {}
     changed = []
     for row in rows:
         try:
             _name = row[0] if isinstance(row, (list, tuple)) else row.get('name')
             _scan = row[1] if isinstance(row, (list, tuple)) else row.get('scanned_at')
-        except Exception:
+        except (IndexError, AttributeError):
             continue
         if _scan is None:
             continue
@@ -18747,12 +18739,8 @@ def _maybe_refresh_cache_for_state_changing_command(label=''):
     # Stage 3: real work
     prefix = f"  [auto-refresh{(' for ' + label) if label else ''}]"
     print(f"{prefix} Plex DB shows changes in: {', '.join(sorted(changed))} — refreshing cache…")
-    try:
-        update_cache_for_library(None)
-        return True
-    except Exception as _e:
-        print(f"{prefix} cache refresh failed: {_e}  (continuing with stale cache)")
-        return False
+    update_cache_for_library(None)
+    return True
 
 
 def update_cache_for_library(library_name):
@@ -18792,7 +18780,7 @@ def update_cache_for_library(library_name):
         if r.returncode != 0:
             print(f"  ⚠ subprocess --update-cache exit code {r.returncode}; cache may be stale")
             return None
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"  ⚠ subprocess --update-cache failed: {e}")
         return None
 
@@ -18807,7 +18795,7 @@ def update_cache_for_library(library_name):
             CACHE = _pickle.load(_f)
         load_media_cache(CACHE)
         return len(PLEX_Media.OBJ_BY_ID)
-    except Exception as e:
+    except Exception as e:  # pickle.load of a damaged file raises any exception (pickle's own docs)
         print(f"  ⚠ cache reload after subprocess --update-cache failed: {e}")
         print(f"    In-memory state may be stale; restart my-plex to pick up the new cache.")
         return None
@@ -19299,7 +19287,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                     media_objs=CACHE.get('media_objs', {}),
                     library_object_counts=CACHE.get('library_object_counts', {})
                 ))
-            except Exception as e:
+            except (OSError, pickle.PicklingError) as e:
                 print(f"  ⚠ Warning: Failed to save cache: {e}")
 
             # Track any additional libraries that may have been affected after execution
@@ -19335,7 +19323,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                     completed, _ = wait_for_plex_scan_complete(plex, lib_name, lib, max_wait=120)
                     if completed:
                         successfully_scanned_libraries.add(lib_name)
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 print(f"✗ Error: {e}")
 
         # Verify affected Plex items are properly updated after scan
@@ -19370,7 +19358,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                                     if item and hasattr(item, 'media'):
                                         # Item exists and is accessible - this is good
                                         pass
-                            except Exception as e:
+                            except PLEX_ERRORS as e:
                                 # Item may have been removed (expected for trashed files)
                                 # Only log unexpected errors
                                 if 'not found' not in str(e).lower():
@@ -19403,7 +19391,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
                 media_objs=CACHE.get('media_objs', {})
             ))
             print(f"  ✓ Cache saved successfully")
-        except Exception as e:
+        except (OSError, pickle.PicklingError) as e:
             print(f"  ⚠ Warning: Failed to save cache: {e}")
 
     return all_success
@@ -19617,7 +19605,7 @@ def undo_operation(operation_log, remote_host=None):
                         if attempt < max_attempts - 1:
                             print(".", end='', flush=True)
 
-                    except Exception as e:
+                    except PLEX_ERRORS as e:
                         if DBG: print(f"{DBGPFX}Search attempt {attempt+1} failed: {e}")
                         if attempt < max_attempts - 1:
                             print(".", end='', flush=True)
@@ -19730,7 +19718,7 @@ def undo_operation(operation_log, remote_host=None):
                             try:
                                 media.removeLabel(label)
                                 print(f"  ✓ Removed label '{label}'")
-                            except Exception:
+                            except PLEX_ERRORS:
                                 print(f"  ⚠ Could not remove label '{label}'")
 
                     # Restore rating
@@ -19745,7 +19733,7 @@ def undo_operation(operation_log, remote_host=None):
                             try:
                                 media.rate(0)
                                 print(f"  ✓ Cleared rating")
-                            except Exception:
+                            except PLEX_ERRORS:
                                 pass
                 else:
                     print(f"  ⚠ Could not find Plex media object with ID {plex_id}")
@@ -19774,14 +19762,14 @@ def undo_operation(operation_log, remote_host=None):
                         lib.update()
                         plex = ensure_plex_api()
                         wait_for_plex_scan_complete(plex, library_name, lib, max_wait=120)
-                    except Exception as e:
+                    except PLEX_ERRORS as e:
                         print(f"  ⚠ Warning: Could not scan library: {e}")
                         print(f"    You can trigger a scan manually from Plex web interface")
                 else:
                     print(f"  ℹ Plex library scan needed - please run manually or wait for automatic scan")
                     print(f"    You can trigger a scan from Plex web interface: Settings > Library > Scan Library Files")
 
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ✗ Error executing undo step: {e}")
             return False
 
@@ -20396,7 +20384,7 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data):
                     print(f"  Analyzing: {title} (ID: {plex_id})...", end=' ', flush=True)
                     item.analyze()
                     print("OK")
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"FAILED: {e}")
         else:
             print("  Plex API not available — skipping analyze.")
@@ -20619,7 +20607,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         media.delete()
                         print(f"  ✓ Deleted Plex entry ID {plex_id} from Plex database")
                         break
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
 
             # Remove from cache
@@ -20768,7 +20756,7 @@ def execute_resolution_action(choice, file1, file2, remote_host, all_files=None,
                         media.delete()
                         print(f"  ✓ Deleted Plex entry ID {plex_id} from Plex database")
                         break
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"  ⚠ Warning: Could not delete from Plex database: {e}")
 
             # Remove from cache
@@ -21477,7 +21465,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
                         file.write( f"DUPLICATE FOUND WITH key:\t'{key}'\tuuid:\t'{uuid}'\nlibrary:\t{library} | {val['library']}\nitem_id:\t{item_ratingKey} | {val['item_id']}\nmedia_idi:\t{media.id} | {val['media_id']}\npart_id:\t{part.id} | {val['part_id']}\ntitle:\t{obj_title} | {val['title']}\nfile:\t{part.file} | {val['file']})\ntype:{obj_type} | {val['type']}\n{tmpstr}============================================================================\n" )
                         if DBG: print(f"{DBGPFX}Wrote DUPLICATE with uuid:'{uuid}' to '{DUPLICATE_FILE}'")
                         return
-                except Exception as e:
+                except OSError as e:
                     err("00075", f"Error wrinting to DUPLICATE_FILE '{DUPLICATE_FILE}': {e}")
 
     (media_id, part_id) = (media.id, part.id)
@@ -21518,7 +21506,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
                     ctx = f"{key} '{obj_title}' reload()"
                 plex_retry_operation(lambda: obj.reload(), context=ctx, library=lib_title)
                 PLEX_Media._reloaded_objects.add(key)  # Mark as reloaded
-            except Exception:
+            except PLEX_ERRORS:
                 pass  # obj doesn't support reload(), will fetch properties lazily
 
         # Media and Part objects often don't support reload() (they're not built from URLs)
@@ -21849,16 +21837,16 @@ for line in sys.stdin:
                 vdur = p.stdout.decode().strip()
                 if vdur and vdur != "N/A":
                     result["video_duration"] = float(vdur) * 1000
-            except Exception:
+            except (OSError, subprocess.SubprocessError, ValueError):
                 pass
         if "video_duration" not in result:
             try:
                 ep = subprocess.run([ffmpeg, "-sseof", "-3", "-i", fp, "-f", "null", "-"], capture_output=True, timeout=60)
                 result["file_ends_cleanly"] = (ep.returncode == 0)
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 pass
         print(json.dumps(result), flush=True)
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
         print(json.dumps({{"path": fp, "n": n, "error": str(e)}}), flush=True)
         continue
 '''
@@ -21942,7 +21930,7 @@ for line in sys.stdin:
             try:
                 stdout, returncode, stderr_lines = future.result()
                 worker_results[worker_id] = (stdout, returncode, stderr_lines)
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 print(f"W{worker_id:02d}| ✗ Worker failed: {e}", flush=True)
                 worker_results[worker_id] = ('', 1, [str(e)])
 
@@ -23181,7 +23169,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
                         series_title, series_dir_server, source, external_ids, series_key)
                     failed_shows.append((series_title, error_type, message, library_name))
                     write_episodes_err(series_dir, error_type, source, message)
-            except Exception as e:
+            except Exception as e:  # the scrapers parse third-party HTML and JSON: a page that changed shape raises anything
                 if not tsv_episodes:
                     failed_shows.append((series_title, 'scrape_failed', str(e)[:60], library_name))
                     write_episodes_err(series_dir, 'scrape_failed', source, str(e)[:80])
@@ -23519,7 +23507,7 @@ def _store_collections_from_database(library_section_id, library_name):
             if col_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection']:
                 PLEX_Media.OBJ_BY_LIBRARY[library_name]['Collection'].append(col_key)
         if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): stored {len(collections)} collections")
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         if DBG: print(f"{DBGPFX}_store_collections_from_database('{library_name}'): failed: {e}")
 
 def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_idx=None, end_idx=None):
@@ -23550,7 +23538,7 @@ def update_movie_library_objs(library, library_idx=0, total_libraries=0, start_i
                 if DBG: print(f"{DBGPFX}Successfully fetched {len(all_movies)} movies from database")
             # Fetch collections (metadata_type=18) for this library
             _store_collections_from_database(library_section_id, library_name)
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         if DBG: print(f"{DBGPFX}Database fetch failed: {e}")
 
     # No API fallback — DB is the only data source for --update-cache
@@ -23590,7 +23578,7 @@ def update_series_library_objs(library, library_idx=0, total_libraries=0, start_
                 if DBG: print(f"{DBGPFX}fetch_series_from_database returned empty/None for library_section_id={library_section_id}")
             # Fetch collections (metadata_type=18) for this library
             _store_collections_from_database(library_section_id, library_name)
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         if DBG:
             print(f"{DBGPFX}Database fetch failed: {e}")
             import traceback
