@@ -27276,7 +27276,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return False
 
     @staticmethod
-    def execute_cmd(args, obj, obj_args) -> None:  # pyright: ignore[reportMissingParameterType] -- Handling action(s) on media; the types are PLEX_OBJ_TYPE_ABC's, left bare because a source test greps this exact signature
+    def execute_cmd(args: argparse.Namespace, obj: str, obj_args: argparse.Namespace) -> None:  # Handling action(s) on media
         if obj_args.delete and not obj_args.remove:
             err("00103", "--del requires --rm (Plex API delete also removes files from disk).\n"
                 "  Use --rm --del to explicitly confirm file removal.\n"
@@ -33171,7 +33171,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return filtered_keys
 
     @staticmethod
-    def list(args, obj_args: object, library_name: str | None, media_type: str | None, duplicates_only: bool = False, resolve_mode: bool = False, broken_only: bool = False, watched_only: bool = False, unwatched_only: bool = False, audio_filter: str | None = None, no_audio_language: bool = False, excess_versions: int | None = None, audio_lang_field: Literal['audio_languages', 'audio_languages_plex'] = 'audio_languages') -> None:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- args: an argparse.Namespace; the suite matches 'def list(args, obj_args'
+    def list(args: argparse.Namespace, obj_args: object, library_name: str | None, media_type: str | None, duplicates_only: bool = False, resolve_mode: bool = False, broken_only: bool = False, watched_only: bool = False, unwatched_only: bool = False, audio_filter: str | None = None, no_audio_language: bool = False, excess_versions: int | None = None, audio_lang_field: Literal['audio_languages', 'audio_languages_plex'] = 'audio_languages') -> None:
         global FORMAT
         if DBG: print(f"{DBGPFX}PLEX_Media.list( library_name = {library_name}', media_type = '{media_type}', duplicates_only = {duplicates_only}, resolve_mode = {resolve_mode}, broken_only = {broken_only}, watched_only = {watched_only}, unwatched_only = {unwatched_only}, audio_filter = {audio_filter}, no_audio_language = {no_audio_language}, excess_versions = {excess_versions} )")
 
@@ -34257,7 +34257,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             err("00113", f"Error deleting media: {e}")
 
     @staticmethod
-    def _remove_from_cache_by_id(numeric_id) -> None:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- an int; the suite matches this signature's text
+    def _remove_from_cache_by_id(numeric_id: int) -> None:
         """Remove all cache entries for a given Plex item ID, then save cache to disk."""
         keys_to_remove = [
             key for key, obj in PLEX_Media.OBJ_BY_ID.items()
@@ -37005,9 +37005,8 @@ def _parse_compound_filter(expr_or_tokens: str | list[str] | list[str | None]
     if pos[0] < len(tokens):
         err("00144", f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
 
-    def _compile(node) -> "tuple[str, Callable[..., bool]]":  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a _FilterNode; --run-tests compound pins this signature's text
-        kind = node[0]
-        if kind == 'LEAF':
+    def _compile(node: _FilterNode) -> "tuple[str, Callable[..., bool]]":
+        if node[0] == 'LEAF':
             atom = node[1]
             parsed = PLEX_Media._parse_filter_sub_expr(atom)
             if parsed:
@@ -37027,13 +37026,13 @@ def _parse_compound_filter(expr_or_tokens: str | list[str] | list[str | None]
                       f"  watched / lang / subs / director / country / original_lang /\n"
                       f"  type / layout / library / title / originaltitle\n"
                       f"  Bare library names are auto-promoted to `library:NAME`.")
-        if kind == 'NOT':
+        if node[0] == 'NOT':
             inner_label, inner_fn = _compile(node[1])
             label = f"NOT {inner_label}"
             def _not_fn(obj: object, fi: object, _inner: Callable[..., bool] = inner_fn) -> bool:
                 return not _inner(obj, fi)
             return (label, _not_fn)
-        if kind == 'AND':
+        if node[0] == 'AND':
             children = [_compile(c) for c in node[1]]
             label = ' AND '.join(c[0] for c in children)
             def _and_fn(obj: object, fi: object,
@@ -37081,7 +37080,7 @@ if TYPE_CHECKING:
     ScopeTarget: TypeAlias = str | list[str] | list[str | None] | None
 
 
-def _resolve_scope_filter_expr(expr) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- str | list[str]; --run-tests scope pins this signature's text
+def _resolve_scope_filter_expr(expr: str | list[str]) -> list[ScopeItem]:
     """Return list of (key, obj) satisfying a filter expression.
 
     Delegates parsing to `_parse_compound_filter()` — supports AND / OR /
@@ -37173,7 +37172,7 @@ def _resolve_scope_filter_expr(expr) -> list[ScopeItem]:  # pyright: ignore[repo
     return items
 
 
-def _get_universal_scope(scope_tokens) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a ScopeTarget; --run-tests scope pins this signature's text
+def _get_universal_scope(scope_tokens: ScopeTarget) -> list[ScopeItem]:
     """Universal scope resolver — the ONE entry point every command should call.
 
     Accepts a list (or tuple) of scope tokens.  Each token can be ANY of:
@@ -37248,7 +37247,7 @@ def _get_universal_scope(scope_tokens) -> list[ScopeItem]:  # pyright: ignore[re
     return result
 
 
-def _get_disk_map_scope(target) -> list[ScopeItem]:  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- a ScopeTarget; --run-tests scope pins this signature's text
+def _get_disk_map_scope(target: ScopeTarget) -> list[ScopeItem]:
     """Determine which cache entries to process — UNIVERSAL scope resolver.
 
     Accepts ALL these target shapes:
@@ -37505,7 +37504,7 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
 
     # Pre-compile every disk2plex regex for this scope so --replace can strip
     # non-canonical markers before writing.
-    _replace_patterns = []  # type: list[re.Pattern[str]]  # (a type comment: --run-tests v269 pins this text)
+    _replace_patterns: list[re.Pattern[str]] = []
     if replace:
         for plex_var, var_spec in DISK_PLEX_MAP.items():  # pyright: ignore[reportUnusedVariable]  -- --run-tests v269 pins this text
             scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
@@ -38925,7 +38924,7 @@ def _move_state_path(old_rk: int | str) -> str:
     return os.path.join(_move_state_dir(), f'{int(old_rk)}.json')
 
 
-def _move_state_write(state):  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- dict[str, Any], the state JSON; --run-tests move pins this signature's text
+def _move_state_write(state: dict[str, Any]) -> str:
     """Atomic write — tmp then rename so a kill mid-flight never corrupts."""
     import json as _json
     p = _move_state_path(state['old_rk'])
