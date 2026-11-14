@@ -1239,7 +1239,7 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertIn("query_plex_database(query, mode='rows')", content,
             "get_library_stats must query database for item counts")
         import re
-        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        match = re.search(r'(def get_library_stats\(.*?\)[^:\n]*:\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
@@ -1555,7 +1555,7 @@ class TestNoAPIFallbacks(unittest.TestCase):
         """get_library_stats must NOT fall back to API totalSize."""
         content = self._read_script()
         import re
-        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        match = re.search(r'(def get_library_stats\(.*?\)[^:\n]*:\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
@@ -1767,7 +1767,7 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         """get_library_stats must query episode count for series libraries."""
         content = self._read_script()
         import re
-        match = re.search(r'(def get_library_stats\(.*?\):\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
+        match = re.search(r'(def get_library_stats\(.*?\)[^:\n]*:\n.*?)(?=\ndef [a-z_])', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find get_library_stats function")
         func_body = match.group(1)
@@ -3164,7 +3164,7 @@ class TestRemoveCommand(unittest.TestCase):
         """execute_cmd must call remove BEFORE delete (trash files before removing entry)."""
         content = self._read_script()
         import re
-        match = re.search(r'def execute_cmd\(args, obj, obj_args\).*?\n(.*?)(?=\n    ####)', content, re.DOTALL)
+        match = re.search(r'class PLEX_Media\b.*?def execute_cmd\(args[^)]*\).*?\n(.*?)(?=\n    ####)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
@@ -3209,7 +3209,7 @@ class TestRemoveCommand(unittest.TestCase):
         """_remove_from_cache_by_id must exist and update all cache structures + save."""
         content = self._read_script()
         import re
-        match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        match = re.search(r'def _remove_from_cache_by_id\(numeric_id[^)]*\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "_remove_from_cache_by_id method must exist")
         body = match.group(1)
@@ -3224,7 +3224,7 @@ class TestRemoveCommand(unittest.TestCase):
         """_remove_from_cache_by_id must remove episode keys from OBJ_BY_SERIES_EPISODES."""
         content = self._read_script()
         import re
-        match = re.search(r'def _remove_from_cache_by_id\(numeric_id\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
+        match = re.search(r'def _remove_from_cache_by_id\(numeric_id[^)]*\).*?\n(.*?)(?=\n    @staticmethod|\n    ####)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         body = match.group(1)
@@ -4261,7 +4261,7 @@ class TestDefaultScope(unittest.TestCase):
     def test_apply_default_scope_called_in_list(self):
         """PLEX_Media.list() must call _apply_default_scope."""
         src = self._read_script()
-        idx = src.index('def list(args, obj_args')
+        idx = src.index('def list(args')
         snippet = src[idx:idx+3000]
         self.assertIn('_apply_default_scope', snippet)
 
@@ -6691,12 +6691,12 @@ class TestVersionStringCollision(unittest.TestCase):
     def test_version_includes_filesize(self):
         """Version string must include filesize (MB)."""
         content = self._read_script()
-        self.assertIn('MB', content[content.index('def _build_version_string('):content.index('def _build_version_string(') + 500])
+        self.assertIn('MB', content[content.index('def _build_version_string('):content.index('\ndef ', content.index('def _build_version_string(') + 1)])
 
     def test_collision_adds_part_id(self):
         """On collision, must disambiguate with part#<id>."""
         content = self._read_script()
-        self.assertIn('part#', content[content.index('def _build_version_string('):content.index('def _build_version_string(') + 500])
+        self.assertIn('part#', content[content.index('def _build_version_string('):content.index('\ndef ', content.index('def _build_version_string(') + 1)])
 
     def test_movie_db_uses_helper(self):
         """fetch_movies_from_database must use _build_version_string."""
@@ -9883,7 +9883,7 @@ class TestUniversalScope(unittest.TestCase):
         """_get_disk_map_scope must dispatch filter-expression targets to _resolve_scope_filter_expr."""
         src = self._read_script()
         import re
-        m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        m = re.search(r'def _get_disk_map_scope\(target[^)]*\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
         body = m.group(1)
@@ -9894,7 +9894,7 @@ class TestUniversalScope(unittest.TestCase):
         """_get_universal_scope must AND-combine (intersect) multiple token results."""
         src = self._read_script()
         import re
-        m = re.search(r'def _get_universal_scope\(scope_tokens\).*?\n(.*?)def _get_disk_map_scope', src, re.DOTALL)
+        m = re.search(r'def _get_universal_scope\(scope_tokens[^)]*\).*?\n(.*?)def _get_disk_map_scope', src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_universal_scope body")
         body = m.group(1)
@@ -9958,7 +9958,7 @@ class TestUniversalScope(unittest.TestCase):
         (no Series/Season → Episode auto-expansion). Pure semantics per user spec."""
         src = self._read_script()
         import re
-        m = re.search(r'def _resolve_scope_filter_expr\(expr\).*?\n(.*?)def _get_universal_scope', src, re.DOTALL)
+        m = re.search(r'def _resolve_scope_filter_expr\(expr[^)]*\).*?\n(.*?)def _get_universal_scope', src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _resolve_scope_filter_expr body")
         body = m.group(1)
@@ -9980,7 +9980,7 @@ class TestUniversalScope(unittest.TestCase):
         """_get_disk_map_scope must auto-promote list input to _get_universal_scope."""
         src = self._read_script()
         import re
-        m = re.search(r'def _get_disk_map_scope\(target\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
+        m = re.search(r'def _get_disk_map_scope\(target[^)]*\).*?\n(.*?)def _get_all_filepaths', src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_disk_map_scope body")
         body = m.group(1)
@@ -10089,7 +10089,7 @@ class TestCompoundFilter(unittest.TestCase):
         import re
         # [^\n]*: -- the BODY is what this pins; the signature may carry a
         # return annotation (it does: the compiler is recursive).
-        m = re.search(r'def _compile\(node\)[^\n]*:(.*?)label, fn = _compile', src, re.DOTALL)
+        m = re.search(r'def _compile\(node[^)]*\)[^\n]*:(.*?)label, fn = _compile', src, re.DOTALL)
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m)
         body = m.group(1)
@@ -10969,7 +10969,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         never produces a half-written JSON that breaks replay."""
         src = self._read_script()
         import re
-        m = re.search(r"def _move_state_write\(state\):.*?tmp = p \+ '\.tmp'.*?os\.replace\(tmp, p\)",
+        m = re.search(r"def _move_state_write\(state[^)]*\)[^:\n]*:.*?tmp = p \+ '\.tmp'.*?os\.replace\(tmp, p\)",
                       src, re.DOTALL)
         self.assertIsNotNone(m, "atomic write pattern (tmp → rename) missing")
 
@@ -11756,7 +11756,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         before re-applying the canonical plex2disk template."""
         src = self._read_script()
         # The processor builds _replace_patterns from DISK_PLEX_MAP entries
-        self.assertIn("_replace_patterns = []", src)
+        self.assertRegex(src, r"_replace_patterns(?:: [^=\n]+)? = \[\]")
         self.assertRegex(src, r"if replace:\s*\n(\s+[^\n]+\n){0,3}\s+for plex_var, var_spec in DISK_PLEX_MAP\.items\(\)")
         # Each disk2plex regex from the entry is compiled
         self.assertRegex(src, r"_replace_patterns\.append\(re\.compile\(rg, re\.IGNORECASE\)\)")
