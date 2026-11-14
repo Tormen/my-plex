@@ -41,7 +41,7 @@ from my_plex import (
     get_episodes_err_path, validate_disk_plex_map, compute_markers_dpm,
     read_markers_from_disk, resolve_disk_map_variables, strip_our_markers,
     apply_markers, apply_markers_to_dir, strip_markers_from_dir,
-    update_sidecar_entry, _PLEX_WRITABLE_FIELDS, _merge_marker,
+    update_sidecar_entry, _PLEX_WRITABLE_FIELDS,
     _extract_legacy_vu_marker, _migrate_legacy_vu_sidecar,
     _check_all_children_watched, _update_cache_child_paths, cmd_plex2disk,
     cmd_disk2plex, rename_file_siblings,
@@ -8588,7 +8588,7 @@ class TestDiskMap(unittest.TestCase):
                      'cmd_plex2disk', 'cmd_plex2disk_clean', 'cmd_disk2plex',
                      '_DISK2PLEX_PUSH_HANDLERS',
                      'transfer_disk_map_markers', 'transfer_disk_map_markers_dir',
-                     '_merge_marker', '_extract_legacy_vu_marker',
+                     '_extract_legacy_vu_marker',
                      '_migrate_legacy_vu_sidecar', 'DISK_MAP_VARIABLES',
                      '_PLEX_WRITABLE_FIELDS']:
             self.assertIn(f'{func}', content, f"Missing: {func}")
@@ -8714,50 +8714,6 @@ class TestDiskMap(unittest.TestCase):
 
     # --- merge logic ---
 
-    def test_merge_marker_plex_strategy(self):
-        """'plex' strategy: Plex always wins."""
-        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'plex'})
-        self.assertEqual(result, 'vu@2026-03-22')
-
-    def test_merge_marker_disk_strategy(self):
-        """'disk' strategy: disk always wins."""
-        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'disk'})
-        self.assertEqual(result, 'vu@2026-01-15')
-
-    def test_merge_marker_newer_plex_wins(self):
-        """'newer' strategy: Plex wins when newer timestamp."""
-        result = _merge_marker('watched', 'vu@2026-03-22', 'vu@2026-01-15', {'watched': 'newer'})
-        self.assertEqual(result, 'vu@2026-03-22')
-
-    def test_merge_marker_newer_disk_wins(self):
-        """'newer' strategy: disk wins when newer timestamp."""
-        result = _merge_marker('watched', 'vu@2026-01-15', 'vu@2026-03-22', {'watched': 'newer'})
-        self.assertEqual(result, 'vu@2026-03-22')
-
-    def test_merge_marker_newer_with_time(self):
-        """'newer' strategy: timestamp with time precision."""
-        result = _merge_marker('watched', 'vu@2026-03-22_1923', 'vu@2026-03-22_0800', {'watched': 'newer'})
-        self.assertEqual(result, 'vu@2026-03-22_1923')
-
-    def test_merge_marker_no_existing(self):
-        """No existing value on disk → use Plex value."""
-        result = _merge_marker('watched', 'vu@2026-03-22', '', {'watched': 'newer'})
-        self.assertEqual(result, 'vu@2026-03-22')
-
-    def test_merge_marker_no_new_newer(self):
-        """Plex empty + 'newer' strategy → keep disk value."""
-        result = _merge_marker('watched', '', 'vu@2026-01-15', {'watched': 'newer'})
-        self.assertEqual(result, 'vu@2026-01-15')
-
-    def test_merge_marker_no_new_plex(self):
-        """Plex empty + 'plex' strategy → clear marker."""
-        result = _merge_marker('watched', '', 'vu@2026-01-15', {'watched': 'plex'})
-        self.assertEqual(result, '')
-
-    def test_merge_marker_default_strategy(self):
-        """Aspect not in merge config defaults to 'plex'."""
-        result = _merge_marker('rating', '8.0', '7.5', {})
-        self.assertEqual(result, '8.0')
 
     # --- _PLEX_WRITABLE_FIELDS ---
 
@@ -10221,13 +10177,6 @@ class TestLayoutFilter(unittest.TestCase):
         for kw in ("'series'", "'show'", "'tv'", "'season'", "'episode'", "'movie'"):
             self.assertIn(kw, src, f"_LAYOUT_ALIASES must include {kw}")
 
-    def test_classify_layout_helper(self):
-        """_classify_layout must distinguish movie / series / season / episode / unknown."""
-        src = self._read_script()
-        self.assertIn("def _classify_layout(", src)
-        # All five labels must appear as return values
-        for label in ("'movie'", "'series'", "'season'", "'episode'", "'unknown'"):
-            self.assertIn(label, src, f"layout classifier must produce {label}")
 
     def test_layout_index_builder_is_bulk_ssh(self):
         """_build_layout_index must use a single bulk `find -maxdepth 2` per library (not per-dir SSH)."""
@@ -14223,11 +14172,6 @@ class TestNoSshWithoutAHost(unittest.TestCase):
         self.assertEqual(self.m._batch_file_exists_remote([there, gone]), {there})
         self.assertEqual(self.calls, [])
 
-    def test_single_check_is_local(self):
-        """The single check answers False for a missing file and starts no
-        ssh."""
-        self.assertFalse(self.m._file_exists_local_or_remote(os.path.join(self.d, 'gone.tsv')))
-        self.assertEqual(self.calls, [])
 
     def test_problems_starts_no_ssh(self):
         """--problems on the fixture library, whose config names no host,

@@ -12505,39 +12505,6 @@ def strip_markers_from_dir(dirname: str, sidecar_entry: Mapping[str, Any] | None
             dirname = dirname.replace(f' {bare}', '', 1)
     return dirname
 
-def _merge_marker(aspect: str, new_value: str, existing_value: str,
-                  merge_config: Mapping[str, str]) -> str:
-    """Resolve conflict between Plex-computed value and disk-existing value.
-
-    Args:
-        aspect: Marker aspect name (e.g. 'watched')
-        new_value: Value computed from Plex metadata
-        existing_value: Value currently on disk (from sidecar)
-        merge_config: DISK_MAP_MERGE dict
-
-    Returns:
-        str: The winning marker value
-    """
-    strategy = merge_config.get(aspect, 'plex')
-    if not existing_value:
-        return new_value
-    if not new_value:
-        return existing_value if strategy in ('disk', 'newer') else ''
-    if strategy == 'plex':
-        return new_value
-    if strategy == 'disk':
-        return existing_value
-    if strategy == 'newer':
-        import re as _re
-        new_ts = _re.search(r'@(\d{4}-\d{2}-\d{2}(?:[-_]\d{4})?)', str(new_value))
-        old_ts = _re.search(r'@(\d{4}-\d{2}-\d{2}(?:[-_]\d{4})?)', str(existing_value))
-        if new_ts and old_ts:
-            return new_value if new_ts.group(1) >= old_ts.group(1) else existing_value
-        if old_ts and not new_ts:
-            return existing_value
-        return new_value
-    return new_value
-
 
 ###########################################################################################
 #### DISK MAP — Sidecar tracking file (disk_map.json)
@@ -15104,44 +15071,6 @@ def _bad_structure_relocate_season_batch(moves: list[tuple[str, str, list[str]]]
     return results
 
 
-def _bad_structure_relocate_season(remote_host: str | None, src_season_dir: str, target_season_dir: str,
-                                   intermediates_to_rmdir: list[str]) -> bool:
-    """v2.39: atomically move src_season_dir → target_season_dir and rmdir
-    intermediate empty dirs.  Used when an Episode is at series/x/.../Sxx/file
-    and we want to lift Sxx up to series/Sxx.
-
-    intermediates_to_rmdir is a list of paths between series_dir and src,
-    deepest-first; each is rmdir'd only if empty (so we don't accidentally
-    discard other content)."""
-    import shlex as _shlex, subprocess as _sp
-    if not src_season_dir or not target_season_dir or src_season_dir == target_season_dir:
-        return False
-    src_q = _shlex.quote(src_season_dir)
-    tgt_q = _shlex.quote(target_season_dir)
-    # Build a single bash script: verify target missing → mv → rmdir intermediates.
-    rmdir_lines = ' && '.join(f'rmdir {_shlex.quote(p)} 2>/dev/null || true' for p in intermediates_to_rmdir) or 'true'
-    script = (
-        f'set -e; '
-        f'if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo "ERROR: target" {tgt_q} "already exists" >&2; exit 2; fi; '
-        f'mv -- {src_q} {tgt_q} || exit 3; '
-        f'{rmdir_lines}'
-    )
-    if remote_host:
-        argv = _ssh_args(remote_host) + ['bash', '-s']
-    else:
-        argv = ['bash', '-s']
-    if DBG:
-        print(f"{DBGPFX}_bad_structure_relocate_season script:\n--- begin script ---\n{script}\n--- end script ---", file=sys.stderr)
-    proc = _sp.run(argv, input=script, capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"      season-relocate error rc={proc.returncode}")
-        print(f"        stderr: {proc.stderr!r}")
-        print(f"        stdout: {proc.stdout!r}")
-        print(f"        argv:   {argv!r}")
-        return False
-    return True
-
-
 def _bad_structure_update_cache(key: str, old_filepath: str, new_filepath: str) -> None:
     """After a successful flatten, update cache indices for `key`."""
     obj = media_record(key)
@@ -17518,51 +17447,6 @@ def _is_season_dir_name(name: str) -> bool:
 
 
 LayoutKind = Literal['movie', 'series', 'season', 'episode', 'unknown']
-
-
-def _classify_layout(entry_path: str, kind: Literal['dir', 'file'], remote_host: str | None = None) -> LayoutKind:
-    """Classify a top-level library entry by its on-disk shape.
-
-    Returns one of: 'movie', 'series', 'season', 'episode', 'unknown'.
-
-      'series'   — directory containing season subdirs (Season X / S0X),
-                   OR a directory with episode-named (s0xe0x) video files
-                   loose at its root (un-sub-foldered show)
-      'season'   — directory whose own name is 'Season X' / 'S0X' AND it
-                   contains video files
-      'movie'    — directory containing one or more video files that
-                   don't look like episodes (no s0xe0x pattern), and no
-                   season subdirs
-      'episode'  — bare video file at the library root whose filename
-                   contains a S0xE0x pattern
-      'unknown'  — anything else (junk, .nfo-only dirs, deeply nested, ...)
-    """
-    base = os.path.basename(entry_path.rstrip('/'))
-    if kind == 'file':
-        ext = os.path.splitext(base)[1].lower()
-        if ext in _VIDEO_EXT_SET and _EPISODE_FILE_RE.search(base):
-            return 'episode'
-        if ext in _VIDEO_EXT_SET:
-            return 'movie'
-        return 'unknown'
-
-    # kind == 'dir' — list one level inside it
-    listing = _list_top_level_entries(entry_path, remote_host)
-    has_season_subdir = any(_is_season_dir_name(os.path.basename(p)) for p, k in listing if k == 'dir')
-    video_files = [os.path.basename(p) for p, k in listing if k == 'file'
-                   and os.path.splitext(p)[1].lower() in _VIDEO_EXT_SET]
-    has_video = bool(video_files)
-    has_episode_files = any(_EPISODE_FILE_RE.search(name) for name in video_files)
-
-    if has_season_subdir:
-        return 'series'
-    if _is_season_dir_name(base) and (has_video or has_episode_files):
-        return 'season'
-    if has_episode_files:
-        return 'series'   # un-sub-foldered show
-    if has_video:
-        return 'movie'
-    return 'unknown'
 
 
 _LAYOUT_INDEX_CACHE: dict[str, dict[str, LayoutKind]] | None = None   # session memo: {lib_rootpath: {entry_basename: layout}}
@@ -34724,30 +34608,6 @@ EPISODES_TSV_MAX_AGE = 86400  # 1 day in seconds
 # Episode TSV read/write
 # ---------------------------------------------------------------------------
 
-def _file_exists_local_or_remote(filepath: str) -> bool:
-    """Check if a file exists locally or on the remote server via SSH.
-    Returns True if the file exists in either location.  With no
-    PLEX_DB_REMOTE_HOST the server is this machine: its path is checked
-    locally, and no ssh is started.
-    Note: For bulk checks, use _batch_file_exists_remote() instead to avoid N SSH calls."""
-    import os, subprocess
-    if os.path.isfile(filepath):
-        return True
-    # Try SSH: translate to server path and check
-    server_dir = get_server_path(os.path.dirname(filepath))
-    server_file = os.path.join(server_dir, os.path.basename(filepath))
-    if not PLEX_DB_REMOTE_HOST:
-        return os.path.isfile(server_file)
-    escaped = shlex.quote(server_file)
-    try:
-        r = subprocess.run(
-            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'[ -f {escaped} ] && echo YES'],
-            capture_output=True, text=True, timeout=10
-        )
-        return r.returncode == 0 and 'YES' in r.stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-
 
 def _batch_file_exists_remote(filepaths: list[str]) -> set[str]:
     """Check which files exist on the remote server in a single SSH call.
@@ -37724,9 +37584,8 @@ def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
     For each item in scope:
     1. Strip existing markers (from sidecar)
     2. Compute new markers from Plex metadata via eval() expressions
-    3. Apply merge strategy (DISK_MAP_MERGE) to resolve conflicts
-    4. Rename file/dir if markers changed
-    5. Update sidecar
+    3. Rename file/dir if markers changed
+    4. Update sidecar
 
     Without --force (default, additive): existing markers on disk are preserved even
     if Plex has no value for that aspect. Only a WARNING is shown.
@@ -38942,15 +38801,6 @@ def _move_state_read(path: str) -> dict[str, Any] | None:
             return _json.load(f)
     except (OSError, ValueError):
         return None
-
-
-def _move_state_remove(old_rk: int | str) -> None:
-    try:
-        os.remove(_move_state_path(old_rk))
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
 
 
 def _build_playlist_membership_map(plex: PlexServer | None) -> dict[int, list[str]]:
