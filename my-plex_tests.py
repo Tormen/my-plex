@@ -19,6 +19,7 @@ import pickle
 import io
 import contextlib
 import json
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1288,7 +1289,6 @@ class TestCacheSkipLogic(unittest.TestCase):
     DETECT = main_globals['DETECT']
     show_item_info = main_globals['show_item_info']
     update_cache_after_resolution = main_globals['update_cache_after_resolution']
-    escape_path_for_ssh = main_globals['escape_path_for_ssh']
     determine_remote_host = main_globals['determine_remote_host']
     resolve_path = main_globals['resolve_path']
     format_filesize = main_globals['format_filesize']
@@ -7222,9 +7222,9 @@ class TestJunk(unittest.TestCase):
                       r.stdout, out[-1500:])
         patterns = ast.literal_eval(_must(re.search(r'Patterns selected: (\[.*\])', r.stdout),
                                           r.stdout).group(1))
-        walked = Counter(_must(re.search(r'find "([^"]+)"', c), c).group(1) for c in calls)
+        walked = Counter(_remote_words(c)[1] for c in calls)
         self.assertEqual(walked, Counter({root: len(patterns) for root in self._ROOTS}), calls)
-        self.assertTrue(all(' fixture-server find "' in c for c in calls), calls)
+        self.assertTrue(all(_remote_words(c)[0] == 'find' for c in calls), calls)
 
     def test_no_recursive_walks_depth_one_only(self):
         """--no-recursive reports only what lies directly in a library root:
@@ -14578,72 +14578,298 @@ class TestReadmeFlagsExist(unittest.TestCase):
 
 _FAKE_SSH_DIR = None
 
-def _fake_ssh_env(login_rc=0, find_listing=None, log=None):
+# The fake ssh's server side: it reads the remote command as the remote shell
+# does -- words by POSIX quoting ('...' literal; "..." with a backslash before
+# $ ` " \ or a newline; a backslash outside quotes), simple commands split at
+# && || ; | & ( ) and a newline, < > >> >& <& a word of their own -- so a test
+# sees the command that would RUN, not the string that was sent.  A word with
+# an unquoted $ or ` in it is one the shell would expand: it is recorded as
+# <EXPANDED:text>, never as text.  An unterminated quote is the shell's syntax
+# error: one stderr line, exit 2, and nothing answered.
+_FAKE_SSH_SERVER = r'''
+import json
+import os
+import re
+import sys
+
+
+def words_of(s):
+    """The simple commands of S, each the list of its words."""
+    cmds, word, live, i, n = [[]], None, False, 0, len(s)
+
+    def end():
+        nonlocal word, live
+        if word is not None:
+            cmds[-1].append(f'<EXPANDED:{word}>' if live else word)
+        word, live = None, False
+
+    while i < n:
+        c = s[i]
+        if c in ' \t':
+            end()
+            i += 1
+        elif c == '#' and word is None:
+            while i < n and s[i] != '\n':
+                i += 1
+        elif s[i:i + 2] in ('&&', '||'):
+            end()
+            cmds.append([])
+            i += 2
+        elif c in ';|&()\n':
+            end()
+            cmds.append([])
+            i += 1
+        elif c in '<>':
+            end()
+            op = s[i:i + 2] if s[i:i + 2] in ('>>', '>&', '<&') else c
+            cmds[-1].append(op)
+            i += len(op)
+        elif c == '\\':
+            if i + 1 >= n:
+                raise ValueError('a backslash ends the command')
+            word = (word or '') + ('' if s[i + 1] == '\n' else s[i + 1])
+            i += 2
+        elif c == "'":
+            j = s.find("'", i + 1)
+            if j < 0:
+                raise ValueError('an unterminated single quote')
+            word = (word or '') + s[i + 1:j]
+            i = j + 1
+        elif c == '"':
+            word = word or ''
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError('an unterminated double quote')
+                d = s[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == '\\' and i + 1 < n and s[i + 1] in '$`"\\\n':
+                    word += '' if s[i + 1] == '\n' else s[i + 1]
+                    i += 2
+                    continue
+                live = live or d in '$`'
+                word += d
+                i += 1
+        else:
+            live = live or c in '$`'
+            word = (word or '') + c
+            i += 1
+    end()
+    return [c for c in cmds if c]
+
+
+def has_run(words, run):
+    return any(words[k:k + len(run)] == run for k in range(len(words)))
+
+
+def answer(first, listing):
+    """The server's answer to the FIRST simple command: `find ROOT ...` prints
+    the listing's lines under ROOT, filtered as that find's own words filter
+    them; `[ -e X ]` prints EXISTS or NOTFOUND."""
+    with open(listing) as f:
+        lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+    paths = [ln.split(' ', 1)[1] for ln in lines]
+    if first[0] == 'find' and len(first) > 1:
+        root = first[1].rstrip('/') + '/'
+        depth1 = has_run(first, ['-maxdepth', '1'])
+        prune = ('dirs' if has_run(first, ['-type', 'd', '-name', '.*', '-prune'])
+                 else 'all' if has_run(first, ['-name', '.*', '-prune']) else '')
+        bare = not has_run(first, ['-exec', 'stat'])
+        for line, path in zip(lines, paths):
+            if not path.startswith(root):
+                continue
+            rest = path[len(root):]
+            if depth1 and '/' in rest:
+                continue
+            if prune == 'all' and re.search(r'(^|/)\.', rest):
+                continue
+            if prune == 'dirs' and re.search(r'(^|/)\.[^/]*/', rest):
+                continue
+            print(path if bare else line)
+    elif first[:2] == ['[', '-e'] and len(first) > 2:
+        x = first[2]
+        print('EXISTS' if any(p == x or p.startswith(x + '/') for p in paths) else 'NOTFOUND')
+
+
+def append(path, line):
+    if path:
+        with open(path, 'a') as f:
+            f.write(line + '\n')
+
+
+args = sys.argv[1:]
+append(os.environ.get('FAKE_SSH_LOG', ''), ' '.join(args))
+cmd = args[-1] if args else ''
+if cmd in ('bash -s', 'sh -s'):
+    cmd = sys.stdin.read()
+words_log = os.environ.get('FAKE_SSH_WORDS', '')
+try:
+    cmds = words_of(cmd)
+except ValueError as e:
+    append(words_log, json.dumps({'error': str(e), 'command': cmd}))
+    sys.stderr.write(f'fake ssh: syntax error: {e}\n')
+    sys.exit(2)
+for c in cmds:
+    append(words_log, json.dumps(c))
+listing = os.environ.get('FAKE_SSH_FIND_LISTING', '')
+if listing and cmds:
+    answer(cmds[0], listing)
+sys.exit(int(os.environ.get('FAKE_SSH_LOGIN_RC') or 0))
+'''
+
+
+def _fake_ssh_env(login_rc=0, find_listing=None, log=None, words=None):
     """An environment whose `ssh` answers -G with the REAL ssh -- it reads a
     config and connects to nothing -- and a login with LOGIN_RC, so an
     --install test reaches no host.  Its config file is the test's own
     (SSH_CONFIG_FILE, see _install_lines), so the real ~/.ssh is never read
     or written.
 
+    The remote command (for `bash -s`, the script on stdin) is read as the
+    remote shell reads it (see _FAKE_SSH_SERVER): an unterminated quote fails
+    the call with exit 2, as a real shell's syntax error does.
+
     FIND_LISTING is a file of the server's files as `find ... -exec stat -f
-    "%z %N"` prints them (SIZE PATH): a remote `find "ROOT" ...` is answered
+    "%z %N"` prints them (SIZE PATH): a remote `find ROOT ...` is answered
     with its lines under ROOT, filtered as that find's own words filter them
     -- `-maxdepth 1` keeps what lies directly in ROOT, `-type d -name ".*"
     -prune` drops what sits in a hidden folder, `-name ".*" -prune` also
     every hidden file.  Without `-exec stat` in it, the find prints the PATH
-    alone, as a plain `find -type f` does.  `[ -e "X" ]` answers EXISTS when
+    alone, as a plain `find -type f` does.  `[ -e X ]` answers EXISTS when
     X is a listed file or a folder one lies in, NOTFOUND otherwise.  LOG gets
-    one line per ssh started, its arguments as given."""
+    one line per ssh started, its arguments as given; WORDS one JSON line per
+    simple command of the remote command, the list of its words."""
     global _FAKE_SSH_DIR
     if _FAKE_SSH_DIR is None:
         real = shutil.which('ssh') or '/usr/bin/ssh'
         _FAKE_SSH_DIR = tempfile.mkdtemp(prefix='my-plex-fake-ssh-')
         import atexit
         atexit.register(shutil.rmtree, _FAKE_SSH_DIR, True)
-        find_awk = os.path.join(_FAKE_SSH_DIR, 'find.awk')
-        with open(find_awk, 'w') as f:
-            f.write(r"""{ path = substr($0, index($0, " ") + 1) }
-ENVIRON["EXISTS"] != "" { if (path == ENVIRON["EXISTS"] || index(path, ENVIRON["EXISTS"] "/") == 1) f = 1; next }
-index(path, ENVIRON["ROOT"]) != 1 { next }
-{ rest = substr(path, length(ENVIRON["ROOT"]) + 1) }
-ENVIRON["DEPTH"] == "1" && index(rest, "/") { next }
-ENVIRON["PRUNE"] == "all" && rest ~ /(^|\/)\./ { next }
-ENVIRON["PRUNE"] == "dirs" && rest ~ /(^|\/)\.[^\/]*\// { next }
-ENVIRON["BARE"] == "1" { print path; next }
-{ print }
-END { if (ENVIRON["EXISTS"] != "") print (f ? "EXISTS" : "NOTFOUND") }
-""")
+        server = os.path.join(_FAKE_SSH_DIR, 'server.py')
+        with open(server, 'w') as f:
+            f.write(_FAKE_SSH_SERVER)
         stub = os.path.join(_FAKE_SSH_DIR, 'ssh')
         with open(stub, 'w') as f:
-            f.write(r"""#!/bin/dash
+            f.write(f"""#!/bin/dash
 # -G only prints the effective config: the real ssh does that
-case " $* " in *" -G "*) exec @REAL@ "$@";; esac
-[ -z "${FAKE_SSH_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-# the remote command is the last argument
-for cmd do :; done
-if [ -n "${FAKE_SSH_FIND_LISTING:-}" ]; then
-  case $cmd in 'find "'*)
-    root=${cmd#find \"}; root=${root%%\"*}
-    depth=; prune=
-    case $cmd in *' -maxdepth 1 '*) depth=1;; esac
-    case $cmd in
-      *' -type d -name ".*" -prune '*) prune=dirs;;
-      *' -name ".*" -prune '*) prune=all;;
-    esac
-    bare=1
-    case $cmd in *'-exec stat'*) bare=;; esac
-    ROOT="$root/" DEPTH=$depth PRUNE=$prune BARE=$bare awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
-  '[ -e "'*)
-    path=${cmd#\[ -e \"}; path=${path%%\"*}
-    EXISTS=$path awk -f @AWK@ "$FAKE_SSH_FIND_LISTING";;
-  esac
-fi
-exit "${FAKE_SSH_LOGIN_RC:-0}"
-""".replace('@REAL@', real).replace('@AWK@', find_awk))
+case " $* " in *" -G "*) exec {shlex.quote(real)} "$@";; esac
+exec {shlex.quote(sys.executable)} -I {shlex.quote(server)} "$@"
+""")
         os.chmod(stub, 0o755)
     return dict(os.environ, PYTHONDONTWRITEBYTECODE='1', FAKE_SSH_LOGIN_RC=str(login_rc),
                 FAKE_SSH_FIND_LISTING=find_listing or '', FAKE_SSH_LOG=log or '',
+                FAKE_SSH_WORDS=words or '',
                 PATH=_FAKE_SSH_DIR + os.pathsep + os.environ.get('PATH', ''))
+
+
+def _remote_words(call):
+    """The words of the first simple command in a fake ssh LOG line -- the
+    remote command after the host, as the remote shell splits it."""
+    return shlex.split(call.split(' fixture-server ', 1)[1])
+
+
+class TestRemoteQuoting(unittest.TestCase):
+    """A path reaches a remote command as ONE word, unchanged, whatever it
+    holds: every path goes in through shlex.quote, the one quoting owner, and
+    the fake ssh reads what was sent as the remote shell reads it.
+
+    The reason it exists: with two owners -- a double-quote escaper whose
+    callers had to add the quotes themselves, and shlex.quote -- some paths
+    went in with neither.  RENAME and RMDIR echoed the path inside '...', so a
+    name with an apostrophe was a syntax error on the server; TRASH quoted a
+    `$HOME/` it meant to expand; the volume trash was `ssh HOST sh -c CMD`,
+    which ssh joins into `sh -c mkdir ...`."""
+
+    DIR = "/srv/it's a \"test\" $HOME `id` dir"
+    PATH = DIR + "/file 1.mkv"
+
+    def _remote(self, call, expands=False):
+        """CALL(tool), in-process, with ssh answered by the fake: the simple
+        commands the remote shell would run, each a list of its words.  No
+        word may be one the shell expands -- a path's $ or ` run on the
+        server -- unless EXPANDS says the command means one to."""
+        from unittest import mock
+        mp = _main_module()
+        d = tempfile.mkdtemp(prefix='my-plex-quoting-')
+        self.addCleanup(shutil.rmtree, d, True)
+        words = os.path.join(d, 'words')
+        with mock.patch.dict(os.environ, _fake_ssh_env(words=words), clear=True), \
+                mock.patch.object(mp, 'SSH_CONFIG_FILE', ''), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            call(mp)
+        with open(words) as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual([x for x in lines if isinstance(x, dict)], [],
+                         "the remote shell refuses the command")
+        if not expands:
+            self.assertEqual([w for c in lines for w in c if w.startswith('<EXPANDED:')], [], lines)
+        return lines
+
+    def _op(self, operation, expands=False, **kwargs):
+        return self._remote(lambda mp: mp.my_plex_file_operation(
+            operation, self.PATH, remote_host='fixture-server', skip_alternatives=True, **kwargs),
+            expands=expands)
+
+    def test_check(self):
+        self.assertIn(['[', '-e', self.PATH, ']'], self._op('CHECK'))
+
+    def test_trash(self):
+        trash = self.DIR + "/trash 'bin'"
+        mvs = [c for c in self._op('TRASH', trash_dir=trash) if c[0] == 'mv']
+        self.assertEqual(len(mvs), 1, mvs)
+        self.assertEqual(mvs[0][1], self.PATH)
+        self.assertRegex(mvs[0][2], r'^' + re.escape(trash + '/') + r'\d{8}_\d{6}_file 1\.mkv$')
+
+    def test_trash_in_home_expands_home(self):
+        """`~/` becomes "$HOME"/, which the remote shell must still expand."""
+        mvs = [c for c in self._op('TRASH', expands=True, trash_dir='~/.Trash') if c[0] == 'mv']
+        self.assertEqual(len(mvs), 1, mvs)
+        self.assertRegex(mvs[0][2], r'^<EXPANDED:\$HOME/\.Trash/\d{8}_\d{6}_file 1\.mkv>$')
+
+    def test_rename(self):
+        new = "it's $new `n`.mkv"
+        self.assertIn(['mv', self.PATH, self.DIR + '/' + new], self._op('RENAME', new_filename=new))
+
+    def test_move(self):
+        dest = self.DIR + "/moved \"x\" 'y'.mkv"
+        self.assertIn(['mv', self.PATH, dest], self._op('MOVE', dest_path=dest))
+
+    def test_rmdir(self):
+        self.assertIn(['rmdir', self.PATH], self._op('RMDIR'))
+
+    def test_list_dir(self):
+        self.assertIn(['find', self.PATH, '-maxdepth', '10', '-type', 'f'], self._op('LIST_DIR'))
+
+    def test_volume_trash(self):
+        """The fake's `id -u` prints nothing, so the volume trash is
+        /Volumes/<vol>/.Trashes/ -- created and echoed by one command."""
+        vol = "/Volumes/it's $v `x`"
+        cmds = self._remote(lambda mp: mp.get_trash_dir('fixture-server', file_path=vol + '/f.mkv'))
+        self.assertIn(['mkdir', '-p', vol + '/.Trashes/'], cmds)
+        self.assertIn(['echo', vol + '/.Trashes/'], cmds)
+
+    def test_fake_reads_as_the_shell_does(self):
+        """The arbiter itself: quoting removed, a live $ marked, an
+        unterminated quote refused with the shell's exit 2."""
+        d = tempfile.mkdtemp(prefix='my-plex-quoting-')
+        self.addCleanup(shutil.rmtree, d, True)
+        words = os.path.join(d, 'words')
+        env = _fake_ssh_env(words=words)
+
+        def run(cmd):
+            if os.path.exists(words):
+                os.remove(words)
+            r = subprocess.run(['ssh', 'fixture-server', cmd], env=env, capture_output=True, text=True)
+            with open(words) as f:
+                return r.returncode, [json.loads(line) for line in f]
+        self.assertEqual(run('mv \'a b\' "c\\$d" e\\ f && echo "$x"'),
+                         (0, [['mv', 'a b', 'c$d', 'e f'], ['echo', '<EXPANDED:$x>']]))
+        self.assertEqual(run('echo "a`b`"'), (0, [['echo', '<EXPANDED:a`b`>']]))
+        rc, lines = run("echo 'it's'")
+        self.assertEqual(rc, 2, lines)
+        self.assertEqual(lines[0]['error'], 'an unterminated single quote')
 
 
 def _install_lines(d, remote='me@192.0.2.10'):
@@ -18071,12 +18297,6 @@ class TestLegacyInlineBlock(unittest.TestCase):
         self.assertEqual(f(int(1.5 * 1024**3)), '1.5 GB')
         self.assertEqual(f(1024**3, force_unit='MB'), '1024 MB')
 
-    def test_escape_path_for_ssh_escapes_the_double_quote_specials_only(self):
-        esc = self._mod().escape_path_for_ssh
-        kept = "/path/charlie's angels (2019) [720p].mp4"
-        self.assertEqual(esc(kept), kept)
-        self.assertEqual(esc("/p/a$b`c\"d\\e"), "/p/a\\$b\\`c\\\"d\\\\e")
-
     def test_determine_remote_host_knows_local_from_absent(self):
         """(remote_host, exists, resolved_path) -- and a DIRECTORY is not the
         file: the local check asks isfile, which is the regression this guards
@@ -18195,6 +18415,7 @@ _UNITTEST_SCOPES = {
     'typecheck':          [TestTypeCheck],
     'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
     'launcher':           [TestLauncherAndModules],
+    'quoting':            [TestRemoteQuoting],
 }
 
 # List of all unittest classes for run_regression_tests()

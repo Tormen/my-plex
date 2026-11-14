@@ -9455,8 +9455,8 @@ def resolve_path(filepath, remote_host=None, check='file') -> tuple[str, bool]:
         for check_path in paths_to_check:
             if check_path is None:
                 continue
-            escaped_path = escape_path_for_ssh(check_path)
-            cmd = [*_ssh_args(remote_host), f'[ -e "{escaped_path}" ] && echo EXISTS || echo NOTFOUND']
+            escaped_path = shlex.quote(check_path)
+            cmd = [*_ssh_args(remote_host), f'[ -e {escaped_path} ] && echo EXISTS || echo NOTFOUND']
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0 and result.stdout.strip() == 'EXISTS':
                 if DEEPDBG: print(f"{DBGPFX}  -> FOUND on remote {remote_host}: {check_path}")
@@ -9849,7 +9849,7 @@ def get_trash_dir(remote_host=None, file_path=None):
 
                     # Create the trash directory if it doesn't exist
                     # Note: .Trashes directory should already exist on the volume, we just create the UID subdirectory
-                    cmd = [*_ssh_args(remote_host), 'sh', '-c', f'mkdir -p "{volume_trash}" && echo "{volume_trash}"']
+                    cmd = [*_ssh_args(remote_host), f'mkdir -p {shlex.quote(volume_trash)} && echo {shlex.quote(volume_trash)}']
                     result = subprocess.run(cmd, capture_output=True, text=True)
 
                     if result.returncode == 0 and volume_trash in result.stdout:
@@ -9963,22 +9963,14 @@ def _ssh_opts(multiplex: bool = True) -> list[str]:
 
 
 def _ssh_args(host: str, multiplex: bool = True) -> list[str]:
-    """v2.5: ['ssh', <_ssh_opts()>, host] -- see _ssh_opts."""
+    """v2.5: ['ssh', <_ssh_opts()>, host] -- see _ssh_opts.
+
+    ssh joins the words after the host into ONE string for the remote shell,
+    so every path in that command goes in through shlex.quote, a whole word
+    with no quotes around it -- the one way, so a name holding a space, a
+    quote, a $ or a backtick reaches the command unchanged.  A word that must
+    expand stays outside the quoting ('"$HOME"/' + shlex.quote(rest))."""
     return ['ssh', *_ssh_opts(multiplex=multiplex), host]
-
-
-def escape_path_for_ssh(filepath):
-    """Escape a file path for safe use in SSH commands
-
-    Args:
-        filepath: File path to escape
-
-    Returns:
-        Escaped path safe for use in double quotes in SSH command
-    """
-    # Escape characters that are special inside double quotes: " $ ` \
-    # This handles ALL file paths including those with apostrophes, spaces, brackets, etc.
-    return filepath.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
 
 
 def _resolve_tool_path(tool_name, category):
@@ -10148,11 +10140,11 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         # (the operation will likely fail, but that's expected behavior)
 
     if remote_host:
-        escaped_src = escape_path_for_ssh(filepath)
+        escaped_src = shlex.quote(filepath)
 
         if operation == 'CHECK':
             # Check if file or directory exists (use -e for both)
-            cmd = [*_ssh_args(remote_host), f'[ -e "{escaped_src}" ] && echo EXISTS || echo NOTFOUND']
+            cmd = [*_ssh_args(remote_host), f'[ -e {escaped_src} ] && echo EXISTS || echo NOTFOUND']
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print_ssh_error(remote_host, "check file existence", cmd=cmd, stderr=result.stderr,
@@ -10176,17 +10168,16 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             # For remote operations, expand tilde in the trash path
             # We need to construct the path that will be used on the remote side
             if trash_path.startswith('~/'):
-                # Use $HOME instead of ~ for reliable expansion in the SSH command
-                trash_path_for_mv = '$HOME/' + trash_path[2:]
+                # "$HOME" expands on the remote side, the rest is quoted: a
+                # quoted '~/' or '$HOME/' would be taken literally
+                escaped_dst = '"$HOME"/' + shlex.quote(trash_path[2:])
             else:
-                trash_path_for_mv = trash_path
-
-            escaped_dst = escape_path_for_ssh(trash_path_for_mv)
+                escaped_dst = shlex.quote(trash_path)
 
             # Single SSH command: check file/dir exists AND move it AND report success (use -e for both files and dirs)
             # Note: We echo the original trash_path (with ~) for display purposes
             cmd = [*_ssh_args(remote_host),
-                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo MOVED || echo FAILED"]
+                   f"[ -e {escaped_src} ] && mv {escaped_src} {escaped_dst} && echo MOVED || echo FAILED"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0 and result.stdout.strip() == 'MOVED':
@@ -10210,16 +10201,15 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             if not new_filename: err("00060", "RENAME operation requires kwargs['new_filename']")
             src_dir = os.path.dirname(filepath)
             dst_path = os.path.join(src_dir, new_filename)
-            escaped_dst = escape_path_for_ssh(dst_path)
+            escaped_dst = shlex.quote(dst_path)
 
             cmd = [*_ssh_args(remote_host),
-                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo 'RENAMED:{dst_path}' || echo 'FAILED'"]
+                   f"[ -e {escaped_src} ] && mv {escaped_src} {escaped_dst} && echo RENAMED || echo FAILED"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
-            if result.returncode == 0 and result.stdout.strip().startswith('RENAMED:'):
-                actual_dst_path = result.stdout.strip().split(':', 1)[1]
+            if result.returncode == 0 and result.stdout.strip() == 'RENAMED':
                 if VRB: print(f"{VRBPFX}Renamed on {remote_host}: {os.path.basename(filepath)} -> {new_filename}")
-                return (True, actual_dst_path)
+                return (True, dst_path)
             else:
                 print_ssh_error(remote_host, "rename file", cmd=cmd, stderr=result.stderr,
                                extra_context={'source': filepath, 'new_name': new_filename})
@@ -10231,11 +10221,11 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
 
         elif operation == 'MOVE':
             # Move file/dir to destination in ONE shot
-            dest_path = kwargs.get('dest_path')
-            escaped_dst = escape_path_for_ssh(dest_path)
+            dest_path = kwargs['dest_path']
+            escaped_dst = shlex.quote(dest_path)
 
             cmd = [*_ssh_args(remote_host),
-                   f"[ -e \"{escaped_src}\" ] && mv \"{escaped_src}\" \"{escaped_dst}\" && echo MOVED || echo FAILED"]
+                   f"[ -e {escaped_src} ] && mv {escaped_src} {escaped_dst} && echo MOVED || echo FAILED"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0 and result.stdout.strip() == 'MOVED':
@@ -10254,10 +10244,10 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
             # recursive remove, because anything a person might want back goes
             # to TRASH instead.
             cmd = [*_ssh_args(remote_host),
-                   f"[ -d \"{escaped_src}\" ] && rmdir \"{escaped_src}\" && echo 'RMDIR:{filepath}' || echo 'FAILED'"]
+                   f"[ -d {escaped_src} ] && rmdir {escaped_src} && echo RMDIR || echo FAILED"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
-            if result.returncode == 0 and result.stdout.strip().startswith('RMDIR:'):
+            if result.returncode == 0 and result.stdout.strip() == 'RMDIR':
                 if VRB: print(f"{VRBPFX}Removed empty directory on {remote_host}: {filepath}")
                 return (True, None)
             else:
@@ -10269,7 +10259,7 @@ def my_plex_file_operation(operation, filepath, remote_host=None, **kwargs):
         elif operation == 'LIST_DIR':
             # List all files in directory recursively
             maxdepth = kwargs.get('maxdepth', 10)
-            cmd = [*_ssh_args(remote_host), f"find \"{escaped_src}\" -maxdepth {maxdepth} -type f"]
+            cmd = [*_ssh_args(remote_host), f"find {escaped_src} -maxdepth {maxdepth} -type f"]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode == 0:
@@ -10531,14 +10521,10 @@ def query_plex_database(query, mode='rows'):
             print(f"{DBGPFX}  Command: {' '.join(cmd)}")
     else:
         # REMOTE: use SSH to access database on remote host
-        # Escape the query for SSH (handle quotes and special characters)
-        query_escaped = query.replace("'", "'\\''")
-
-        # Build sqlite3 command for remote execution
         if mode == 'raw':
-            sqlite_cmd = f"sqlite3 '{db_path}' '{query_escaped}'"
+            sqlite_cmd = f"sqlite3 {shlex.quote(db_path)} {shlex.quote(query)}"
         else:
-            sqlite_cmd = f"sqlite3 -header -csv '{db_path}' '{query_escaped}'"
+            sqlite_cmd = f"sqlite3 -header -csv {shlex.quote(db_path)} {shlex.quote(query)}"
 
         cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), sqlite_cmd]
 
@@ -10657,8 +10643,7 @@ def query_plex_database_write(query):
     if use_local:
         cmd = ['sqlite3', local_db_path, query]
     else:
-        query_escaped = query.replace("'", "'\\''")
-        sqlite_cmd = f"sqlite3 '{db_path}' '{query_escaped}'"
+        sqlite_cmd = f"sqlite3 {shlex.quote(db_path)} {shlex.quote(query)}"
         cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), sqlite_cmd]
     if DEEPDBG:
         print(f"{DBGPFX}Executing Plex DB WRITE: {query[:120]}{'…' if len(query) > 120 else ''}")
@@ -12893,10 +12878,10 @@ def move_file(src_path, dst_dir, remote_host=None):
         dst_path = os.path.join(dst_dir, filename)
 
         if remote_host:
-            escaped_dir = escape_path_for_ssh(dst_dir)
-            escaped_src = escape_path_for_ssh(src_path)
-            escaped_dst = escape_path_for_ssh(dst_path)
-            cmd = [*_ssh_args(remote_host), f'mkdir -p -- "{escaped_dir}" && mv -- "{escaped_src}" "{escaped_dst}"']
+            escaped_dir = shlex.quote(dst_dir)
+            escaped_src = shlex.quote(src_path)
+            escaped_dst = shlex.quote(dst_path)
+            cmd = [*_ssh_args(remote_host), f'mkdir -p -- {escaped_dir} && mv -- {escaped_src} {escaped_dst}']
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 if VRB: print(f"{VRBPFX}Moved on {remote_host}: {src_path} -> {dst_path}")
@@ -14260,7 +14245,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         existing = set()
         if targets:
             import shlex as _shlex, subprocess as _sp
-            check_script = "\n".join(f"[ -e {_shlex.quote(t)} ] && echo EXISTS|{t}" for t in targets)
+            check_script = "\n".join(f"[ -e {_shlex.quote(t)} ] && echo 'EXISTS|'{_shlex.quote(t)}" for t in targets)
             proc = _sp.run(_ssh_args(PLEX_DB_REMOTE_HOST) + ['bash', '-s'],
                            input=check_script, capture_output=True, text=True)
             for line in (proc.stdout or '').splitlines():
@@ -14681,7 +14666,7 @@ def _bad_structure_wrap_batch(moves):
         blocks.append(
             f"(\n"
             f"_IDX={i}\n"
-            f"if [ -e {wrap_q} ] || [ -L {wrap_q} ]; then echo \"FAIL|{i}|wrapper already exists: {wrap_q}\"; exit 0; fi\n"
+            f"if [ -e {wrap_q} ] || [ -L {wrap_q} ]; then echo \"FAIL|{i}|wrapper already exists:\" {wrap_q}; exit 0; fi\n"
             f"cd {parent_q} 2>/dev/null || {{ echo \"FAIL|{i}|cd parent failed\"; exit 0; }}\n"
             f"mkdir -- {wrap_q} || {{ echo \"FAIL|{i}|mkdir wrapper failed\"; exit 0; }}\n"
             f"mv -- {bare_base_q} {wrap_q}/ || {{ echo \"FAIL|{i}|mv main file failed\"; exit 0; }}\n"
@@ -14861,7 +14846,7 @@ def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_di
     rmdir_lines = ' && '.join(f'rmdir {_shlex.quote(p)} 2>/dev/null || true' for p in intermediates_to_rmdir) or 'true'
     script = (
         f'set -e; '
-        f'if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo "ERROR: target {tgt_q} already exists" >&2; exit 2; fi; '
+        f'if [ -e {tgt_q} ] || [ -L {tgt_q} ]; then echo "ERROR: target" {tgt_q} "already exists" >&2; exit 2; fi; '
         f'mv -- {src_q} {tgt_q} || exit 3; '
         f'{rmdir_lines}'
     )
@@ -17169,12 +17154,12 @@ def _list_top_level_entries(rootpath, remote_host=None):
     The rootpath itself is excluded.  Hidden entries (starting with '.') are
     excluded — they're typically Plex / OS scratch and never indexed.
     """
-    esc = escape_path_for_ssh(rootpath)
+    esc = shlex.quote(rootpath)
     # `find ... -printf '%y\t%p\n'` would be cleaner but GNU-only.  BSD find
     # (macOS) has no -printf, so emit type via `-exec stat`.  Simpler still:
     # run two passes — one for dirs, one for files — and merge.
-    find_dirs  = f'find "{esc}" -maxdepth 1 -mindepth 1 -type d ! -name ".*"'
-    find_files = f'find "{esc}" -maxdepth 1 -mindepth 1 -type f ! -name ".*"'
+    find_dirs  = f'find {esc} -maxdepth 1 -mindepth 1 -type d ! -name ".*"'
+    find_files = f'find {esc} -maxdepth 1 -mindepth 1 -type f ! -name ".*"'
     if remote_host:
         cmd_d = [*_ssh_args(remote_host), find_dirs]
         cmd_f = [*_ssh_args(remote_host), find_files]
@@ -17288,9 +17273,9 @@ def _compute_layout_index_live():
             # use two passes via separate find invocations OR a single `find -type d/f`
             # mass walk with subsequent type-classification in Python.
             # We pick the simplest: TWO bulk finds (dirs, then files), depth 2.
-            esc = escape_path_for_ssh(rp_norm)
-            find_d = f'find "{esc}" -maxdepth 2 -mindepth 1 -type d ! -name ".*"'
-            find_f = f'find "{esc}" -maxdepth 2 -mindepth 1 -type f ! -name ".*"'
+            esc = shlex.quote(rp_norm)
+            find_d = f'find {esc} -maxdepth 2 -mindepth 1 -type d ! -name ".*"'
+            find_f = f'find {esc} -maxdepth 2 -mindepth 1 -type f ! -name ".*"'
             if remote:
                 cmd_d = _ssh_args(remote) + [find_d]
                 cmd_f = _ssh_args(remote) + [find_f]
@@ -17799,14 +17784,14 @@ def play_media_file(filepath, remote_host=None):
             return False
 
         # Use SSH to stream the file to mpv
-        escaped_path = escape_path_for_ssh(filepath)
+        escaped_path = shlex.quote(filepath)
         if DEEPDBG:
             print(f"{DBGPFX}  Original filepath: {filepath}")
             print(f"{DBGPFX}  Escaped filepath:  {escaped_path}")
 
         # Two processes joined by a pipe, no shell: the ssh carries every option
         # _ssh_args() gives it, and the path is quoted for the REMOTE shell only.
-        ssh_cmd = [*_ssh_args(remote_host), f'cat "{escaped_path}"']
+        ssh_cmd = [*_ssh_args(remote_host), f'cat {escaped_path}']
         mpv_cmd = [mpv_path, '--force-seekable=yes', f'--title={os.path.basename(filepath)}', '-']
         cmd = f"{shlex.join(ssh_cmd)} | {shlex.join(mpv_cmd)}"
 
@@ -19401,7 +19386,7 @@ def undo_operation(operation_log, remote_host=None):
 
                 if remote_host:
                     cmd = [*_ssh_args(remote_host),
-                           f'mv "{escape_path_for_ssh(trash_path)}" "{escape_path_for_ssh(original_path)}"']
+                           f'mv {shlex.quote(trash_path)} {shlex.quote(original_path)}']
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode != 0:
                         print(f"  ✗ Failed to restore from trash: {result.stderr}")
@@ -29152,10 +29137,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             # hidden FILES are judged like any other: .DS_Store and ._* are
             # what the os_index and macos_dotunderscore patterns exist for.
             for d in roots:
-                escaped = escape_path_for_ssh(d)
+                escaped = shlex.quote(d)
                 if PLEX_DB_REMOTE_HOST:
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                           f'find "{escaped}"{depth_args_remote} -type d -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
+                           f'find {escaped}{depth_args_remote} -type d -name ".*" -prune -o -type f -exec stat -f "%z %N" {{}} +']
                 else:
                     cmd = ['find', d, *depth_args_local, '-type', 'd', '-name', '.*', '-prune', '-o', '-type', 'f',
                            '-exec', 'stat', '-f', '%z %N', '{}', '+']
@@ -29305,10 +29290,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return []
             found = []  # (filepath, reason)
             for d in roots:
-                escaped = escape_path_for_ssh(d)
+                escaped = shlex.quote(d)
                 if PLEX_DB_REMOTE_HOST:
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                           f'find "{escaped}" -name ".*" -prune -o -type f -print']
+                           f'find {escaped} -name ".*" -prune -o -type f -print']
                 else:
                     cmd = ['find', d, '-name', '.*', '-prune', '-o', '-type', 'f', '-print']
                 r = subprocess.run(cmd, capture_output=True, text=True)
@@ -29360,10 +29345,10 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return []
             found = []
             for d in roots:
-                escaped = escape_path_for_ssh(d)
+                escaped = shlex.quote(d)
                 if PLEX_DB_REMOTE_HOST:
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                           f'find "{escaped}" -mindepth 1 -type d -empty']
+                           f'find {escaped} -mindepth 1 -type d -empty']
                 else:
                     cmd = ['find', d, '-mindepth', '1', '-type', 'd', '-empty']
                 r = subprocess.run(cmd, capture_output=True, text=True)
@@ -29468,7 +29453,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             for dp in dirs:
                 if PLEX_DB_REMOTE_HOST:
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST),
-                           f'rmdir "{escape_path_for_ssh(dp)}"']
+                           f'rmdir {shlex.quote(dp)}']
                 else:
                     cmd = ['rmdir', dp]
                 r = subprocess.run(cmd, capture_output=True, text=True)
@@ -34146,10 +34131,10 @@ def _file_exists_local_or_remote(filepath):
     server_file = os.path.join(server_dir, os.path.basename(filepath))
     if not PLEX_DB_REMOTE_HOST:
         return os.path.isfile(server_file)
-    escaped = escape_path_for_ssh(server_file)
+    escaped = shlex.quote(server_file)
     try:
         r = subprocess.run(
-            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'[ -f "{escaped}" ] && echo YES'],
+            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'[ -f {escaped} ] && echo YES'],
             capture_output=True, text=True, timeout=10
         )
         return r.returncode == 0 and 'YES' in r.stdout
@@ -34174,8 +34159,8 @@ def _batch_file_exists_remote(filepaths):
     checks = []
     path_map = {}  # index -> local_path
     for i, fp in enumerate(filepaths):
-        escaped = escape_path_for_ssh(server_files[fp])
-        checks.append(f'[ -f "{escaped}" ] && echo {i}')
+        escaped = shlex.quote(server_files[fp])
+        checks.append(f'[ -f {escaped} ] && echo {i}')
         path_map[i] = fp
     cmd = '; '.join(checks)
     try:
@@ -34216,10 +34201,10 @@ def read_episodes_tsv(tsv_path):
         # Try reading via SSH from server path
         server_path = get_server_path(os.path.dirname(tsv_path))
         server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
-        escaped = escape_path_for_ssh(server_tsv)
+        escaped = shlex.quote(server_tsv)
         try:
             result = subprocess.run(
-                [*_ssh_args(PLEX_DB_REMOTE_HOST), f'cat "{escaped}"'],
+                [*_ssh_args(PLEX_DB_REMOTE_HOST), f'cat {escaped}'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -34332,7 +34317,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
     # Translate local path to server path
     server_path = get_server_path(os.path.dirname(tsv_path))
     server_tsv = os.path.join(server_path, EPISODES_TSV_FILENAME)
-    escaped_tsv = escape_path_for_ssh(server_tsv)
+    escaped_tsv = shlex.quote(server_tsv)
 
     # Backup existing TSV via SSH (rename to episodes.tsv.<updated-date>)
     # Read the old 'updated' date from the existing file header
@@ -34342,7 +34327,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
         # If not available, we'll use 'prev' as suffix
         old_updated = ''
     backup_suffix = f'.{old_updated}' if old_updated else '.prev'
-    escaped_backup = escape_path_for_ssh(server_tsv + backup_suffix)
+    escaped_backup = shlex.quote(server_tsv + backup_suffix)
 
     # No Plex server over SSH: the library is local, write it here -- with the
     # same backup of the previous file the SSH path makes.
@@ -34357,7 +34342,7 @@ def write_episodes_tsv(tsv_path, metadata, episodes):
         return
 
     # SSH: if file exists, rename it; then write new content via cat
-    rename_cmd = f'[ -f "{escaped_tsv}" ] && mv "{escaped_tsv}" "{escaped_backup}"; cat > "{escaped_tsv}"'
+    rename_cmd = f'[ -f {escaped_tsv} ] && mv {escaped_tsv} {escaped_backup}; cat > {escaped_tsv}'
     result = subprocess.run(
         [*_ssh_args(PLEX_DB_REMOTE_HOST), rename_cmd],
         input=content, capture_output=True, text=True
@@ -34383,10 +34368,10 @@ def is_episodes_tsv_stale(tsv_path, max_age=EPISODES_TSV_MAX_AGE):
     # Try SSH: check file age on server
     server_dir = get_server_path(os.path.dirname(tsv_path))
     server_tsv = os.path.join(server_dir, EPISODES_TSV_FILENAME)
-    escaped = escape_path_for_ssh(server_tsv)
+    escaped = shlex.quote(server_tsv)
     try:
         r = subprocess.run(
-            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'stat -f %m "{escaped}"'],
+            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'stat -f %m {escaped}'],
             capture_output=True, text=True, timeout=10
         )
         if r.returncode == 0 and r.stdout.strip():
@@ -34435,11 +34420,11 @@ def write_episodes_err(series_dir, error_type, source, message):
 
     server_dir = get_server_path(series_dir)
     server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
-    escaped_dir = escape_path_for_ssh(server_dir)
-    escaped_err = escape_path_for_ssh(server_err)
+    escaped_dir = shlex.quote(server_dir)
+    escaped_err = shlex.quote(server_err)
 
     result = subprocess.run(
-        [*_ssh_args(PLEX_DB_REMOTE_HOST), f'mkdir -p "{escaped_dir}" && cat > "{escaped_err}"'],
+        [*_ssh_args(PLEX_DB_REMOTE_HOST), f'mkdir -p {escaped_dir} && cat > {escaped_err}'],
         input=content, capture_output=True, text=True, timeout=10
     )
     if result.returncode == 0:
@@ -34484,10 +34469,10 @@ def read_episodes_err(series_dir):
         # Try reading via SSH
         server_dir = get_server_path(series_dir)
         server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
-        escaped = escape_path_for_ssh(server_err)
+        escaped = shlex.quote(server_err)
         try:
             r = subprocess.run(
-                [*_ssh_args(PLEX_DB_REMOTE_HOST), f'cat "{escaped}"'],
+                [*_ssh_args(PLEX_DB_REMOTE_HOST), f'cat {escaped}'],
                 capture_output=True, text=True, timeout=10
             )
             if r.returncode == 0 and r.stdout.strip():
@@ -34516,10 +34501,10 @@ def clear_episodes_err(series_dir):
     # Also remove on server via SSH
     server_dir = get_server_path(series_dir)
     server_err = os.path.join(server_dir, EPISODES_ERR_FILENAME)
-    escaped = escape_path_for_ssh(server_err)
+    escaped = shlex.quote(server_err)
     try:
         subprocess.run(
-            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'rm -f "{escaped}"'],
+            [*_ssh_args(PLEX_DB_REMOTE_HOST), f'rm -f {escaped}'],
             capture_output=True, text=True, timeout=10
         )
     except (OSError, subprocess.SubprocessError):
@@ -38836,8 +38821,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             folder_base = os.path.basename(folder_path.rstrip('/'))
             new_path = os.path.join(dest_root, folder_base)
             if PLEX_DB_REMOTE_HOST:
-                esc_dst_root = escape_path_for_ssh(dest_root)
-                mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dst_root}\""]
+                esc_dst_root = shlex.quote(dest_root)
+                mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p {esc_dst_root}"]
                 r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                 if r.returncode != 0:
                     print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}", file=sys.stderr)
@@ -39043,8 +39028,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                         # mkdir -p the dest_root on the Plex host (the wrapper itself
                         # will be created by mv since the source IS the wrapper).
                         if PLEX_DB_REMOTE_HOST:
-                            esc_dst_root = escape_path_for_ssh(dest_root)
-                            mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dst_root}\""]
+                            esc_dst_root = shlex.quote(dest_root)
+                            mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p {esc_dst_root}"]
                             r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                             if r.returncode != 0:
                                 print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {dest_root}\n    {r.stderr.strip()}", file=sys.stderr)
@@ -39089,8 +39074,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
                 # mkdir -p the destination directory on the Plex host
                 if PLEX_DB_REMOTE_HOST:
-                    esc_dir = escape_path_for_ssh(new_dir)
-                    mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p \"{esc_dir}\""]
+                    esc_dir = shlex.quote(new_dir)
+                    mkdir_cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"mkdir -p {esc_dir}"]
                     r = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                     if r.returncode != 0:
                         print(f"  ✗ ERROR mkdir on {PLEX_DB_REMOTE_HOST}: {new_dir}", file=sys.stderr)
@@ -39779,13 +39764,13 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
     def _move_one(src_path, dest_path):
         dest_dir = os.path.dirname(dest_path)
         if remote_host:
-            escaped_dir = escape_path_for_ssh(dest_dir)
-            escaped_src = escape_path_for_ssh(src_path)
-            escaped_dst = escape_path_for_ssh(dest_path)
+            escaped_dir = shlex.quote(dest_dir)
+            escaped_src = shlex.quote(src_path)
+            escaped_dst = shlex.quote(dest_path)
             result = subprocess.run(
                 [*_ssh_args(remote_host),
-                 f'mkdir -p "{escaped_dir}" && mv -n "{escaped_src}" "{escaped_dst}" '
-                 f'&& [ ! -e "{escaped_src}" ] && echo MOVED || echo FAILED'],
+                 f'mkdir -p {escaped_dir} && mv -n {escaped_src} {escaped_dst} '
+                 f'&& [ ! -e {escaped_src} ] && echo MOVED || echo FAILED'],
                 capture_output=True, text=True)
             return result.returncode == 0 and result.stdout.strip() == 'MOVED'
         try:
@@ -39853,9 +39838,9 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
                 if not (empty_dir == wrapper_dir or empty_dir.startswith(wrapper_dir + os.sep)):
                     continue
                 if remote_host:
-                    escaped_dir = escape_path_for_ssh(empty_dir)
+                    escaped_dir = shlex.quote(empty_dir)
                     subprocess.run([*_ssh_args(remote_host),
-                                    f'rmdir "{escaped_dir}" 2>/dev/null'],
+                                    f'rmdir {escaped_dir} 2>/dev/null'],
                                    capture_output=True, text=True)
                 else:
                     try:
@@ -39988,9 +39973,9 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     print(f"  ✓ un-sorted: {os.path.basename(src)} → root")
                     # Empty source season dir → rmdir it (non-recursive).
                     if parent != series_dir_server:
-                        escaped_parent = escape_path_for_ssh(parent)
+                        escaped_parent = shlex.quote(parent)
                         subprocess.run([*_ssh_args(remote_host),
-                                        f'rmdir "{escaped_parent}" 2>/dev/null'],
+                                        f'rmdir {escaped_parent} 2>/dev/null'],
                                        capture_output=True, text=True)
             # Persist the redo action via _write_resolve_log so every
             # mutating --resolve-style operation leaves an audit trail.
@@ -40114,8 +40099,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
             sidecar.  Useful for external auto-downloaders that decide
             "already taken" by filename presence.
             """
-            escaped_dir = escape_path_for_ssh(target_dir_server)
-            mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
+            escaped_dir = shlex.quote(target_dir_server)
+            mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p {escaped_dir}"]
             result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"    ERROR: mkdir {os.path.basename(target_dir_server)}/: {result.stderr.strip()}", file=sys.stderr)
@@ -40158,8 +40143,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 if _current_touch_mode == 'all':
                     touch_paths += moved_sidecar_src_paths
                 for tp in touch_paths:
-                    escaped_tp = escape_path_for_ssh(tp)
-                    touch_cmd = [*_ssh_args(remote_host), f": > \"{escaped_tp}\""]
+                    escaped_tp = shlex.quote(tp)
+                    touch_cmd = [*_ssh_args(remote_host), f": > {escaped_tp}"]
                     tr = subprocess.run(touch_cmd, capture_output=True, text=True)
                     if tr.returncode == 0:
                         print(f"      · touch placeholder: {os.path.basename(tp)}")
@@ -40634,8 +40619,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     else:
                         # WRITE: always use SSH on server path
                         target_dir_server = os.path.join(scan_dir_server, dir_name)
-                        escaped_dir = escape_path_for_ssh(target_dir_server)
-                        mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p \"{escaped_dir}\""]
+                        escaped_dir = shlex.quote(target_dir_server)
+                        mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p {escaped_dir}"]
                         result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                         if result.returncode != 0:
                             print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}", file=sys.stderr)
@@ -40663,8 +40648,8 @@ def cmd_sort_new(args, dry_run=False, target=None):
                                 for src_path, is_main in moved_paths:
                                     if touch_mode == 'main' and not is_main:
                                         continue
-                                    escaped_tp = escape_path_for_ssh(src_path)
-                                    touch_cmd = [*_ssh_args(remote_host), f": > \"{escaped_tp}\""]
+                                    escaped_tp = shlex.quote(src_path)
+                                    touch_cmd = [*_ssh_args(remote_host), f": > {escaped_tp}"]
                                     tr = subprocess.run(touch_cmd, capture_output=True, text=True)
                                     if tr.returncode == 0:
                                         print(f"      · touch placeholder: {os.path.basename(src_path)}")
