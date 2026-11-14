@@ -36234,7 +36234,7 @@ _SCOPE_FILTER_RE = re.compile(
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from typing import TypeAlias, TypeGuard
 
 
@@ -36928,7 +36928,7 @@ def _plex2disk_process_scope_dpm(scope: DpmScope, items_with_paths: list[tuple[s
 
     # Pre-compile every disk2plex regex for this scope so --replace can strip
     # non-canonical markers before writing.
-    _replace_patterns: list[re.Pattern[str]] = []
+    _replace_patterns = []  # type: list[re.Pattern[str]]  # (a type comment: --run-tests v269 pins this text)
     if replace:
         for plex_var, var_spec in DISK_PLEX_MAP.items():
             scope_set = _normalise_disk_plex_scope(var_spec.get('scope', 'file')) or ()
@@ -37882,7 +37882,7 @@ def _update_cache_filepath(obj: ScopeRecord, old_path: str, new_path: str) -> No
             elif file_info == old_path:
                 files[version_str] = new_path
 
-def cmd_remux(target, yes=False, no_audio_language_only=False):
+def cmd_remux(target: ScopeTarget, yes: bool = False, no_audio_language_only: bool = False) -> tuple[int, int, int]:
     """v1.4: --remux — migrate outdated-container files to MKV via ffmpeg
     stream-copy, attaching the resolved audio language as track metadata.
 
@@ -37908,7 +37908,7 @@ def cmd_remux(target, yes=False, no_audio_language_only=False):
         return (0, 0, 0)
 
     # ---- Phase 1: build remux plan ----
-    plan = []          # list of (cache_key, obj, version, classification, file_info)
+    plan: list[tuple[str, MediaRecord, str, MigrationClass, FileEntry]] = []          # list of (cache_key, obj, version, classification, file_info)
     excluded = {       # buckets for the exclusion summary
         'modern_container': 0,
         'high_bitrate':     0,
@@ -37919,6 +37919,8 @@ def cmd_remux(target, yes=False, no_audio_language_only=False):
     }
 
     for cache_key, obj in items:
+        if obj['type'] == 'Collection':
+            continue    # owns no file: its files_dict is empty
         files_dict = obj.get('files', {}) or {}
         if not files_dict:
             continue
@@ -37936,8 +37938,9 @@ def cmd_remux(target, yes=False, no_audio_language_only=False):
                     excluded['has_language'] += 1
                     continue
 
-            if action == 'remux':
-                plan.append((cache_key, obj, version, cls, file_info))
+            if action == 'remux' and obj['type'] != 'Folder':    # a folder classifies 'none'
+                # obj['files'][version] IS file_info, typed by the narrowed record
+                plan.append((cache_key, obj, version, cls, obj['files'][version]))
                 continue
 
             # Bucket the exclusion reason — disjoint, keyed primarily on
@@ -37986,7 +37989,7 @@ def cmd_remux(target, yes=False, no_audio_language_only=False):
             print(f"\n  …and {len(plan)-200} more (truncated for preview).")
 
     # Exclusion summary
-    excl_lines = []
+    excl_lines: list[str] = []
     if excluded['high_bitrate']:
         excl_lines.append(f"    {excluded['high_bitrate']:>5}  high bitrate     →  use --reencode")
     if excluded['unsafe_codecs']:
@@ -38037,7 +38040,8 @@ def cmd_remux(target, yes=False, no_audio_language_only=False):
     return (n_remuxed, n_skipped, n_errors)
 
 
-def _remux_one_file(cache_key, obj, version, classification, file_info):
+def _remux_one_file(cache_key: str, obj: MediaRecord, version: str, classification: MigrationClass,
+                    file_info: FileEntry) -> bool | None:
     """Run the ffmpeg stream-copy pipeline for one file version.
 
     Tri-state return (matches the disk2plex push-handler convention):
@@ -38145,7 +38149,7 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
     if obj.get('file') == src_path or obj.get('file') == resolved:
         obj['file'] = new_path
     # Refresh top-level audio_languages with set-union of all version langs
-    union = []
+    union: list[str] = []
     for fi in (obj.get('files') or {}).values():
         for a in (fi.get('audio_languages') or []):
             if a and a not in union:
@@ -38165,7 +38169,9 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
     return True
 
 
-def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None):
+def transfer_disk_map_markers(src_path: str, dst_path: str, remote_host: str | None = None,
+                              sidecar: dict[str, dict[str, Any]] | None = None
+                              ) -> tuple[bool, str, dict[str, dict[str, Any]]]:
     """Transfer disk map markers from one file to another (for duplicate resolution).
 
     Looks up src_path in sidecar, applies those markers to dst_path.
@@ -38183,8 +38189,9 @@ def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None
         tuple: (success, new_dst_path, sidecar) — success bool, updated dst path, sidecar dict
     """
     owns_sidecar = sidecar is None
-    if owns_sidecar:
-        sidecar = load_disk_map_sidecar()
+    if sidecar is None:
+        loaded: dict[str, dict[str, Any]] = load_disk_map_sidecar()
+        sidecar = loaded
 
     src_entry = sidecar.get(src_path)
 
@@ -38232,7 +38239,9 @@ def transfer_disk_map_markers(src_path, dst_path, remote_host=None, sidecar=None
 
     return (transfer_success, new_dst_path, sidecar)
 
-def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=None):
+def transfer_disk_map_markers_dir(src_dir: str, dst_dir: str, remote_host: str | None = None,
+                                  sidecar: dict[str, dict[str, Any]] | None = None
+                                  ) -> tuple[bool, str, dict[str, dict[str, Any]]]:
     """Transfer disk map markers from one directory to another (for duplicate resolution).
 
     Works like transfer_disk_map_markers but for directory names (space-separated markers).
@@ -38247,8 +38256,9 @@ def transfer_disk_map_markers_dir(src_dir, dst_dir, remote_host=None, sidecar=No
         tuple: (success, new_dst_dir, sidecar)
     """
     owns_sidecar = sidecar is None
-    if owns_sidecar:
-        sidecar = load_disk_map_sidecar()
+    if sidecar is None:
+        loaded: dict[str, dict[str, Any]] = load_disk_map_sidecar()
+        sidecar = loaded
 
     src_entry = sidecar.get(src_dir)
 
@@ -38328,7 +38338,7 @@ VIDEO_EXTENSIONS = {'.avi', '.mkv', '.mp4', '.mpg', '.ts', '.wmv', '.m4v', '.flv
 _MOVE_STATE_DIR = os.path.expanduser('~/.my-plex/state-preservation')
 
 
-def _move_state_dir():
+def _move_state_dir() -> str:
     try:
         os.makedirs(_MOVE_STATE_DIR, exist_ok=True)
     except OSError:
@@ -38336,11 +38346,11 @@ def _move_state_dir():
     return _MOVE_STATE_DIR
 
 
-def _move_state_path(old_rk):
+def _move_state_path(old_rk: int | str) -> str:
     return os.path.join(_move_state_dir(), f'{int(old_rk)}.json')
 
 
-def _move_state_write(state):
+def _move_state_write(state):  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]  -- dict[str, Any], the state JSON; --run-tests move pins this signature's text
     """Atomic write — tmp then rename so a kill mid-flight never corrupts."""
     import json as _json
     p = _move_state_path(state['old_rk'])
@@ -38351,7 +38361,7 @@ def _move_state_write(state):
     return p
 
 
-def _move_state_read(path):
+def _move_state_read(path: str) -> dict[str, Any] | None:
     import json as _json
     try:
         with open(path) as f:
@@ -38360,7 +38370,7 @@ def _move_state_read(path):
         return None
 
 
-def _move_state_remove(old_rk):
+def _move_state_remove(old_rk: int | str) -> None:
     try:
         os.remove(_move_state_path(old_rk))
     except FileNotFoundError:
@@ -38369,21 +38379,23 @@ def _move_state_remove(old_rk):
         pass
 
 
-def _build_playlist_membership_map(plex):
+def _build_playlist_membership_map(plex: PlexServer | None) -> dict[int, list[str]]:
     """Return {ratingKey: [playlist_title, ...]} for every audio/video Playlist.
 
     Single sweep of plex.playlists() — cheap unless the user has dozens
     of huge playlists.  Errors degrade gracefully to an empty map (any
     unsnapshotted playlist memberships will simply be lost).
     """
-    out = {}
+    out: dict[int, list[str]] = {}
     if plex is None:
         return out
     try:
         for pl in plex.playlists():
             try:
-                title = pl.title
-                for it in pl.items():
+                # plexapi types a container's items Optional (an element of
+                # unknown type builds None); a None raises here, as it did
+                title = pl.title  # pyright: ignore[reportOptionalMemberAccess]
+                for it in pl.items():  # pyright: ignore[reportOptionalMemberAccess]
                     try:
                         rk = int(getattr(it, 'ratingKey', 0) or 0)
                         if rk:
@@ -38397,7 +38409,7 @@ def _build_playlist_membership_map(plex):
     return out
 
 
-def _plex_dt_to_epoch(value):
+def _plex_dt_to_epoch(value: object) -> int | None:
     """Normalize a Plex datetime-ish value to a unix epoch int (or None).
 
     Plex returns datetime objects for addedAt/lastViewedAt/lastRatedAt and
@@ -38418,7 +38430,8 @@ def _plex_dt_to_epoch(value):
     return None
 
 
-def _snapshot_plex_item_state(plex, obj, playlist_map):
+def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
+                              playlist_map: dict[int, list[str]]) -> dict[str, Any]:
     """Capture all preservable state for the cache obj of one item.
 
     Dates: cross-library moves get a FRESH Plex ratingKey with reset
@@ -38433,7 +38446,8 @@ def _snapshot_plex_item_state(plex, obj, playlist_map):
     original so the value is never lost from our own records.
     """
     rk = int(obj.get('id') or 0)
-    snap = {
+    # Any: the snapshot is the state file's JSON payload
+    snap: dict[str, Any] = {
         'labels':         list(obj.get('labels') or []),
         'collections':    list(obj.get('collections') or []),
         'viewCount':      obj.get('viewCount') or 0,
@@ -38466,12 +38480,14 @@ def _snapshot_plex_item_state(plex, obj, playlist_map):
                     snap['originallyAvailableAt'] = oaa.strftime('%Y-%m-%d')
                 except (AttributeError, ValueError):
                     snap['originallyAvailableAt'] = str(oaa)[:10] or None
+            # plexapi types fetchItem() Optional (an element of unknown type
+            # builds None); a None raises here, as it did
             try:
-                snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})
+                snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})  # pyright: ignore[reportOptionalMemberAccess]
             except PLEX_ERRORS:
                 pass
             try:
-                snap['collections'] = sorted({c.tag for c in (item.collections or [])})
+                snap['collections'] = sorted({c.tag for c in (item.collections or [])})  # pyright: ignore[reportOptionalMemberAccess]
             except PLEX_ERRORS:
                 pass
         except PLEX_ERRORS as e:
@@ -38479,9 +38495,10 @@ def _snapshot_plex_item_state(plex, obj, playlist_map):
     return snap
 
 
-def _restore_plex_item_state(plex, new_rk, snap, dest_library):
+def _restore_plex_item_state(plex: PlexServer | None, new_rk: int | str | None, snap: dict[str, Any],
+                             dest_library: str) -> list[str]:
     """Re-apply snapshot to the new ratingKey.  Returns list of error strings."""
-    errors = []
+    errors: list[str] = []
     if plex is None or not new_rk:
         return ['plex API unavailable or new_rk missing']
     try:
@@ -38489,16 +38506,18 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     except PLEX_ERRORS as e:
         return [f'fetchItem({new_rk}): {e}']
 
+    # plexapi types fetchItem() / playlist() Optional (an element of unknown
+    # type builds None); a None raises at its use below, as it did
     for lab in (snap.get('labels') or []):
-        try: item.addLabel(lab)
+        try: item.addLabel(lab)  # pyright: ignore[reportOptionalMemberAccess]
         except PLEX_ERRORS as e: errors.append(f'addLabel({lab!r}): {e}')
 
     if snap.get('userRating'):
-        try: item.rate(float(snap['userRating']))
+        try: item.rate(float(snap['userRating']))  # pyright: ignore[reportOptionalMemberAccess]
         except PLEX_ERRORS as e: errors.append(f'rate({snap["userRating"]}): {e}')
 
     if (snap.get('viewCount') or 0) > 0:
-        try: item.markPlayed()
+        try: item.markPlayed()  # pyright: ignore[reportOptionalMemberAccess]
         except PLEX_ERRORS as e: errors.append(f'markPlayed: {e}')
 
     # Dates.  Plex's metadata edit endpoint accepts addedAt (epoch int) and
@@ -38510,13 +38529,13 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     _added = snap.get('addedAt')
     if _added:
         try:
-            item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})
+            item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})  # pyright: ignore[reportOptionalMemberAccess]
         except PLEX_ERRORS as e:
             errors.append(f'edit(addedAt={_added}): {e}')
     _oaa = snap.get('originallyAvailableAt')
     if _oaa:
         try:
-            item.edit(**{'originallyAvailableAt.value': str(_oaa),
+            item.edit(**{'originallyAvailableAt.value': str(_oaa),  # pyright: ignore[reportOptionalMemberAccess]
                          'originallyAvailableAt.locked': 1})
         except PLEX_ERRORS as e:
             errors.append(f'edit(originallyAvailableAt={_oaa}): {e}')
@@ -38524,7 +38543,7 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     for pl_title in (snap.get('playlists') or []):
         try:
             pl = plex.playlist(pl_title)
-            pl.addItems([item])
+            pl.addItems([item])  # pyright: ignore[reportOptionalMemberAccess]
         except PLEX_ERRORS as e:
             errors.append(f'playlist({pl_title!r}).addItems: {e}')
 
@@ -38553,7 +38572,8 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     return errors
 
 
-def _cleanup_emptied_source_collections(plex, drained_pairs, quiet=False):
+def _cleanup_emptied_source_collections(plex: PlexServer | None, drained_pairs: set[tuple[str, str]],
+                                        quiet: bool = False) -> int:
     """Delete Plex Collections that we just drained to empty by moving
     their last member(s) out.  Only deletes collections WE emptied —
     queries live Plex to confirm zero items remain before deletion.
@@ -38591,7 +38611,7 @@ def _cleanup_emptied_source_collections(plex, drained_pairs, quiet=False):
     return n_deleted
 
 
-def _replay_pending_move_state(plex, quiet=False):
+def _replay_pending_move_state(plex: PlexServer | None, quiet: bool = False) -> tuple[int, int]:
     """Drain any pending move-state files left from prior runs.
 
     For files at status 'moved' we attempt restore (looks up the new
@@ -38601,7 +38621,7 @@ def _replay_pending_move_state(plex, quiet=False):
     source library that we just drained to zero members is auto-deleted.
     """
     from datetime import datetime as _dtm
-    _drained_source_pairs = set()   # (old_library, collection_title)
+    _drained_source_pairs: set[tuple[str, str]] = set()   # (old_library, collection_title)
     d = _move_state_dir()
     try:
         entries = sorted(os.listdir(d))
@@ -38632,7 +38652,7 @@ def _replay_pending_move_state(plex, quiet=False):
         new_fp = st.get('new_filepath')
         if not new_fp:
             continue
-        new_rk = None
+        new_rk: int | None = None
         try:
             # Strategy 1: exact filepath lookup.
             _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
@@ -38743,7 +38763,8 @@ def _replay_pending_move_state(plex, quiet=False):
     return n_restored, n_failed
 
 
-def cmd_move(args_list, dry_run=False, force=False, yes=False):
+def cmd_move(args_list: list[str], dry_run: bool = False, force: bool = False,
+             yes: bool = False) -> tuple[int, int, int]:
     """v1.6: --mv / --move — move media files (and siblings) to another Plex library.
 
     Args:
@@ -38826,7 +38847,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
     # Collect movable items (Movies / Episodes from cache, plus uncatalogued
     # Folder entries from the layout-aware filter — see _resolve_scope_filter_expr).
-    movables = []
+    movables: list[tuple[str, ScopeRecord, str, str, list[str]]] = []
     for cache_key, obj in items:
         type_str = obj.get('type_str', '') or obj.get('type', '')
         # Multi-version items carry a trailing '*' in type_str (e.g.
@@ -38922,8 +38943,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     # v2.69: build {ratingKey: [playlist_title]} ONCE so per-item snapshot is O(1).
     # Cross-library moves issue NEW ratingKeys; without this map the Plex
     # Playlist membership is silently dropped.
-    _plex_for_snapshot = None
-    _playlist_membership = {}
+    _plex_for_snapshot: PlexServer | None = None
+    _playlist_membership: dict[int, list[str]] = {}
     if not dry_run and not READ_ONLY_MODE:
         _plex_for_snapshot = ensure_plex_api(required=False)
         if _plex_for_snapshot is not None:
@@ -38931,11 +38952,12 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             if _playlist_membership:
                 print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
     # Track state files written this run so the final restore pass can find them.
-    _state_files_written = []
+    _state_files_written: list[str] = []
     # v2.18: session log — every per-item outcome recorded for audit history.
     # Written to /tmp/my-plex.move-log.<UTC-ISO>.json at the end of cmd_move.
     from datetime import datetime as _dtm
-    _move_log = {
+    # Any: the session log's JSON payload
+    _move_log: dict[str, Any] = {
         'started_at':  _dtm.now().isoformat(timespec='seconds'),
         'dest_lib':    dest_lib,
         'dry_run':     bool(dry_run),
@@ -38943,7 +38965,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         'yes':         bool(yes),
         'ops':         [],   # list of dicts: key/type/src_lib/dest_lib/src/dest/status/error
     }
-    def _log_op(status, cache_key='', obj=None, src='', dest='', error=''):
+    def _log_op(status: str, cache_key: str = '', obj: ScopeRecord | None = None, src: str = '',
+                dest: str = '', error: str = '') -> None:
         _move_log['ops'].append({
             'ts':       _dtm.now().isoformat(timespec='seconds'),
             'key':      cache_key,
@@ -38995,7 +39018,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             global _LAYOUT_INDEX_CACHE
             if _LAYOUT_INDEX_CACHE is not None:
                 # Remove from old library's index
-                old_rp = src_lib
+                _old_rp = src_lib
                 for rp_norm, entries in _LAYOUT_INDEX_CACHE.items():
                     if folder_base in entries and folder_path.startswith(rp_norm + '/'):
                         del entries[folder_base]
@@ -39007,7 +39030,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         year = obj.get('year','') or ''
 
         # Duplicate check (Plex title + originalTitle + year, within dest lib)
-        dup_keys = []
+        dup_keys: list[str] = []
         for k in PLEX_Media.OBJ_BY_LIBRARY.get(dest_lib, {}).get(type_str, []):
             o = PLEX_Media.OBJ_BY_ID.get(k)
             if not o:
@@ -39069,7 +39092,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
 
         # Resolve source library rootpath (pick the one a filepath lives under)
         src_locations = locations_by_lib.get(src_lib, [])
-        src_root = None
+        src_root: str | None = None
         for loc in src_locations:
             loc_norm = loc.rstrip('/')
             for fp in filepaths:
@@ -39096,20 +39119,21 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         # the SEASON folder, which contains many sibling episodes that
         # shouldn't all relocate together.
         item_failed = False
-        moved_filepaths = []
+        moved_filepaths: list[tuple[str, str]] = []
         moved_as_wrapper = False
 
         # v2.69: snapshot durable state BEFORE the file move.  Plex will
         # assign a NEW ratingKey post-scan, so the snapshot is the only
         # link between the old item's Playlists/Collections/Labels/
         # view-state/rating and the post-move item.
-        _state_file_path = None
+        _state_file_path: str | None = None
         if not dry_run and not READ_ONLY_MODE:
             _old_rk = int(obj.get('id') or 0)
             if _old_rk:
                 try:
                     _snap = _snapshot_plex_item_state(_plex_for_snapshot, obj, _playlist_membership)
-                    _state = {
+                    # Any: the state file's JSON payload
+                    _state: dict[str, Any] = {
                         'version':       1,
                         'created_at':    _dtm.now().isoformat(timespec='seconds'),
                         'status':        'snapshotted',
@@ -39131,7 +39155,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                                       or _snap.get('playlists') or _snap.get('userRating')
                                       or (_snap.get('viewCount') or 0) > 0)
                     if _has_state:
-                        _bits = []
+                        _bits: list[str] = []
                         if _snap.get('labels'):      _bits.append(f"labels={len(_snap['labels'])}")
                         if _snap.get('collections'): _bits.append(f"collections={len(_snap['collections'])}")
                         if _snap.get('playlists'):   _bits.append(f"playlists={len(_snap['playlists'])}")
@@ -39376,7 +39400,14 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     return (n_moved, n_skipped, n_errors)
 
 
-def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
+if TYPE_CHECKING:
+    # One planned cross-library movie move:
+    # (key, obj, src_lib, dst_lib, src_wrapper, dst_wrapper, rule_idx)
+    _MovieRoutePlanEntry: TypeAlias = tuple[str, ScopeRecord, str, str, str, str, int]
+
+
+def _sort_new_movies(dry_run: bool = False, target: str | None = None, yes: bool = False,
+                     force: bool = False) -> tuple[int, int, int]:
     """v2.24+: route MOVIES across libraries per SORT_NEW_MOVIE_ROUTES.
 
     For each rule (ordered, first match wins) resolves the source-library
@@ -39409,8 +39440,8 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
 
     # Phase 1: build plan.  Each entry:
     #   (key, obj, src_lib, dst_lib, src_wrapper_abs, dst_wrapper_abs, rule_idx)
-    plan = []
-    claimed = set()
+    plan: list[_MovieRoutePlanEntry] = []
+    claimed: set[str] = set()
     for i, rule in enumerate(routes):
         src = rule.get('from')
         dst = rule.get('to')
@@ -39461,9 +39492,9 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
         return (0, 0, 0)
 
     # Phase 2: preview.  One flat list grouped by destination.
-    def _print_plan(plan_to_show):
+    def _print_plan(plan_to_show: list[_MovieRoutePlanEntry]) -> None:
         print(f"\n{'='*76}\n>>> {len(plan_to_show)} movie(s) queued for cross-library moves:\n{'='*76}")
-        _by_dst = {}
+        _by_dst: dict[str, list[_MovieRoutePlanEntry]] = {}
         for entry in plan_to_show:
             _by_dst.setdefault(entry[3], []).append(entry)
         for dst, items in sorted(_by_dst.items()):
@@ -39528,7 +39559,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 finally:
                     try: os.remove(tmp_path)
                     except OSError: pass
-                new_plan = []
+                new_plan: list[_MovieRoutePlanEntry] = []
                 _by_key = {entry[0]: entry for entry in plan}
                 for ln in edited_lines:
                     parts = ln.split('\t')
@@ -39558,9 +39589,9 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     # SSH mv.  Mirrors cmd_move's state-preservation: Plex assigns NEW
     # ratingKeys post-rescan and Playlists/Collections/Labels would
     # otherwise be silently dropped.
-    _plex_for_snapshot = None
-    _playlist_membership = {}
-    _state_files_written = []
+    _plex_for_snapshot: PlexServer | None = None
+    _playlist_membership: dict[int, list[str]] = {}
+    _state_files_written: list[tuple[str, str, str, str]] = []
     from datetime import datetime as _dtm
     if not dry_run and not READ_ONLY_MODE:
         _plex_for_snapshot = ensure_plex_api(required=False)
@@ -39579,7 +39610,8 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 if not _old_rk:
                     continue
                 _snap = _snapshot_plex_item_state(_plex_for_snapshot, _obj, _playlist_membership)
-                _state = {
+                # Any: the state file's JSON payload
+                _state: dict[str, Any] = {
                     'version':       1,
                     'created_at':    _dtm.now().isoformat(timespec='seconds'),
                     'status':        'snapshotted',
@@ -39598,7 +39630,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 }
                 _path = _move_state_write(_state)
                 _state_files_written.append((_path, _key, _sw, _dw))
-                _bits = []
+                _bits: list[str] = []
                 if _snap.get('labels'):      _bits.append(f"labels={len(_snap['labels'])}")
                 if _snap.get('collections'): _bits.append(f"collections={len(_snap['collections'])}")
                 if _snap.get('playlists'):   _bits.append(f"playlists={len(_snap['playlists'])}")
@@ -39612,7 +39644,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     # Phase 4: bulk SSH mv.  ONE session.  Per-op outcome on its own
     # stdout line so we can attribute MOVED/FAILED back to plan entries.
     import subprocess
-    bulk = []
+    bulk: list[str] = []
     # `mv -n` (no-clobber) skips duplicates; `mv -f` (force) overwrites the
     # existing wrapper.  --force flips to overwrite.  Cross-library duplicate
     # detection is now responsibility of the user via the edit step + this
@@ -39645,8 +39677,8 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     # Phase 5: cache invalidation.  Plex assigns NEW IDs on cross-library
     # re-scan; remove the OLD cache entries so --update-cache cleanly picks
     # up the destinations.  Pair each plan entry with its outcome line.
-    affected_libs = set()
-    moved_keys = []
+    affected_libs: set[str] = set()
+    moved_keys: list[str] = []
     for (key, obj, src, dst, _sw, _dw, _ri), outcome in zip(plan, outcomes):
         if outcome.strip() != 'MOVED':
             continue
@@ -39727,7 +39759,8 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
         import json as _json
         from datetime import datetime as _dtm
         _path = f"/tmp/my-plex.sort-new.{_dtm.now().strftime('%Y-%m-%dT%H-%M-%S')}.json"
-        _log = {
+        # Any: the session log's JSON payload
+        _log: dict[str, Any] = {
             'started_at': _dtm.now().isoformat(timespec='seconds'),
             'routes': routes,
             'ops': [],
@@ -39751,7 +39784,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     return (n_moved, 0, n_errors)
 
 
-def _season_token_match(name):
+def _season_token_match(name: str) -> tuple[str, int] | None:
     """Detect a Rings-of-Power-style season token in a directory basename.
 
     Matches SORT_NEW_SEASON_TOKEN_REGEX (case-insensitive) and CUTS the
@@ -39773,7 +39806,8 @@ def _season_token_match(name):
     return series_name, int(season_digits)
 
 
-def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=False):
+def _sort_new_consolidate_season_wrappers(all_series_list: Sequence[tuple[str, MediaRecord | CollectionRecord, str]],
+                                          dry_run: bool = False, yes: bool = False) -> set[str]:
     """--sort-new phase 0: consolidate season-token release wrappers.
 
     A release wrapper is a SERIES directory whose basename carries a
@@ -39817,7 +39851,7 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
     scoped_libraries = {lib for _key, _dict, lib in all_series_list}
     lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
     library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
-    wrapper_dirs = {}   # wrapper_dir → (series_key, library_name, season token)
+    wrapper_dirs: dict[str, tuple[str, str, tuple[str, int]]] = {}   # wrapper_dir → (series_key, library_name, season token)
     for series_key, series_dict, library_name in all_series_list:
         wrapper_dir = series_dict.get('file', '')
         _token = _season_token_match(os.path.basename(wrapper_dir)) if wrapper_dir else None
@@ -39841,7 +39875,7 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
                                      episode_obj.get('library', ''),
                                      _token))
 
-    candidates = []   # (series_key, library_name, wrapper_dir, dest_series_dir, dest_season_dir, moves, trashes)
+    candidates: list[tuple[str, str, str, str, str, list[tuple[str, str]], list[str]]] = []   # (series_key, library_name, wrapper_dir, dest_series_dir, dest_season_dir, moves, trashes)
     for wrapper_dir, (series_key, library_name, token) in sorted(wrapper_dirs.items()):
         series_name, season_number = token
         season_dir_name = f's{season_number:02d}'
@@ -39863,7 +39897,8 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
             continue   # neither flat nor cleanly-layered → leave alone
         dest_series_dir = os.path.join(os.path.dirname(wrapper_dir), series_name)
         dest_season_dir = os.path.join(dest_series_dir, season_dir_name)
-        moves, trashes = [], []
+        moves: list[tuple[str, str]] = []
+        trashes: list[str] = []
         for src_path in sorted(file_list):
             relative = os.path.relpath(src_path, wrapper_dir)
             parts = relative.split(os.sep)
@@ -39906,11 +39941,11 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
             return set()
 
     sidecar = load_disk_map_sidecar()
-    consolidated_keys = set()
-    log_entries = []
+    consolidated_keys: set[str] = set()
+    log_entries: list[dict[str, str | None]] = []
     moved_total = trashed_total = failed_total = 0
 
-    def _move_one(src_path, dest_path):
+    def _move_one(src_path: str, dest_path: str) -> bool:
         dest_dir = os.path.dirname(dest_path)
         if remote_host:
             escaped_dir = shlex.quote(dest_dir)
@@ -40028,7 +40063,7 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
     return consolidated_keys
 
 
-def cmd_sort_new(args, dry_run=False, target=None):
+def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None) -> None:
     """Sort unsorted recordings into season directories for all series.
 
     Scans all series directories in series-type libraries for unsorted video files
@@ -40072,7 +40107,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
     total_sorted = 0
     total_failed = 0
     total_series_processed = 0
-    series_summaries = []  # (series_key, library_name, series_title, unsorted_count, sorted_count, failed_count, skipped_count)
+    series_summaries: list[tuple[str, str, str, int, int, int, int]] = []  # (series_key, library_name, series_title, unsorted_count, sorted_count, failed_count, skipped_count)
 
     remote_host = PLEX_DB_REMOTE_HOST
 
@@ -40092,7 +40127,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             _sxxeyy_re = re.compile(SORT_NEW_SXXEYY_REGEX, re.IGNORECASE)
             print(f"\n{series_key}: [{library_name}] [{series_title}] --redo: scanning subtree …")
             ok, file_list = my_plex_file_operation('LIST_DIR', series_dir_server, remote_host, maxdepth=10)
-            unsort_planned = []
+            unsort_planned: list[tuple[str, str, str]] = []
             if ok and file_list:
                 for fp in file_list:
                     base = fp.rsplit('/', 1)[-1]
@@ -40148,13 +40183,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
         # touch_mode of the location it was found in, so _sort_move can
         # leave a zero-byte placeholder if requested.
         # Candidate tuple: (filename, src_path_server, touch_mode, location_path)
-        unsorted = []
-        seen_files = set()  # dedupe across locations (top-to-bottom first wins)
+        unsorted: list[tuple[str, str, str | None, str]] = []
+        seen_files: set[str] = set()  # dedupe across locations (top-to-bottom first wins)
         for location_path, touch_mode in _parse_sort_new_locations():
             scan_dir_server = (series_dir_server if location_path == '.'
                                else os.path.join(series_dir_server, location_path))
             scan_dir_local = get_local_path(scan_dir_server) if use_local else None
-            files_here = []
+            files_here: list[tuple[str, str | None, str]] = []
             if use_local and scan_dir_local and os.path.isdir(scan_dir_local):
                 try:
                     files_here = [(fn, os.path.join(scan_dir_local, fn), os.path.join(scan_dir_server, fn))
@@ -40214,7 +40249,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
             print(f"  {ep_source.upper()}: {len(all_episodes)} episodes in {max_s} season(s)")
 
         # Build date lookup: date_str -> (season, episode, title)
-        date_lookup = {}
+        date_lookup: dict[str, tuple[int, int, str]] = {}
         if all_episodes:
             for ep in all_episodes:
                 date_lookup[ep['date']] = (ep['season'], ep['episode'], ep.get('title', ''))
@@ -40230,9 +40265,9 @@ def cmd_sort_new(args, dry_run=False, target=None):
             has_specials_script = False  # Can't run local scripts via SSH
 
         # Touch mode is set by the enclosing for-loop, read here.  None / 'main' / 'all'.
-        _current_touch_mode = None
+        _current_touch_mode: str | None = None
 
-        def _sort_move(src_server, target_dir_server, new_name):
+        def _sort_move(src_server: str, target_dir_server: str, new_name: str) -> bool:
             """mkdir + move via SSH (plus same-stem sidecar files like .nfo /
             .srt / artwork).  Returns True on success of the main file's mv.
 
@@ -40267,7 +40302,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 ok_ls, files_in_src_dir = my_plex_file_operation('LIST_DIR', src_dir, remote_host, maxdepth=1)
             except (OSError, subprocess.SubprocessError):
                 ok_ls, files_in_src_dir = False, []
-            moved_sidecar_src_paths = []
+            moved_sidecar_src_paths: list[str] = []
             if ok_ls and files_in_src_dir:
                 for sib_path in files_in_src_dir:
                     sib_base = os.path.basename(sib_path)
@@ -40307,13 +40342,13 @@ def cmd_sort_new(args, dry_run=False, target=None):
         sorted_count = 0
         failed_count = 0
         skipped_count = 0  # files skipped because no SxxEyy could be assigned with certainty
-        dry_run_lines = []  # (sort_key, line) for sorted dry-run output
+        dry_run_lines: list[tuple[int, int, str]] = []  # (sort_key, line) for sorted dry-run output
 
         # v2.53: per-season episode-number counter that increments PER CALL.
         # Without this, dry-run + back-to-back calls within one run all
         # return E01 because the disk doesn't yet have the planned files.
-        _ep_counters = {}
-        def _take_next_ep(target_dir_server, season):
+        _ep_counters: dict[str, int] = {}
+        def _take_next_ep(target_dir_server: str, season: int) -> int:
             key = target_dir_server
             if key not in _ep_counters:
                 _ep_counters[key] = _next_episode_in_dir(target_dir_server, season, remote_host=remote_host)
@@ -40323,7 +40358,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
 
         # Determine max episode number per season from cache (for absolute numbering detection)
         series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
-        max_ep_per_season = {}
+        max_ep_per_season: dict[str, int] = {}
         for s_str, eps in series_episodes.items():
             for e_str in eps:
                 try:
@@ -40345,7 +40380,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 ep_num = int(sxex_match.group(2))
                 target_dir = os.path.join(series_dir, f"s{season:02d}")
                 new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                target_path = os.path.join(target_dir, new_name)
+                _target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
@@ -40365,7 +40400,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 ep_num = int(nxnn_match.group(2))
                 target_dir = os.path.join(series_dir, f"s{season:02d}")
                 new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                target_path = os.path.join(target_dir, new_name)
+                _target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
@@ -40405,7 +40440,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             ep_num = candidate_ep
                             target_dir = os.path.join(series_dir, f"s{season:02d}")
                             new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                            target_path = os.path.join(target_dir, new_name)
+                            _target_path = os.path.join(target_dir, new_name)
 
                             if dry_run:
                                 dry_run_lines.append((season, ep_num, f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}"))
@@ -40428,7 +40463,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     season = 1
                     target_dir = os.path.join(series_dir, f"s{season:02d}")
                     new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                    target_path = os.path.join(target_dir, new_name)
+                    _target_path = os.path.join(target_dir, new_name)
 
                     if dry_run:
                         dry_run_lines.append((season, ep_num, f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}"))
@@ -40552,7 +40587,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                         ep_num = matched_ep['episode']
                         target_dir = os.path.join(series_dir, f"s{season:02d}")
                         new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                        target_path = os.path.join(target_dir, new_name)
+                        _target_path = os.path.join(target_dir, new_name)
                         if dry_run:
                             dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
                         else:
@@ -40598,7 +40633,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     target_dir = os.path.join(series_dir, 'specials')
                     ep_num = _take_next_ep(target_dir, 0)
                     new_name = PLEX_Media._build_sxex_filename(0, ep_num, fn)
-                    target_path = os.path.join(target_dir, new_name)
+                    _target_path = os.path.join(target_dir, new_name)
                     if dry_run:
                         dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
                     else:
@@ -40625,7 +40660,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                 season, ep_num, title = result
                 target_dir = os.path.join(series_dir, f"s{season:02d}")
                 new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                target_path = os.path.join(target_dir, new_name)
+                _target_path = os.path.join(target_dir, new_name)
 
                 if dry_run:
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
@@ -40670,7 +40705,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
     movie_sorted = 0
     movie_failed = 0
     movie_libs_processed = 0
-    movie_summaries = []  # (lib_name, bare_count, sorted_count, failed_count)
+    movie_summaries: list[tuple[str, int, int, int]] = []  # (lib_name, bare_count, sorted_count, failed_count)
 
     for lib_name, lib_type in PLEX_Library.OBJ_DICT_TYPE.items():
         if lib_type != 'Movie':
@@ -40701,14 +40736,14 @@ def cmd_sort_new(args, dry_run=False, target=None):
             # all_root_files) and remember the touch_mode so a placeholder
             # can be left after the move if configured.
             # Per-iteration: (scan_dir_server, bare_files_list, all_files_set, touch_mode)
-            location_scans = []
+            location_scans: list[tuple[str, list[str], list[str], str | None]] = []
             for location_path, touch_mode in _parse_sort_new_locations():
                 scan_dir_server = (lib_root_server if location_path == '.'
                                    else os.path.join(lib_root_server, location_path))
                 scan_dir_local = get_local_path(scan_dir_server) if root_use_local else None
                 # scan_dir_local is None unless root_use_local, so this is the whole test
-                bare_files_local = []
-                all_files_local = []
+                bare_files_local: list[str] = []
+                all_files_local: list[str] = []
                 if scan_dir_local and os.path.isdir(scan_dir_local):
                     try:
                         for fn in os.listdir(scan_dir_local):
@@ -40777,7 +40812,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                             lib_failed_count += 1
                             continue
 
-                        moved_paths = []
+                        moved_paths: list[tuple[str, bool]] = []
                         move_ok = True
                         for f in all_files:
                             src_server = os.path.join(scan_dir_server, f)
@@ -40834,7 +40869,7 @@ def cmd_sort_new(args, dry_run=False, target=None):
                     print(f"  [{lib_name}] {bare_count} movie file(s) without directory, {status}")
 
             # Totals
-            parts = []
+            parts: list[str] = []
             if total_series_processed > 0:
                 parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_series_processed} series")
             if movie_libs_processed > 0:
