@@ -1141,7 +1141,7 @@ if _dropped:
           f"it would point the suite at another config", file=sys.stderr)
 
 
-def config_search_paths(config_file=None):
+def config_search_paths(config_file: str | None = None) -> list[tuple[str, str]]:
     """Every place a config can come from, in read order, as (source, path).
 
     SOURCE is '$MY_PLEX_CONFIG', '--config' or CONFIG_INHERITED_SOURCE for
@@ -1161,7 +1161,7 @@ def config_search_paths(config_file=None):
     return default_config_paths()
 
 
-def default_config_paths():
+def default_config_paths() -> list[tuple[str, str]]:
     """The default locations, as (layer, path) in read order -- what is
     searched when nobody named a file."""
     user = [os.path.join(_home(), n) for n in USER_CONFIG_NAMES]
@@ -1210,16 +1210,16 @@ def no_config_offer() -> str:
     return "\n".join(lines)
 
 
-def _global_first(paths):
+def _global_first(paths: list[str]) -> list[str]:
     """PATHS ordered for a farm that links a config from both trees: the one
     whose link points into a global/ tree first, told by the target and never
     by the name -- the farm may give the global file the plain name."""
-    def is_global(p):
+    def is_global(p: str) -> bool:
         return '/global/' in os.path.realpath(p)
     return sorted(paths, key=lambda p: (not is_global(p), paths.index(p)))
 
 
-def _changeable_by_another(path, st) -> str:
+def _changeable_by_another(path: str, st: os.stat_result) -> str:
     """Why another user than root could change PATH (its stat ST), or ''.
     Root, and in the suite the euid it runs as, count as root."""
     if st.st_uid not in (0, os.geteuid()):
@@ -1229,7 +1229,7 @@ def _changeable_by_another(path, st) -> str:
     return ''
 
 
-def _config_text_as_root(source, path):
+def _config_text_as_root(source: str, path: str) -> str | None:
     """As root, the text of the config PATH -- SOURCE says where it came from
     ('--config names', 'the site config') -- or None when it may not be run.
 
@@ -1243,7 +1243,7 @@ def _config_text_as_root(source, path):
     prints, a warning, and the file is not read."""
     import stat as _stat
     real = os.path.realpath(path)
-    dirs = []
+    dirs: list[str] = []
     d = os.path.dirname(real)
     while d not in dirs:
         dirs.insert(0, d)
@@ -1267,7 +1267,12 @@ def _config_text_as_root(source, path):
     return None
 
 
-def config_layers(config_file=None):
+# Which of the two config layers a file read belongs to -- or 'named', a file
+# someone named for this run, read alone.
+ConfigLayer = Literal['named', 'site', 'user']
+
+
+def config_layers(config_file: str | None = None) -> list[tuple[ConfigLayer, str]]:
     """The files to read, as [(layer, path)] in read order: ('named', FILE)
     alone, or the site files then the user's -- none in a test run.
 
@@ -1313,7 +1318,7 @@ def config_layers(config_file=None):
     site = ([q for q in in_farm if _dangling(q)]
             + _global_first([q for q in in_farm if os.path.exists(q)]))
     if not any(os.path.exists(q) for q in site):
-        site += _first_real([q] for q in SYSTEM_CONFIG_PATHS)
+        site += _first_real([[q] for q in SYSTEM_CONFIG_PATHS])
     # Root reads the site config alone: it cannot know whose home to look in
     # (RUN_AS_USER comes from the site config).  Every file root reads -- a
     # site file as much as a named one -- must be root's alone: load_config_file
@@ -1330,20 +1335,21 @@ def config_layers(config_file=None):
                + "  Merge them into one, and make the other a link to it or remove it.")
         if _config_must_stop(msg):
             err("00025", msg)
-    user = _first_real([u] for u in users)
-    return [('site', s) for s in site] + [('user', u) for u in user]
+    user = _first_real([[u] for u in users])
+    layers: list[tuple[ConfigLayer, str]] = [('site', s) for s in site]
+    return layers + [('user', u) for u in user]
 
 
-def _dangling(path) -> bool:
+def _dangling(path: str) -> bool:
     """True when PATH is a link that points nowhere."""
     return os.path.lexists(path) and not os.path.exists(path)
 
 
-def _first_real(names) -> list[str]:
+def _first_real(names: list[list[str]]) -> list[str]:
     """The search through NAMES, each a group of paths read together: every
     path that is there, up to the first group with a real file in it -- so
     the dangling links passed on the way stay, for the loader to name."""
-    out = []
+    out: list[str] = []
     for group in names:
         out += [p for p in group if os.path.lexists(p)]
         if any(os.path.exists(p) for p in group):
@@ -1351,7 +1357,7 @@ def _first_real(names) -> list[str]:
     return out
 
 
-def _config_must_stop(msg=''):
+def _config_must_stop(msg: str = '') -> bool:
     """True when a config problem must stop this run; in a run that only
     prints it is a warning instead, printed here, and the run goes on."""
     if _PRINT_ONLY_RUN:
@@ -1369,7 +1375,14 @@ def _config_must_stop(msg=''):
 # not, each with why it was not read ('' when it was): a dangling link the
 # search passed over, or (in a run that only prints) a file that failed to
 # run, or (as root) one not root's alone.
-CONFIG_RECORD = {'files': [], 'chosen': [], 'origin': {}, 'set_by': {}}
+class ConfigRecord(TypedDict):
+    files: list[tuple[ConfigLayer, str]]           # read, in order
+    chosen: list[tuple[ConfigLayer, str, str]]     # chosen, with why not read ('' = read)
+    origin: dict[str, str]                         # key -> the file whose value wins
+    set_by: dict[str, list[str]]                   # key -> every file that set it
+
+
+CONFIG_RECORD: ConfigRecord = {'files': [], 'chosen': [], 'origin': {}, 'set_by': {}}
 
 
 # A macOS Plex server's standard database path, for a server run by user
@@ -1378,8 +1391,9 @@ CONFIG_RECORD = {'files': [], 'chosen': [], 'origin': {}, 'set_by': {}}
 PLEX_DB_PATH_EXAMPLE = ('/Users/plexuser/Library/Application Support/Plex Media Server/'
                         'Plug-in Support/Databases/com.plexapp.plugins.library.db')
 
-# Default configuration values
-CONFIG_DEFAULTS = {
+# Default configuration values.  Any: a config is the user's own Python, run by
+# exec(), so a value can be of any type; each global taking one names its use.
+CONFIG_DEFAULTS: dict[str, Any] = {
     # Plex Server Configuration
     'PLEX_URL': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
     'PLEX_TOKEN': '< PLEASE CONFIGURE /or/ USE PLEX_XML_URL >',
@@ -2120,7 +2134,7 @@ ISO_639_1_TO_2 = {
 # returns a multi-line block via pprint.pformat, with each line prefixed
 # by `# ` so the whole block stays commented out (the user uncomments
 # the entire block when opting in).
-def _fmt_default(var_name, value, indent='# '):
+def _fmt_default(var_name: str, value: object, indent: str = '# ') -> str:
     import pprint as _pp
     one_line = f"{var_name} = {value!r}"
     if len(one_line) <= 70 and '\n' not in one_line:
@@ -3257,7 +3271,7 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 # EDITOR = {CONFIG_DEFAULTS['EDITOR']!r}
 """
 
-def load_config_file(config_file=None):
+def load_config_file(config_file: str | None = None) -> dict[str, Any]:
     """Read every config file config_layers() names, in order, into ONE
     namespace that starts from the defaults -- so a later file can extend an
     earlier value (`X = X + [...]`), and a plain assignment replaces it
@@ -3274,8 +3288,8 @@ def load_config_file(config_file=None):
     """
     import copy
     import dis
-    def snap(ns):
-        out = {}
+    def snap(ns: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
         for k, v in ns.items():
             if k.isupper() and not k.startswith('_'):
                 try:
@@ -3284,11 +3298,11 @@ def load_config_file(config_file=None):
                     out[k] = v
         return out
 
-    ns = {k: copy.deepcopy(v) for k, v in CONFIG_DEFAULTS.items()}
-    origin = {}
-    set_by = {}
-    files = []
-    chosen = []
+    ns: dict[str, Any] = {k: copy.deepcopy(v) for k, v in CONFIG_DEFAULTS.items()}
+    origin: dict[str, str] = {}
+    set_by: dict[str, list[str]] = {}
+    files: list[tuple[ConfigLayer, str]] = []
+    chosen: list[tuple[ConfigLayer, str, str]] = []
     for layer, path in config_layers(config_file):
         if not os.path.exists(path):
             print(f"Warning: config link {path} -> {os.readlink(path)} points nowhere "
@@ -3310,7 +3324,7 @@ def load_config_file(config_file=None):
             exec(code, ns)
         except Exception as e:  # the config is the user's own Python: whatever it raises is the config's
             where = f"line {e.lineno}: " if isinstance(e, SyntaxError) and e.lineno else ""
-            if isinstance(e, Exception) and e.__traceback__ is not None and not where:
+            if e.__traceback__ is not None and not where:
                 tb = [fr for fr in __import__('traceback').extract_tb(e.__traceback__) if fr.filename == path]
                 where = f"line {tb[-1].lineno}: " if tb else ""
             msg = (f"a config file did not run: {path}"
@@ -3351,7 +3365,7 @@ def load_config_file(config_file=None):
     CONFIG_RECORD['set_by'] = set_by
     return {k: ns[k] for k in origin}
 
-def apply_config(loaded_config) -> None:
+def apply_config(loaded_config: dict[str, Any]) -> None:
     """Set this module's globals from LOADED_CONFIG (load_config_file()'s
     return), each key it does not set back to its default.  The one place
     a loaded config becomes the values the tool runs with: main() calls it,
@@ -3404,10 +3418,16 @@ UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_
 UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME']
 UNMATCHED_RESOLVE_TITLE_NORMALIZE = CONFIG_DEFAULTS['UNMATCHED_RESOLVE_TITLE_NORMALIZE']
 
-# Compiled cache for UNMATCHED_RESOLVE_TITLE_NORMALIZE (lazy).
-_UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED = None
+# Plain data: what a config, a pickle or a JSON payload holds.  A value read
+# from one is Any (CONFIG_DEFAULTS, pickle.load, json.load); code that checks
+# its shape with isinstance() first gives it this type, so the check narrows
+# it to dict[Any, Any], say -- isinstance() on Any narrows to dict[Unknown].
+PlainData = str | int | float | bool | list[Any] | tuple[Any, ...] | dict[Any, Any] | None
 
-def _apply_unmatched_title_normalize(s):
+# Compiled cache for UNMATCHED_RESOLVE_TITLE_NORMALIZE (lazy).
+_UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED: list[tuple[re.Pattern[str], str]] | None = None
+
+def _apply_unmatched_title_normalize(s: str) -> str:
     """Apply UNMATCHED_RESOLVE_TITLE_NORMALIZE rules (extra user regexes)
     on top of the built-in cleanup.  Returns the input unchanged when
     rules are empty or when the result collapses to whitespace.
@@ -3416,8 +3436,9 @@ def _apply_unmatched_title_normalize(s):
     if not s:
         return s
     if _UNMATCHED_RESOLVE_TITLE_NORMALIZE_COMPILED is None:
-        out = []
-        for entry in (UNMATCHED_RESOLVE_TITLE_NORMALIZE or ()):
+        out: list[tuple[re.Pattern[str], str]] = []
+        for entry_v in (UNMATCHED_RESOLVE_TITLE_NORMALIZE or ()):
+            entry: PlainData = entry_v
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 print(f"  > WARNING: UNMATCHED_RESOLVE_TITLE_NORMALIZE entry {entry!r} ignored: not a 2-tuple", file=sys.stderr)
                 continue
@@ -3446,9 +3467,12 @@ SORT_NEW_SCAN_LOCATIONS = CONFIG_DEFAULTS['SORT_NEW_SCAN_LOCATIONS']
 SORT_NEW_SXXEYY_REGEX = CONFIG_DEFAULTS['SORT_NEW_SXXEYY_REGEX']
 SORT_NEW_SEASON_TOKEN_REGEX = CONFIG_DEFAULTS['SORT_NEW_SEASON_TOKEN_REGEX']
 
-_SORT_NEW_LOCATIONS_COMPILED = None  # lazy: [(path_str, touch_mode), …]
+# What --sort-new touches in a scan location: its main file, or all.
+SortNewTouchMode = Literal['main', 'all']
 
-def _parse_sort_new_locations():
+_SORT_NEW_LOCATIONS_COMPILED: list[tuple[str, SortNewTouchMode | None]] | None = None  # lazy: [(path_str, touch_mode), …]
+
+def _parse_sort_new_locations() -> list[tuple[str, SortNewTouchMode | None]]:
     """Normalize SORT_NEW_SCAN_LOCATIONS into [(path, touch_mode), …].
 
     touch_mode is one of None, 'main', 'all'.  Invalid entries are
@@ -3458,8 +3482,11 @@ def _parse_sort_new_locations():
     global _SORT_NEW_LOCATIONS_COMPILED
     if _SORT_NEW_LOCATIONS_COMPILED is not None:
         return _SORT_NEW_LOCATIONS_COMPILED
-    out = []
-    for entry in (SORT_NEW_SCAN_LOCATIONS or ()):
+    out: list[tuple[str, SortNewTouchMode | None]] = []
+    for entry_v in (SORT_NEW_SCAN_LOCATIONS or ()):
+        entry: PlainData = entry_v
+        mode_str: object
+        touch_mode: SortNewTouchMode | None
         if isinstance(entry, str):
             path, mode_str = entry, None
         elif isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[0], str):
@@ -3495,9 +3522,9 @@ DISK_PLEX_MAP = CONFIG_DEFAULTS['DISK_PLEX_MAP']
 # Plex Server credentials
 # Note: PLEX_URL, PLEX_TOKEN, PLEX_XML_URL have placeholder values in CONFIG_DEFAULTS
 # They must be set via config file or command-line arguments
-PLEX_URL = None  # Will be set from config file or command-line if provided
-PLEX_TOKEN = None  # Will be set from config file or command-line if provided
-PLEX_XML_URL = None  # Will be set from config file or command-line if provided
+PLEX_URL: str | None = None  # Will be set from config file or command-line if provided
+PLEX_TOKEN: str | None = None  # Will be set from config file or command-line if provided
+PLEX_XML_URL: str | None = None  # Will be set from config file or command-line if provided
 PLEX_TIMEOUT = CONFIG_DEFAULTS['PLEX_TIMEOUT']
 
 # Plex Database Direct Access Configuration
@@ -3605,9 +3632,9 @@ MULTI_VERSION_MAX_DURATION_SPREAD_PCT = CONFIG_DEFAULTS.get('MULTI_VERSION_MAX_D
 JUNK_PATTERNS = CONFIG_DEFAULTS.get('JUNK_PATTERNS', {})
 
 # Compiled JUNK_PATTERNS cache: {name: (scope, compiled_regex_or_None, max_bytes_or_0, recursive_bool)}
-_JUNK_PATTERNS_COMPILED = None
+_JUNK_PATTERNS_COMPILED: dict[str, tuple[str, re.Pattern[str] | None, int, bool | None]] | None = None
 
-def _parse_yes_no(val, default=None):
+def _parse_yes_no(val: object, default: bool | None = None) -> bool | None:
     """Accept 'yes'/'no'/True/False/'true'/'false'/1/0 (case-insensitive).
     Returns True / False / `default` when unparseable."""
     if val is True or val is False:
@@ -3622,7 +3649,7 @@ def _parse_yes_no(val, default=None):
             return False
     return default
 
-def _compile_junk_patterns():
+def _compile_junk_patterns() -> dict[str, tuple[str, re.Pattern[str] | None, int, bool | None]]:
     """Validate + compile JUNK_PATTERNS into _JUNK_PATTERNS_COMPILED.
     Invalid patterns are skipped with a stderr warning.
     Returns the compiled dict {name: (scope, regex_or_None, max_bytes, recursive)}.
@@ -3630,12 +3657,14 @@ def _compile_junk_patterns():
     global _JUNK_PATTERNS_COMPILED
     if _JUNK_PATTERNS_COMPILED is not None:
         return _JUNK_PATTERNS_COMPILED
-    out = {}
-    if not isinstance(JUNK_PATTERNS, dict):
-        print(f"  > WARNING: JUNK_PATTERNS must be a dict, got {type(JUNK_PATTERNS).__name__} — feature disabled.", file=sys.stderr)
+    out: dict[str, tuple[str, re.Pattern[str] | None, int, bool | None]] = {}
+    patterns: PlainData = JUNK_PATTERNS
+    if not isinstance(patterns, dict):
+        print(f"  > WARNING: JUNK_PATTERNS must be a dict, got {type(patterns).__name__} — feature disabled.", file=sys.stderr)
         _JUNK_PATTERNS_COMPILED = out
         return out
-    for name, spec in JUNK_PATTERNS.items():
+    for name, spec_v in patterns.items():
+        spec: PlainData = spec_v
         if not isinstance(spec, dict):
             print(f"  > WARNING: JUNK_PATTERNS[{name!r}] must be a dict — skipping.", file=sys.stderr)
             continue
@@ -3682,10 +3711,10 @@ MISPLACED_MAX_EPISODES       = 5     # max total episodes (trilogy/quadrilogy/qu
 # {'mbps': X} sets threshold in Megabits/second; {'mb_per_hour': X} in MB/hr.
 _MB_PER_HOUR_PER_MBPS = 450.0  # 1 Mbps × 3600 s/hr ÷ 8 = 450 MB/hr
 _reencode_threshold = CONFIG_DEFAULTS.get('REENCODE_THRESHOLD', {'mbps': 2.5})
-_candidates = []
+_candidates: list[float] = []
 if 'mbps'         in _reencode_threshold: _candidates.append(float(_reencode_threshold['mbps']))
 if 'mb_per_hour'  in _reencode_threshold: _candidates.append(float(_reencode_threshold['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
-REENCODE_THRESHOLD_MBPS = min(_candidates) if _candidates else 2.5  # if both given, use lower (stricter)
+REENCODE_THRESHOLD_MBPS: float = min(_candidates) if _candidates else 2.5  # if both given, use lower (stricter)
 
 # v1.4: --remux + extended --reencode (see CONFIG_DEFAULTS comments above).
 OUTDATED_CONTAINERS      = tuple(s.lower() for s in CONFIG_DEFAULTS.get('OUTDATED_CONTAINERS', ()))
@@ -3713,9 +3742,9 @@ DEFAULT_SCOPE = CONFIG_DEFAULTS['DEFAULT_SCOPE']
 CLI_TEXT_NORMALIZE_REGEX = CONFIG_DEFAULTS['CLI_TEXT_NORMALIZE_REGEX']
 
 # Compiled cache for CLI_TEXT_NORMALIZE_REGEX — lazily built on first use.
-_CLI_TEXT_NORMALIZE_COMPILED = None
+_CLI_TEXT_NORMALIZE_COMPILED: list[tuple[re.Pattern[str], str]] | None = None
 
-def _normalize_text(s):
+def _normalize_text(s: str) -> str:
     """Apply CLI_TEXT_NORMALIZE_REGEX rules chained via re.sub to produce
     ONE normalized variant of `s`. Returns the original `s` unchanged
     when the result collapses to empty/whitespace (defensive guard
@@ -3729,7 +3758,8 @@ def _normalize_text(s):
         return s
     if _CLI_TEXT_NORMALIZE_COMPILED is None:
         _CLI_TEXT_NORMALIZE_COMPILED = []
-        for entry in (CLI_TEXT_NORMALIZE_REGEX or ()):
+        for entry_v in (CLI_TEXT_NORMALIZE_REGEX or ()):
+            entry: PlainData = entry_v
             if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 continue
             try:
@@ -3782,10 +3812,10 @@ CACHE_CHECKPOINT_INTERVAL = CONFIG_DEFAULTS['CACHE_CHECKPOINT_INTERVAL']  # Save
 
 US = "my-plex"  # the command's name in usage lines: the launcher's, whatever file holds this code
 
-CACHE = {} # global cache object - content written to / read from CACHE_FILE
+CACHE: dict[str, Any] = {} # global cache object - content written to / read from CACHE_FILE (a pickle payload)
 CACHE_LOADED = False # to know if we already loaded the cache
 
-EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{}, 'language_distribution':{} }
+EMPTY_LIBRARY_STATS: dict[str, dict[str, Any]] = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'episodesCount':{}, 'totalDuration':{}, 'totalStorage':{}, 'agent':{}, 'language':{}, 'locations':{}, 'language_distribution':{} }
 # language_distribution: per-library audio-language index, populated during
 # --update-cache from each item's audio_languages[0].
 #   {lib_title: {lang_code: [obj_keys, ...]}}
@@ -3796,7 +3826,7 @@ EMPTY_LIBRARY_STATS = { 'updatedAt':{}, 'plexUpdatedAt':{}, 'itemsCount':{}, 'ep
 #     no "mixed" flag, so multi-language is opt-in via the value 'MULTI'
 #     in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY config)
 #   - O(1) lang:<code> filtering in _list_filtered
-EMPTY_CACHE = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
+EMPTY_CACHE: dict[str, Any] = { 'media_objs': {}, 'library_stats': EMPTY_LIBRARY_STATS, 'plex_labels_index': {}, 'ondisk_labels_index': {} }
 
 GLOBAL_CMD_PARSER: Any = None # will hold the global_cmd_parser
 PLEX_SERVER: Any = None # server instance will be set where needed
@@ -3806,7 +3836,8 @@ PLEX_CONNECT_ERROR: str | None = None  # why the last connect failed (set only b
 PARSER = 'arg-parser'
 FN     = 'doit-function'
 DETECT = 'detect-function'
-PLEXOBJ = {             # Store the corresponding information for each PLEXOBJ_TYPE:
+# Any: per key a different kind -- an argparse parser, or one of the class's functions.
+PLEXOBJ: dict[str, dict[str, Any]] = {             # Store the corresponding information for each PLEXOBJ_TYPE:
     PARSER : {},        # PLEXOBJ[PARSER][OBJ_TYPE] = corresponding argparse parser for this OBJ_TYPE
     FN     : {},        # PLEXOBJ[FN][OBJ_TYPE]     = corresponding python function to call for this OBJ_TYPE 
     DETECT : {}         # PLEXOBJ[DETECT][OBJ_TYPE] = corresponding detection function for this OBJ_TYPE
@@ -3872,7 +3903,7 @@ MEDIA MANAGEMENT:
 # Map plexapi's lowercase type strings to our internal type names.
 # Plex uses "show" internally; we use "Series" everywhere.
 _PLEX_TYPE_MAP = {'show': 'Series', 'movie': 'Movie', 'season': 'Season', 'episode': 'Episode', 'collection': 'Collection'}
-def _plex_type(plex_type_str):
+def _plex_type(plex_type_str: str) -> str:
     """Convert plexapi type string (e.g. 'show') to our internal type (e.g. 'Series')."""
     return _PLEX_TYPE_MAP.get(plex_type_str, plex_type_str.capitalize())
 
@@ -3909,11 +3940,11 @@ _GENRE_NORM = {
     'news': 'News',
 }
 
-def _normalize_genre(g):
+def _normalize_genre(g: object) -> str:
     """Return canonical English genre name; fall back to original if no mapping."""
     return _GENRE_NORM.get(str(g).lower(), str(g))
 
-def _normalize_genres(genres):
+def _normalize_genres(genres: list[object] | None) -> list[str]:
     """Normalize a list of genre tags to canonical English proper-case names."""
     return [_normalize_genre(g) for g in (genres or [])]
 
@@ -3925,7 +3956,7 @@ def _normalize_genres(genres):
 _AUDIO_LANG_UNKNOWN = 'unknown'
 _AUDIO_LANG_UNKNOWN_PLEX_CODES = frozenset({'und', 'mis', 'mul', 'zxx', ''})
 
-def _normalize_audio_languages(langs):
+def _normalize_audio_languages(langs: list[str] | None) -> list[str]:
     """Map Plex's audio-language list to my-plex's canonical form.
 
     Rules:
@@ -3937,8 +3968,8 @@ def _normalize_audio_languages(langs):
     """
     if not langs:
         return [_AUDIO_LANG_UNKNOWN]
-    seen = set()
-    out = []
+    seen: set[str] = set()
+    out: list[str] = []
     for l in langs:
         code = str(l).lower().strip()
         if code in _AUDIO_LANG_UNKNOWN_PLEX_CODES:
@@ -3995,22 +4026,23 @@ SCOPE SELECTORS  (for commands marked with [SCOPE])
 #### PRINT HELP
 ###########################################################################################
 
-def main_print_help_of_subparsers(parser):
-    # retrieve subparsers from parser
-    subparsers_actions = [
-        action for action in parser._actions 
-        if isinstance(action, argparse._SubParsersAction) ]
+def main_print_help_of_subparsers(parser: argparse.ArgumentParser) -> None:
+    # retrieve subparsers from parser -- argparse has no public way to list them
+    subparsers_actions: list[argparse.Action] = [
+        action for action in parser._actions  # pyright: ignore[reportPrivateUsage]
+        if isinstance(action, argparse._SubParsersAction) ]  # pyright: ignore[reportPrivateUsage]
     # there will probably only be one subparser_action,
     # but better safe than sorry
     for subparsers_action in subparsers_actions:
         # get all subparsers and print help
-        for choice, subparser in subparsers_action.choices.items():
+        choices: dict[str, argparse.ArgumentParser] = getattr(subparsers_action, 'choices')
+        for choice, subparser in choices.items():
             print()
             if DBG: print("{DBGPFX}Subparser '{}'".format(choice))
             print(subparser.format_help())
 
 
-def main_print_help(args, remaining_args, main_parser):
+def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_parser: argparse.ArgumentParser) -> None:
     global GLOBAL_CMD_PARSER, FORCE_CACHE_UPDATE
     if DBG: print( f"{DBGPFX}len(sys.argv)={len(sys.argv)}." )
     # Don't show help if --update-cache, --verify-cache, or --info is provided (allow standalone commands)
@@ -7540,6 +7572,8 @@ def main_print_help(args, remaining_args, main_parser):
             print()
             print("=" * 76)
             sys.exit(0)
+        case _:
+            pass  # a pipeline's name or an object type: below
 
     # v3 step 4d: --help <pipeline-name> — per-pipeline page rendered from
     # PIPELINES dict so user-defined pipelines are documented for free.
@@ -7563,7 +7597,8 @@ def main_print_help(args, remaining_args, main_parser):
             print("  Default pipeline — override in ~/.my-plex.conf via PIPELINES dict.")
         print()
         print(f"Phases ({len(_phases)}):")
-        for _i, _phase in enumerate(_phases, 1):
+        for _i, _phase_v in enumerate(_phases, 1):
+            _phase: PlainData = _phase_v
             if isinstance(_phase, (list, tuple)):
                 _cmd = ' '.join(_phase)
             else:
@@ -7595,7 +7630,7 @@ _shutdown_requested = False
 # rather than guessing.  0 until one arrives.
 _shutdown_signum = 0
 
-def _graceful_shutdown_handler(signum, _frame):
+def _graceful_shutdown_handler(signum: int, _frame: object) -> None:
     """Handle SIGINT (Ctrl+C) and SIGTERM (kill) - set flag so workers exit gracefully.
     For --update-cache: first Ctrl+C saves checkpoint, second forces exit.
     For other operations: first Ctrl+C exits immediately.
@@ -7644,7 +7679,7 @@ def _graceful_shutdown_handler(signum, _frame):
 signal.signal(signal.SIGINT, _graceful_shutdown_handler)
 signal.signal(signal.SIGTERM, _graceful_shutdown_handler)
 
-def prompt_yes_no(question):
+def prompt_yes_no(question: str) -> bool:
     """
     Prompt user with a yes/no question, respecting AUTO_YES and AUTO_NO global flags.
 
@@ -7734,7 +7769,7 @@ def _meant_flag(word: str, known: "set[str]") -> "str | None":
     hits = [k for k in known if k.startswith(stem)]
     return hits[0] if len(hits) == 1 else None
 
-def _flag_hint(arg):
+def _flag_hint(arg: str) -> str:
     """What to say after "Invalid flag ARG": the name that replaced it, or
     where to look."""
     if arg in _RENAMED_FLAGS:
@@ -7770,7 +7805,7 @@ def _words_beside_create_config(argv: 'list[str]', file: 'str | None') -> 'list[
         i += 1
     return beside
 
-def _remote_kind(host):
+def _remote_kind(host: str) -> Literal['address', 'host']:
     """'address' for a literal IP, 'host' for a name.  One owner: the Plex
     server and the SSH endpoint both have to answer it, and my-little-snitch
     takes a different flag for each."""
@@ -7782,7 +7817,7 @@ def _remote_kind(host):
         return 'host'
 
 
-def _ssh_remote():
+def _ssh_remote() -> tuple[str, Literal['address', 'host'], int] | None:
     """The Plex server's SSH endpoint, as a rule needs it: (remote, kind, port).
 
     my-plex runs ssh for every direct DB read and every file operation on the
@@ -7811,7 +7846,7 @@ def _ssh_remote():
     return (eff['hostname'], _remote_kind(eff['hostname']), int(eff.get('port') or 22))
 
 
-def _parse_db_remote(value):
+def _parse_db_remote(value: str | None) -> tuple[str, str, int] | None:
     """'user@host[:port]' -> (user, host, port), None when empty.  A value
     of any other shape stops the run: guessing a host to ssh to is worse
     than asking."""
@@ -7824,7 +7859,7 @@ def _parse_db_remote(value):
     return (m.group(1), m.group(2), int(m.group(3) or 22))
 
 
-def _ssh_path(path):
+def _ssh_path(path: str) -> str:
     """PATH as ssh reads it from a config: a leading `~/` is the RUNNING
     user's home from the password database, as ssh expands it -- not $HOME,
     which a sudo or a test may have changed."""
@@ -7834,12 +7869,12 @@ def _ssh_path(path):
     return path
 
 
-def _ssh_value(line):
+def _ssh_value(line: str) -> str:
     """The value of one ssh config line -- `IdentityFile "a b"` -> 'a b'."""
     return line.strip().split(None, 1)[1].strip().strip('"') if len(line.split()) > 1 else ''
 
 
-def _ssh_effective(alias):
+def _ssh_effective(alias: str) -> dict[str, str] | None:
     """What ssh would use for ALIAS -- {hostname, user, port, identityfile}
     -- from `ssh -G`, which reads the config and connects to nothing.  None
     when ssh cannot be asked."""
@@ -7849,7 +7884,7 @@ def _ssh_effective(alias):
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    eff = {}
+    eff: dict[str, str] = {}
     for line in out.splitlines():
         k, _sep, v = line.partition(' ')
         if k in ('hostname', 'user', 'port') or (k == 'identityfile' and k not in eff):
@@ -7857,7 +7892,7 @@ def _ssh_effective(alias):
     return eff or None
 
 
-def _plex_remote():
+def _plex_remote() -> tuple[str, Literal['address', 'domain', 'host'], int] | None:
     """The Plex SERVER as a firewall rule needs it: (remote, kind, port).
 
     It comes from the CONFIG -- PLEX_API_REMOTE, 'host[:port]', else the host
@@ -7888,7 +7923,7 @@ def _plex_remote():
     """
     from urllib.parse import urlparse
 
-    def _configured(value):
+    def _configured(value: str | None) -> str:
         value = (value or '').strip()
         # the '< PLEASE CONFIGURE ... >' placeholders are not a URL
         return '' if value.startswith('<') else value
@@ -7923,7 +7958,7 @@ def _plex_remote():
     return (host, 'host', port)
 
 
-def _install_db_remote():
+def _install_db_remote() -> tuple[str, str, int]:
     """PLEX_DB_REMOTE parsed, which both halves of --install require: the
     ssh rule's host and port (root) and the Host entry (the user) come from
     it.  Without it, an ERROR naming the files read."""
@@ -8024,7 +8059,7 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
     remote = tail[0]
     port = int(tail[tail.index('--port') + 1]) if '--port' in tail else 443
 
-    def stored(path):
+    def stored(path: str) -> str:
         # my-little-snitch's own form of a program: a framework Python
         # connects as its Python.app, and Homebrew's version folder is `*`
         # (a patch upgrade keeps the rule, a minor one does not).  Applied to
@@ -8035,12 +8070,12 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
 
     this_python = stored(os.path.realpath(sys.executable))
 
-    def stops_program(process):
+    def stops_program(process: str) -> bool:
         return process == 'any' or any(
             stored(name) == this_python or (program == 'ssh' and os.path.basename(name) == 'ssh')
             for name in process.split(' via '))
 
-    def stops_port(spec):
+    def stops_port(spec: str) -> bool:
         proto, _slash, ports = spec.partition('/')
         if spec == 'any' or (proto in ('any', 'tcp') and ports == 'any'):
             return True
@@ -8052,7 +8087,8 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
                 return True
         return False
 
-    removable, kept = [], []
+    removable: list[tuple[str, str]] = []
+    kept: list[tuple[str, str]] = []
     for line in listing.splitlines():
         rid, tab, rule = line.partition('\t')
         cols = re.split(r' {2,}', rule.strip())
@@ -8069,7 +8105,7 @@ def _deny_ids(listing: str, program: str, tail: "list[str]",
     return removable, kept
 
 
-def _run_firewall_tool(argv, stdin=None):
+def _run_firewall_tool(argv: list[str], stdin: str | None = None) -> tuple[int, str]:
     """One my-little-snitch call: (rc, its stdout and stderr together).  A
     tool that cannot be started at all is an ERROR naming LITTLE_SNITCH_CLI."""
     try:
@@ -8182,7 +8218,7 @@ def install_firewall(config_file: "str | None" = None) -> "tuple[str, str | None
     print(f"     (Little Snitch names a run from a shell \"Terminal via Python\")")
     written = there = 0
     for program, tail, why in remotes:
-        rcs = []
+        rcs: list[int] = []
         for argv in ([cli, 'allow', 'go', program, *tail, '--owner', user],
                      [cli, 'allow', 'go', 'any', *tail, '--via', program, '--owner', user]):
             rc, out = _run_firewall_tool(argv)
@@ -8206,7 +8242,7 @@ def install_firewall(config_file: "str | None" = None) -> "tuple[str, str | None
     return user, named
 
 
-def _little_snitch_remotes():
+def _little_snitch_remotes() -> list[tuple[str, list[str], str]]:
     """Every remote my-plex connects to: (program, argv tail, why).
 
     PROGRAM is what opens the socket, which is what a firewall names: this
@@ -8220,7 +8256,7 @@ def _little_snitch_remotes():
     API, the SSH endpoint and pip were all missing from --install while
     --help promised "one per host it connects to".
     """
-    def _kinded(remote, kind, port):
+    def _kinded(remote: str, kind: str, port: int) -> list[str]:
         tail = [remote]
         if kind == 'address':
             tail.append('--address')
@@ -8249,14 +8285,14 @@ def _little_snitch_remotes():
     return remotes
 
 
-def _ssh_config_file():
+def _ssh_config_file() -> str:
     """The ssh config --install adds its Include to: SSH_CONFIG_FILE, else
     ~/.ssh/config of the run's HOME."""
     return (os.path.expanduser(SSH_CONFIG_FILE) if SSH_CONFIG_FILE
             else os.path.join(_home(), '.ssh', 'config'))
 
 
-def _write_atomically(path, text, mode=0o600):
+def _write_atomically(path: str, text: str, mode: int = 0o600) -> None:
     """PATH -- a symlink followed to its target -- replaced in one rename,
     its mode kept (MODE for a new file): no ssh ever reads half a file."""
     import tempfile
@@ -8276,12 +8312,12 @@ def _write_atomically(path, text, mode=0o600):
         raise
 
 
-def _ssh_blocks(lines):
+def _ssh_blocks(lines: list[str]) -> list[tuple[int, int, list[str] | None]]:
     """[(start, end, patterns)] for each Host/Match block in LINES; a Match
     block has patterns None.  END is exclusive, trailing blank lines left out."""
     heads = [(i, ln.split()) for i, ln in enumerate(lines)
              if ln.strip() and ln.split()[0].lower() in ('host', 'match')]
-    out = []
+    out: list[tuple[int, int, list[str] | None]] = []
     for n, (i, words) in enumerate(heads):
         end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
         while end > i + 1 and not lines[end - 1].strip():
@@ -8290,7 +8326,7 @@ def _ssh_blocks(lines):
     return out
 
 
-def _install_ssh_entry(remote):
+def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migrated', 'unchanged']:
     """The ssh half of --install: make PLEX_DB_REMOTE_HOST resolve to
     PLEX_DB_REMOTE, through a Host block in my-plex's own ~/.ssh/my-plex.conf
     and ONE Include line at the top of the ssh config.  Returns the outcome
@@ -8333,7 +8369,8 @@ def _install_ssh_entry(remote):
     eff = _ssh_effective(alias) or {}
     resolves = bool(eff.get('hostname')) and eff.get('hostname') != alias
 
-    carried, migrated_from = [], None
+    carried: list[str] = []
+    migrated_from: tuple[int, int, list[str]] | None = None
     if found:
         s, e, pats = found[0]
         if len(pats) > 1 or len(found) > 1:
@@ -8400,7 +8437,7 @@ def _install_ssh_entry(remote):
                        [f"#   {ln}" for ln in migrated_from[2]]
     text = "\n".join(kept_comment + body + ["",
                      "# back to every host for whatever follows this file", "Host *", ""])
-    outcome = 'unchanged'
+    outcome: Literal['written', 'migrated', 'unchanged'] = 'unchanged'
     if text != "\n".join(old_ours) + ("\n" if old_ours else ""):
         _write_atomically(ours, text)
         outcome = 'migrated' if migrated_from else 'written'
@@ -8470,19 +8507,19 @@ def _config_path_text(path: str) -> str:
     return f"{path} -> {os.readlink(path)}" if os.path.islink(path) else path
 
 
-def _config_file_label(path):
+def _config_file_label(path: str) -> str:
     """A config file as a message names it: its layer, then the path."""
     layer = next((l for l, p in CONFIG_RECORD['files'] if p == path), '?')
     return f"{_LAYER_LABEL.get(layer, layer)}: {_config_path_text(path)}"
 
 
-def _config_origin(key):
+def _config_origin(key: str) -> str:
     """Where KEY's value came from, for a message: the file, or 'default'."""
     path = CONFIG_RECORD['origin'].get(key)
     return _config_file_label(path) if path else 'default'
 
 
-def _config_value_text(key, value) -> str:
+def _config_value_text(key: str, value: Any) -> str:
     """VALUE as --config and -DD print it, never a secret: a secret-named key
     as its length, any other value in Python form with every X-Plex-Token cut
     out -- one nested in a list, tuple, set, bytes or dict too, and a dict
@@ -8490,7 +8527,9 @@ def _config_value_text(key, value) -> str:
     if value and _SECRET_KEY_RE.search(key):
         return str(_redact(key, value))
 
-    def scrub(v: Any) -> Any:
+    # What a config value is meant to be (value is Any: CONFIG_DEFAULTS),
+    # with the bytes and sets a scrub may meet inside one.
+    def scrub(v: PlainData | bytes | set[Any] | frozenset[Any]) -> object:
         if isinstance(v, str):
             return _redact('', v)
         if isinstance(v, bytes):
@@ -8510,12 +8549,12 @@ def _config_value_text(key, value) -> str:
     return repr(scrub(value))
 
 
-def config_applied_line(key, value) -> str:
+def config_applied_line(key: str, value: Any) -> str:
     """-DD's line for a key a config file set: its value and the file."""
     return f"Config applied: {key} = {_config_value_text(key, value)}   ({_config_origin(key)})"
 
 
-def config_report(conf, config_file=None) -> str:
+def config_report(conf: dict[str, Any], config_file: str | None = None) -> str:
     """Bare --config: the files read, in order, then one line per key they
     SET, each with the layer that set it.  CONF is load_config_file()'s
     return; CONFIG_RECORD says which file set what.  Prints no secret."""
@@ -8603,7 +8642,10 @@ def cmd_install() -> NoReturn:
     sys.exit(0)
 
 
-def _build_version_string(duration_ms, width, height, video_codec, audio_codec, filesize, part_id, existing_files=None):
+def _build_version_string(duration_ms: int | str | None, width: int | str | None, height: int | str | None,
+                          video_codec: str | None, audio_codec: str | None, filesize: int | str | None,
+                          part_id: int | str | None,
+                          existing_files: dict[str, FileEntry] | None = None) -> tuple[str, str]:
     """Build a version string for a media file, guaranteed unique within existing_files.
     Format: '60.8min 720x576 (h264 mp3) 439MB'
     On collision: appends ' part#<part_id>' to BOTH the existing and new entry."""
@@ -8633,7 +8675,8 @@ def _get_worker_prefix():
     except (ValueError, IndexError):
         return ""  # Can't parse worker number, skip prefix
 
-def plex_retry_operation(operation, *args, context=None, library=None, **kwargs) -> Any:
+def plex_retry_operation(operation: object, *args: object, context: str | None = None,
+                         library: str | None = None, **kwargs: object) -> Any:
     """
     Generic retry wrapper for any PLEX operation with exponential backoff.
     Handles connection throttling/timeouts. During cache update mode, will reduce
@@ -8752,11 +8795,11 @@ def plex_get_episodes(season, library_title="", series_title=""):
 
 class CacheLock:
     """Context manager for file-based locking to prevent concurrent cache access"""
-    def __init__(self, lock_file):
+    def __init__(self, lock_file: str) -> None:
         self.lock_file = lock_file
-        self.lock_fd = None
+        self.lock_fd: io.TextIOWrapper | None = None
 
-    def write_progress(self, message):
+    def write_progress(self, message: str) -> None:
         """Write progress message directly to the lock file"""
         if self.lock_fd:
             try:
@@ -8771,7 +8814,7 @@ class CacheLock:
                 pass  # Silently ignore write errors
 
     @staticmethod
-    def read_progress(lock_file):
+    def read_progress(lock_file: str) -> str:
         """Read progress message from the lock file"""
         try:
             progress_file = lock_file + ".progress"
@@ -8780,7 +8823,7 @@ class CacheLock:
         except OSError:
             return "Initializing..."
 
-    def __enter__(self):
+    def __enter__(self) -> CacheLock:
         import select
         import sys
 
@@ -8843,7 +8886,8 @@ class CacheLock:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
+                 exc_tb: object) -> Literal[False]:
         if self.lock_fd:
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
@@ -8858,7 +8902,7 @@ class CacheLock:
                 pass
         return False
 
-def load_cache():
+def load_cache() -> None:
     global CACHE, CACHE_FILE, LOCK_FILE, EMPTY_CACHE, CACHE_LOADED
     if CACHE_LOADED: return
     # Load the previous cache from file if it exists
@@ -8883,12 +8927,12 @@ def load_cache():
                         # my-plex ONLY works with new cache format
                         obj_by_id = CACHE.get('obj_by_id', {})
                         old_format_detected = False
-                        old_format_examples = []
+                        old_format_examples: list[str] = []
 
                         for obj in obj_by_id.values():
                             files_dict = obj.get('files', {})
                             if files_dict:
-                                for ver, file_info in files_dict.items():
+                                for _ver, file_info in files_dict.items():
                                     if isinstance(file_info, str):
                                         # Old format detected!
                                         old_format_detected = True
@@ -8947,7 +8991,7 @@ def load_cache():
             CACHE = EMPTY_CACHE.copy()  # Use copy() to avoid modifying the template
     CACHE_LOADED = True
 
-def build_media_cache_dict(include_paths=True, **extra):
+def build_media_cache_dict(include_paths: bool = True, **extra: object) -> dict[str, Any]:
     """Build a cache dict from current PLEX_Media class attributes.
 
     Args:
@@ -8956,7 +9000,7 @@ def build_media_cache_dict(include_paths=True, **extra):
     Returns:
         dict suitable for passing to update_and_save_cache().
     """
-    d = {
+    d: dict[str, Any] = {
         'obj_by_id':             PLEX_Media.OBJ_BY_ID,
         'obj_by_movie':          PLEX_Media.OBJ_BY_MOVIE,
         'obj_by_series':           PLEX_Media.OBJ_BY_SERIES,
@@ -8997,7 +9041,7 @@ def is_library_name(name: str) -> bool:
         _LIBRARY_NAMES_IN_CACHE_FILE = names
     return name in _LIBRARY_NAMES_IN_CACHE_FILE
 
-def load_media_cache(source):
+def load_media_cache(source: dict[str, Any]) -> None:
     """Load media cache structures from a dict (CACHE or partial_cache).
 
     Uses .get() with empty-dict default so missing keys are safe.
@@ -9015,7 +9059,7 @@ def load_media_cache(source):
     # Detect outdated cache format and instruct user to rebuild
     # New OBJ_BY_LIBRARY format: {lib: {type: [keys]}} — values are lists
     # Old format: {lib: {cache_key: obj_dict}} — values are dicts
-    for lib_name, lib_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
+    for _lib_name, lib_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
         if not lib_dict:
             continue
         if any(isinstance(v, dict) for v in lib_dict.values()):
@@ -9066,7 +9110,7 @@ def _write_crash_trace() -> str:
         return f"(could not be written: {write_failure})"
 
 
-def _atomic_pickle_dump(path, data):
+def _atomic_pickle_dump(path: str, data: object) -> None:
     """Write data to path atomically: write to a temp file then rename.
     A crash during write leaves the original untouched (no truncation)."""
     import tempfile
@@ -9082,7 +9126,7 @@ def _atomic_pickle_dump(path, data):
         raise
 
 
-def update_and_save_cache(obj_dict):
+def update_and_save_cache(obj_dict: dict[str, Any]) -> None:
     global CACHE, CACHE_FILE, LOCK_FILE, FORCE_CACHE_UPDATE, READ_ONLY_MODE, OFFLINE
 
     # CRITICAL: Update timestamps to current time + 60s buffer BEFORE merging into CACHE
@@ -9147,7 +9191,8 @@ def update_and_save_cache(obj_dict):
     # Update global CACHE
     # CRITICAL FIX: Only update keys that have non-empty values to prevent overwriting
     # good data with empty dicts if PLEX_Media structures get unexpectedly cleared
-    for key, value in obj_dict.items():
+    for key, value_any in obj_dict.items():
+        value: PlainData | set[Any] = value_any
         # Skip empty collections - they likely indicate a bug elsewhere, not intentional clearing
         if isinstance(value, (dict, list, set)) and len(value) == 0:
             if DBG: print(f"{DBGPFX}update_and_save_cache(): Skipping empty {type(value).__name__} for key '{key}' (preserving existing data)")
@@ -9187,7 +9232,9 @@ def update_and_save_cache(obj_dict):
             _atomic_pickle_dump(CACHE_FILE, CACHE)
         if DBG: print_obj(CACHE, "CACHE (AFTER pickle.dump)", DBGPFX, intro=f"{DBGPFX}update_and_save_cache(): Saved cache to '{CACHE_FILE}'\n", depth=1)
 
-def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
+def print_var(var: dict[Any, Any] | list[Any] | tuple[Any, ...] | str, var_name: str | None = None,
+              prefix: str | None = "", intro: str | None = None, width: int = 80,
+              depth: int | None = None) -> None:
     if intro is not None: print(intro, end='')
     else: intro=""
     if prefix is None: prefix=""
@@ -9197,7 +9244,8 @@ def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
     prefix = prefix + "    "
     if isinstance(var, dict):
         if (len(var)==0): print()
-        for i,(k,v) in enumerate(var.items()):
+        for i,(k,v_any) in enumerate(var.items()):
+            v: PlainData = v_any
             if isinstance(v,dict):
                 if i==0: print()
                 print_var(v, var_name=None, prefix=prefix, intro=f"{prefix}   '{k}' : {type(v)} (len:{len(v)})'")
@@ -9207,7 +9255,10 @@ def print_var(var, var_name=None, prefix="", intro=None, width=80, depth=None):
     else:
         for x in pformat( var, width=width, depth=depth ).split('\n'): print(prefix, x, sep='')
 
-def print_obj(obj, var_name=None, prefix="", intro=None, width=80, depth=None):
+def print_obj(obj: Any, var_name: str | None = None, prefix: str | None = "", intro: str | None = None,
+              width: int = 80, depth: int | None = None) -> None:
+    # Any: whatever object is dumped; a dict's shape is checked below.
+    data: PlainData = obj
     if intro is not None: print(intro, end='')
     if var_name is not None:
         pfx = prefix if (intro is not None and intro.endswith('\n')) else ''
@@ -9215,10 +9266,10 @@ def print_obj(obj, var_name=None, prefix="", intro=None, width=80, depth=None):
     if prefix is None: prefix=""
 
     # Special handling for dictionaries when depth=1 (show first level structure nicely)
-    if isinstance(obj, dict) and depth == 1:
+    if isinstance(data, dict) and depth == 1:
         print(f"{prefix}Dictionary structure (first level):")
-        for key in sorted(obj.keys()):
-            value = obj[key]
+        for key in sorted(data.keys()):
+            value: PlainData = data[key]
             if isinstance(value, dict):
                 print(f"{prefix}  - {str(key):25s} : {len(value):6d} items (dict)")
             elif isinstance(value, list):
@@ -9332,7 +9383,7 @@ def _inject_episode_funcs_into_test_mod():
     for _name in _EPISODE_FUNC_NAMES:
         if _name in globals():
             setattr(_mod, _name, globals()[_name])
-def run_regression_tests(scope=None):
+def run_regression_tests(scope: str | None = None) -> None:
     _inject_episode_funcs_into_test_mod()
     _load_test_mod().run_regression_tests(scope=scope)
 
@@ -9340,7 +9391,7 @@ def run_regression_tests(scope=None):
 ############################################################
 #### PLEX SERVER HELPER FUNCTIONS
 
-def parse_plex_xml_url(xml_url):
+def parse_plex_xml_url(xml_url: str) -> tuple[str, str]:
     """
     Parse a Plex XML URL to extract server URL and token.
     Example input: https://192-168-192-252.37042a2a68964c6597fc54267ed7a413.plex.direct:32400/library/metadata/12345?X-Plex-Token=abc123xyz
@@ -9366,7 +9417,7 @@ def parse_plex_xml_url(xml_url):
         err("00053", f"Failed to parse Plex XML URL: {e}")
 
 # Connect to Plex server API
-def ensure_plex_api(required=True) -> Any:
+def ensure_plex_api(required: bool = True) -> Any:
     """Infrastructure for all API-dependent write/mutate operations.
     Ensure PLEX_SERVER is connected. Lazily connects on first call.
     If required=True (default), raises error when API is unavailable.
@@ -9385,11 +9436,11 @@ def ensure_plex_api(required=True) -> Any:
         err("00055", "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
     return PLEX_SERVER
 
-def _get_active_scan_section_ids(plex):
+def _get_active_scan_section_ids(plex: PlexServer) -> set[str]:
     """Return set of library section IDs that have active library.update.section activities."""
-    active = set()
+    active: set[str] = set()
     try:
-        for activity in plex.activities:
+        for activity in plex.activities:  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- plexapi infers list[Unknown]
             if getattr(activity, 'type', '') == 'library.update.section':
                 context = getattr(activity, 'Context', None)
                 if context is not None:
