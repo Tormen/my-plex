@@ -733,10 +733,11 @@ pyright --pythonpath ~/.python.venv/my-plex/bin/python3
 inside its own venv, and without it pyright cannot resolve `plexapi` or
 `readchar` and reports those imports as errors.
 
-`my-plex --run-tests typecheck` runs the part of this that is already green -- no
-undefined and no possibly-unbound name in `my_plex_boot.py` and `my_plex.py` -- and is skipped when
-pyright is not installed.  The remaining findings are listed in the project's
-TODO.
+Strict is the mode.  The files reach it one at a time: a file joins the
+config's `"strict"` list once strict finds nothing in it, and the others are
+checked in standard mode until then.  `my-plex --run-tests typecheck` fails
+on any finding in `my_plex_boot.py`, `my_plex.py` or `my-plex_tests.py`, and
+is skipped when pyright is not installed.
 
 ## Version and release
 

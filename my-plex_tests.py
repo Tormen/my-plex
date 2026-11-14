@@ -12811,18 +12811,16 @@ class TestBareLibraryScope(unittest.TestCase):
 
 
 class TestTypeCheck(unittest.TestCase):
-    """pyright must report NOTHING about my_plex_boot.py and my_plex.py, under
-    pyrightconfig.json.
+    """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
+    suite, under pyrightconfig.json -- strict for every file on its "strict"
+    list, standard for the others until they join it.
 
     What a type check is worth here, concretely: four NameErrors sat in
     shipped commands until one was first run -- plan_movie and libs_affected
     in cmd_bad_structure_resolve(), i in the ctrl-c handler of
     cmd_original_languages(), _dtm in _replay_pending_move_state() -- each on
     a failure or interrupt path, which is where the command matters most, so
-    none of them ever showed up in ordinary use.
-
-    my-plex_tests.py is NOT asserted: it is not at zero yet, and neither is
-    strict mode.  TODO.local.md tracks both."""
+    none of them ever showed up in ordinary use."""
 
     # The checker's environment, not the code: without my-plex's venv pyright
     # cannot see plexapi or readchar, and says so once per import.
@@ -12836,7 +12834,8 @@ class TestTypeCheck(unittest.TestCase):
         venv_python = os.path.join(os.path.expanduser('~/.python.venv/my-plex'), 'bin', 'python3')
         if os.path.isfile(venv_python):
             cmd += ['--pythonpath', venv_python]
-        r = subprocess.run([*cmd, BOOT_SOURCE, TOOL_SOURCE], capture_output=True, text=True, timeout=300)
+        files = (BOOT_SOURCE, TOOL_SOURCE, os.path.realpath(__file__))
+        r = subprocess.run([*cmd, *files], capture_output=True, text=True, timeout=300)
         # pyright exits 1 whenever it reports anything, so the verdict is the
         # JSON, not the exit status; a crash prints no JSON at all.
         try:
@@ -12849,9 +12848,8 @@ class TestTypeCheck(unittest.TestCase):
                 for d in report.get('generalDiagnostics', [])
                 if d.get('severity') == 'error'
                 and d.get('rule') not in self.ENVIRONMENT_RULES
-                and os.path.realpath(d.get('file', '')) in (os.path.realpath(BOOT_SOURCE),
-                                                            os.path.realpath(TOOL_SOURCE))]
-        self.assertEqual(hits, [], f"pyright reports {len(hits)} finding(s) in the modules:\n  "
+                and os.path.realpath(d.get('file', '')) in map(os.path.realpath, files)]
+        self.assertEqual(hits, [], f"pyright reports {len(hits)} finding(s):\n  "
                                    + "\n  ".join(hits))
 
 

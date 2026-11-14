@@ -7921,7 +7921,7 @@ def _run_firewall_tool(argv, stdin=None):
     return r.returncode, (r.stdout or '') + (r.stderr or '')
 
 
-def install_firewall(config_file=None) -> "tuple[str, str | None]":
+def install_firewall(config_file: "str | None" = None) -> "tuple[str, str | None]":
     """--install's ROOT half: the firewall rules, through my-little-snitch,
     for every remote my-plex connects to.  Returns what the boot module
     hands the rest of --install to: the user, and the config file named for
