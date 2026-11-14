@@ -2219,7 +2219,7 @@ class TestListMethodSplit(unittest.TestCase):
         """PLEX_Media.list() must call the extracted helper methods."""
         content = self._read_script()
         import re
-        match = re.search(r'(def list\(args, obj_args.*?\n.*?)(?=\n    @staticmethod)', content, re.DOTALL)
+        match = re.search(r'(def list\(args[^,]*, obj_args.*?\n.*?)(?=\n    @staticmethod)', content, re.DOTALL)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match, "Must find PLEX_Media.list()")
         body = match.group(1)
@@ -2505,7 +2505,7 @@ class TestExcessVersions(unittest.TestCase):
         """PLEX_Media.list() must accept and dispatch excess_versions."""
         content = self._read_script()
         import re
-        match = re.search(r'def list\(args, obj_args.*?\)', content)
+        match = re.search(r'def list\(args[^,]*, obj_args.*?\)', content)
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         self.assertIn("excess_versions", match.group(0), "list() must accept excess_versions parameter")
