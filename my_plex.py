@@ -17040,6 +17040,7 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
         'actions':  [],
     }
     fixed = skipped = 0
+    changed = 0   # groups whose Plex Collection was created or gained a movie: the cache must follow them
     quit_early = False
 
     for i, (cid, tmdb_name, members, lib_name) in enumerate(candidates, 1):
@@ -17107,6 +17108,7 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
 
         # Create-or-fetch the Plex Collection, then add items.
         existing = None
+        created = False
         try:
             for c in section.collections():
                 if (c.title or '').strip().lower() == coll_name.strip().lower():
@@ -17114,22 +17116,37 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
             if existing is None and _PlexCollection is not None:
                 try:
                     existing = _PlexCollection.create(plex, title=coll_name, section=section, items=items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
+                    created = True
                     print(f"  ✓ created Plex Collection {coll_name!r} with {len(items)} item(s)")
                 except PLEX_ERRORS as _e:
                     print(f"  ⚠ Plex Collection.create({coll_name!r}) failed: {_e}")
                     existing = None
+            added = 0   # the movies now in the Plex Collection
             if existing is not None:
                 try:
                     existing.addItems(items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
+                    added = len(items)
                     print(f"  ✓ added {len(items)} item(s) to Plex Collection {coll_name!r}")
                 except PLEX_ERRORS as _e:
                     # Per-item fallback for older plexapi
+                    print(f"  ⚠ addItems failed ({_e}) -- tagging item by item")
                     for it in items:
                         try:
                             it.addCollection(coll_name)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
-                        except PLEX_ERRORS:
-                            pass
-                    print(f"  ✓ tagged {len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
+                            added += 1
+                        except PLEX_ERRORS as _ie:
+                            print(f"  ⚠ addCollection({coll_name!r}) failed for item {it.ratingKey}: {_ie}")
+                    print(f"  {'✓' if added == len(items) else '⚠'} tagged {added}/{len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
+            if created or added:
+                changed += 1
+            if added < len(items):
+                skipped += 1
+                _why = 'no Plex Collection' if existing is None else f'tagged {added}/{len(items)}'
+                log_payload['actions'].append({
+                    'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name,
+                    'plex_collection': coll_name, 'status': 'fail', 'reason': _why,
+                })
+                continue
             fixed += 1
             log_payload['actions'].append({
                 'tmdb_id': cid, 'tmdb_name': tmdb_name, 'library': lib_name,
@@ -17147,9 +17164,9 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
     # don't need library.update() / wait_for_plex_scan_complete here —
     # the Plex DB already reflects the changes by the time addItems
     # returns.
-    if fixed and not dry_run:
+    if changed and not dry_run:
         print()
-        print(f">>> Refreshing my-plex cache (via subprocess --update-cache) so the {fixed} new Plex Collection(s) are reflected…")
+        print(f">>> Refreshing my-plex cache (via subprocess --update-cache) so the {changed} changed Plex Collection(s) are reflected…")
         update_cache_for_library(None)
 
     log_payload['finished'] = _dt.datetime.now().isoformat(timespec='seconds')
@@ -17159,7 +17176,7 @@ def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: b
     print()
     print("=" * 70)
     print(f"SUMMARY: {fixed} fixed, {skipped} skipped, {len(candidates)} total")
-    if fixed and not dry_run:
+    if changed and not dry_run:
         print(">>> Done.  Cache refreshed in-process — no separate --update-cache needed.")
     if quit_early:
         print(">>> Stopped early (q).")

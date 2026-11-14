@@ -13213,6 +13213,91 @@ class TestDuplicateResolverAutoTrash(unittest.TestCase):
         self.assertEqual(len(applied), 1)
 
 
+class TestUncollectedResolveOutcome(unittest.TestCase):
+    """--uncollected --resolve counts a group as fixed only when every movie
+    of it is in the Plex Collection.  It used to print "tagged N item(s)"
+    and count the group fixed whatever happened: the per-item fallback
+    swallowed every addCollection failure, and a collection whose create
+    failed was counted fixed with nothing added to anything."""
+
+    def _run(self, *, existing: bool, add_items_fails: bool = False,
+             tag_fails: frozenset[int] = frozenset(), create_fails: bool = False) -> tuple[str, list[dict[str, Any]]]:
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        import plexapi.exceptions
+        mp = _main_module()
+        media = mp.PLEX_Media
+        saved = media.OBJ_BY_ID
+        self.addCleanup(setattr, media, 'OBJ_BY_ID', saved)
+        movies = {f'Movie:{i}': _make_movie(i, f'Film {i}', f'/lib/a/film{i}.mkv') for i in (1, 2)}
+        for o in movies.values():
+            o['tmdb_collection_id'] = '77'           # pyright: ignore[reportGeneralTypeIssues]  -- keys MediaRecord does not declare: the TMDB lookup adds them
+            o['tmdb_collection_name'] = 'Saga'       # pyright: ignore[reportGeneralTypeIssues]
+        media.OBJ_BY_ID = movies
+        bad = plexapi.exceptions.BadRequest
+
+        def _item(rk: int) -> object:
+            def _tag(_name: str) -> None:
+                if rk in tag_fails:
+                    raise bad(f'no tag for {rk}')
+            return NS(ratingKey=rk, addCollection=_tag)
+
+        def _add_items(_items: object) -> None:
+            if add_items_fails:
+                raise bad('addItems refused')
+
+        coll = NS(title='Saga', addItems=_add_items)
+        section = NS(collections=lambda: [coll] if existing else [])
+        def _section(_name: str) -> object:
+            return section
+
+        plex = NS(library=NS(section=_section), fetchItem=_item)
+        logged: list[dict[str, Any]] = []
+
+        def _log(_command: str, payload: dict[str, Any]) -> None:
+            logged.append(payload)
+
+        def _create(*_a: object, **_k: object) -> object:
+            if create_fails:
+                raise bad('create refused')
+            return coll
+
+        out = io.StringIO()
+        with mock.patch.object(mp, 'ensure_plex_api', return_value=plex), \
+             mock.patch('plexapi.collection.Collection.create', side_effect=_create), \
+             mock.patch.object(mp, 'update_cache_for_library', return_value=None), \
+             mock.patch.object(mp, '_write_resolve_log', side_effect=_log), \
+             contextlib.redirect_stdout(out):
+            mp.cmd_uncollected_resolve(None, auto=True)
+        return out.getvalue(), logged[0]['actions']
+
+    def test_every_tag_failing_is_not_fixed(self):
+        out, actions = self._run(existing=True, add_items_fails=True, tag_fails=frozenset({1, 2}))
+        self.assertNotIn('✓ tagged', out)
+        self.assertNotIn('Refreshing my-plex cache', out)   # nothing changed in Plex
+        self.assertIn('SUMMARY: 0 fixed, 1 skipped', out)
+        self.assertEqual(actions[0]['status'], 'fail')
+
+    def test_a_partial_tagging_names_the_count_and_is_not_fixed(self):
+        out, actions = self._run(existing=True, add_items_fails=True, tag_fails=frozenset({2}))
+        self.assertIn('tagged 1/2 item(s)', out)
+        self.assertIn('SUMMARY: 0 fixed, 1 skipped', out)
+        self.assertEqual(actions[0]['status'], 'fail')
+        self.assertIn('Refreshing my-plex cache', out)   # one movie did go in: the cache must follow
+
+    def test_a_failed_create_is_not_fixed(self):
+        out, actions = self._run(existing=False, create_fails=True)
+        self.assertIn('SUMMARY: 0 fixed, 1 skipped', out)
+        self.assertEqual(actions[0]['status'], 'fail')
+
+    def test_control_every_movie_added_is_fixed(self):
+        out, actions = self._run(existing=True)
+        self.assertIn('SUMMARY: 1 fixed, 0 skipped', out)
+        self.assertEqual(actions[0]['status'], 'fixed')
+        out, actions = self._run(existing=True, add_items_fails=True)
+        self.assertIn('tagged 2/2 item(s)', out)
+        self.assertEqual(actions[0]['status'], 'fixed')
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18838,7 +18923,8 @@ _UNITTEST_SCOPES = {
     'rename':     [TestRename, TestRenameShared],
     'commands':   [TestNearMissFlag, TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
-                   TestSortNew, TestSortNewSeasonWrapper, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
+                   TestSortNew, TestSortNewSeasonWrapper, TestSortNewScanLocations, TestUnmatched, TestUnsorted,
+                   TestUncollectedResolveOutcome],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection, TestVenvRebuildOnPythonMinor],
