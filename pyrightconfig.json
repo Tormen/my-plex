@@ -14,5 +14,5 @@
   "include": ["my_plex_boot.py", "my_plex.py", "my-plex_tests.py"],
   "exclude": ["playground", "__pycache__"],
   "typeCheckingMode": "standard",
-  "strict": ["my_plex_boot.py"]
+  "strict": ["my_plex_boot.py", "my-plex_tests.py"]
 }
