@@ -16787,6 +16787,60 @@ class TestCreateConfig(unittest.TestCase):
             self.assertIn('overwrites', ln, ln)
 
 
+class TestSqliteHeaderOrder(unittest.TestCase):
+    """query_plex_database's rows keep the FIRST row of the result.
+
+    Apple's sqlite3 3.54 (ada, 2026-11-14) prints no header for
+    `sqlite3 -header -csv`: -csv, coming second, turns the header off again.
+    _parse_csv_to_rows drops line one as the header, so every query lost its
+    first real row -- the schema check found no `id` column in any table, and
+    every --update-cache read one row short.  The stub sqlite3 here behaves
+    as that one does: a header only when -header comes after -csv."""
+
+    def test_the_first_row_survives_a_sqlite3_that_resets_the_header(self):
+        from unittest import mock
+        m = _main_module()
+        d = tempfile.mkdtemp(prefix='my-plex-sqlite-')
+        try:
+            stub = os.path.join(d, 'sqlite3')
+            with open(stub, 'w') as f:
+                f.write('#!/bin/sh\n'
+                        'h=0\n'
+                        'for a; do case $a in -csv) h=0;; -header) h=1;; esac; done\n'
+                        '[ $h = 1 ] && echo "id,tag"\n'
+                        'echo "828,Action"\n'
+                        'echo "333,Adventure"\n')
+            os.chmod(stub, 0o755)
+            db = os.path.join(d, 'library.db')
+            open(db, 'w').close()
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ.get('PATH', ''))
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(m, 'plex_db_path', return_value=db):
+                rows = m.query_plex_database('select id, tag from tags;', mode='rows')
+            self.assertEqual(rows, [('828', 'Action'), ('333', 'Adventure')])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestSchemaCheckStopsTheUpdate(unittest.TestCase):
+    """A failed Plex database schema check stops --update-cache with an
+    ERROR and a non-zero exit.  It returned instead: the run went on to
+    "Cache update complete: no changes" and exited 0 having read nothing
+    (ada, 2026-11-14)."""
+
+    def test_a_failed_schema_check_is_fatal(self):
+        from unittest import mock
+        m = _main_module()
+        with mock.patch.object(m, 'validate_plex_database_schema', return_value=False), \
+             mock.patch.object(m, 'FORCE_CACHE_UPDATE', True), \
+             mock.patch.object(m, 'OFFLINE', False), \
+             mock.patch.object(m, 'get_library_sections_from_database',
+                               side_effect=AssertionError('the update went on past the failed check')):
+            with self.assertRaises(SystemExit) as cm:
+                m.PLEX_Media.update_cache()
+        self.assertNotEqual(cm.exception.code, 0)
+
+
 class TestPlexDbPathRequired(unittest.TestCase):
     """PLEX_DB_PATH has no default: where the database lies is the SERVER's
     business, and a default naming one user's server path is that user's
@@ -16924,7 +16978,7 @@ class TestPlexDbPathRequired(unittest.TestCase):
         r = self.run_cmd(self.conf(f"PLEX_DB_PATH = {path!r}\n"), '--update-cache')
         self.assertNotIn('PLEX_DB_PATH is empty', r.stderr)
         calls = self.ssh_calls()
-        self.assertTrue(any('plex-test-host' in c and f"sqlite3 -header -csv {shlex.quote(path)}" in c
+        self.assertTrue(any('plex-test-host' in c and f"sqlite3 -csv -header {shlex.quote(path)}" in c
                             for c in calls), calls)
 
     def _disk2plex(self, mod: Any, db_path: str, extras: dict[str, str]) -> tuple[list[int], str]:
@@ -18900,7 +18954,7 @@ _UNITTEST_SCOPES = {
     'typecheck':          [TestTypeCheck],
     'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
     'launcher':           [TestLauncherAndModules],
-    'quoting':            [TestRemoteQuoting],
+    'quoting':            [TestRemoteQuoting, TestSqliteHeaderOrder, TestSchemaCheckStopsTheUpdate],
 }
 
 # List of all unittest classes for run_regression_tests()
