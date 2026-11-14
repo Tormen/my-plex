@@ -12043,7 +12043,7 @@ def resolve_disk_map_variables(obj: Mapping[str, Any], cache_key: str | None = N
     var['CONTENT_RATING'] = obj.get('contentRating', '') or ''
 
     # Actors
-    actors = obj.get('actors', []) or []
+    actors: list[str] = obj.get('actors') or []
     var['ACTORS_TOP3'] = ', '.join(actors[:3]) if actors else ''
     var['ACTORS_ALL'] = ', '.join(actors) if actors else ''
     for i in range(3):
@@ -12052,22 +12052,22 @@ def resolve_disk_map_variables(obj: Mapping[str, Any], cache_key: str | None = N
         var[f'ACTOR{i+1}_LN'] = ln
 
     # Countries
-    countries = obj.get('countries', []) or []
+    countries: list[str] = obj.get('countries') or []
     var['COUNTRY'] = countries[0] if countries else ''
     var['COUNTRIES'] = ', '.join(countries) if countries else ''
 
     # Genres
-    genres = obj.get('genres', []) or []
+    genres: list[str] = obj.get('genres') or []
     var['GENRE'] = genres[0] if genres else ''
     var['GENRES'] = ', '.join(genres) if genres else ''
 
     # Directors
-    directors = obj.get('directors', []) or []
+    directors: list[str] = obj.get('directors') or []
     var['DIRECTOR'] = directors[0] if directors else ''
     var['DIRECTORS'] = ', '.join(directors) if directors else ''
 
     # Writers
-    writers = obj.get('writers', []) or []
+    writers: list[str] = obj.get('writers') or []
     var['WRITER'] = writers[0] if writers else ''
     var['WRITERS'] = ', '.join(writers) if writers else ''
 
@@ -12091,7 +12091,7 @@ def resolve_disk_map_variables(obj: Mapping[str, Any], cache_key: str | None = N
     #                    track list, else first track.
     # AUDIO_LANGS      = comma-joined string for printing (e.g. 'de, en')
     # AUDIO_LANGS_LIST = full track list, original order (unaffected by prefs)
-    _alangs = obj.get('audio_languages') or []
+    _alangs: list[str] = obj.get('audio_languages') or []
     _primary = ''
     _prefs: list[str] = PREFERRED_AUDIO_LANGUAGES or []
     for _pref in _prefs:
@@ -12117,15 +12117,15 @@ def resolve_disk_map_variables(obj: Mapping[str, Any], cache_key: str | None = N
     var['SERIES'] = obj.get('series', '') or ''
 
     # External IDs
-    ext_ids = obj.get('external_ids', {}) or {}
+    ext_ids: dict[str, str] = obj.get('external_ids') or {}
     var['IMDB_ID'] = ext_ids.get('imdb', '') or ''
     var['TMDB_ID'] = ext_ids.get('tmdb', '') or ''
     var['TVDB_ID'] = ext_ids.get('tvdb', '') or ''
 
     # Labels and collections (Plex-writable)
-    labels = obj.get('labels', []) or []
+    labels: list[str] = obj.get('labels') or []
     var['LABELS'] = ', '.join(labels) if labels else ''
-    collections = obj.get('collections', []) or []
+    collections: list[str] = obj.get('collections') or []
     var['COLLECTIONS'] = ', '.join(collections) if collections else ''
 
     # series_strategy='bottom_up' — promote markers to the highest uniform
@@ -12868,6 +12868,12 @@ _NAMING_RULE_KEYS = ('template', 'transforms', 'preserve_ext',
                      'preserve_markers', 'preserve_labels')
 
 
+def _is_config_dict(value: object) -> TypeGuard[dict[str, Any]]:
+    """True for a dict: a CONF entry, keyed by the names the user wrote,
+    whose values the caller checks one by one."""
+    return isinstance(value, dict)
+
+
 def validate_naming_rules(
         rules: Mapping[str, object] | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Validate the NAMING_RULES CONF dict.
@@ -12883,14 +12889,14 @@ def validate_naming_rules(
             problems.append(f"NAMING_RULES[{rule_type!r}]: unknown object-type key "
                             f"(known: {', '.join(_NAMING_RULE_TYPES)}) — rule skipped")
             continue
-        if not isinstance(rule, dict):
+        if not _is_config_dict(rule):
             problems.append(f"NAMING_RULES[{rule_type!r}]: entry must be a dict — rule skipped")
             continue
         unknown_keys = [key for key in rule if key not in _NAMING_RULE_KEYS]
         if unknown_keys:
             problems.append(f"NAMING_RULES[{rule_type!r}]: unknown key(s) {unknown_keys} — ignored")
         template = rule.get('template')
-        transforms = rule.get('transforms') or []
+        transforms: Any = rule.get('transforms') or []     # Any: the user's CONF value, checked entry by entry below
         if not template and not transforms:
             problems.append(f"NAMING_RULES[{rule_type!r}]: neither 'template' nor "
                             f"'transforms' present — rule does no work, skipped")
@@ -12904,7 +12910,8 @@ def validate_naming_rules(
                                         f"'.{modifier}' in {token_match.group(0)} "
                                         f"(known: {', '.join(_NAMING_KNOWN_MODIFIERS)}) — rule skipped")
                         structurally_ok = False
-        for transform_index, transform in enumerate(transforms):
+        for transform_index, transform_v in enumerate(transforms):
+            transform: PlainData = transform_v
             if not (isinstance(transform, (list, tuple)) and len(transform) == 2
                     and all(isinstance(part, str) for part in transform)):
                 problems.append(f"NAMING_RULES[{rule_type!r}]: transforms[{transform_index}] "
@@ -14062,7 +14069,7 @@ def _derive_wrapper_path(obj: Mapping[str, Any]) -> str | None:
         # Pick any version's filepath; all versions should share the wrapper.
         fp: str | None = None
         for fi in files.values():
-            fp = fi.get('filepath') if isinstance(fi, dict) else None
+            fp = fi.get('filepath')
             if fp:
                 break
         if not fp:
@@ -14071,7 +14078,8 @@ def _derive_wrapper_path(obj: Mapping[str, Any]) -> str | None:
             return None
         # Walk back to first subdir under the library rootpath.
         lib = obj.get('library', '')
-        roots: list[str] = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib, [])
+        locations_by_lib: dict[str, list[str]] = CACHE.get('library_stats', {}).get('locations', {}) or {}
+        roots = locations_by_lib.get(lib, [])
         for root in roots:
             root_n = root.rstrip('/')
             if fp.startswith(root_n + '/'):
@@ -14293,7 +14301,8 @@ def cmd_bad_structure_resolve(scope: str | list[str] | None = None, auto: bool =
     else:
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
-    lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+    library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+    lib_locations: dict[str, list[str]] = library_stats.get('locations', {}) or {}
 
     # ---------- 1.  Collect candidates -----------------------------------
     # too-deep: (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
@@ -14313,7 +14322,7 @@ def cmd_bad_structure_resolve(scope: str | list[str] | None = None, auto: bool =
         file_entries: list[str] = []
         if files_dict:
             for _ver, fi in files_dict.items():
-                fp = fi.get('filepath') if isinstance(fi, dict) else fi
+                fp = fi.get('filepath')
                 if fp: file_entries.append(fp)
         else:
             fp = obj.get('file')
@@ -15168,14 +15177,13 @@ def _bad_structure_update_cache(key: str, old_filepath: str, new_filepath: str) 
     # Multi-version: update files dict entry whose filepath matches.
     files = obj.get('files') or {}
     for _ver, fi in files.items():
-        if isinstance(fi, dict) and fi.get('filepath') == old_filepath:
+        if fi.get('filepath') == old_filepath:
             fi['filepath'] = new_filepath
-    # Cross-index: PLEX_Media.OBJ_BY_FILEPATH if present.
-    fbi = getattr(PLEX_Media, 'OBJ_BY_FILEPATH', None)
-    if isinstance(fbi, dict):
-        if old_filepath in fbi:
-            entries = fbi.pop(old_filepath)
-            fbi[new_filepath] = entries
+    # Cross-index: PLEX_Media.OBJ_BY_FILEPATH.
+    fbi = PLEX_Media.OBJ_BY_FILEPATH
+    if old_filepath in fbi:
+        entries = fbi.pop(old_filepath)
+        fbi[new_filepath] = entries
 
 
 # One queued --unmatched rename: (key, record, src_wrapper, dest_wrapper, year,
@@ -15633,7 +15641,7 @@ def cmd_unmatched_resolve(scope: str | list[str] | None = None, auto: bool = Fal
             obj_type_str = obj.get('type', '')  # pyright: ignore[reportOptionalMemberAccess]  # bug: an editor-typed pair has no record
             # Per-version filepath entries
             for _v, _fi in (obj.get('files', {}) or {}).items():  # pyright: ignore[reportOptionalMemberAccess]
-                fp = _fi.get('filepath') if isinstance(_fi, dict) else None
+                fp = _fi.get('filepath')
                 if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
                     del PLEX_Media.OBJ_BY_FILEPATH[fp]
             # Top-level path (Series/Season point at the dir)
@@ -16249,7 +16257,7 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
     explicit_series = False
     if isinstance(scope, str) and scope.startswith('Series:'):
         explicit_series = True
-    elif isinstance(scope, list) and scope and all(isinstance(s, str) and s.startswith('Series:') for s in scope):
+    elif isinstance(scope, list) and scope and all(s.startswith('Series:') for s in scope):
         explicit_series = True
 
     flagged: list[tuple[str, Mapping[str, Any], list[str]]] = []  # [(key, obj, episode_keys)]
@@ -16278,8 +16286,6 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
             files: Mapping[str, FileEntry] = eobj.get('files') or {}
             _ep_dur_ms = 0
             for fi in files.values():
-                if not isinstance(fi, dict):
-                    continue
                 cd = (fi.get('file_metadata') or {}).get('container_duration')
                 if cd and cd > _ep_dur_ms:
                     _ep_dur_ms = cd
@@ -16454,7 +16460,8 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
             skipped += 1
             log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'unknown-target: {chosen_target}'})
             continue
-        target_roots = [r for r in (getattr(target_lib_obj, 'locations', None) or []) if r]
+        target_locations: list[str] = getattr(target_lib_obj, 'locations', None) or []
+        target_roots = [r for r in target_locations if r]
         if not target_roots:
             print(f"  ⚠ target library has no rootpath — skipping")
             skipped += 1
@@ -16516,7 +16523,7 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
             eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
             files = eobj.get('files') or {}
             for _v, fi in files.items():
-                if isinstance(fi, dict) and fi.get('filepath'):
+                if fi.get('filepath'):
                     _total_source_files += 1
 
         per_film_map: dict[int, tuple[str, int | None]] | None = None  # ek → (canonical_title, canonical_year)
@@ -16530,7 +16537,7 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
                 eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
                 files = eobj.get('files') or {}
                 for _v, fi in files.items():
-                    if isinstance(fi, dict) and fi.get('filepath'):
+                    if fi.get('filepath'):
                         _flat_files.append((ek, fi))
             per_film_map = {
                 id(_fi): (_p.get('title') or '', _p.get('year'))
@@ -16546,8 +16553,6 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
             _audio = (eobj.get('audio_languages') or [None])[0]
             files = eobj.get('files') or {}
             for _v, fi in files.items():
-                if not isinstance(fi, dict):
-                    continue
                 src = fi.get('filepath') or ''
                 if not src:
                     continue
@@ -16745,7 +16750,8 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
                 print(f"  ⚠ unknown library {target_series_lib!r} — skipping")
                 skipped += 1
                 continue
-            t_roots = [r for r in (getattr(target_series_obj, 'locations', None) or []) if r]
+            t_locations: list[str] = getattr(target_series_obj, 'locations', None) or []
+            t_roots = [r for r in t_locations if r]
             if not t_roots:
                 print(f"  ⚠ target library has no rootpath — skipping")
                 skipped += 1
@@ -16888,8 +16894,10 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
             _path_map: dict[str, Any] = {}     # plexapi items, reached through ensure_plex_api's Any
             try:
                 for _it in _section.all():
-                    for _media in (getattr(_it, 'media', None) or []):
-                        for _part in (getattr(_media, 'parts', None) or []):
+                    _medias: list[plexapi.media.Media] = getattr(_it, 'media', None) or []
+                    for _media in _medias:
+                        _parts: list[plexapi.media.MediaPart] = getattr(_media, 'parts', None) or []
+                        for _part in _parts:
                             _fp = getattr(_part, 'file', None)
                             if _fp:
                                 _path_map[_fp] = _it
@@ -17246,7 +17254,8 @@ def cmd_pipeline(name: str, scope: str | None = None, dry_run: bool = False, yes
     print(f">>> PIPELINE {name}  ({total} phase(s)) scope={scope or '(all)'}  dry-run={dry_run}  yes={yes}  force={force}")
     print("=" * 76)
 
-    for i, phase in enumerate(phases, 1):
+    for i, phase_v in enumerate(phases, 1):
+        phase: PlainData = phase_v
         if not isinstance(phase, (list, tuple)) or not phase:
             err("00065", f"Pipeline {name!r} phase #{i}: expected non-empty list of CLI tokens, got {phase!r}")
         cli_head = phase[0]
@@ -17419,13 +17428,13 @@ def _compute_known_filepaths_from_plex_db_live() -> set[str]:
     into the cache pickle; non-update commands must use
     `_get_known_filepaths_from_plex_db()` instead.
     """
-    rows = query_plex_database(
+    rows: list[tuple[str, ...]] | None = query_plex_database(
         "SELECT file FROM media_parts WHERE deleted_at IS NULL AND file IS NOT NULL"
     )
     paths: set[str] = set()
     if rows:
         for row in rows:
-            fp = row[0] if isinstance(row, (list, tuple)) else row
+            fp = row[0]
             if fp:
                 paths.add(str(fp))
     if DBG:
@@ -17446,7 +17455,8 @@ def _get_known_filepaths_from_plex_db(force_refresh: bool = False) -> set[str]:
     cached = CACHE.get('plex_known_filepaths')
     if cached and not force_refresh:
         # Stored as a sorted list to keep the pickle deterministic — load as a set.
-        paths = set(cached) if not isinstance(cached, set) else cached
+        cached_paths: Iterable[str] = cached     # the pickle's list (or set) of paths
+        paths = set(cached_paths) if not isinstance(cached_paths, set) else cached_paths
         _PLEX_DB_KNOWN_FILES_CACHE = paths
         if DBG:
             print(f"{DBGPFX}_get_known_filepaths_from_plex_db: loaded {len(paths)} paths from CACHE['plex_known_filepaths']")
@@ -17958,7 +17968,7 @@ def display_duplicate_details(nr: int, obj: MediaRecord | CollectionRecord) -> N
     # Check for potential file truncation/corruption using cached metadata
     # First try the new cached metadata (works for all file types, not just MKV)
     plex_duration = obj.get('duration')  # Duration in milliseconds
-    files_dict = obj.get('files', {})
+    files_dict: Mapping[str, FileEntry] = obj.get('files', {})
 
     # Get file_metadata from the appropriate version
     file_metadata = None
@@ -17966,15 +17976,14 @@ def display_duplicate_details(nr: int, obj: MediaRecord | CollectionRecord) -> N
         # If this is a synthetic multi-version object, use the specific version
         if obj.get('_is_synthetic') and version != 'N/A':
             file_info = files_dict.get(version)
-            if isinstance(file_info, dict):
+            if file_info is not None:
                 file_metadata = file_info.get('file_metadata')
         else:
             # For regular objects, check all file versions
             for file_info in files_dict.values():
-                if isinstance(file_info, dict):
-                    file_metadata = file_info.get('file_metadata')
-                    if file_metadata:
-                        break
+                file_metadata = file_info.get('file_metadata')
+                if file_metadata:
+                    break
 
     # Check if file is marked as broken or potentially truncated
     if not file_metadata:
@@ -18894,19 +18903,18 @@ def _maybe_refresh_cache_for_state_changing_command(label: str = '') -> bool:
     except OSError:
         pass
     # Stage 2: Plex DB scanned_at delta check
-    rows = query_plex_database(
+    rows: list[tuple[str, ...]] = query_plex_database(
         "SELECT name, scanned_at FROM library_sections",
         mode='rows'
     ) or []
-    cached_ua = (CACHE.get('library_stats') or {}).get('updatedAt') or {}
+    library_stats: dict[str, Any] = CACHE.get('library_stats') or {}
+    cached_ua: dict[str, object] = library_stats.get('updatedAt') or {}    # per library: a unix int or a datetime
     changed: list[str] = []
     for row in rows:
         try:
-            _name = row[0] if isinstance(row, (list, tuple)) else row.get('name')
-            _scan = row[1] if isinstance(row, (list, tuple)) else row.get('scanned_at')
+            _name = row[0]
+            _scan = row[1]
         except (IndexError, AttributeError):
-            continue
-        if _scan is None:
             continue
         _cached = cached_ua.get(_name)
         # Plex's scanned_at is a string ISO timestamp; CACHE's updatedAt
@@ -19371,7 +19379,9 @@ def _bad_structure_depth_violation(obj: MediaRecord | CollectionRecord | dict[st
     if obj_type not in ('Movie', 'Episode'):
         return 0
     lib = obj.get('library', '')
-    roots = ((CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}).get(lib) or []
+    library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+    locations_by_lib: dict[str, list[str]] = library_stats.get('locations', {}) or {}
+    roots = locations_by_lib.get(lib) or []
     filepath = obj.get('file') or ''
     if not filepath or not roots:
         return 0
@@ -20275,10 +20285,13 @@ def resolve_no_audio_language(obj_keys: list[str], args: argparse.Namespace) -> 
     # Compile filepath patterns once (case-insensitive) from
     # DISK_PLEX_MAP['AUDIO_LANG']['values'][*]['disk2plex'].
     _filepath_patterns: list[tuple[re.Pattern[str], str]] = []
-    _audio_lang_spec = (DISK_PLEX_MAP or {}).get('AUDIO_LANG', {})
-    for _plex_val, _entry_or_list in (_audio_lang_spec.get('values') or {}).items():
-        _entries = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
-        for _entry in _entries:
+    _disk_plex_map: dict[str, Any] = DISK_PLEX_MAP or {}     # the config, validated as a dict at load
+    _audio_lang_spec: dict[str, Any] = _disk_plex_map.get('AUDIO_LANG', {})
+    _audio_lang_values: dict[str, PlainData] = _audio_lang_spec.get('values') or {}
+    for _plex_val, _entry_or_list in _audio_lang_values.items():
+        _entries: list[Any] = _entry_or_list if isinstance(_entry_or_list, list) else [_entry_or_list]
+        for _entry_v in _entries:
+            _entry: PlainData = _entry_v
             if not isinstance(_entry, dict):
                 continue
             for _rg in _dpm_resolve_disk2plex(_entry, 'file'):
@@ -20659,7 +20672,7 @@ def _execute_trash_and_move(choice: str, file1: str, file2: str, keys: list[str]
 
     # Merge metadata from trashed item to kept item
     print(f"Merging metadata (watched status, labels, ratings) from [{trash_idx+1}] to [{keep_idx+1}]...")
-    metadata_result = merge_metadata_from_duplicates(keys[trash_idx], keys[keep_idx])  # pyright: ignore[reportOptionalSubscript]  # raises TypeError when keys is None
+    metadata_result = merge_metadata_from_duplicates(keys[trash_idx], keys[keep_idx])  # pyright: ignore[reportOptionalSubscript, reportUnknownArgumentType]  # raises TypeError when keys is None
     if operation_log:
         operation_log["actions"].append({
             "action": "merge_metadata",
@@ -20678,7 +20691,7 @@ def _execute_trash_and_move(choice: str, file1: str, file2: str, keys: list[str]
         if operation_log:
             operation_log["actions"].append({"action": "trash", "target": f"movie_directory_{trash_idx+1}", "original_path": movie_dir_trash, "status": "failed", "error": "Could not trash directory"})
             operation_log["result"] = "failed"
-            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript]  # operation_log exists only beside resolution_log_data
+            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript, reportUnknownMemberType]  # operation_log exists only beside resolution_log_data
         return False
 
     print(f"✓ Movie directory [{trash_idx+1}] moved to trash successfully.")
@@ -20691,7 +20704,7 @@ def _execute_trash_and_move(choice: str, file1: str, file2: str, keys: list[str]
         if operation_log:
             operation_log["actions"].append({"action": "move", "target": f"movie_directory_{keep_idx+1}", "original_path": movie_dir_keep, "destination": target_lib_dir, "status": "failed", "error": "Could not move to target library"})
             operation_log["result"] = "failed"
-            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript]  # operation_log exists only beside resolution_log_data
+            resolution_log_data["operations"].append(operation_log)  # pyright: ignore[reportOptionalSubscript, reportUnknownMemberType]  # operation_log exists only beside resolution_log_data
         return False
 
     print(f"✓ Movie directory [{keep_idx+1}] moved to {target_lib_dir} successfully.")
@@ -21075,7 +21088,7 @@ def execute_resolution_action(choice: str, file1: str, file2: str, remote_host: 
 
                         if list_success and subdir_files:
                             # Move each file from subdirectory to parent
-                            move_errors = []
+                            move_errors: list[str] = []
                             for subfile in subdir_files:
                                 src_path = subfile
                                 dst_path = os.path.join(file2_dir, os.path.basename(subfile))
@@ -21184,8 +21197,8 @@ def execute_resolution_action(choice: str, file1: str, file2: str, remote_host: 
         print(f"Renaming {len(files_to_rename)} file(s) using directory names:")
 
         # Process each file
-        renamed_files = []
-        failed_files = []
+        renamed_files: list[str] = []
+        failed_files: list[str] = []
 
         for idx, filepath in enumerate(files_to_rename, 1):
             dirpath = os.path.dirname(filepath)
@@ -21211,7 +21224,7 @@ def execute_resolution_action(choice: str, file1: str, file2: str, remote_host: 
                         "new_path": new_path,
                         "status": "success"
                     })
-                renamed_files.append(new_path)
+                renamed_files.append(new_path)  # pyright: ignore[reportArgumentType]  # a rename that succeeded returns its new path
             else:
                 print(f"  ✗ Failed to rename file #{idx}.")
                 if operation_log:
@@ -21367,7 +21380,7 @@ def resolve_scope_to_keys(scope_val: str | list[str] | tuple[str, ...] | bool | 
             _series_keys: set[str] = set()
             _has_other = False
             for _k in obj_keys:
-                _o = PLEX_Media.OBJ_BY_ID.get(_k, {})
+                _o: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(_k, {})
                 _t = _o.get('type')
                 if _t == 'Series':
                     _series_keys.add(_k)
