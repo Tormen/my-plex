@@ -8837,8 +8837,8 @@ class TestDiskMap(unittest.TestCase):
         saved = (PLEX_Media.OBJ_BY_ID.copy(),
                  PLEX_Media.OBJ_BY_FILEPATH.copy() if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else {})
         try:
-            PLEX_Media.OBJ_BY_ID['Season:1'] = {'file': '/a/b/s01', 'files': {}}
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'file': '/a/b/s01/e1.mkv', 'files': {}}
+            PLEX_Media.OBJ_BY_ID['Season:1'] = {'type': 'Season', 'file': '/a/b/s01', 'files': {}}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'type': 'Episode', 'file': '/a/b/s01/e1.mkv', 'files': {}}
             _update_cache_child_paths('/a/b/s01', '/a/b/s01 [vu]')
             self.assertEqual(PLEX_Media.OBJ_BY_ID['Season:1']['file'], '/a/b/s01 [vu]')
             self.assertEqual(PLEX_Media.OBJ_BY_ID['Episode:1']['file'], '/a/b/s01 [vu]/e1.mkv')
