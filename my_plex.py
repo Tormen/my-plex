@@ -41467,7 +41467,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
         })
 
 
-def _next_episode_in_dir(directory, season_num, remote_host=None):
+def _next_episode_in_dir(directory: str, season_num: int, remote_host: str | None = None) -> int:
     """Find the next available episode number in a season directory.
 
     v2.53: the directory may live only on the Plex server (e.g.
@@ -41478,10 +41478,10 @@ def _next_episode_in_dir(directory, season_num, remote_host=None):
     import os
     spad = f"S{season_num:02d}"
     max_ep = 0
-    entries = []
+    entries: list[str] = []
     # 1. Try local (post-ALTERNATIVE_ROOTPATHS resolution).
     try:
-        local_dir = get_local_path(directory) if 'get_local_path' in globals() else directory
+        local_dir: str = get_local_path(directory) if 'get_local_path' in globals() else directory
         if os.path.isdir(local_dir):
             entries = os.listdir(local_dir)
     except OSError:
@@ -41490,6 +41490,7 @@ def _next_episode_in_dir(directory, season_num, remote_host=None):
     # looks like a server-side path (heuristic: starts with /Volumes/).
     if not entries and directory.startswith('/Volumes/'):
         host = remote_host or PLEX_DB_REMOTE_HOST
+        file_list: list[str] | None
         try:
             success, file_list = my_plex_file_operation('LIST_DIR', directory, host, maxdepth=1)
             if success and file_list:
@@ -41509,7 +41510,15 @@ def _next_episode_in_dir(directory, season_num, remote_host=None):
 #### LABEL MANAGEMENT FUNCTIONS:
 ###########################################################################################
 
-def get_video_file_metadata(filepath, filesize, remote_host=None):
+# A server-side object from plexapi (a library section, a movie, an episode,
+# the server itself).  Any, not plexapi's classes: plexapi builds their
+# attributes from the server's XML at runtime and leaves its methods
+# unannotated, so its classes type every attribute this code reads as
+# Unknown or Optional.
+PlexAPIObject = Any
+
+
+def get_video_file_metadata(filepath: str, filesize: int | None, remote_host: str | None = None) -> dict[str, Any] | None:
     """Collect metadata from video file (container duration) using ffmpeg.
 
     Uses run_tool_on_PLEX_server() which respects EXTERNAL_TOOLS['SERVER']['ffmpeg']
@@ -41567,7 +41576,7 @@ def get_video_file_metadata(filepath, filesize, remote_host=None):
 
     return None
 
-def integrate_metadata_from_json(json_file):
+def integrate_metadata_from_json(json_file: str) -> None:
     """Integrate video metadata from JSON file into cache
 
     Loads metadata collected on Plex server and merges it into cache objects.
@@ -41662,13 +41671,13 @@ def integrate_metadata_from_json(json_file):
     if filesize_mismatch_count > 0 or not_in_cache_count > 0:
         print(f"\n⚠ Some files were skipped. Consider running --update-cache to refresh the cache.")
 
-def list_all_labels():
+def list_all_labels() -> None:
     """List all labels and the count of media items for each"""
     global CACHE
 
     # Load plex_labels_index from cache
     load_cache()
-    plex_labels_index = CACHE.get('plex_labels_index', {})
+    plex_labels_index: dict[str, list[str]] = CACHE.get('plex_labels_index', {})
 
     if not plex_labels_index:
         print("No labels found in media library.")
@@ -41684,13 +41693,13 @@ def list_all_labels():
 
     print(f"\nTotal: {len(plex_labels_index)} unique labels")
 
-def list_items_with_label(label):
+def list_items_with_label(label: str) -> None:
     """List all media items that have the specified label"""
     global CACHE
 
     # Load plex_labels_index from cache
     load_cache()
-    plex_labels_index = CACHE.get('plex_labels_index', {})
+    plex_labels_index: dict[str, list[str]] = CACHE.get('plex_labels_index', {})
 
     if label not in plex_labels_index:
         print(f"No media items found with label '{label}'.")
@@ -41717,7 +41726,7 @@ def list_items_with_label(label):
 
             print(f"{plex_id:<10} | {obj_type:<10} | {title:<60} | {year:<6} | {filepath}")
 
-def _handle_label_command(label_args, action, dry_run=False, yes=False):
+def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'], dry_run: bool = False, yes: bool = False) -> None:
     """Handle --add-label / --remove-label with scope support.
     label_args: list from argparse nargs='+', first element is label, rest is scope.
     action: 'add' or 'remove'."""
@@ -41733,6 +41742,7 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
 
     # Resolve scope to item keys
     # Try as library name first
+    obj_keys: list[str]
     if scope_str in PLEX_Library.OBJ_DICT_SUPPORTED:
         obj_keys = collect_library_keys(library_name=scope_str)
     else:
@@ -41790,7 +41800,7 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
 
     # Save cache once after all changes (not per item)
     if not dry_run and added > 0:
-        plex_labels_index = PLEX_Media.build_labels_index()
+        plex_labels_index: dict[str, list[str]] = PLEX_Media.build_labels_index()
         update_and_save_cache({
             'obj_by_id': PLEX_Media.OBJ_BY_ID,
             'plex_labels_index': plex_labels_index
@@ -41820,7 +41830,7 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
         pass
 
     # Try as title search
-    matches = []
+    matches: list[tuple[MediaRecord, str]] = []
     search_lower = identifier.lower()
     for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
         if cached_obj['type'] == 'Collection':
@@ -41841,7 +41851,7 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
     err("00159", f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
 
 
-def add_label_to_item(label, plex_id):
+def add_label_to_item(label: str, plex_id: str) -> Literal['exists', 'added', 'error']:
     """Add a label to a media item. API required: label mutations via Plex HTTP API.
     plex_id can be: numeric Plex ID, cache key (Movie:123), or title."""
     ensure_plex_api()
@@ -41851,8 +41861,8 @@ def add_label_to_item(label, plex_id):
     # Fetch the actual Plex media object
     try:
         library_name = obj['library']
-        library = PLEX_Library.OBJ_DICT[library_name]
-        item = library.fetchItem(obj['item_id'])
+        library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
+        item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
         err("00160", f"Failed to fetch media item from Plex server: {e}")
 
@@ -41874,7 +41884,7 @@ def add_label_to_item(label, plex_id):
         print(f"  {obj_key}: ERROR: Failed to add label: {e}", file=sys.stderr)
         return 'error'
 
-def remove_label_from_item(label, plex_id):
+def remove_label_from_item(label: str, plex_id: str) -> Literal['not_found', 'removed', 'error']:
     """Remove a label from a media item. API required: label mutations via Plex HTTP API.
     plex_id can be: numeric Plex ID, cache key (Movie:123), or title."""
     ensure_plex_api()
@@ -41884,8 +41894,8 @@ def remove_label_from_item(label, plex_id):
     # Fetch the actual Plex media object
     try:
         library_name = obj['library']
-        library = PLEX_Library.OBJ_DICT[library_name]
-        item = library.fetchItem(obj['item_id'])
+        library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
+        item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
         err("00161", f"Failed to fetch media item from Plex server: {e}")
 
@@ -41908,7 +41918,28 @@ def remove_label_from_item(label, plex_id):
         print(f"  {obj_key}: ERROR: Failed to remove label: {e}", file=sys.stderr)
         return 'error'
 
-def get_library_differences(lib_name, lib_type, deep_episode_check=False):
+class SeriesMissingContent(TypedDict):
+    """A series on the server whose cached copy lacks seasons or episodes."""
+    title: str
+    missing_seasons: int
+    missing_episodes: int
+
+
+class LibraryDifferences(TypedDict):
+    """get_library_differences()'s answer; see its docstring."""
+    missing_from_cache: list[str | SeriesMissingContent]
+    deleted_from_server: list[str]
+    missing_seasons: int
+    missing_episodes: int
+
+
+class _ServerSeries(TypedDict):
+    title: str
+    season_ids: set[int]
+    episode_ids: set[int]
+
+
+def get_library_differences(lib_name: str, lib_type: str, deep_episode_check: bool = False) -> LibraryDifferences:
     """
     Get detailed differences between cached and server content for a library.
 
@@ -41926,14 +41957,14 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
     """
     global PLEX_Library, PLEX_Media
 
-    result = {
+    result: LibraryDifferences = {
         'missing_from_cache': [],
         'deleted_from_server': [],
         'missing_seasons': 0,
         'missing_episodes': 0
     }
 
-    lib = PLEX_Library.OBJ_DICT.get(lib_name)
+    lib: PlexAPIObject = PLEX_Library.OBJ_DICT.get(lib_name)
     if not lib:
         return result
 
@@ -41941,10 +41972,10 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
     # missing/null season/episode index fields (common for niche content).
     # Series objects → cached_ids (Series-level membership).
     # Season/Episode objects → cached_series[series_title]['season_ids'/'episode_ids'].
-    cached_ids = set()
-    cached_series = {}  # series_title -> {'season_ids': set(int), 'episode_ids': set(int)}
+    cached_ids: set[int] = set()
+    cached_series: dict[str, dict[str, set[int]]] = {}  # series_title -> {'season_ids': set(int), 'episode_ids': set(int)}
 
-    def _rk(v):
+    def _rk(v: int | str) -> int | None:
         try:
             return int(v)
         except (TypeError, ValueError):
@@ -41976,14 +42007,14 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
     safe_name = lib_name.replace("'", "''")
     try:
         if lib_type == 'Movie':
-            rows = query_plex_database(
+            rows: list[tuple[str, ...]] = query_plex_database(
                 f"SELECT mi.id, mi.title FROM metadata_items mi "
                 f"JOIN library_sections ls ON mi.library_section_id = ls.id "
                 f"WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 "
                 f"AND mi.deleted_at IS NULL",
                 mode='rows') or []
-            server_movie_ids = set()
-            server_movie_titles = set()
+            server_movie_ids: set[int] = set()
+            server_movie_titles: set[str] = set()
             for row in rows:
                 rk = int(row[0])
                 title = row[1] or ''
@@ -42004,16 +42035,16 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
 
         elif lib_type == 'Series':
             # One Series row per show.
-            series_rows = query_plex_database(
+            series_rows: list[tuple[str, ...]] = query_plex_database(
                 f"SELECT mi.id, mi.title FROM metadata_items mi "
                 f"JOIN library_sections ls ON mi.library_section_id = ls.id "
                 f"WHERE ls.name = '{safe_name}' AND mi.metadata_type = 2 "
                 f"AND mi.deleted_at IS NULL",
                 mode='rows') or []
-            server_series_ids = set()
-            server_series_titles = set()
+            server_series_ids: set[int] = set()
+            server_series_titles: set[str] = set()
             # series_id → {'title': str, 'season_ids': set(int), 'episode_ids': set(int)}
-            server_series = {}
+            server_series: dict[int, _ServerSeries] = {}
             for row in series_rows:
                 sid = int(row[0])
                 stitle = row[1] or ''
@@ -42022,8 +42053,8 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
                 server_series[sid] = {'title': stitle, 'season_ids': set(), 'episode_ids': set()}
 
             # season.id → series_id  (for routing episodes back to their show)
-            season_to_series = {}
-            season_rows = query_plex_database(
+            season_to_series: dict[int | None, int | None] = {}
+            season_rows: list[tuple[str, ...]] = query_plex_database(
                 f"SELECT s.id, s.parent_id FROM metadata_items s "
                 f"JOIN library_sections ls ON s.library_section_id = ls.id "
                 f"WHERE ls.name = '{safe_name}' AND s.metadata_type = 3 "
@@ -42037,7 +42068,7 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
                     server_series[series_id]['season_ids'].add(season_id)
 
             if deep_episode_check:
-                episode_rows = query_plex_database(
+                episode_rows: list[tuple[str, ...]] = query_plex_database(
                     f"SELECT ep.id, ep.parent_id FROM metadata_items ep "
                     f"JOIN library_sections ls ON ep.library_section_id = ls.id "
                     f"WHERE ls.name = '{safe_name}' AND ep.metadata_type = 4 "
@@ -42050,7 +42081,7 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
                     if series_id in server_series:
                         server_series[series_id]['episode_ids'].add(ep_id)
 
-            series_with_missing_content = []
+            series_with_missing_content: list[SeriesMissingContent] = []
             for sid, srv in server_series.items():
                 stitle = srv['title']
                 if sid not in cached_ids:
@@ -42091,7 +42122,7 @@ def get_library_differences(lib_name, lib_type, deep_episode_check=False):
 
     return result
 
-def show_system_info():
+def show_system_info() -> None:
     """Show general system information: cache status, server stats, libraries"""
     global PLEX_SERVER, OFFLINE, CACHE_FILE, CACHE
     from pathlib import Path
@@ -42105,7 +42136,7 @@ def show_system_info():
     print("\nSERVER:")
     if OFFLINE:
         # Use cached server info in offline mode
-        server_info = CACHE.get('server_info', {})
+        server_info: dict[str, Any] = CACHE.get('server_info', {})
         if server_info:
             print(f"  {'Name':<12} {server_info.get('friendlyName', 'N/A')} (cached)")
             print(f"  {'Version':<12} {server_info.get('version', 'N/A')} (cached)")
@@ -42226,7 +42257,7 @@ def show_system_info():
 
         # Count by type (compact)
         if len(PLEX_Media.OBJ_BY_ID) > 0:
-            type_counts = {}
+            type_counts: dict[str, int] = {}
             for obj in PLEX_Media.OBJ_BY_ID.values():
                 obj_type = obj.get('type', 'Unknown')
                 type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
@@ -42240,7 +42271,7 @@ def show_system_info():
     lock_path = Path(str(cache_path) + '.lock')
     if partial_path.exists() or lock_path.exists():
         print(f"  {'Warnings':<12} ", end="")
-        warnings = []
+        warnings: list[str] = []
         if partial_path.exists():
             size_bytes = partial_path.stat().st_size
             size_str = f"{size_bytes/(1024*1024):.1f} MB" if size_bytes >= 1024*1024 else f"{size_bytes/1024:.1f} KB"
@@ -42256,8 +42287,8 @@ def show_system_info():
 
         import pickle
 
-        total_size = 0
-        structure_sizes = []
+        total_size = 0.0
+        structure_sizes: list[tuple[str, int, float]] = []
 
         # Calculate size for each cache structure
         for key in ['media_objs', 'library_stats', 'plex_labels_index', 'ondisk_labels_index', 'obj_by_id',
@@ -42363,10 +42394,10 @@ def show_system_info():
             print(f"    {'Detection threshold':30s}: {TRUNCATION_THRESHOLD_PCT}%")
 
         # Count duplicates using multi-key approach (same logic as --duplicates command)
-        key_to_group = {}
-        dup_groups = {}
+        key_to_group: dict[str, str] = {}
+        dup_groups: dict[str, int] = {}
         for obj in PLEX_Media.OBJ_BY_ID.values():
-            dup_keys = generate_duplicate_keys(obj)
+            dup_keys: list[str] = generate_duplicate_keys(obj)
             if not dup_keys:
                 continue
             existing_group = None
@@ -42394,14 +42425,15 @@ def show_system_info():
     print("\nLIBRARIES:")
     if len(PLEX_Library.OBJ_DICT) > 0:
         # Collect all libraries with their types
-        all_libraries = []
+        all_libraries: list[tuple[str, str, int | None]] = []
 
+        lib_name: str
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
-            lib = PLEX_Library.OBJ_DICT[lib_name]
-            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+            lib: PlexAPIObject = PLEX_Library.OBJ_DICT[lib_name]
+            lib_type: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
 
             # Get server item count
-            server_items = None
+            server_items: int | None = None
             if not OFFLINE:
                 try:
                     # totalSize is a cheap property access (no API call needed)
@@ -42423,10 +42455,10 @@ def show_system_info():
         # Calculate cache size per library including ALL cache structures
         import pickle
 
-        library_cache_sizes = {}
+        library_cache_sizes: dict[str, int] = {}
 
         # Calculate size for each library from obj_by_id (main storage)
-        library_obj_counts = {}
+        library_obj_counts: dict[str, int] = {}
         for lib_name in PLEX_Library.OBJ_DICT.keys():
             lib_objects = {k: v for k, v in PLEX_Media.OBJ_BY_ID.items() if v.get('library') == lib_name}
             if lib_objects:
@@ -42458,8 +42490,10 @@ def show_system_info():
         # During init, CACHE dict may have been updated with fresh Plex timestamps
         # but if user declined cache update, those new timestamps were NOT saved to disk
         # Therefore, we RELOAD from disk to show the actual saved state
-        cache_timestamps = {}
-        plex_timestamps = {}
+        # a library's 'updatedAt' as the cache stored it: a datetime, or
+        # whatever an older cache held (hence the hasattr checks below)
+        cache_timestamps: dict[str, Any] = {}
+        plex_timestamps: dict[str, Any] = {}
 
         # Reload timestamps from disk file to show what's actually saved
         import pickle
@@ -42468,7 +42502,7 @@ def show_system_info():
         if os.path.exists(cache_file_path):
             try:
                 with open(cache_file_path, 'rb') as f:
-                    disk_cache = pickle.load(f)
+                    disk_cache: dict[str, Any] = pickle.load(f)
                     if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
                         cache_timestamps = disk_cache['library_stats']['updatedAt']
                         # Series same in both columns - this is what's saved on disk
@@ -42554,7 +42588,7 @@ def show_system_info():
 
     print("\n" + "="*76)
 
-def _print_library_differences(lib_name, lib_type, diffs, series_details=True):
+def _print_library_differences(lib_name: str, lib_type: str, diffs: LibraryDifferences, series_details: bool = True) -> None:
     """Helper function to print library differences (used by verify_cache)
 
     Args:
@@ -42586,7 +42620,7 @@ def _print_library_differences(lib_name, lib_type, diffs, series_details=True):
 
             # Seriess with missing content
             for item in shows_with_missing_content:
-                missing_parts = []
+                missing_parts: list[str] = []
                 if item['missing_seasons'] > 0:
                     missing_parts.append(f"{item['missing_seasons']}S")
                 if item['missing_episodes'] > 0:
@@ -42629,7 +42663,7 @@ def _print_library_differences(lib_name, lib_type, diffs, series_details=True):
                 count = len(shows_with_missing_content)
                 print(f"    {count} series with missing seasons/episodes:")
                 for item in shows_with_missing_content:
-                    missing_parts = []
+                    missing_parts: list[str] = []
                     if item['missing_seasons'] > 0:
                         missing_parts.append(f"{item['missing_seasons']}S")
                     if item['missing_episodes'] > 0:
@@ -42654,9 +42688,9 @@ def _print_library_differences(lib_name, lib_type, diffs, series_details=True):
                 print(f"      [PLEX: ✗] [Cache: ✓] {title}")
             sys.stdout.flush()
 
-def _verify_data_integrity():
+def _verify_data_integrity() -> None:
     """Run data integrity checks on cache (no SSH/DB needed)"""
-    integrity_issues = []
+    integrity_issues: list[str] = []
 
     print(f"\n{'='*76}")
     print(f"DATA INTEGRITY CHECKS")
@@ -42674,7 +42708,8 @@ def _verify_data_integrity():
         if obj_type not in ('Movie', 'Episode'):
             continue
         plex_duration = obj.get('duration') or 0
-        for _version, file_info in obj.get('files', {}).items():
+        files: dict[str, FileEntry] = obj.get('files', {})
+        for _version, file_info in files.items():
             if not isinstance(file_info, dict):
                 continue
             total_files += 1
@@ -42707,6 +42742,7 @@ def _verify_data_integrity():
                 if is_truncated:
                     truncated_files += 1
 
+    parts: list[str]
     if total_files > 0:
         parts = []
         if missing_metadata > 0:
@@ -42746,8 +42782,9 @@ def _verify_data_integrity():
                 obj = PLEX_Media.OBJ_BY_ID[key]
                 if obj.get('type') in ('Series', 'Season'):
                     continue
-                obj_filepaths = set()
-                for _, fi in obj.get('files', {}).items():
+                obj_filepaths: set[str] = set()
+                obj_files: dict[str, FileEntry] = obj.get('files', {})
+                for _, fi in obj_files.items():
                     if isinstance(fi, dict) and fi.get('filepath'):
                         obj_filepaths.add(fi['filepath'])
                 if fp not in obj_filepaths and obj.get('file') != fp:
@@ -42814,8 +42851,8 @@ def _verify_data_integrity():
         integrity_issues.append(f"Cross-reference issues: {'; '.join(parts)}")
 
     # Check 5: plex_labels_index consistency
-    cached_labels_index = CACHE.get('plex_labels_index', {})
-    rebuilt_labels_index = {}
+    cached_labels_index: dict[str, list[str]] = CACHE.get('plex_labels_index', {})
+    rebuilt_labels_index: dict[str, list[str]] = {}
     for obj_id, obj in PLEX_Media.OBJ_BY_ID.items():
         for label in (obj.get('labels', []) or []):
             if label not in rebuilt_labels_index:
@@ -42823,7 +42860,7 @@ def _verify_data_integrity():
             rebuilt_labels_index[label].append(obj_id)
 
     labels_ok = True
-    labels_detail = []
+    labels_detail: list[str] = []
     missing_labels = set(rebuilt_labels_index.keys()) - set(cached_labels_index.keys())
     extra_labels = set(cached_labels_index.keys()) - set(rebuilt_labels_index.keys())
     if missing_labels:
@@ -42870,23 +42907,23 @@ def _verify_data_integrity():
         integrity_issues.append(f"Collection issues: {'; '.join(parts)}")
 
     # Check 7: library_stats itemsCount accuracy
-    cached_stats = CACHE.get('library_stats', {})
-    cached_item_counts = cached_stats.get('itemsCount', {})
+    cached_stats: dict[str, dict[str, Any]] = CACHE.get('library_stats', {})
+    cached_item_counts: dict[str, int] = cached_stats.get('itemsCount', {})
     if cached_item_counts:
-        primary_type_per_lib = {}
+        primary_type_per_lib: dict[str, str] = {}
         for lib_name, type_dict in PLEX_Media.OBJ_BY_LIBRARY.items():
             if 'Movie' in type_dict:
                 primary_type_per_lib[lib_name] = 'Movie'
             elif 'Series' in type_dict:
                 primary_type_per_lib[lib_name] = 'Series'
 
-        actual_counts = {}
+        actual_counts: dict[str, int] = {}
         for obj in PLEX_Media.OBJ_BY_ID.values():
             lib = obj.get('library')
             if lib and obj.get('type') == primary_type_per_lib.get(lib):
                 actual_counts[lib] = actual_counts.get(lib, 0) + 1
 
-        stats_mismatches = []
+        stats_mismatches: list[str] = []
         for lib_name, cached_count in cached_item_counts.items():
             actual = actual_counts.get(lib_name, 0)
             if cached_count != actual:
@@ -42920,7 +42957,7 @@ def _verify_data_integrity():
         print(f"\n  Run --update-cache to fix the {n} integrity issue{'s' if n != 1 else ''}.")
 
 
-def verify_cache():
+def verify_cache() -> None:
     """Verify cache consistency with Plex server and show detailed differences"""
     global PLEX_SERVER, OFFLINE, CACHE_FILE
 
@@ -42949,15 +42986,17 @@ def verify_cache():
         print(f"{'-'*name_width}  {'-'*8}  {'-'*28}  {'-'*28}  {'-'*19}  {'-'*19}  {'-'*10}")
 
     # Track inconsistencies for detailed reporting
-    inconsistencies = []
-    timestamp_mismatches = []  # Track libraries with timestamp differences
+    inconsistencies: list[str] = []
+    timestamp_mismatches: list[str] = []  # Track libraries with timestamp differences
 
     # Get library timestamps from DISK CACHE (not in-memory)
     # IMPORTANT: Like --info, we should show what's SAVED ON DISK, not what's in memory
     # During init, CACHE dict may have been updated with fresh Plex timestamps
     # but if user declined cache update, those new timestamps were NOT saved to disk
     # Therefore, we RELOAD from disk to show the actual saved state
-    library_timestamps_disk = {}
+    # a library's 'updatedAt' as the cache stored it: a datetime, or
+    # whatever an older cache held (hence the hasattr checks below)
+    library_timestamps_disk: dict[str, Any] = {}
 
     import pickle
     cache_file_path = os.path.expanduser(CACHE_FILE)
@@ -42965,7 +43004,7 @@ def verify_cache():
     if os.path.exists(cache_file_path):
         try:
             with open(cache_file_path, 'rb') as f:
-                disk_cache = pickle.load(f)
+                disk_cache: dict[str, Any] = pickle.load(f)
                 if 'library_stats' in disk_cache and 'updatedAt' in disk_cache['library_stats']:
                     library_timestamps_disk = disk_cache['library_stats']['updatedAt']
                     if DEEPDBG:
@@ -42985,14 +43024,15 @@ def verify_cache():
     # Use the disk timestamps for display
     library_timestamps = library_timestamps_disk
 
+    lib_name: str
     try:
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
             # Check if shutdown was requested (Ctrl+C)
             if _shutdown_requested:
                 break
 
-            lib = PLEX_Library.OBJ_DICT[lib_name]
-            lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+            lib: PlexAPIObject = PLEX_Library.OBJ_DICT[lib_name]
+            lib_type: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
 
             # Count cached items
             # For Series libraries: count only series (to match server count)
@@ -43022,12 +43062,12 @@ def verify_cache():
                                   if obj.get('library') == lib_name and obj.get('type') == 'Movie')
 
             # Count collections from OBJ_BY_COLLECTION
-            for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
+            for _col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
                 if col_obj.get('library') == lib_name:
                     collection_count += 1
 
             # Get server item count and additional counts for Series libraries
-            server_items = None
+            server_items: int | None = None
             server_seasons = 0
             server_episodes = 0
             server_collections = 0
@@ -43035,6 +43075,7 @@ def verify_cache():
             if not OFFLINE:
                 try:
                     safe_name = lib_name.replace("'", "''")
+                    rows: list[tuple[str, ...]] | None
                     if lib_type == 'Movie':
                         rows = query_plex_database(
                             f"SELECT COUNT(*) FROM metadata_items mi JOIN library_sections ls ON mi.library_section_id = ls.id WHERE ls.name = '{safe_name}' AND mi.metadata_type = 1 AND mi.deleted_at IS NULL",
@@ -43155,7 +43196,7 @@ def verify_cache():
             # In -V mode: immediately show differences inline after the library row
             if not OFFLINE and VRB and not VERYVRB and lib_name in inconsistencies:
                 # Get differences for this library
-                lib_type_for_diff = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+                lib_type_for_diff: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
                 diffs = get_library_differences(lib_name, lib_type_for_diff, deep_episode_check=False)
                 if diffs['missing_from_cache'] or diffs['deleted_from_server']:
                     _print_library_differences(lib_name, lib_type_for_diff, diffs, series_details=False)
@@ -43169,8 +43210,8 @@ def verify_cache():
             # Process ALL libraries in parallel and print results as they complete
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            def analyze_library(lib_name):
-                lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
+            def analyze_library(lib_name: str) -> tuple[str, str, LibraryDifferences, bool]:
+                lib_type: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, 'Unknown')
                 diffs = get_library_differences(lib_name, lib_type, deep_episode_check=True)
                 has_inconsistency = lib_name in inconsistencies
                 return lib_name, lib_type, diffs, has_inconsistency
@@ -43181,7 +43222,7 @@ def verify_cache():
                           for lib_name in sorted(PLEX_Library.OBJ_DICT.keys())}
 
                 for future in as_completed(futures):
-                    lib_name, lib_type, diffs, has_inconsistency = future.result()
+                    lib_name, lib_type, diffs, _has_inconsistency = future.result()
                     print(f"\n{'─'*76}")
                     print(f"Library: {lib_name} ({lib_type})")
                     print(f"{'─'*76}", flush=True)
@@ -43207,7 +43248,7 @@ def verify_cache():
                         cache_ts = library_timestamps.get(lib_name, 'N/A')
                         # Re-fetch PLEX timestamp for display
                         lib = PLEX_Library.OBJ_DICT.get(lib_name)
-                        plex_ts = 'N/A'
+                        plex_ts: Any = 'N/A'   # the library's updatedAt from plexapi, else 'N/A'
                         if lib:
                             try:
                                 if hasattr(lib, 'updatedAt') and lib.updatedAt:
@@ -43269,11 +43310,13 @@ def verify_cache():
 
     print("\n" + "="*76)
 
-def _print_problem_warnings(problems, lib_arg=''):
+def _print_problem_warnings(problems: dict[str, Any], lib_arg: str = '') -> None:
     """Print problem counts as >> ⚠ warning lines. Used by --update-cache and --problems.
 
     v2.69: registry-driven.  Iterates PROBLEM_CATEGORIES_REGISTRY in
     insertion order, so adding a new category here is a 1-place edit.
+    problems: a count per category -- or a legacy {entries, files} dict --
+    beside 'computed_at'; Any, as the cache stores it.
     """
     if not problems:
         return
@@ -43297,9 +43340,9 @@ def _print_problem_warnings(problems, lib_arg=''):
         print(f"  >> ⚠ {n} {cat['description']}{extra}{arrow}")
 
 
-def _write_cache_update_log(action, completion_status, total_added, total_removed, total_updated,
-                            total_media_files, total_broken, metadata_probed, metadata_total,
-                            metadata_success, metadata_broken):
+def _write_cache_update_log(action: str, completion_status: str, total_added: int, total_removed: int, total_updated: int,
+                            total_media_files: int, total_broken: int, metadata_probed: int, metadata_total: int,
+                            metadata_success: int, metadata_broken: int) -> None:
     """Write a detailed JSON log of all changes made during --update-cache.
 
     The log contains everything NOT already in the cache file: per-item change details,
@@ -43308,7 +43351,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
     """
     from datetime import datetime
 
-    log = {
+    log: dict[str, Any] = {   # the JSON written to CACHE_UPDATES_FILE
         '_comment': 'Cache update log — all details not stored in the cache file. Machine-readable for undo.',
         'timestamp': datetime.now().isoformat(),
         'action': action,
@@ -43329,7 +43372,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
     }
 
     # Per-library summary counts (always populated)
-    libraries = {}
+    libraries: dict[str, dict[str, dict[str, int]]] = {}
     if hasattr(PLEX_Media, 'library_delta_counters') and PLEX_Media.library_delta_counters:
         for lib_key, counters in PLEX_Media.library_delta_counters.items():
             base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
@@ -43351,7 +43394,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
     log['libraries'] = libraries
 
     # Per-library change details (individual items — only populated for incremental updates)
-    changes_by_library = {}
+    changes_by_library: dict[str, dict[str, list[dict[str, Any]]]] = {}
     if hasattr(PLEX_Media, 'library_delta_details') and PLEX_Media.library_delta_details:
         for lib_key, details in PLEX_Media.library_delta_details.items():
             base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
@@ -43361,7 +43404,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
             for act in ['added', 'removed', 'updated']:
                 for obj_type in ['series', 'seasons', 'episodes', 'movies']:
                     for item in details[act][obj_type]:
-                        entry = {
+                        entry: dict[str, Any] = {
                             'id': item.get('id'),
                             'type': item.get('type', obj_type.rstrip('s').capitalize()),
                             'title': item.get('title'),
@@ -43414,7 +43457,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
         ]
 
     # Problem detection counts (mirrors the PROBLEM DETECTION block printed to CLI)
-    problems = CACHE.get('problems', {})
+    problems: dict[str, Any] = CACHE.get('problems', {})
     if problems:
         log['problems'] = {k: v for k, v in problems.items() if k != 'computed_at'}
         if problems.get('computed_at'):
@@ -43426,7 +43469,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
         if os.path.exists(CACHE_UPDATES_FILE):
             try:
                 with open(CACHE_UPDATES_FILE, 'r') as f:
-                    old_log = json.load(f)
+                    old_log: dict[str, Any] = json.load(f)
                 old_ts = old_log.get('timestamp', '')[:19].replace(':', '-')  # 2026-03-16T13-17-02
                 if old_ts:
                     prev_path = CACHE_UPDATES_FILE.replace('.json', f'.{old_ts}.json')
@@ -43446,7 +43489,7 @@ def _write_cache_update_log(action, completion_status, total_added, total_remove
         print(f"  ⚠ Failed to write update log: {e}", flush=True)
 
 
-def _get_broken_reason(file_info, plex_duration=0):
+def _get_broken_reason(file_info: FileEntry, plex_duration: int = 0) -> str | None:
     """Return a human-readable broken reason string, or None if file is not broken."""
     fm = file_info.get('file_metadata')
     if fm:
@@ -43472,11 +43515,11 @@ def _get_broken_reason(file_info, plex_duration=0):
                 return f"suspiciously small ({avg_kbyte_per_s:.1f} KB/s < BROKEN_MIN_BYTERATE_KBYTE_PER_S={BROKEN_MIN_BYTERATE_KBYTE_PER_S})"
     return None
 
-def _normalize_alpha(s):
+def _normalize_alpha(s: str) -> str:
     """Strip everything except a-z for fuzzy path matching."""
     return _re.sub(r'[^a-z]', '', s.lower())
 
-def resolve_cache_items(identifier):
+def resolve_cache_items(identifier: str) -> list[tuple[str, Any]]:
     """Resolve a media identifier (ID, key, title, filepath) to a list of (key, obj) cache matches.
     Used by show_item_info, resolve_series_for_episodes, and any other code that needs to find cache items.
 
@@ -43488,9 +43531,13 @@ def resolve_cache_items(identifier):
       5. Normalized filepath search (strip non-a-z, match against file paths)
 
     Returns: list of (key, obj) tuples, sorted by type (Movie→Series→Season→Episode)
+    The obj is a MediaRecord or a CollectionRecord; the return says Any
+    because callers read it past what the checker can narrow: --rename's
+    resolver takes a Season's S_str (str | None) as a str, and
+    show_item_info indexes media-only keys once 'files' proved a media item.
     """
     import os
-    found_items = []
+    found_items: list[tuple[str, MediaRecord | CollectionRecord]] = []
 
     # Strategy 1: Try as Plex ID — requires "ID:NNN" prefix (as printed by --broken)
     if identifier.upper().startswith('ID:'):
@@ -43529,7 +43576,7 @@ def resolve_cache_items(identifier):
             path = path.rstrip('/')
             if path in PLEX_Media.OBJ_BY_FILEPATH:
                 for key in PLEX_Media.OBJ_BY_FILEPATH[path]:
-                    obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+                    obj = PLEX_Media.OBJ_BY_ID.get(key)
                     if obj:
                         found_items.append((key, obj))
 
@@ -43548,18 +43595,18 @@ def resolve_cache_items(identifier):
     if not found_items:
         search_norm = _normalize_alpha(identifier)
         if len(search_norm) >= 3:  # avoid matching everything with very short strings
-            seen_keys = set()
+            seen_keys: set[str] = set()
             for filepath, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
                 if search_norm in _normalize_alpha(filepath):
                     for key in keys:
-                        obj = PLEX_Media.OBJ_BY_ID.get(key, {})
+                        obj = PLEX_Media.OBJ_BY_ID.get(key)
                         if not obj:
                             continue
                         # For episodes, prefer their parent Series object
                         if obj.get('type') == 'Episode':
                             series_key = obj.get('series_key', '')
                             if series_key and series_key not in seen_keys:
-                                series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {})
+                                series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
                                 if series_obj:
                                     found_items.append((series_key, series_obj))
                                     seen_keys.add(series_key)
@@ -43574,7 +43621,7 @@ def resolve_cache_items(identifier):
     return found_items
 
 
-def _resolve_info_fields(obj_type):
+def _resolve_info_fields(obj_type: str) -> set[str]:
     """Resolve visible fields for --info output based on INFO_FIELDS config and verbosity.
 
     Returns a set of field names that should be displayed for the given object type
@@ -43584,10 +43631,10 @@ def _resolve_info_fields(obj_type):
     fields = INFO_FIELDS
     type_key = obj_type.lower()  # 'movie', 'series', 'episode', 'season'
 
-    def _resolve_list(key):
+    def _resolve_list(key: str) -> list[str]:
         """Resolve a config key, following string aliases."""
         val = fields.get(key, [])
-        seen = set()
+        seen: set[str] = set()
         while isinstance(val, str):
             if val in seen:
                 break  # circular alias protection
@@ -43613,7 +43660,7 @@ def _resolve_info_fields(obj_type):
     return visible
 
 
-def _print_item_ratings(obj, visible):
+def _print_item_ratings(obj: MediaRecord | CollectionRecord, visible: set[str]) -> None:
     """Print rating & metadata fields for a single item, controlled by visible field set."""
     obj_type = obj.get('type')
     if 'OriginalTitle' in visible:
@@ -43625,7 +43672,7 @@ def _print_item_ratings(obj, visible):
         if content_rating:
             print(f"Content Rating:\t{content_rating}")
     if 'Rating' in visible:
-        ratings_parts = []
+        ratings_parts: list[str] = []
         critics = obj.get('criticsRating')
         if critics is not None:
             ratings_parts.append(f"Critics: {critics:.1f}/10")
@@ -43670,7 +43717,7 @@ def _print_item_ratings(obj, visible):
             print(f"Summary:\t{summary}")
 
 
-def show_item_info(identifier, table_only=False):
+def show_item_info(identifier: str | None, table_only: bool = False) -> None:
     """Show detailed information about a Plex item by ID, key, or search term.
     If identifier is None or empty, shows general system information instead.
     If table_only is True, always show compact table format (used by --find/--search)."""
@@ -43741,7 +43788,7 @@ def show_item_info(identifier, table_only=False):
     # is verbose-only to keep default output uncluttered.
     if obj_type in ('Movie', 'Series'):
         guid = obj.get('guid') or ''
-        ext_ids = obj.get('external_ids') or {}
+        ext_ids: dict[str, str] = obj.get('external_ids') or {}
         if guid.startswith('local://'):
             print(f"Match:\t⚠ UNMATCHED by Plex (guid='{guid}') — use Fix Match in Plex to identify this item")
         elif not guid:
@@ -43758,14 +43805,14 @@ def show_item_info(identifier, table_only=False):
         if 'Series' in visible:
             print(f"Series:\t{obj.get('series', 'N/A')}")
         if 'Episode' in visible:
-            siblings = obj.get('multi_episode_siblings') or []
+            siblings: list[str] = obj.get('multi_episode_siblings') or []
             if len(siblings) >= 2:
                 leader_obj = PLEX_Media.OBJ_BY_ID.get(siblings[0], obj)
                 ep_range = _format_episode_range(leader_obj)
                 print(f"Episode:\t{ep_range}")
                 print(f"Multi-episode file:\t{len(siblings)} siblings share one file")
                 for sk in siblings:
-                    sib = PLEX_Media.OBJ_BY_ID.get(sk, {})
+                    sib: MediaRecord | CollectionRecord | dict[str, Any] = PLEX_Media.OBJ_BY_ID.get(sk, {})
                     marker = '  (leader)' if sk == siblings[0] else ''
                     sib_s0xe0x = sib.get('S0XE0X', '')
                     sib_title = sib.get('title', '')
@@ -43796,6 +43843,8 @@ def show_item_info(identifier, table_only=False):
             if series_dir_server:
                 series_dir = get_local_path(series_dir_server)
                 tsv_path = get_episodes_tsv_path(series_dir)
+                tsv_meta: dict[str, str] | None
+                tsv_episodes: list[dict[str, int | str]] | None
                 tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
                 if tsv_meta:
                     tsv_source = tsv_meta.get('source', '')
@@ -43803,7 +43852,7 @@ def show_item_info(identifier, table_only=False):
                     tsv_series_id = tsv_meta.get('series_id', '')
                     tsv_updated = tsv_meta.get('updated', '')
                     tsv_ep_count = len(tsv_episodes) if tsv_episodes else 0
-                    tsv_seasons = set()
+                    tsv_seasons: set[int | str] = set()
                     if tsv_episodes:
                         for ep in tsv_episodes:
                             tsv_seasons.add(ep.get('season', 0))
@@ -43822,7 +43871,7 @@ def show_item_info(identifier, table_only=False):
                     print(f"\nScraped Data:\tNo episodes.tsv found")
 
             # Scraped info from OBJ_BY_SERIES_SCRAPED
-            scraped_data = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key, {})
+            scraped_data: ScrapedSeries | dict[str, Any] = PLEX_Media.OBJ_BY_SERIES_SCRAPED.get(key, {})
             if scraped_data:
                 scraped_title = scraped_data.get('title', '')
                 scraped_source = scraped_data.get('source', '')
@@ -43839,7 +43888,7 @@ def show_item_info(identifier, table_only=False):
             series_seasons = PLEX_Media.OBJ_BY_SERIES.get(key, {})
             series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
             if series_seasons:
-                season_rows = []
+                season_rows: list[tuple[str, str, int, int, int, str]] = []
                 for S_str in sorted(series_seasons.keys()):
                     season_key = series_seasons[S_str]
                     ep_count = 0
@@ -43848,11 +43897,11 @@ def show_item_info(identifier, table_only=False):
                     total_filesize = 0
                     total_duration_ms = 0
                     file_count = 0
-                    for e_str, versions in series_episodes.get(S_str, {}).items():
-                        for version_str, ep_keys in versions.items():
+                    for _e_str, versions in series_episodes.get(S_str, {}).items():
+                        for _version_str, ep_keys in versions.items():
                             for ep_key in ep_keys:
                                 ep_count += 1
-                                ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                                ep_obj: MediaRecord | CollectionRecord | dict[str, Any] = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
                                 duration_ms = ep_obj.get('duration') or 0
                                 for fi in ep_obj.get('files', {}).values():
                                     filesize = fi.get('filesize') or 0
@@ -43917,22 +43966,22 @@ def show_item_info(identifier, table_only=False):
         if 'EpisodeTable' in visible:
             series_episodes = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
             if series_episodes:
-                all_eps = []
-                _seen_sibling_keys = set()
+                all_eps: list[tuple[str | None, str, str, str]] = []
+                _seen_sibling_keys: set[str] = set()
                 for S_str in sorted(series_episodes.keys()):
                     for E_str in sorted(series_episodes[S_str].keys()):
-                        for version_str, ep_keys in series_episodes[S_str][E_str].items():
+                        for _version_str, ep_keys in series_episodes[S_str][E_str].items():
                             for ep_key in ep_keys:
                                 if ep_key in _seen_sibling_keys:
                                     continue
-                                ep = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
+                                ep: MediaRecord | CollectionRecord | dict[str, Any] = PLEX_Media.OBJ_BY_ID.get(ep_key, {})
                                 siblings = ep.get('multi_episode_siblings') or []
                                 if len(siblings) >= 2:
                                     if ep_key != siblings[0]:
                                         continue
                                     _seen_sibling_keys.update(siblings)
                                     ep_range = _format_episode_range(ep)
-                                    titles = [
+                                    titles: list[str] = [
                                         PLEX_Media.OBJ_BY_ID.get(k, {}).get('title', '')
                                         for k in siblings
                                     ]
@@ -43943,7 +43992,7 @@ def show_item_info(identifier, table_only=False):
                                 ep_file = ep.get('file', '')
                                 all_eps.append((ep_range, ep_key, title, ep_file))
                 if all_eps:
-                    col_ep    = max(max(len(e[0]) for e in all_eps), 7)
+                    col_ep    = max(max(len(e[0]) for e in all_eps), 7)  # pyright: ignore[reportArgumentType]  # an episode whose S0XE0X is None raises TypeError here (suspected bug, left as it is)
                     col_key   = max(max(len(e[1]) for e in all_eps), 3)
                     col_title = max(max((len(e[2]) for e in all_eps), default=5), 5)
                     show_ep_file = 'EpisodeFile' in visible
@@ -43965,7 +44014,7 @@ def show_item_info(identifier, table_only=False):
     if 'Duplicates' in visible:
         dup_keys = set(generate_duplicate_keys(obj))
         if dup_keys:
-            same_lib_dups = []
+            same_lib_dups: list[tuple[str, MediaRecord | CollectionRecord]] = []
             item_library = obj.get('library', '')
             for other_key, other_obj in PLEX_Media.OBJ_BY_ID.items():
                 if other_key == key:
@@ -44004,11 +44053,11 @@ def show_item_info(identifier, table_only=False):
                 bitrate_mbps = (fs * 8) / (plex_duration / 1000) / 1_000_000
                 print(f"Bitrate:\t{bitrate_mbps:.2f} Mbps")
             if 'AudioLanguage' in visible:
-                audio_langs = info.get('audio_languages') or obj.get('audio_languages', [])
+                audio_langs: list[str] = info.get('audio_languages') or obj.get('audio_languages', [])
                 if audio_langs:
                     print(f"Audio Language:\t{', '.join(audio_langs)}")
             if 'Subtitles' in visible:
-                subtitle_langs = info.get('subtitle_languages') or obj.get('subtitle_languages', [])
+                subtitle_langs: list[str] = info.get('subtitle_languages') or obj.get('subtitle_languages', [])
                 if subtitle_langs:
                     print(f"Subtitles:\t{', '.join(subtitle_langs)}")
             if 'BROKEN' in visible:
@@ -44024,7 +44073,7 @@ def show_item_info(identifier, table_only=False):
                     broken_reason = _get_broken_reason(info, plex_duration) if 'BROKEN' in visible else None
                     broken_str = f"  BROKEN: {broken_reason}" if broken_reason else ""
                     # Per-file language info
-                    lang_parts = []
+                    lang_parts: list[str] = []
                     if 'AudioLanguage' in visible:
                         audio_langs = info.get('audio_languages') or []
                         if audio_langs:
@@ -44077,6 +44126,11 @@ def show_item_info(identifier, table_only=False):
 # the same nine lines as without it): it is refused by name instead.
 _ARGV_REWRITTEN: list[tuple[str, str]] = []
 
+# The value of a variadic option (nargs='*', or a legacy nargs='?'): the
+# words given, a single word, True for a bare flag, None when absent.
+VariadicArg = list[str] | str | bool | None
+
+
 def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
     """err when a word beside FLAG became a --list filter that FLAG's command
     never reads.  TAKES names what FLAG does take, for the message."""
@@ -44089,7 +44143,11 @@ def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
                  "  - the word was meant for another option, or as a second value\n"
                  f"  - a title search was meant: without {flag}, `my-plex <word>` lists what matches")
 
-def execute_global_commands(args, cmd_args):
+def execute_global_commands(args: Any, cmd_args: Any) -> None:
+    # args, cmd_args: the argparse.Namespace of the main and the global
+    # parser.  Any until safe_getattr() is annotated: a Namespace passed to
+    # the unannotated safe_getattr() here changes what pyright infers it
+    # returns at every other call, and flags callers outside this function.
     if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
     #init_plex(args, all=False, server=True, library=True)
 
@@ -44108,7 +44166,7 @@ def execute_global_commands(args, cmd_args):
         run_regression_tests(scope=cmd_args.run_tests or None)
 
     # Handle --missing command
-    _missing_val = safe_getattr(cmd_args, 'missing', None)
+    _missing_val: VariadicArg = safe_getattr(cmd_args, 'missing', None)
     if _missing_val is not None:
         # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
         if _missing_val is True or _missing_val == [] or _missing_val == '':
@@ -44146,7 +44204,7 @@ def execute_global_commands(args, cmd_args):
     # Helper: collapse a SCOPE arg (nargs='*' list, legacy single str, or
     # legacy `True` sentinel) into the shape every cmd_* + _get_disk_map_scope
     # expects: None / str / list[str].
-    def _collapse_scope_arg(val):
+    def _collapse_scope_arg(val):  # type: (VariadicArg) -> VariadicArg
         if val is None or val is True:
             return None
         if isinstance(val, list):
@@ -44217,7 +44275,7 @@ def execute_global_commands(args, cmd_args):
         sys.exit(0)
 
     # Handle --mv / --move command (cross-library file move)
-    mv_args = safe_getattr(cmd_args, 'mv', None)
+    mv_args: list[str] | str | None = safe_getattr(cmd_args, 'mv', None)
     if mv_args is not None:
         if not isinstance(mv_args, list):
             mv_args = [mv_args]
@@ -44263,19 +44321,19 @@ def execute_global_commands(args, cmd_args):
             'com.plexapp.agents.none':          'Personal Media',
             'com.plexapp.agents.localmedia':    'Local Media',
         }
-        lib_stats = CACHE.get('library_stats', {})
-        agents = lib_stats.get('agent', {})
-        languages = lib_stats.get('language', {})
-        items_count = lib_stats.get('itemsCount', {})
-        lang_dist = lib_stats.get('language_distribution', {})
+        lib_stats: dict[str, dict[str, Any]] = CACHE.get('library_stats', {})
+        agents: dict[str, str] = lib_stats.get('agent', {})
+        languages: dict[str, str] = lib_stats.get('language', {})
+        items_count: dict[str, int] = lib_stats.get('itemsCount', {})
+        lang_dist: dict[str, dict[str, list[str]]] = lib_stats.get('language_distribution', {})
 
         # Build per-library AUTO_RESOLVE lookup: {lib: 'MULTI' | '<2-letter>'}
-        _auto_resolve_map = {}
+        _auto_resolve_map: dict[str, str] = {}
         for _l, _v in AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY:
             _auto_resolve_map[_l] = (str(_v).upper() if str(_v).upper() == 'MULTI'
                                      else str(_v).lower()[:2])
 
-        def _format_language_distribution(lib_name):
+        def _format_language_distribution(lib_name: str) -> str:
             """Render distribution as 'en* 79%, fr 15%, de 2% [MULTI]' with:
               *  = matches Plex library.language for this library
               ** = matches AUTO_RESOLVE override AND that override differs from Plex's lang
@@ -44293,7 +44351,7 @@ def execute_global_commands(args, cmd_args):
             if total == 0 and not is_multi and not override_code:
                 return '-'
             ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:4]
-            parts = []
+            parts: list[str] = []
             for code, n in ordered:
                 pct = round(100 * n / total) if total else 0
                 if pct < 1:
@@ -44329,9 +44387,10 @@ def execute_global_commands(args, cmd_args):
                 'PLEX-MEDIA-INFO-SOURCE', 'ITEMS', _eps_col, 'RATINGS']
         # Build all rows in memory first, then pad each cell to its column's
         # max width and join with TAB (so awk -F'\t' / cut still parse cleanly).
-        _rows = []
+        _rows: list[list[str]] = []
+        lib_name: str
         for lib_name in sorted(PLEX_Library.OBJ_DICT.keys()):
-            l_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
+            l_type: str = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             supported = 'yes' if lib_name in PLEX_Library.OBJ_DICT_SUPPORTED else 'no'
             agent_id = agents.get(lib_name, '')
             agent = AGENT_DISPLAY.get(agent_id, agent_id) if agent_id else '-'
@@ -44383,7 +44442,7 @@ def execute_global_commands(args, cmd_args):
                                             supported, agent, items, missing_src, rating_col)])
         # Column widths: max(len of header, len of each cell). Last column not padded.
         _widths = [max([len(_hdr[i])] + [len(r[i]) for r in _rows]) for i in range(len(_hdr))]
-        def _format_row(cells):
+        def _format_row(cells: list[str]) -> str:
             # Pad every cell except the last; tab-separate them all
             return '\t'.join((cells[i].ljust(_widths[i]) if i < len(cells) - 1 else cells[i])
                               for i in range(len(cells)))
@@ -44517,7 +44576,7 @@ def execute_global_commands(args, cmd_args):
         cached_str = f": last --update-cache: {_cached_at}" if _cached_at else ""
         print(f" >>> PROBLEM DETECTION (based on cache){cached_str}")
 
-        def _run_check(func, *args, **kwargs):
+        def _run_check(func: Callable[..., int | None], *args: object, **kwargs: object) -> int | None:
             """Run a check function, suppressing detail output unless -V/--verbose."""
             if VRB:
                 return func(*args, **kwargs)
@@ -44530,7 +44589,7 @@ def execute_global_commands(args, cmd_args):
         # to the registry).  Users select which categories run via
         # PROBLEM_CATEGORIES_ENABLED in CONF (None = all, [] = none, [...]
         # = only those listed).
-        live_problems = {}
+        live_problems: dict[str, Any] = {}
         for cat_name, cat in _enabled_problem_categories().items():
             if tsv_only and not cat.get('tsv_relevant'):
                 continue
@@ -44610,7 +44669,7 @@ def execute_global_commands(args, cmd_args):
     # (each from JUNK_PATTERNS dict keys); empty → run all patterns.
     # Each pattern carries its own SCOPE; --recursive/--no-recursive on
     # the CLI globally overrides every pattern's RECURSIVE field.
-    junk_val = safe_getattr(cmd_args, 'junk', None)
+    junk_val: VariadicArg = safe_getattr(cmd_args, 'junk', None)
     if junk_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
@@ -44632,7 +44691,7 @@ def execute_global_commands(args, cmd_args):
 
     # Handle --orphaned [SCOPE]: orphan files / empty dirs / stale my-plex sidecars.
     # Sub-flags --files / --dirs / --my-plex narrow the categories; none = all three.
-    orphaned_val = safe_getattr(cmd_args, 'orphaned', None)
+    orphaned_val: VariadicArg = safe_getattr(cmd_args, 'orphaned', None)
     if orphaned_val is not None:
         resolve = bool(safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False))
         dry_run = bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False))
@@ -44655,7 +44714,7 @@ def execute_global_commands(args, cmd_args):
     # Handle --naming [SCOPE]: NAMING_RULES-driven canonical renames.
     # Preview by default; --resolve applies; --revert rolls back via the
     # sidecar's naming_original.  --try / --yes honoured like everywhere.
-    naming_val = safe_getattr(cmd_args, 'naming', None)
+    naming_val: VariadicArg = safe_getattr(cmd_args, 'naming', None)
     if naming_val is None:
         naming_val = safe_getattr(args, 'naming', None)
     if naming_val is not None:
@@ -44692,7 +44751,7 @@ def execute_global_commands(args, cmd_args):
     # If the FIRST positional token is a bare integer, treat it as a one-shot
     # override of UNCOLLECTED_MIN_MEMBERS (mirrors the --excess-versions N
     # pattern).  Remaining tokens become the SCOPE.
-    uncoll_val = safe_getattr(cmd_args, 'uncollected', None)
+    uncoll_val: VariadicArg = safe_getattr(cmd_args, 'uncollected', None)
     if uncoll_val is not None:
         # If scope came AFTER --resolve / --auto / --try in the user's
         # argv (e.g. `--uncollected --resolve --auto Movie:123204 Movie:123205`),
@@ -44700,7 +44759,7 @@ def execute_global_commands(args, cmd_args):
         # --uncollected.  Merge them in so the operator's intent — scoping
         # --uncollected — is honoured regardless of arg ordering.
         if not uncoll_val:   # empty list / True / None
-            _cop = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
+            _cop: list[str] | str | None = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
             if _cop:
                 if isinstance(_cop, list):
                     uncoll_val = list(_cop)
@@ -44758,7 +44817,7 @@ def execute_global_commands(args, cmd_args):
         return
 
     # Handle --bad-structure [SCOPE]: media files nested too deeply on disk
-    bs_val = safe_getattr(cmd_args, 'bad_structure', None)
+    bs_val: VariadicArg = safe_getattr(cmd_args, 'bad_structure', None)
     if bs_val is not None:
         # --bad-structure --resolve [--auto] [--try]: auto-flatten when safe,
         # interactive prompt on conflicts.
@@ -44890,7 +44949,7 @@ def execute_global_commands(args, cmd_args):
 #### DO IT
 ###########################################################################################
 
-def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
+def detect_PLEX_OBJ_TYPE(args: argparse.Namespace, obj: str) -> str | None: # determine_PLEX_OBJ_TYPE
     """ returns None if no PLEX_OBJ could be detected! """
     if DBG: print( f"{DBGPFX}detect_PLEX_OBJ_TYPE(): obj=\"{obj}\"" )
     #init_plex(args)
@@ -44908,14 +44967,14 @@ def detect_PLEX_OBJ_TYPE(args, obj): # determine_PLEX_OBJ_TYPE
     return None
     #err("00169", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
 
-def execute_plex_cmd(args, obj, obj_type, obj_args_list):
+def execute_plex_cmd(args: argparse.Namespace, obj: str, obj_type: str, obj_args_list: list[str]) -> list[str]:
     """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
         --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
     if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
     if obj_type not in PLEXOBJ[PARSER]: err("00170", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
     if obj_type not in PLEXOBJ[FN]: err("00171", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
-    obj_parser = PLEXOBJ[PARSER][obj_type]
-    remaining_args = []
+    obj_parser: argparse.ArgumentParser = PLEXOBJ[PARSER][obj_type]
+    remaining_args: list[str] = []
     no_args_given = len(obj_args_list) == 0
     obj_args = obj_parser.parse_args([])
     if no_args_given and hasattr(obj_args, 'list'):
@@ -44940,7 +44999,7 @@ def execute_plex_cmd(args, obj, obj_type, obj_args_list):
     PLEXOBJ[FN][obj_type] (args, obj, obj_args)
     return remaining_args
 
-def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
+def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args: list[str]) -> None:
     global GLOBAL_CMD_PARSER
     # HERE: args.CMD_OR_PLEXOBJECT can be also None (if there was ONLY a global command provided)!
 
@@ -44981,9 +45040,9 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
         sys.exit(0)
 
     state = 0 # means we did not yet find a PLEXOBJECT
-    obj = None
-    obj_type = None
-    obj_args_list = []
+    obj: str | None = None
+    obj_type: str | None = None
+    obj_args_list: list[str] = []
     while len(remaining_args) > 0:
         arg = remaining_args.pop(0)
         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP state={state} [{len(remaining_args)} arg='{arg}', remaining_args = {remaining_args}" )
@@ -45044,7 +45103,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
         # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
         if (state != 2 and state != 3): err("00177", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
-        execute_plex_cmd(args, obj, obj_type, obj_args_list)
+        execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # states 2 and 3 come only after obj and obj_type were set
         match state:
             case 3: continue # state 3: there are NO remaining args left -> we are done :)
             case 2:
@@ -45057,7 +45116,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args, remaining_args):
                     continue     # if NOT yet done -> continue to collect obj_args_list or find new PLEXOBJ
                 else: # if no args left -> we also execute the last PLEX_OBJ we had found in this loop
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 2 --> state 0| no remaining_args left! -> now executing the NEW PLEXOBJ (default action)" )
-                    execute_plex_cmd(args, obj, obj_type, obj_args_list)
+                    execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # state 2 is set only when new_obj_type is not None
                     state = 0                                 # it should not matter as we are done now
 
 
@@ -45072,7 +45131,7 @@ def _flag_on_command_line(flag: str) -> bool:
     return any(a == flag or a.startswith(flag + '=') for a in sys.argv[1:])
 
 
-def _resolve_secret_arg(flag: str, value):
+def _resolve_secret_arg(flag: str, value: str | None) -> str | None:
     """A secret passed on the command line, resolved -- and reported if it
     was passed as a literal.
 
@@ -45109,7 +45168,7 @@ def _resolve_secret_arg(flag: str, value):
     return value
 
 
-def refuse_legacy_keys(loaded_config) -> None:
+def refuse_legacy_keys(loaded_config: dict[str, object]) -> None:
     """Stop the run when a config file still sets a key that is no longer
     recognised (a hard cutover): one migration hint per key, and EVERY file
     that sets it -- with layered configs that may be the site config or a
@@ -45318,7 +45377,7 @@ def main():
         sys.exit(0)
 
     # Load configuration file
-    loaded_config = load_config_file(config_args.config_file)
+    loaded_config: dict[str, Any] = load_config_file(config_args.config_file)
 
     # A file named with --config is the file for every my-plex this run
     # starts too -- a pipeline's phases -- through the variable they inherit,
@@ -45358,7 +45417,7 @@ def main():
     # so they must be recomputed here after the config file values have been applied.
     global REENCODE_THRESHOLD_MBPS, ONDISK_LABEL_START_MARKER, ONDISK_LABEL_END_MARKER, PROBLEMS2DISK
     _rt = globals().get('REENCODE_THRESHOLD', {'mbps': 2.5})
-    _c = []
+    _c: list[float] = []
     if 'mbps'        in _rt: _c.append(float(_rt['mbps']))
     if 'mb_per_hour' in _rt: _c.append(float(_rt['mb_per_hour']) / _MB_PER_HOUR_PER_MBPS)
     REENCODE_THRESHOLD_MBPS    = min(_c) if _c else 2.0
@@ -45426,10 +45485,10 @@ def main():
         re.IGNORECASE
     )
     _new_argv = [sys.argv[0]]
-    _inject_flags = []   # flags to append after the current argv sweep
-    _filter_exprs = []   # category B expressions collected
-    _remove_cols = set()  # column headers to remove (from negative Cat-C)
-    _translations = []   # (original_token, translated_to) for user echo
+    _inject_flags: list[str] = []   # flags to append after the current argv sweep
+    _filter_exprs: list[str] = []   # category B expressions collected
+    _remove_cols: set[str] = set()  # column headers to remove (from negative Cat-C)
+    _translations: list[tuple[str, str]] = []   # (original_token, translated_to) for user echo
     _after_dashdash = False  # once `--` is seen, all remaining tokens are literal title search
     # v2.1: if the user passes an explicit `library:NAME` anywhere in argv,
     # bare words that happen to match library names are treated as
@@ -45763,7 +45822,7 @@ def main():
     has_watched = '--watched' in sys.argv
     has_unwatched = '--unwatched' in sys.argv
     AUDIO_FLAGS = ['--en', '--english', '--de', '--german', '--fr', '--french']
-    def is_audio_flag(arg):
+    def is_audio_flag(arg: str) -> bool:
         return arg.startswith('--audio') or arg in AUDIO_FLAGS
 
     has_audio = any(is_audio_flag(arg) for arg in sys.argv)
@@ -45771,7 +45830,7 @@ def main():
                              or '--no-language' in sys.argv
                              or '--no-plex-audio-language' in sys.argv)
 
-    def inject_before_first_match(trigger_fn, to_inject, label=""):
+    def inject_before_first_match(trigger_fn: Callable[[str], bool], to_inject: list[str], label: str = "") -> bool:
         """Inject args before the first matching trigger in sys.argv. Returns True if injected."""
         normalized = [sys.argv[0]]
         injected = False
@@ -45791,7 +45850,7 @@ def main():
         if inject_before_first_match(lambda a: a == '--resolve', ['--list'], " (--no-audio-language --resolve)"):
             has_list = True
     elif has_resolve and not (has_list and has_duplicates) and not has_no_audio_language:
-        inject_args = []
+        inject_args: list[str] = []
         if not has_list:       inject_args.append('--list')
         if not has_duplicates: inject_args.append('--duplicates')
         if inject_before_first_match(lambda a: a == '--resolve', inject_args, " (--resolve)"):
@@ -45833,6 +45892,7 @@ def main():
             LOCK_FILE = os.path.join(Path.home(), LOCK_FILE)
         load_cache()
         load_media_cache(CACHE)
+        seen: set[str]
         if _complete_what in ('genres', 'genre'):
             seen = set()
             for obj in PLEX_Media.OBJ_BY_ID.values():
@@ -46302,7 +46362,7 @@ def main():
         print(f"{DBGPFX}=== END CONFIGURATION VARIABLES ===\n")
 
     # Validation: Check that all required variables have sensible values
-    validation_errors = []
+    validation_errors: list[str] = []
 
     # PLEX_DB_PATH is not checked here: a command that reads only the cache
     # does not need it.  plex_db_path() stops the ones that read the database.
@@ -46363,7 +46423,7 @@ def main():
     if has_scan:
         # Collect library names from CMD_OR_PLEXOBJECT and remaining_args
         # (remaining_args may contain the library name if --scan was parsed first)
-        scan_lib_candidates = []
+        scan_lib_candidates: list[str] = []
         if args.CMD_OR_PLEXOBJECT and args.CMD_OR_PLEXOBJECT != '--scan':
             scan_lib_candidates.append(args.CMD_OR_PLEXOBJECT)
         for ra in remaining_args:
@@ -46379,8 +46439,8 @@ def main():
     # All follow the same nargs='*' pattern: flag → optional list of SCOPE tokens.
     # When no value AND CMD_OR_PLEXOBJECT is present, the flag becomes an obj_arg
     # (appended after the object); otherwise it's a global command (prepended).
-    def _reinject_variadic(attr_name, flag_name, prefer_obj_arg_when_bare=True):
-        val = safe_getattr(args, attr_name, None)
+    def _reinject_variadic(attr_name: str, flag_name: str, prefer_obj_arg_when_bare: bool = True) -> None:
+        val: VariadicArg = safe_getattr(args, attr_name, None)
         if val is None:
             return
         _vals = val if isinstance(val, list) else ([val] if val and val is not True else [])
@@ -46397,7 +46457,8 @@ def main():
     # --missing has a slightly different bare-flag policy: always append (it
     # errors at the dispatcher level if no series reference resolves).
     if safe_getattr(args, 'missing', None) is not None:
-        _vals = args.missing if isinstance(args.missing, list) else ([args.missing] if args.missing and args.missing is not True else [])
+        _missing_arg: VariadicArg = args.missing
+        _vals = _missing_arg if isinstance(_missing_arg, list) else ([_missing_arg] if _missing_arg and _missing_arg is not True else [])
         if _vals:
             remaining_args.insert(0, '--missing')
             for _i, _v in enumerate(_vals, 1):
@@ -46427,7 +46488,8 @@ def main():
 
     # Re-inject --renumber into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'renumber', None) is not None:
-        _renumber_vals = args.renumber if isinstance(args.renumber, list) else ([args.renumber] if args.renumber and args.renumber is not True else [])
+        _renumber_arg: VariadicArg = args.renumber
+        _renumber_vals = _renumber_arg if isinstance(_renumber_arg, list) else ([_renumber_arg] if _renumber_arg and _renumber_arg is not True else [])
         if _renumber_vals:
             remaining_args.insert(0, '--renumber')
             for _i, _v in enumerate(_renumber_vals, 1):
@@ -46463,20 +46525,23 @@ def main():
 
     # Re-inject --plex2disk into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'plex2disk', None) is not None:
-        _vals = args.plex2disk if isinstance(args.plex2disk, list) else ([args.plex2disk] if args.plex2disk and args.plex2disk is not True else [])
+        _plex2disk_arg: VariadicArg = args.plex2disk
+        _vals = _plex2disk_arg if isinstance(_plex2disk_arg, list) else ([_plex2disk_arg] if _plex2disk_arg and _plex2disk_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
     # Re-inject --map-to-filename alias (legacy → --plex2disk)
     elif safe_getattr(args, 'map_to_filename', None) is not None:
-        _vals = args.map_to_filename if isinstance(args.map_to_filename, list) else ([args.map_to_filename] if args.map_to_filename and args.map_to_filename is not True else [])
+        _map_to_filename_arg: VariadicArg = args.map_to_filename
+        _vals = _map_to_filename_arg if isinstance(_map_to_filename_arg, list) else ([_map_to_filename_arg] if _map_to_filename_arg and _map_to_filename_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
 
     # Re-inject --remux into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'remux', None) is not None:
-        _remux_vals = args.remux if isinstance(args.remux, list) else ([args.remux] if args.remux and args.remux is not True else [])
+        _remux_arg: VariadicArg = args.remux
+        _remux_vals = _remux_arg if isinstance(_remux_arg, list) else ([_remux_arg] if _remux_arg and _remux_arg is not True else [])
         remaining_args.insert(0, '--remux')
         for _i, _v in enumerate(_remux_vals, 1):
             remaining_args.insert(_i, _v)
@@ -46496,14 +46561,16 @@ def main():
     # Re-inject --mv-to into remaining_args
     # --mv-to DEST_LIB [SCOPE...] — first positional is destination, rest is scope.
     if safe_getattr(args, 'mv', None) is not None:
-        _mv_args = args.mv if isinstance(args.mv, list) else [args.mv]
+        _mv_arg: list[str] | str = args.mv
+        _mv_args = _mv_arg if isinstance(_mv_arg, list) else [_mv_arg]
         for _i, _v in enumerate(_mv_args):
             remaining_args.insert(_i + 1, _v)
         remaining_args.insert(0, '--mv-to')
 
     # Re-inject --disk2plex into remaining_args (nargs='*' → list of tokens)
     if safe_getattr(args, 'disk2plex', None) is not None:
-        _vals = args.disk2plex if isinstance(args.disk2plex, list) else ([args.disk2plex] if args.disk2plex and args.disk2plex is not True else [])
+        _disk2plex_arg: VariadicArg = args.disk2plex
+        _vals = _disk2plex_arg if isinstance(_disk2plex_arg, list) else ([_disk2plex_arg] if _disk2plex_arg and _disk2plex_arg is not True else [])
         remaining_args.insert(0, '--disk2plex')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
@@ -46520,7 +46587,8 @@ def main():
 
     # Re-inject --map-from-filename alias (→ --plex2disk --strip), nargs='*'
     if safe_getattr(args, 'map_from_filename', None) is not None:
-        _vals = args.map_from_filename if isinstance(args.map_from_filename, list) else ([args.map_from_filename] if args.map_from_filename and args.map_from_filename is not True else [])
+        _map_from_filename_arg: VariadicArg = args.map_from_filename
+        _vals = _map_from_filename_arg if isinstance(_map_from_filename_arg, list) else ([_map_from_filename_arg] if _map_from_filename_arg and _map_from_filename_arg is not True else [])
         remaining_args.insert(0, '--plex2disk')
         for _i, _v in enumerate(_vals, 1):
             remaining_args.insert(_i, _v)
@@ -46531,7 +46599,8 @@ def main():
     #   1. --rename <TARGETS...> (no CMD_OR_PLEXOBJECT) → targets become PLEX objects, --rename is obj_arg
     #   2. <PLEXOBJ> --rename (bare --rename with CMD_OR_PLEXOBJECT) → append as obj_arg
     if safe_getattr(args, 'rename', None) is not None:
-        _rename_vals = args.rename if isinstance(args.rename, list) else ([args.rename] if args.rename and args.rename is not True else [])
+        _rename_arg: VariadicArg = args.rename
+        _rename_vals = _rename_arg if isinstance(_rename_arg, list) else ([_rename_arg] if _rename_arg and _rename_arg is not True else [])
         if _rename_vals:
             for _i, _v in enumerate(_rename_vals):
                 remaining_args.insert(_i, _v)
