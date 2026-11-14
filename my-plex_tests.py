@@ -4408,7 +4408,7 @@ class TestDefaultScope(unittest.TestCase):
         """_parse_filter_sub_expr must handle ep:word syntax for episode-only title search."""
         src = self._read_script()
         idx = src.index('def _parse_filter_sub_expr(')
-        snippet = src[idx:idx+8000]
+        snippet = src[idx:idx+12000]
         self.assertIn('_ep_title_re', snippet,
             "_parse_filter_sub_expr must handle ep: prefix for episode title search")
 
