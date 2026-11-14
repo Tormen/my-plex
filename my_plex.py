@@ -39757,11 +39757,12 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
     scoped_libraries = {lib for _key, _dict, lib in all_series_list}
     lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
     library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
-    wrapper_dirs = {}   # wrapper_dir → (series_key, library_name)
+    wrapper_dirs = {}   # wrapper_dir → (series_key, library_name, season token)
     for series_key, series_dict, library_name in all_series_list:
         wrapper_dir = series_dict.get('file', '')
-        if wrapper_dir and _season_token_match(os.path.basename(wrapper_dir)):
-            wrapper_dirs.setdefault(wrapper_dir, (series_key, library_name))
+        _token = _season_token_match(os.path.basename(wrapper_dir)) if wrapper_dir else None
+        if _token:
+            wrapper_dirs.setdefault(wrapper_dir, (series_key, library_name, _token))
     for episode_key, episode_obj in PLEX_Media.OBJ_BY_ID.items():
         if episode_obj.get('type') != 'Episode':
             continue

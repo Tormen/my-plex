@@ -12911,6 +12911,49 @@ class TestListPrinters(unittest.TestCase):
         self.assertIn('SERIES\tShow S01E01: Pilot', out)
 
 
+class TestSortNewSeasonWrapper(unittest.TestCase):
+    """--sort-new consolidates a release wrapper ('Show.s01.release') into
+    <library>/Show/s01/.  A wrapper found as a series' OWN directory was
+    recorded as (key, library) while the loop unpacks (key, library, token),
+    so the commonest shape raised ValueError before moving anything."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        self._saved = (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, self.mp.CACHE,
+                       self.mp.PLEX_DB_REMOTE_HOST)
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, self.mp.CACHE,
+         self.mp.PLEX_DB_REMOTE_HOST) = self._saved
+
+    def test_a_series_own_wrapper_directory_is_consolidated(self):
+        from unittest import mock
+        media = self.mp.PLEX_Media
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        wrapper = os.path.join(root, 'Show.s01.release')
+        os.makedirs(wrapper)
+        open(os.path.join(wrapper, 'Show.e01.mkv'), 'w').close()
+        series = _make_movie(10, 'Show', wrapper, version='Series', library='lib6')
+        series['type'] = 'Series'
+        media.OBJ_BY_ID, media.OBJ_BY_FILEPATH = {'Series:10': series}, {}
+        self.mp.CACHE = {'library_stats': {'locations': {'lib6': [root]}}}
+        self.mp.PLEX_DB_REMOTE_HOST = None
+        with mock.patch.object(self.mp, 'load_disk_map_sidecar', return_value={}), \
+             mock.patch.object(self.mp, 'save_disk_map_sidecar'), \
+             mock.patch.object(self.mp, 'update_and_save_cache'), \
+             mock.patch.object(self.mp, 'build_media_cache_dict'), \
+             mock.patch.object(self.mp, '_write_resolve_log', return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()):
+            done = self.mp._sort_new_consolidate_season_wrappers([('Series:10', series, 'lib6')], yes=True)
+        self.assertEqual(done, {'Series:10'})
+        self.assertTrue(os.path.exists(os.path.join(root, 'Show', 's01', 'Show.e01.mkv')))
+        self.assertFalse(os.path.exists(wrapper))
+        self.assertEqual(series['file'], os.path.join(root, 'Show'))
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18496,7 +18539,7 @@ _UNITTEST_SCOPES = {
     'rename':     [TestRename, TestRenameShared],
     'commands':   [TestNearMissFlag, TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
-                   TestSortNew, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
+                   TestSortNew, TestSortNewSeasonWrapper, TestSortNewScanLocations, TestUnmatched, TestUnsorted],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],
     'quiet':      [TestQuiet],
     'venv':       [TestVenvDetection, TestVenvRebuildOnPythonMinor],
