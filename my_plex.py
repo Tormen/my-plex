@@ -32699,12 +32699,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"  WARNING: rename failed: {old_name}", file=sys.stderr)
             return False, path
 
-        remote_host: str | None = None
-        if not dry_run:
-            try:
-                remote_host = determine_remote_host(None)[0]  # pyright: ignore[reportArgumentType]  -- BUG (open): determine_remote_host(None) raises TypeError; the caller's handler hides it
-            except (TypeError, OSError, subprocess.SubprocessError):
-                remote_host = None
+        remote_host = PLEX_DB_REMOTE_HOST   # a rename is a write: over ssh on the Plex server, never a local mount
 
         # --- Build above/below threshold sets from cache ---
         threshold = REENCODE_THRESHOLD_MBPS

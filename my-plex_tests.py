@@ -2894,6 +2894,33 @@ class TestOndiskLabels(unittest.TestCase):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
+    def test_reencode_mark_renames_on_the_plex_server(self):
+        """--reencode --mark renames over ssh on the Plex server, as every
+        write does.  It used to ask determine_remote_host(None) for the host,
+        which always raises TypeError; the handler took that as 'local', so
+        each rename ran on this machine's mount, or failed where none was."""
+        from unittest import mock
+        mp = _main_module()
+        media = mp.PLEX_Media
+        saved = (media.OBJ_BY_ID, media.OBJ_BY_ONDISK_LABEL, mp.PLEX_DB_REMOTE_HOST)
+        self.addCleanup(lambda: (setattr(media, 'OBJ_BY_ID', saved[0]),
+                                 setattr(media, 'OBJ_BY_ONDISK_LABEL', saved[1]),
+                                 setattr(mp, 'PLEX_DB_REMOTE_HOST', saved[2])))
+        media.OBJ_BY_ID = {'Movie:1': _make_movie(1, 'Film', '/lib/a/Film (2023)/film.mkv', filesize=50_000_000_000)}
+        media.OBJ_BY_ONDISK_LABEL = {}
+        mp.PLEX_DB_REMOTE_HOST = 'plexhost'
+        hosts: list[object] = []
+
+        def _op(_op_name: str, _path: str, remote_host: object = None, **_k: object) -> tuple[bool, str]:
+            hosts.append(remote_host)
+            return True, _path
+
+        with mock.patch.object(mp, 'my_plex_file_operation', side_effect=_op), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            media._mark_reencode_candidates_on_disk(['Movie:1'], None, 'reencode', False)
+        self.assertTrue(hosts)
+        self.assertEqual(set(hosts), {'plexhost'})
+
     # --- parse_ondisk_labels ---
 
     def test_parse_ondisk_labels_basic(self):
