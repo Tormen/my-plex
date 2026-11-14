@@ -38976,6 +38976,7 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
     lastViewedAt — markPlayed() stamps it to 'now'.  We still snapshot the
     original so the value is never lost from our own records.
     """
+    from typing import cast
     rk = int(obj.get('id') or 0)
     # Any: the snapshot is the state file's JSON payload
     snap: dict[str, Any] = {
@@ -38994,7 +38995,9 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
     # Live Plex API supplements (in case cache is missing fields).
     if plex is not None and rk:
         try:
-            item = plex.fetchItem(rk)
+            # Any: fetchItem builds whichever plexapi class the element names
+            # (Movie, Episode, ...), and leaves its parameters unannotated
+            item = cast(Any, plex.fetchItem(rk))  # pyright: ignore[reportUnknownMemberType]
             for attr, key in (('viewCount', 'viewCount'),
                               ('userRating', 'userRating'),
                               ('viewOffset', 'viewOffset')):
@@ -39011,14 +39014,14 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
                     snap['originallyAvailableAt'] = oaa.strftime('%Y-%m-%d')
                 except (AttributeError, ValueError):
                     snap['originallyAvailableAt'] = str(oaa)[:10] or None
-            # plexapi types fetchItem() Optional (an element of unknown type
-            # builds None); a None raises here, as it did
+            # fetchItem() returns None for an element of unknown type; a None
+            # raises here, as it did
             try:
-                snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})  # pyright: ignore[reportOptionalMemberAccess]
+                snap['labels'] = sorted({lab.tag for lab in (item.labels or ())})
             except PLEX_ERRORS:
                 pass
             try:
-                snap['collections'] = sorted({c.tag for c in (item.collections or [])})  # pyright: ignore[reportOptionalMemberAccess]
+                snap['collections'] = sorted({c.tag for c in (item.collections or ())})
             except PLEX_ERRORS:
                 pass
         except PLEX_ERRORS as e:
@@ -39029,26 +39032,30 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
 def _restore_plex_item_state(plex: PlexServer | None, new_rk: int | str | None, snap: dict[str, Any],
                              dest_library: str) -> list[str]:
     """Re-apply snapshot to the new ratingKey.  Returns list of error strings."""
+    from typing import cast
     errors: list[str] = []
     if plex is None or not new_rk:
         return ['plex API unavailable or new_rk missing']
     try:
-        item = plex.fetchItem(int(new_rk))
+        # Any: fetchItem builds whichever plexapi class the element names
+        # (Movie, Episode, ...), and leaves its parameters unannotated
+        item = cast(Any, plex.fetchItem(int(new_rk)))  # pyright: ignore[reportUnknownMemberType]
     except PLEX_ERRORS as e:
         return [f'fetchItem({new_rk}): {e}']
 
-    # plexapi types fetchItem() / playlist() Optional (an element of unknown
-    # type builds None); a None raises at its use below, as it did
-    for lab in (snap.get('labels') or []):
-        try: item.addLabel(lab)  # pyright: ignore[reportOptionalMemberAccess]
+    # fetchItem() / playlist() return None for an element of unknown type;
+    # a None raises at its use below, as it did
+    snap_labels: list[str] = snap.get('labels') or []
+    for lab in snap_labels:
+        try: item.addLabel(lab)
         except PLEX_ERRORS as e: errors.append(f'addLabel({lab!r}): {e}')
 
     if snap.get('userRating'):
-        try: item.rate(float(snap['userRating']))  # pyright: ignore[reportOptionalMemberAccess]
+        try: item.rate(float(snap['userRating']))
         except PLEX_ERRORS as e: errors.append(f'rate({snap["userRating"]}): {e}')
 
     if (snap.get('viewCount') or 0) > 0:
-        try: item.markPlayed()  # pyright: ignore[reportOptionalMemberAccess]
+        try: item.markPlayed()
         except PLEX_ERRORS as e: errors.append(f'markPlayed: {e}')
 
     # Dates.  Plex's metadata edit endpoint accepts addedAt (epoch int) and
@@ -39060,43 +39067,47 @@ def _restore_plex_item_state(plex: PlexServer | None, new_rk: int | str | None, 
     _added = snap.get('addedAt')
     if _added:
         try:
-            item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})  # pyright: ignore[reportOptionalMemberAccess]
+            item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})
         except PLEX_ERRORS as e:
             errors.append(f'edit(addedAt={_added}): {e}')
     _oaa = snap.get('originallyAvailableAt')
     if _oaa:
         try:
-            item.edit(**{'originallyAvailableAt.value': str(_oaa),  # pyright: ignore[reportOptionalMemberAccess]
+            item.edit(**{'originallyAvailableAt.value': str(_oaa),
                          'originallyAvailableAt.locked': 1})
         except PLEX_ERRORS as e:
             errors.append(f'edit(originallyAvailableAt={_oaa}): {e}')
 
-    for pl_title in (snap.get('playlists') or []):
+    snap_playlists: list[str] = snap.get('playlists') or []
+    for pl_title in snap_playlists:
         try:
-            pl = plex.playlist(pl_title)
-            pl.addItems([item])  # pyright: ignore[reportOptionalMemberAccess]
+            pl = cast('Playlist | None', plex.playlist(pl_title))  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
+            pl.addItems([item])  # pyright: ignore[reportOptionalMemberAccess, reportUnknownMemberType]
         except PLEX_ERRORS as e:
             errors.append(f'playlist({pl_title!r}).addItems: {e}')
 
-    for coll_title in (snap.get('collections') or []):
+    snap_collections: list[str] = snap.get('collections') or []
+    for coll_title in snap_collections:
         try:
+            section: plexapi.library.LibrarySection | None
             try:
-                section = plex.library.section(dest_library)
+                section = cast('plexapi.library.LibrarySection', plex.library.section(dest_library))  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
             except PLEX_ERRORS:
                 section = None
-            existing = None
+            existing: Collection | None = None
             if section is not None:
                 try:
-                    for c in section.collections():
-                        if c.title == coll_title:
+                    section_collections = cast('list[Collection]', section.collections())  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
+                    for c in section_collections:
+                        if c.title == coll_title:  # pyright: ignore[reportUnknownMemberType]  # plexapi sets .title untyped
                             existing = c; break
                 except PLEX_ERRORS:
                     pass
             if existing is not None:
-                existing.addItems([item])
+                existing.addItems([item])  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
             else:
                 from plexapi.collection import Collection as _PC
-                _PC.create(server=plex, title=coll_title, section=dest_library, items=[item])
+                _PC.create(server=plex, title=coll_title, section=dest_library, items=[item])  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
         except PLEX_ERRORS as e:
             errors.append(f'collection({coll_title!r}): {e}')
 
@@ -39109,6 +39120,7 @@ def _cleanup_emptied_source_collections(plex: PlexServer | None, drained_pairs: 
     their last member(s) out.  Only deletes collections WE emptied —
     queries live Plex to confirm zero items remain before deletion.
     """
+    from typing import cast
     if plex is None or not drained_pairs:
         return 0
     n_deleted = 0
@@ -39116,25 +39128,26 @@ def _cleanup_emptied_source_collections(plex: PlexServer | None, drained_pairs: 
         if not library or not title:
             continue
         try:
-            section = plex.library.section(library)
+            section = cast('plexapi.library.LibrarySection', plex.library.section(library))  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
         except PLEX_ERRORS as e:
             if not quiet: print(f"  ⚠ cleanup: section {library!r} not reachable: {e}")
             continue
         try:
-            matches = [c for c in section.collections() if c.title == title]
+            section_collections = cast('list[Collection]', section.collections())  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
+            matches = [c for c in section_collections if c.title == title]  # pyright: ignore[reportUnknownMemberType]  # plexapi sets .title untyped
         except PLEX_ERRORS as e:
             if not quiet: print(f"  ⚠ cleanup: list collections in {library!r}: {e}")
             continue
         for coll in matches:
             try:
-                members = coll.items()
+                members = cast('list[object]', coll.items())  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
             except PLEX_ERRORS as e:
                 if not quiet: print(f"  ⚠ cleanup: read members of {title!r} in {library!r}: {e}")
                 continue
             if members:
                 continue   # still has members — not WE who emptied it, or partial drain
             try:
-                coll.delete()
+                coll.delete()  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                 if not quiet: print(f"  🗑 cleanup: deleted now-empty Plex Collection {title!r} in {library!r}")
                 n_deleted += 1
             except PLEX_ERRORS as e:
@@ -39197,23 +39210,23 @@ def _replay_pending_move_state(plex: PlexServer | None, quiet: bool = False) -> 
             # computation in older sort-new code paths).
             if not new_rk and new_fp:
                 _wrapper = new_fp if new_fp.endswith('/') else (new_fp.rsplit('/', 1)[0] + '/')
-                for _fp, _ks in (PLEX_Media.OBJ_BY_FILEPATH.items() if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else []):
+                for _fp, _ks in PLEX_Media.OBJ_BY_FILEPATH.items():
                     if _fp.startswith(_wrapper):
-                        _ks2 = _ks if isinstance(_ks, list) else [_ks]
-                        for _ck in _ks2:
+                        for _ck in _ks:
                             _o = PLEX_Media.OBJ_BY_ID.get(_ck)
-                            if isinstance(_o, dict) and _o.get('id') and _o.get('library') == (st.get('dest_library') or ''):
+                            if _o is not None and _o.get('id') and _o.get('library') == (st.get('dest_library') or ''):
                                 new_rk = int(_o['id'])
                                 break
                         if new_rk: break
             # Strategy 3: GUID + dest_library (Plex may have merged the
             # moved file as a new VERSION of a same-GUID existing item).
             if not new_rk:
-                _g = (st.get('snapshot') or {}).get('guid') or st.get('guid') or ''
+                _snapshot: dict[str, Any] = st.get('snapshot') or {}
+                _g = _snapshot.get('guid') or st.get('guid') or ''
                 _dest = st.get('dest_library') or ''
                 if _g and _dest:
-                    for _ck, _o in (PLEX_Media.OBJ_BY_ID.items() if hasattr(PLEX_Media, 'OBJ_BY_ID') else []):
-                        if isinstance(_o, dict) and _o.get('guid') == _g and _o.get('library') == _dest and _o.get('id'):
+                    for _ck, _o in PLEX_Media.OBJ_BY_ID.items():
+                        if _o.get('guid') == _g and _o.get('library') == _dest and _o.get('id'):
                             new_rk = int(_o['id'])
                             break
             # Strategy 4: title + year + dest_library.
@@ -39222,8 +39235,8 @@ def _replay_pending_move_state(plex: PlexServer | None, quiet: bool = False) -> 
                 _y = str(st.get('year') or '')
                 _dest = st.get('dest_library') or ''
                 if _t and _dest:
-                    for _ck, _o in (PLEX_Media.OBJ_BY_ID.items() if hasattr(PLEX_Media, 'OBJ_BY_ID') else []):
-                        if (isinstance(_o, dict) and _o.get('title') == _t
+                    for _ck, _o in PLEX_Media.OBJ_BY_ID.items():
+                        if (_o.get('title') == _t
                             and str(_o.get('year') or '') == _y
                             and _o.get('library') == _dest and _o.get('id')):
                             new_rk = int(_o['id'])
@@ -39251,7 +39264,7 @@ def _replay_pending_move_state(plex: PlexServer | None, quiet: bool = False) -> 
             # collections/labels stay empty until the next --update-cache,
             # silently failing the CACHE INTEGRITY rule.
             try:
-                _snap = st.get('snapshot') or {}
+                _snap: dict[str, Any] = st.get('snapshot') or {}
                 _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
                 _keys = _fp_entry if isinstance(_fp_entry, list) else ([_fp_entry] if _fp_entry else [])
                 for _ck in _keys:
@@ -39277,7 +39290,9 @@ def _replay_pending_move_state(plex: PlexServer | None, quiet: bool = False) -> 
             # delete the now-emptied Plex Collections at the end.
             try:
                 _src_lib = st.get('old_library') or ''
-                for _ct in ((st.get('snapshot') or {}).get('collections') or []):
+                _snap_r: dict[str, Any] = st.get('snapshot') or {}
+                _snap_colls: list[str] = _snap_r.get('collections') or []
+                for _ct in _snap_colls:
                     if _src_lib and _ct:
                         _drained_source_pairs.add((_src_lib, _ct))
             except TypeError:
@@ -39585,8 +39600,8 @@ def cmd_move(args_list: list[str], dry_run: bool = False, force: bool = False,
                 print()
                 print(f"  ⚠  DUPLICATE in '{dest_lib}': '{title}' ({year}) matches:")
                 for k in dup_keys[:5]:
-                    o = PLEX_Media.OBJ_BY_ID.get(k, {})
-                    print(f"      {k}   file: {o.get('file','?')}")
+                    o = PLEX_Media.OBJ_BY_ID.get(k)
+                    print(f"      {k}   file: {o.get('file','?') if o is not None else '?'}")
                 if len(dup_keys) > 5:
                     print(f"      … and {len(dup_keys)-5} more")
                 print(f"    [s]kip this   [o]verwrite this   [S]kip-all   [O]verwrite-all   [q]uit")
@@ -39949,7 +39964,8 @@ def _sort_new_movies(dry_run: bool = False, target: str | None = None, yes: bool
     no per-item scan triggers.
 
     Returns (n_moved, n_skipped, n_errors)."""
-    routes = SORT_NEW_MOVIE_ROUTES or []
+    # A rule is {'from': LIB, 'when': FILTER, 'to': LIB} (the config's own Python)
+    routes: list[dict[str, str]] = SORT_NEW_MOVIE_ROUTES or []
     if not routes:
         return (0, 0, 0)
 
@@ -39961,7 +39977,7 @@ def _sort_new_movies(dry_run: bool = False, target: str | None = None, yes: bool
 
     print(f"\n{'='*76}\n--sort-new: MOVIE ROUTING ({len(routes)} rule(s) in SORT_NEW_MOVIE_ROUTES)\n{'='*76}")
 
-    locations_by_lib = CACHE.get('library_stats', {}).get('locations', {}) or {}
+    locations_by_lib: dict[str, list[str]] = CACHE.get('library_stats', {}).get('locations', {}) or {}
     libs_present = set(PLEX_Library.OBJ_DICT.keys())
 
     # NOTE: bare-movie wrap is handled UPSTREAM in `cmd_sort_new` (disk-scan
@@ -40219,8 +40235,9 @@ def _sort_new_movies(dry_run: bool = False, target: str | None = None, yes: bool
         if src in PLEX_Media.OBJ_BY_LIBRARY and 'Movie' in PLEX_Media.OBJ_BY_LIBRARY[src]:
             try: PLEX_Media.OBJ_BY_LIBRARY[src]['Movie'].remove(key)
             except ValueError: pass
-        for _v, _fi in (obj.get('files', {}) or {}).items():
-            fp = _fi.get('filepath') if isinstance(_fi, dict) else None
+        _files: dict[str, FileEntry] | dict[str, _FolderFileEntry] = obj.get('files') or {}
+        for _v, _fi in _files.items():
+            fp = _fi.get('filepath')
             if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
                 del PLEX_Media.OBJ_BY_FILEPATH[fp]
         if key in PLEX_Media.OBJ_BY_MOVIE: del PLEX_Media.OBJ_BY_MOVIE[key]
@@ -40380,7 +40397,8 @@ def _sort_new_consolidate_season_wrappers(all_series_list: Sequence[tuple[str, M
     # rings-of-power s02 wrapper has no series obj of its own.
     scoped_keys = {key for key, _dict, _lib in all_series_list}
     scoped_libraries = {lib for _key, _dict, lib in all_series_list}
-    lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+    library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+    lib_locations: dict[str, list[str]] = library_stats.get('locations', {}) or {}
     library_roots = {p for paths in lib_locations.values() for p in (paths or []) if p}
     wrapper_dirs: dict[str, tuple[str, str, tuple[str, int]]] = {}   # wrapper_dir → (series_key, library_name, season token)
     for series_key, series_dict, library_name in all_series_list:
@@ -40829,6 +40847,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
             src_base = os.path.basename(src_server)
             src_stem = os.path.splitext(src_base)[0]
             new_stem = os.path.splitext(new_name)[0]
+            files_in_src_dir: list[str]   # LIST_DIR answers with the paths in the directory
             try:
                 ok_ls, files_in_src_dir = my_plex_file_operation('LIST_DIR', src_dir, remote_host, maxdepth=1)
             except (OSError, subprocess.SubprocessError):
@@ -42023,7 +42042,7 @@ def get_library_differences(lib_name: str, lib_type: str, deep_episode_check: bo
                 mode='rows') or []
             for row in season_rows:
                 season_id = int(row[0])
-                series_id = int(row[1]) if row[1] is not None else None
+                series_id = int(row[1])
                 season_to_series[season_id] = series_id
                 if series_id in server_series:
                     server_series[series_id]['season_ids'].add(season_id)
@@ -42037,7 +42056,7 @@ def get_library_differences(lib_name: str, lib_type: str, deep_episode_check: bo
                     mode='rows') or []
                 for row in episode_rows:
                     ep_id = int(row[0])
-                    season_id = int(row[1]) if row[1] is not None else None
+                    season_id = int(row[1])
                     series_id = season_to_series.get(season_id)
                     if series_id in server_series:
                         server_series[series_id]['episode_ids'].add(ep_id)
@@ -42262,10 +42281,11 @@ def show_system_info() -> None:
                 total_size += size_mb
 
                 # Count items
+                # only the size of a map of any shape is read
                 if isinstance(data, dict):
-                    count = len(data)
+                    count = len(data)  # pyright: ignore[reportUnknownArgumentType]
                 elif isinstance(data, list):
-                    count = len(data)
+                    count = len(data)  # pyright: ignore[reportUnknownArgumentType]
                 else:
                     count = 0
 
@@ -42671,8 +42691,6 @@ def _verify_data_integrity() -> None:
         plex_duration = obj.get('duration') or 0
         files: dict[str, FileEntry] = obj.get('files', {})
         for _version, file_info in files.items():
-            if not isinstance(file_info, dict):
-                continue
             total_files += 1
             fm = file_info.get('file_metadata')
             if fm is None:
@@ -42734,8 +42752,6 @@ def _verify_data_integrity() -> None:
     filepath_dangling = 0
     filepath_path_mismatch = 0
     for fp, keys in PLEX_Media.OBJ_BY_FILEPATH.items():
-        if not isinstance(keys, list):
-            keys = [keys]
         for key in keys:
             if key not in PLEX_Media.OBJ_BY_ID:
                 filepath_dangling += 1
@@ -42746,7 +42762,7 @@ def _verify_data_integrity() -> None:
                 obj_filepaths: set[str] = set()
                 obj_files: dict[str, FileEntry] = obj.get('files', {})
                 for _, fi in obj_files.items():
-                    if isinstance(fi, dict) and fi.get('filepath'):
+                    if fi.get('filepath'):
                         obj_filepaths.add(fi['filepath'])
                 if fp not in obj_filepaths and obj.get('file') != fp:
                     filepath_path_mismatch += 1
@@ -42774,11 +42790,10 @@ def _verify_data_integrity() -> None:
         for _, episodes in seasons.items():
             for _, versions in episodes.items():
                 for _, ep_keys in versions.items():
-                    if isinstance(ep_keys, list):
-                        for ep_key in ep_keys:
-                            episode_entries += 1
-                            if ep_key not in PLEX_Media.OBJ_BY_ID:
-                                episode_dangling += 1
+                    for ep_key in ep_keys:
+                        episode_entries += 1
+                        if ep_key not in PLEX_Media.OBJ_BY_ID:
+                            episode_dangling += 1
 
     # Check OBJ_BY_LIBRARY for duplicate keys
     library_total_keys = 0
@@ -42848,7 +42863,7 @@ def _verify_data_integrity() -> None:
     collection_count = len(PLEX_Media.OBJ_BY_COLLECTION)
     orphaned_collections = 0
     invalid_members = 0
-    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values() if obj.get('id') is not None}
+    all_obj_ids = {obj.get('id') for obj in PLEX_Media.OBJ_BY_ID.values()}
     for col_key, col_obj in PLEX_Media.OBJ_BY_COLLECTION.items():
         if col_key not in PLEX_Media.OBJ_BY_ID:
             orphaned_collections += 1
@@ -43282,7 +43297,7 @@ def _print_problem_warnings(problems: Mapping[str, Any], lib_arg: str = '') -> N
     if not problems:
         return
     for cat_name, cat in PROBLEM_CATEGORIES_REGISTRY.items():
-        raw = problems.get(cat_name, 0)
+        raw: int | dict[str, int] | None = problems.get(cat_name, 0)
         # Legacy schema: excess_versions used to be a dict {entries, files}
         if isinstance(raw, dict):
             n = raw.get('entries', 0)
@@ -43339,7 +43354,7 @@ def _write_cache_update_log(action: str, completion_status: str, total_added: in
             base_lib = lib_key.split('[')[0] if '[' in lib_key else lib_key
             if base_lib not in libraries:
                 libraries[base_lib] = {'added': {}, 'removed': {}, 'updated': {}}
-            for act in ['added', 'removed', 'updated']:
+            for act in ('added', 'removed', 'updated'):
                 for obj_type, count in counters[act].items():
                     if count > 0:
                         libraries[base_lib][act][obj_type] = libraries[base_lib][act].get(obj_type, 0) + count
@@ -43943,7 +43958,7 @@ def show_item_info(identifier: str | None, table_only: bool = False) -> None:
                                     _seen_sibling_keys.update(siblings)
                                     ep_range = _format_episode_range(ep)
                                     titles: list[str] = [
-                                        PLEX_Media.OBJ_BY_ID.get(k, {}).get('title', '')
+                                        (_o.get('title', '') if (_o := PLEX_Media.OBJ_BY_ID.get(k)) is not None else '')
                                         for k in siblings
                                     ]
                                     title = ' / '.join(t for t in titles if t)
@@ -44104,11 +44119,8 @@ def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
                  "  - the word was meant for another option, or as a second value\n"
                  f"  - a title search was meant: without {flag}, `my-plex <word>` lists what matches")
 
-def execute_global_commands(args: Any, cmd_args: Any) -> None:
-    # args, cmd_args: the argparse.Namespace of the main and the global
-    # parser.  Any until safe_getattr() is annotated: a Namespace passed to
-    # the unannotated safe_getattr() here changes what pyright infers it
-    # returns at every other call, and flags callers outside this function.
+def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespace) -> None:
+    # args, cmd_args: the Namespace of the main and of the global parser
     if DBG: print( f"{DBGPFX}execute_global_commands(): cmd_args=\"{cmd_args}\"" )
     #init_plex(args, all=False, server=True, library=True)
 
@@ -44731,7 +44743,6 @@ def execute_global_commands(args: Any, cmd_args: Any) -> None:
         # digit characters like '²' or Arabic numerals which we DON'T want
         # interpreted as a threshold here.
         if (isinstance(uncoll_val, list) and uncoll_val
-                and isinstance(uncoll_val[0], str)
                 and re.fullmatch(r'[0-9]+', uncoll_val[0])):
             _override_min = int(uncoll_val[0])
             uncoll_val = uncoll_val[1:]   # strip the threshold; rest is SCOPE
@@ -44899,7 +44910,7 @@ def execute_global_commands(args: Any, cmd_args: Any) -> None:
         needs_full_list = duplicates_only or broken_only or resolve_mode or no_audio_language or excess_versions
         if needs_full_list:
             if DBG: print(f"{DBGPFX}execute_global_commands(): full list mode: duplicates={duplicates_only} broken={broken_only} resolve={resolve_mode} no_audio_lang={no_audio_language} field={audio_lang_field} excess={excess_versions}")
-            PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions, audio_lang_field=audio_lang_field)
+            PLEX_Media.list(args, [], None, media_type, duplicates_only, resolve_mode, broken_only, watched_only, unwatched_only, audio_filter, no_audio_language, excess_versions, audio_lang_field=audio_lang_field)  # pyright: ignore[reportUnknownMemberType]  # list() leaves its args parameter unannotated
         else:
             # All simple listing (with or without filter expr) → clean KEY|cols|FILEPATH format
             PLEX_Media._list_filtered(filter_expr, library_name=None, media_type=media_type,
@@ -44980,8 +44991,9 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
     # This is the same class of bug the --sync 4-way fallback addressed,
     # but at the loop-entry level rather than the namespace-fallback
     # level.
-    _early_sync = (safe_getattr(args, 'plex_disk_sync', None) or
-                   safe_getattr(args, 'sync', None))
+    # argparse's nargs='*' list, or True / a str set by a caller of its own
+    _early_sync: list[str] | str | Literal[True] | None = (
+        safe_getattr(args, 'plex_disk_sync', None) or safe_getattr(args, 'sync', None))
     if _early_sync is not None and not remaining_args:
         if args.force:
             err("00172", "--force cannot be used with --sync / --plex-disk-sync")
@@ -45045,6 +45057,8 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
                 case 1:
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 2| Found new PLEXOBJECT while we still treat old PLEXOBJECT." )
                     state = 2      # new PLEXOBJ found while we have still old PLEXOBJ (not yet executed)
+                case _:            # state 3 is set only when no argument is left, so the loop has ended
+                    pass
         else:                      # no PLEXOBJECT and NO GLOBAL_CMD
             match state:
                 case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
@@ -46336,8 +46350,9 @@ def main():
     if LIBRARY_START_DELAY < 0:
         validation_errors.append(f"LIBRARY_START_DELAY must be >= 0 (got {LIBRARY_START_DELAY})")
 
-    # Check tuple values
-    if not isinstance(RATE_LIMIT_DELAY_RANGE, tuple) or len(RATE_LIMIT_DELAY_RANGE) != 2:
+    # Check tuple values (the config is the user's Python: these checks are
+    # where a value of any shape is first looked at)
+    if not isinstance(RATE_LIMIT_DELAY_RANGE, tuple) or len(RATE_LIMIT_DELAY_RANGE) != 2:  # pyright: ignore[reportUnknownArgumentType]
         validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be a tuple of 2 values (got {RATE_LIMIT_DELAY_RANGE!r})")
     elif RATE_LIMIT_DELAY_RANGE[0] < 0 or RATE_LIMIT_DELAY_RANGE[1] < RATE_LIMIT_DELAY_RANGE[0]:
         validation_errors.append(f"RATE_LIMIT_DELAY_RANGE must be (min, max) with min >= 0 and max >= min (got {RATE_LIMIT_DELAY_RANGE!r})")
@@ -46345,7 +46360,7 @@ def main():
     # Check list values
     if not isinstance(PLEX_RETRY_DELAYS, list):
         validation_errors.append(f"PLEX_RETRY_DELAYS must be a list (got {type(PLEX_RETRY_DELAYS).__name__})")
-    elif not all(isinstance(d, (int, float)) and d > 0 for d in PLEX_RETRY_DELAYS):
+    elif not all(isinstance(d, (int, float)) and d > 0 for d in PLEX_RETRY_DELAYS):  # pyright: ignore[reportUnknownVariableType]
         validation_errors.append(f"PLEX_RETRY_DELAYS must be a list of positive numbers (got {PLEX_RETRY_DELAYS!r})")
 
     if not isinstance(ALTERNATIVE_ROOTPATHS, list):
