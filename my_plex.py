@@ -37153,12 +37153,9 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
     # like the auto-refresh: no PLEX_DB_PATH skips it, never plex_db_path()'s
     # ERROR -- the markers come from the cache.
     if not OFFLINE and not READ_ONLY_MODE and PLEX_DB_PATH:
-        try:
-            n_changed, _n_total = sync_view_state_into_cache()
-            if n_changed:
-                print(f"  state-sync: refreshed view-state for {n_changed} item(s) from Plex DB")
-        except Exception as _e:
-            if DBG: print(f"{DBGPFX}plex2disk: view-state sweep failed: {_e}")
+        n_changed, _n_total = sync_view_state_into_cache()
+        if n_changed:
+            print(f"  state-sync: refreshed view-state for {n_changed} item(s) from Plex DB")
 
     # series_strategy='bottom_up' — lazy compute of uniform fields if missing
     # from cache (e.g. user upgraded to v1.3 without running --update-cache).
@@ -37300,25 +37297,19 @@ def cmd_plex2disk(target, dry_run=False, force=False, replace=False):
         if _affected_libs:
             print()
             print(f"  Triggering Plex scan + waiting for {len(_affected_libs)} affected librar{'y' if len(_affected_libs) == 1 else 'ies'}: {', '.join(sorted(_affected_libs))}")
-            try:
-                _plex_for_scan = ensure_plex_api(required=False)
-                if _plex_for_scan is not None:
-                    for _lib in sorted(_affected_libs):
-                        try:
-                            _sec = _plex_for_scan.library.section(_lib)
-                            _sec.update()
-                            _ok, _elapsed = wait_for_plex_scan_complete(_plex_for_scan, _lib, _sec, max_wait=300, verbose=False)
-                            print(f"    {_lib}: scan {'completed' if _ok else 'timed out'} in {_elapsed:.1f}s")
-                        except Exception as _e:
-                            print(f"    {_lib}: scan failed: {_e}")
-                    # Now refresh cache so it reflects the new paths.
+            _plex_for_scan = ensure_plex_api(required=False)
+            if _plex_for_scan is not None:
+                for _lib in sorted(_affected_libs):
                     try:
-                        update_cache_for_library(None)
-                        print("  Cache refreshed; ready for next command.")
-                    except Exception as _e:
-                        print(f"  Cache refresh failed: {_e}")
-            except Exception as _e:
-                print(f"  Could not connect to Plex for scan-wait: {_e}")
+                        _sec = _plex_for_scan.library.section(_lib)
+                        _sec.update()
+                        _ok, _elapsed = wait_for_plex_scan_complete(_plex_for_scan, _lib, _sec, max_wait=300, verbose=False)
+                        print(f"    {_lib}: scan {'completed' if _ok else 'timed out'} in {_elapsed:.1f}s")
+                    except PLEX_ERRORS as _e:
+                        print(f"    {_lib}: scan failed: {_e}")
+                # Now refresh cache so it reflects the new paths.
+                update_cache_for_library(None)
+                print("  Cache refreshed; ready for next command.")
 
 def _plex2disk_clean_scope(sidecar, paths, strip_fn, dry_run, is_dir=False):
     """Strip markers from a set of paths using sidecar data.
@@ -37561,7 +37552,7 @@ def _push_watched_dpm(obj, change, dry_run):
         else:
             print(f"  Pushed watched ({wd or 'no date'}): {title}")
         return True
-    except Exception as ex:
+    except PLEX_ERRORS as ex:
         print(f"  ERROR pushing watched for {title}: {ex}", file=sys.stderr)
         return False
 
@@ -37793,7 +37784,7 @@ def cmd_disk2plex(target, dry_run=False, force=False, yes=False):
                 continue
             try:
                 ok = handler(obj, change, dry_run=False)
-            except Exception as ex:
+            except PLEX_ERRORS as ex:
                 print(f"  ERROR pushing {plex_var} for {cache_key}: {ex}", file=sys.stderr)
                 errors += 1
                 continue
@@ -38071,7 +38062,7 @@ def _remux_one_file(cache_key, obj, version, classification, file_info):
         # Best-effort cleanup of staging
         try:
             run_tool_on_PLEX_server('rm', ['-f', staging_path], remote_host=remote_host, timeout=10)
-        except Exception:
+        except OSError:
             pass
         return False
 
@@ -38296,7 +38287,7 @@ _MOVE_STATE_DIR = os.path.expanduser('~/.my-plex/state-preservation')
 def _move_state_dir():
     try:
         os.makedirs(_MOVE_STATE_DIR, exist_ok=True)
-    except Exception:
+    except OSError:
         pass
     return _MOVE_STATE_DIR
 
@@ -38321,7 +38312,7 @@ def _move_state_read(path):
     try:
         with open(path) as f:
             return _json.load(f)
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 
@@ -38330,7 +38321,7 @@ def _move_state_remove(old_rk):
         os.remove(_move_state_path(old_rk))
     except FileNotFoundError:
         pass
-    except Exception:
+    except OSError:
         pass
 
 
@@ -38353,11 +38344,11 @@ def _build_playlist_membership_map(plex):
                         rk = int(getattr(it, 'ratingKey', 0) or 0)
                         if rk:
                             out.setdefault(rk, []).append(title)
-                    except Exception:
+                    except (ValueError, TypeError):
                         continue
-            except Exception:
+            except PLEX_ERRORS:
                 continue
-    except Exception as e:
+    except PLEX_ERRORS as e:
         if DBG: print(f"{DBGPFX}_build_playlist_membership_map: {e}")
     return out
 
@@ -38378,7 +38369,7 @@ def _plex_dt_to_epoch(value):
             return int(value.timestamp())
         if isinstance(value, _dt.date):
             return int(_dt.datetime(value.year, value.month, value.day).timestamp())
-    except Exception:
+    except (OverflowError, OSError, ValueError):
         return None
     return None
 
@@ -38429,17 +38420,17 @@ def _snapshot_plex_item_state(plex, obj, playlist_map):
             if oaa is not None:
                 try:
                     snap['originallyAvailableAt'] = oaa.strftime('%Y-%m-%d')
-                except Exception:
+                except (AttributeError, ValueError):
                     snap['originallyAvailableAt'] = str(oaa)[:10] or None
             try:
                 snap['labels'] = sorted({lab.tag for lab in (item.labels or [])})
-            except Exception:
+            except PLEX_ERRORS:
                 pass
             try:
                 snap['collections'] = sorted({c.tag for c in (item.collections or [])})
-            except Exception:
+            except PLEX_ERRORS:
                 pass
-        except Exception as e:
+        except PLEX_ERRORS as e:
             if DBG: print(f"{DBGPFX}_snapshot_plex_item_state rk={rk}: {e}")
     return snap
 
@@ -38451,20 +38442,20 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
         return ['plex API unavailable or new_rk missing']
     try:
         item = plex.fetchItem(int(new_rk))
-    except Exception as e:
+    except PLEX_ERRORS as e:
         return [f'fetchItem({new_rk}): {e}']
 
     for lab in (snap.get('labels') or []):
         try: item.addLabel(lab)
-        except Exception as e: errors.append(f'addLabel({lab!r}): {e}')
+        except PLEX_ERRORS as e: errors.append(f'addLabel({lab!r}): {e}')
 
     if snap.get('userRating'):
         try: item.rate(float(snap['userRating']))
-        except Exception as e: errors.append(f'rate({snap["userRating"]}): {e}')
+        except PLEX_ERRORS as e: errors.append(f'rate({snap["userRating"]}): {e}')
 
     if (snap.get('viewCount') or 0) > 0:
         try: item.markPlayed()
-        except Exception as e: errors.append(f'markPlayed: {e}')
+        except PLEX_ERRORS as e: errors.append(f'markPlayed: {e}')
 
     # Dates.  Plex's metadata edit endpoint accepts addedAt (epoch int) and
     # originallyAvailableAt (ISO date); both are locked so a later library
@@ -38476,28 +38467,28 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
     if _added:
         try:
             item.edit(**{'addedAt.value': int(_added), 'addedAt.locked': 1})
-        except Exception as e:
+        except PLEX_ERRORS as e:
             errors.append(f'edit(addedAt={_added}): {e}')
     _oaa = snap.get('originallyAvailableAt')
     if _oaa:
         try:
             item.edit(**{'originallyAvailableAt.value': str(_oaa),
                          'originallyAvailableAt.locked': 1})
-        except Exception as e:
+        except PLEX_ERRORS as e:
             errors.append(f'edit(originallyAvailableAt={_oaa}): {e}')
 
     for pl_title in (snap.get('playlists') or []):
         try:
             pl = plex.playlist(pl_title)
             pl.addItems([item])
-        except Exception as e:
+        except PLEX_ERRORS as e:
             errors.append(f'playlist({pl_title!r}).addItems: {e}')
 
     for coll_title in (snap.get('collections') or []):
         try:
             try:
                 section = plex.library.section(dest_library)
-            except Exception:
+            except PLEX_ERRORS:
                 section = None
             existing = None
             if section is not None:
@@ -38505,14 +38496,14 @@ def _restore_plex_item_state(plex, new_rk, snap, dest_library):
                     for c in section.collections():
                         if c.title == coll_title:
                             existing = c; break
-                except Exception:
+                except PLEX_ERRORS:
                     pass
             if existing is not None:
                 existing.addItems([item])
             else:
                 from plexapi.collection import Collection as _PC
                 _PC.create(server=plex, title=coll_title, section=dest_library, items=[item])
-        except Exception as e:
+        except PLEX_ERRORS as e:
             errors.append(f'collection({coll_title!r}): {e}')
 
     return errors
@@ -38531,18 +38522,18 @@ def _cleanup_emptied_source_collections(plex, drained_pairs, quiet=False):
             continue
         try:
             section = plex.library.section(library)
-        except Exception as e:
+        except PLEX_ERRORS as e:
             if not quiet: print(f"  ⚠ cleanup: section {library!r} not reachable: {e}")
             continue
         try:
             matches = [c for c in section.collections() if c.title == title]
-        except Exception as e:
+        except PLEX_ERRORS as e:
             if not quiet: print(f"  ⚠ cleanup: list collections in {library!r}: {e}")
             continue
         for coll in matches:
             try:
                 members = coll.items()
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 if not quiet: print(f"  ⚠ cleanup: read members of {title!r} in {library!r}: {e}")
                 continue
             if members:
@@ -38551,7 +38542,7 @@ def _cleanup_emptied_source_collections(plex, drained_pairs, quiet=False):
                 coll.delete()
                 if not quiet: print(f"  🗑 cleanup: deleted now-empty Plex Collection {title!r} in {library!r}")
                 n_deleted += 1
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 if not quiet: print(f"  ⚠ cleanup: delete {title!r} in {library!r}: {e}")
     return n_deleted
 
@@ -38570,7 +38561,7 @@ def _replay_pending_move_state(plex, quiet=False):
     d = _move_state_dir()
     try:
         entries = sorted(os.listdir(d))
-    except Exception:
+    except OSError:
         return 0, 0
     pending = [e for e in entries if e.endswith('.json')]
     if not pending:
@@ -38586,11 +38577,11 @@ def _replay_pending_move_state(plex, quiet=False):
             if not quiet:
                 print(f"  ⊘ stale snapshot {fn}: file never moved, discarding")
             try: os.remove(path)
-            except Exception: pass
+            except OSError: pass
             continue
         if status == 'restored':
             try: os.remove(path)
-            except Exception: pass
+            except OSError: pass
             continue
         if status != 'moved':
             continue
@@ -38642,7 +38633,7 @@ def _replay_pending_move_state(plex, quiet=False):
                             and _o.get('library') == _dest and _o.get('id')):
                             new_rk = int(_o['id'])
                             break
-        except Exception as _e:
+        except (ValueError, TypeError) as _e:
             if DBG: print(f"{DBGPFX}_replay_pending_move_state lookup: {_e}")
         if not new_rk:
             if not quiet:
@@ -38683,9 +38674,9 @@ def _replay_pending_move_state(plex, quiet=False):
                 # doesn't drop the in-memory patch.
                 try:
                     update_and_save_cache(CACHE)
-                except Exception as _se:
+                except (OSError, pickle.PicklingError) as _se:
                     if DBG: print(f"{DBGPFX}post-restore cache save: {_se}")
-            except Exception as _e:
+            except TypeError as _e:
                 if DBG: print(f"{DBGPFX}post-restore cache patch: {_e}")
             # Remember the source library + collection titles so we can
             # delete the now-emptied Plex Collections at the end.
@@ -38694,20 +38685,17 @@ def _replay_pending_move_state(plex, quiet=False):
                 for _ct in ((st.get('snapshot') or {}).get('collections') or []):
                     if _src_lib and _ct:
                         _drained_source_pairs.add((_src_lib, _ct))
-            except Exception:
+            except TypeError:
                 pass
             try: os.remove(path)
-            except Exception: pass
+            except OSError: pass
             n_restored += 1
     # Auto-cleanup: any source-library Plex Collection that's now empty
     # (because we just moved its last member out) is deleted.  We only
     # delete collections that live-Plex confirms are empty.
-    try:
-        n_del = _cleanup_emptied_source_collections(plex, _drained_source_pairs, quiet=quiet)
-        if n_del and not quiet:
-            print(f"  state-preservation: cleaned up {n_del} now-empty source Plex Collection(s)")
-    except Exception as _e:
-        if not quiet: print(f"  ⚠ state-preservation: collection cleanup failed: {_e}")
+    n_del = _cleanup_emptied_source_collections(plex, _drained_source_pairs, quiet=quiet)
+    if n_del and not quiet:
+        print(f"  state-preservation: cleaned up {n_del} now-empty source Plex Collection(s)")
     return n_restored, n_failed
 
 
@@ -38775,16 +38763,10 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     # every cmd_move invocation — including no-op ones — act as a
     # transparent replay trigger.
     if not dry_run and not READ_ONLY_MODE:
-        try:
-            _plex_for_replay = ensure_plex_api(required=False)
-        except Exception:
-            _plex_for_replay = None
-        try:
-            nr, nf = _replay_pending_move_state(_plex_for_replay, quiet=False)
-            if nr or nf:
-                print(f">>> drained pending state-preservation: {nr} restored, {nf} failed")
-        except Exception as _e:
-            print(f"  ⚠ state-preservation replay failed: {_e}")
+        _plex_for_replay = ensure_plex_api(required=False)
+        nr, nf = _replay_pending_move_state(_plex_for_replay, quiet=False)
+        if nr or nf:
+            print(f">>> drained pending state-preservation: {nr} restored, {nf} failed")
 
     # Resolve scope via the universal multi-token resolver — same engine
     # used by --list, --remux, --plex2disk, etc.  Multiple tokens AND-combine
@@ -38899,14 +38881,11 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     _plex_for_snapshot = None
     _playlist_membership = {}
     if not dry_run and not READ_ONLY_MODE:
-        try:
-            _plex_for_snapshot = ensure_plex_api(required=False)
-            if _plex_for_snapshot is not None:
-                _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
-                if _playlist_membership:
-                    print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
-        except Exception as _e:
-            print(f"  ⚠ could not build playlist-membership map ({_e}); playlist memberships will NOT be preserved")
+        _plex_for_snapshot = ensure_plex_api(required=False)
+        if _plex_for_snapshot is not None:
+            _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
+            if _playlist_membership:
+                print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
     # Track state files written this run so the final restore pass can find them.
     _state_files_written = []
     # v2.18: session log — every per-item outcome recorded for audit history.
@@ -39016,7 +38995,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 print(f"    Your choice: ", end='', flush=True)
                 try:
                     ch = readchar.readchar()
-                except Exception:
+                except Exception:  # readchar: raises termios' and the terminal's own errors
                     ch = 's'
                 print(ch)
                 if ch == 's':
@@ -39115,7 +39094,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                         if _snap.get('userRating'):  _bits.append(f"rating={_snap['userRating']}")
                         if (_snap.get('viewCount') or 0) > 0: _bits.append(f"watched={_snap['viewCount']}x")
                         print(f"  state-snapshot {cache_key} rk={_old_rk}: {', '.join(_bits)}")
-                except Exception as _e:
+                except OSError as _e:
                     print(f"  ⚠ state-snapshot {cache_key}: {_e}")
 
         if type_str == 'Movie' and filepaths:
@@ -39123,7 +39102,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             first_fp = filepaths[0]
             try:
                 rel = os.path.relpath(first_fp, src_root)
-            except Exception:
+            except (ValueError, TypeError):
                 rel = os.path.basename(first_fp)
             if rel.startswith('..') or '/' not in rel:
                 # Video sits at the library root (no wrapper dir) — fall
@@ -39181,7 +39160,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             for fp in filepaths:
                 try:
                     rel_path = os.path.relpath(fp, src_root)
-                except Exception:
+                except (ValueError, TypeError):
                     rel_path = os.path.basename(fp)
                 if rel_path.startswith('..'):
                     rel_path = os.path.basename(fp)
@@ -39210,7 +39189,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 else:
                     try:
                         os.makedirs(new_dir, exist_ok=True)
-                    except Exception as e:
+                    except OSError as e:
                         print(f"  ✗ ERROR mkdir local: {new_dir} — {e}", file=sys.stderr)
                         item_failed = True
                         break
@@ -39284,7 +39263,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                 _st['new_filepath'] = moved_filepaths[0][1]
                 _move_state_write(_st)
                 _state_files_written.append(_state_file_path)
-            except Exception as _e:
+            except OSError as _e:
                 print(f"  ⚠ state-file update failed: {_e}")
 
     # ----- Trigger Plex library scans -----
@@ -39299,11 +39278,11 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
                     try:
                         api_libs[libname].update()
                         print(f"  ✓ Scan triggered: {libname}")
-                    except Exception as e:
+                    except PLEX_ERRORS as e:
                         print(f"  ! Could not trigger scan for {libname}: {e}")
                 else:
                     print(f"  ! Library not found in Plex API: {libname}")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ! Could not connect to Plex API to trigger scans: {e}")
         if not READ_ONLY_MODE:
             update_and_save_cache(CACHE)
@@ -39323,11 +39302,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
     if n_moved > 0 and not dry_run and not READ_ONLY_MODE:
         print()
         print(f"  refreshing cache (delegates to --update-cache; new Plex IDs adopted)…")
-        try:
-            update_cache_for_library(None)
-        except Exception as e:
-            print(f"  ⚠ in-process cache refresh failed: {e}")
-            print(f"    Fall back to: my-plex --update-cache")
+        update_cache_for_library(None)
 
         # v2.69: restore state on every just-moved item.  Pending state files
         # written this run (status='moved') now resolve to a new ratingKey
@@ -39335,12 +39310,8 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
         if _state_files_written:
             print()
             print(f"  state-preservation: restoring state on {len(_state_files_written)} moved item(s)…")
-            try:
-                nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
-                print(f"  state-preservation: {nr} restored, {nf} failed")
-            except Exception as _e:
-                print(f"  ⚠ state-preservation restore failed: {_e}")
-                print(f"    State files remain at {_MOVE_STATE_DIR}/ for a later replay.")
+            nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+            print(f"  state-preservation: {nr} restored, {nf} failed")
     # v2.18: write session log to /tmp/my-plex.move-log.<UTC-ISO>.json so
     # the user can audit history of cross-library moves later.
     if _move_log['ops']:
@@ -39355,7 +39326,7 @@ def cmd_move(args_list, dry_run=False, force=False, yes=False):
             with open(_path, 'w') as _f:
                 _json.dump(_move_log, _f, indent=2, default=str)
             print(f"  log     : {_path}")
-        except Exception as _e:
+        except OSError as _e:
             print(f"  log     : (failed to write — {_e})")
     print("=" * 76)
     return (n_moved, n_skipped, n_errors)
@@ -39417,7 +39388,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
             expr_tokens = [f"library:{src}", "AND", "type:movie", "AND", "("] + when.split() + [")"]
         try:
             matches = _resolve_scope_filter_expr(expr_tokens)
-        except Exception as e:
+        except (ValueError, re.error) as e:
             print(f"  ⚠ rule #{i+1}: filter evaluation failed — {e}")
             continue
         dst_roots = locations_by_lib.get(dst) or []
@@ -39548,21 +39519,15 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     _state_files_written = []
     from datetime import datetime as _dtm
     if not dry_run and not READ_ONLY_MODE:
-        try:
-            _plex_for_snapshot = ensure_plex_api(required=False)
-            if _plex_for_snapshot is not None:
-                _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
-                if _playlist_membership:
-                    print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
-        except Exception as _e:
-            print(f"  ⚠ playlist-membership map build failed ({_e}); playlist memberships will NOT be preserved")
+        _plex_for_snapshot = ensure_plex_api(required=False)
+        if _plex_for_snapshot is not None:
+            _playlist_membership = _build_playlist_membership_map(_plex_for_snapshot)
+            if _playlist_membership:
+                print(f"  state-preservation: indexed {len(_playlist_membership)} ratingKey(s) across Plex Playlists")
         # Also drain any leftover state from a prior crashed run.
-        try:
-            _nr, _nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
-            if _nr or _nf:
-                print(f">>> drained pending state-preservation: {_nr} restored, {_nf} failed")
-        except Exception as _e:
-            print(f"  ⚠ state-preservation replay failed: {_e}")
+        _nr, _nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+        if _nr or _nf:
+            print(f">>> drained pending state-preservation: {_nr} restored, {_nf} failed")
         # Per-item snapshot.
         for _key, _obj, _src, _dst, _sw, _dw, _ri in plan:
             try:
@@ -39597,7 +39562,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 if (_snap.get('viewCount') or 0) > 0: _bits.append(f"watched={_snap['viewCount']}x")
                 if _bits:
                     print(f"  state-snapshot {_key} rk={_old_rk}: {', '.join(_bits)}")
-            except Exception as _e:
+            except (ValueError, TypeError, OSError) as _e:
                 print(f"  ⚠ state-snapshot {_key}: {_e}")
 
     # Phase 4: bulk SSH mv.  ONE session.  Per-op outcome on its own
@@ -39623,7 +39588,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     if DBG: print(f"{DBGPFX}sort-new SSH bulk-mv ({len(plan)} ops)", file=sys.stderr)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"ERROR: SSH bulk-mv failed: {e}", file=sys.stderr)
         return (0, 0, len(plan))
     outcomes = result.stdout.splitlines()
@@ -39682,7 +39647,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
                 else:
                     _st['new_filepath'] = _new_fp_planned   # prefix-scan fallback
                 _move_state_write(_st)
-            except Exception as _e:
+            except OSError as _e:
                 print(f"  ⚠ state-file update {key}: {_e}")
 
     # Phase 6: ONE library scan trigger per affected lib (unless Plex's
@@ -39691,17 +39656,14 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
         if _detect_plex_auto_scan_enabled():
             print(">>> Plex auto-update-on-disk-change is enabled — skipping manual lib.update().")
         else:
-            try:
-                plex = ensure_plex_api(required=False)
-                if plex:
-                    for lib_name in sorted(affected_libs):
-                        try:
-                            plex.library.section(lib_name).update()
-                            print(f"  ✓ triggered Plex scan of '{lib_name}'")
-                        except Exception as e:
-                            print(f"  ⚠ scan of '{lib_name}' failed: {e}")
-            except Exception as e:
-                print(f"  ⚠ scan trigger failed: {e}")
+            plex = ensure_plex_api(required=False)
+            if plex:
+                for lib_name in sorted(affected_libs):
+                    try:
+                        plex.library.section(lib_name).update()
+                        print(f"  ✓ triggered Plex scan of '{lib_name}'")
+                    except PLEX_ERRORS as e:
+                        print(f"  ⚠ scan of '{lib_name}' failed: {e}")
 
     # v2.69: refresh cache in-process (CACHE INTEGRITY rule) so new
     # ratingKeys land in the cache, then drain pending state files so
@@ -39709,20 +39671,12 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
     if moved_keys and not dry_run and not READ_ONLY_MODE:
         print()
         print(f"  refreshing cache (delegates to --update-cache; new Plex IDs adopted)…")
-        try:
-            update_cache_for_library(None)
-        except Exception as e:
-            print(f"  ⚠ in-process cache refresh failed: {e}")
-            print(f"    Fall back to: my-plex --update-cache")
+        update_cache_for_library(None)
         if _state_files_written:
             print()
             print(f"  state-preservation: restoring state on {len(_state_files_written)} moved item(s)…")
-            try:
-                nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
-                print(f"  state-preservation: {nr} restored, {nf} failed")
-            except Exception as _e:
-                print(f"  ⚠ state-preservation restore failed: {_e}")
-                print(f"    State files remain at {_MOVE_STATE_DIR}/ for a later replay.")
+            nr, nf = _replay_pending_move_state(_plex_for_snapshot, quiet=False)
+            print(f"  state-preservation: {nr} restored, {nf} failed")
 
     # Phase 7: JSON session log.
     try:
@@ -39743,7 +39697,7 @@ def _sort_new_movies(dry_run=False, target=None, yes=False, force=False):
         with open(_path, 'w') as _f:
             _json.dump(_log, _f, indent=2, default=str)
         print(f"  log     : {_path}")
-    except Exception as _e:
+    except OSError as _e:
         print(f"  log     : (failed to write — {_e})")
 
     print(f"\n{'='*76}\n--sort-new MOVIE ROUTING SUMMARY")
