@@ -12914,7 +12914,7 @@ def move_file(src_path, dst_dir, remote_host=None):
             shutil.move(src_path, dst_path)
             if VRB: print(f"{VRBPFX}Moved: {src_path} -> {dst_path}")
             return True
-    except Exception as e:
+    except OSError as e:
         print(f"ERROR: Failed to move file: {e}", file=sys.stderr)
         return False
 
@@ -13113,7 +13113,7 @@ def fetch_tmdb_movie_basics(tmdb_id, max_retries=5):
             _t.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
             continue
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if DBG: print(f"{DBGPFX}fetch_tmdb_movie_basics({tmdb_id}): {e!r}")
             return None
     return None
@@ -13185,7 +13185,7 @@ def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5
             _t.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
             continue
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             # Unknown error — log and bail out without retry to avoid hot-loop.
             if DBG: print(f"{DBGPFX}fetch_original_language_from_tmdb({tmdb_id},{media_type}): {e}")
             return None
@@ -13225,7 +13225,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 d = _json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if DBG: print(f"{DBGPFX}TMDB by-id {endpoint}/{ext_id} → {e!r}", file=sys.stderr)
             return None
         date_field = 'release_date' if endpoint == 'movie' else 'first_air_date'
@@ -13257,7 +13257,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 d = _json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if DBG: print(f"{DBGPFX}TVDB by-id {path}/{ext_id} → {e!r}", file=sys.stderr)
             return None
         rec = (d.get('data') or {})
@@ -13288,7 +13288,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 d = _json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if DBG: print(f"{DBGPFX}TMDB find imdb:{ext_id} → {e!r}", file=sys.stderr)
             return None
         bucket = 'tv_results' if endpoint == 'tv' else 'movie_results'
@@ -13361,7 +13361,7 @@ def _search_tmdb_collections(title, max_retries=3):
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TMDB collection search {title!r} → HTTP {e.code}", file=sys.stderr)
             return []
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if attempt < max_retries:
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TMDB collection search {title!r} → {e!r}", file=sys.stderr)
@@ -13388,7 +13388,7 @@ def _fetch_tmdb_collection_parts(collection_id):
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = _json.loads(resp.read().decode('utf-8'))
-    except Exception as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         if DBG: print(f"{DBGPFX}TMDB collection/{collection_id} → {e!r}", file=sys.stderr)
         return []
     parts = []
@@ -13457,7 +13457,7 @@ def _search_tmdb_titles(title, kind='movie', max_retries=3):
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TMDB search {endpoint}?query={title!r} → HTTP {e.code}", file=sys.stderr)
             return []
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if attempt < max_retries:
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TMDB search {endpoint}?query={title!r} → {e!r}", file=sys.stderr)
@@ -13491,7 +13491,7 @@ def _tvdb_token():
             # TVDB tokens are valid for ~30 days; refresh every 24h to be safe.
             _TVDB_TOKEN_CACHE['expires_at'] = _t.time() + 86400
             return token
-    except Exception as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         if DBG: print(f"{DBGPFX}TVDB login failed: {e!r}", file=sys.stderr)
     return None
 
@@ -13554,7 +13554,7 @@ def _search_tvdb_titles(title, kind='movie', max_retries=3):
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TVDB search {tvdb_type}?query={title!r} → HTTP {e.code}", file=sys.stderr)
             return []
-        except Exception as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             if attempt < max_retries:
                 _t.sleep(backoff); backoff = min(backoff * 2, 30.0); continue
             if DBG: print(f"{DBGPFX}TVDB search {tvdb_type}?query={title!r} → {e!r}", file=sys.stderr)
@@ -13964,17 +13964,14 @@ def _detect_plex_auto_scan_enabled():
     enough on its own — it runs on a timer (default 24h), not on disk
     change, so we still want the manual trigger if only the scheduled
     scan is on."""
+    plex = ensure_plex_api(required=False)
+    if not plex:
+        return False
     try:
-        plex = ensure_plex_api(required=False)
-        if not plex:
-            return False
-        try:
-            v = plex.settings.get('FSEventLibraryUpdatesEnabled')
-            if v is not None and bool(getattr(v, 'value', v)):
-                return True
-        except Exception:
-            pass
-    except Exception:
+        v = plex.settings.get('FSEventLibraryUpdatesEnabled')
+        if v is not None and bool(getattr(v, 'value', v)):
+            return True
+    except PLEX_ERRORS:
         pass
     return False
 
@@ -14209,7 +14206,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             else:
                 rc = _sp.run(['sh', '-c', find_cmd], capture_output=True, text=True, timeout=20)
             videos_on_disk = [v for v in (rc.stdout or '').splitlines() if v.strip()]
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             print(f"  ⚠ {key}: could not scan {wrapper_dir} ({e!r}) — skipping.")
             continue
 
@@ -14479,11 +14476,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     if _lib:
                         libs_affected.add(_lib)
         if libs_affected:
-            try:
-                _plex = ensure_plex_api(required=False)
-            except Exception as e:
-                _plex = None
-                print(f"  ⚠ Plex API connect failed (can't trigger lib scan): {e}")
+            _plex = ensure_plex_api(required=False)
             if _plex:
                 if _detect_plex_auto_scan_enabled():
                     print(">>> Plex auto-update-on-disk-change is enabled — skipping manual lib.update().")
@@ -14492,27 +14485,24 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         try:
                             _plex.library.section(_lib_name).update()
                             print(f"  ✓ triggered Plex scan of '{_lib_name}'")
-                        except Exception as e:
+                        except PLEX_ERRORS as e:
                             print(f"  ⚠ scan of '{_lib_name}' failed: {e}")
 
     # v2.69: write a JSON resolve log for parity with every other --resolve command.
-    try:
-        import datetime as _dt
-        _write_resolve_log('bad_structure_resolve', {
-            'command':  'bad_structure_resolve',
-            'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-            'dry_run':  bool(dry_run),
-            'auto':     bool(auto),
-            'scope':    scope,
-            'summary':  {
-                'episode_moves':     len(plan_episode),
-                'movie_flattens':    len(plan_auto),
-                'conflicts':         len(plan_conflict),
-            },
-            'libraries_scanned':     sorted(libs_affected) if libs_affected else [],
-        })
-    except Exception as _e:
-        print(f">>> (resolve log skipped: {_e})")
+    import datetime as _dt
+    _write_resolve_log('bad_structure_resolve', {
+        'command':  'bad_structure_resolve',
+        'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+        'dry_run':  bool(dry_run),
+        'auto':     bool(auto),
+        'scope':    scope,
+        'summary':  {
+            'episode_moves':     len(plan_episode),
+            'movie_flattens':    len(plan_auto),
+            'conflicts':         len(plan_conflict),
+        },
+        'libraries_scanned':     sorted(libs_affected) if libs_affected else [],
+    })
     print()
 
 
@@ -15134,12 +15124,11 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             if choice == '?':
                 # Show wrapper contents via SSH so user knows what's there
                 try:
-                    import subprocess
                     cmd = [*_ssh_args(PLEX_DB_REMOTE_HOST), f"ls -1 {shlex.quote(wrapper)}"]
                     out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
                     for line in out.splitlines()[:20]:
                         print(f"      {line}")
-                except Exception as e:
+                except (OSError, subprocess.SubprocessError) as e:
                     print(f"      (ls failed: {e})")
                 continue
             m = re.match(r'^y(\d{4})$', choice, re.IGNORECASE)
@@ -15322,7 +15311,6 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # Skip entirely if rename_queue is empty (refresh-only path).
     libs_affected = set()
     if rename_queue:
-        import subprocess
         bulk_cmds = []
         for _key, _obj, src, dst, _yr, _tmdb in rename_queue:
             # POSIX-safe quoting — quote the paths to survive special chars.
@@ -15332,7 +15320,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         if DBG: print(f"{DBGPFX}SSH bulk-mv ({len(rename_queue)} ops)…", file=sys.stderr)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             print(f"ERROR: SSH bulk-mv failed: {e}", file=sys.stderr)
             return
         if result.returncode != 0 and not result.stdout:
@@ -15401,10 +15389,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # from 'local://…' to 'plex://movie/…' within seconds.
     if UNMATCHED_RESOLVE_AUTO_SCAN_AFTER_RENAME:
         plex = None
-        try:
-            plex = ensure_plex_api(required=False)
-        except Exception as e:
-            print(f"  ⚠ Plex API connect failed: {e}")
+        plex = ensure_plex_api(required=False)
         if plex:
             # 1. library.update() once per affected library (unless Plex's
             #    filesystem watcher will do it anyway).
@@ -15415,7 +15400,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     try:
                         plex.library.section(lib_name).update()
                         print(f"  ✓ triggered Plex scan of '{lib_name}'")
-                    except Exception as e:
+                    except PLEX_ERRORS as e:
                         print(f"  ⚠ scan of '{lib_name}' failed: {e}")
             # 2. item.fixMatch(auto=True) per renamed AND already-canonical
             #    item.  item.refresh() does NOT help here — its docstring
@@ -15445,7 +15430,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                             continue
                         try:
                             item = plex.fetchItem(rk)
-                        except Exception as fetch_exc:
+                        except PLEX_ERRORS as fetch_exc:
                             if _is_404(fetch_exc):
                                 print(f"  ✓ {key}: Plex already re-scanned (old ratingKey gone) — new entry will match on its own")
                             else:
@@ -15454,7 +15439,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         try:
                             item.fixMatch(auto=True)
                             print(f"  ✓ matched: {key}  {obj.get('title','?')!r}")
-                        except Exception as fm_exc:
+                        except PLEX_ERRORS as fm_exc:
                             if _is_404(fm_exc):
                                 # 404 on the match endpoint = old ratingKey
                                 # was deleted between fetchItem and fixMatch
@@ -15467,39 +15452,36 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                                 try:
                                     item.refresh()
                                     print(f"     fallback: item.refresh() queued")
-                                except Exception as r_exc:
+                                except PLEX_ERRORS as r_exc:
                                     if _is_404(r_exc):
                                         print(f"     (item meanwhile gone — Plex auto-rescanned)")
                                     else:
                                         print(f"     refresh fallback also failed: {r_exc}")
-                    except Exception as e:
+                    except (ValueError, TypeError) as e:
                         print(f"  ⚠ re-match failed for {key}: {e}")
         else:
             print(">>> Plex API not configured — please trigger a library scan / per-item Fix Match manually.")
 
     # v2.69: write a JSON resolve log for parity with every other --resolve command.
-    try:
-        import datetime as _dt
-        _write_resolve_log('unmatched_resolve', {
-            'command':  'unmatched_resolve',
-            'finished': _dt.datetime.now().isoformat(timespec='seconds'),
-            'dry_run':  bool(dry_run),
-            'auto':     bool(auto),
-            'scope':    scope,
-            'summary':  {
-                'renamed':      len(rename_queue),
-                'refresh_only': len(refresh_only),
-                'skipped':      len(skipped),
-            },
-            'rename_queue': [
-                {'key': k, 'src': src, 'dest': dst, 'year': yr, 'tmdb_id': tmdb}
-                for (k, _o, src, dst, yr, tmdb) in rename_queue
-            ],
-            'skipped':      [{'key': k, 'reason': r} for (k, r) in skipped],
-            'refresh_only': [k for (k, _o) in refresh_only],
-        })
-    except Exception as _e:
-        print(f">>> (resolve log skipped: {_e})")
+    import datetime as _dt
+    _write_resolve_log('unmatched_resolve', {
+        'command':  'unmatched_resolve',
+        'finished': _dt.datetime.now().isoformat(timespec='seconds'),
+        'dry_run':  bool(dry_run),
+        'auto':     bool(auto),
+        'scope':    scope,
+        'summary':  {
+            'renamed':      len(rename_queue),
+            'refresh_only': len(refresh_only),
+            'skipped':      len(skipped),
+        },
+        'rename_queue': [
+            {'key': k, 'src': src, 'dest': dst, 'year': yr, 'tmdb_id': tmdb}
+            for (k, _o, src, dst, yr, tmdb) in rename_queue
+        ],
+        'skipped':      [{'key': k, 'reason': r} for (k, r) in skipped],
+        'refresh_only': [k for (k, _o) in refresh_only],
+    })
 
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
 
@@ -15631,7 +15613,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # 3. Fetch Plex item + query agent.
         try:
             series_item = plex.fetchItem(rk)
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ⚠ fetchItem({rk}) failed: {e} — skipping")
             skipped += 1
             log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'fetch-failed: {e}'})
@@ -15644,7 +15626,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             print(f"          query: {q!r}")
             try:
                 return series_item.matches(title=q) or [], None
-            except Exception as e:
+            except PLEX_ERRORS as e:
                 return [], str(e)
 
         raw_results, err = _query_agent(_clean_q)
@@ -15691,11 +15673,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             #     imdb_id and feed it to fixMatch.
             if auto and chosen is None:
                 print(f"  >>> Plex agent below threshold — falling back to online engines (TMDB/TVDB/fernsehserien.de)…")
-                try:
-                    online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
-                except Exception as e:
-                    print(f"  ⚠ online-engine search failed: {e}")
-                    online_cands = []
+                online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
                 if online_cands:
                     online_scored = sorted(
                         ((c, _score_candidate(_clean_q, c)) for c in online_cands),
@@ -15773,11 +15751,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         print(f"  ⚠ series.matches() failed: {err}")
                 else:
                     print(f"          T-query: {_clean_q!r}  (online engines)")
-                    try:
-                        online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
-                    except Exception as e:
-                        print(f"  ⚠ online-engine search failed: {e}")
-                        online_cands = []
+                    online_cands = _search_unmatched_candidates(_clean_q, 'tv') or []
                     if not online_cands:
                         print(f"  (online engines returned no candidates)")
                         continue
@@ -15875,7 +15849,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             continue
         try:
             series_item.fixMatch(chosen['_raw'])
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ✗ fixMatch failed: {e}")
             log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'fail',
                                            'reason': f'fixMatch: {e}',
@@ -15905,7 +15879,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             scrape_episodes(chosen.get('title') or title, wrapper, force=True,
                             external_ids=new_ext_ids, library_name=lib_name,
                             year=chosen.get('year'))
-        except Exception as e:
+        except Exception as e:  # the scrapers parse third-party HTML and JSON: a page that changed shape raises anything
             print(f"  ⚠ re-scrape failed (non-fatal): {e}")
 
     # 8. Library scan(s) — wait for completion.  PLEX_Library.OBJ_DICT
@@ -15930,12 +15904,8 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 # to the canonical --update-cache code path via subprocess +
                 # pickle reload (3a446fb), so this is safe.
                 print(f">>> Refreshing my-plex cache (via subprocess --update-cache)…")
-                try:
-                    update_cache_for_library(lib_name)
-                except Exception as e:
-                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
-                    print(f"    Fall back to: my-plex --update-cache")
-            except Exception as e:
+                update_cache_for_library(lib_name)
+            except PLEX_ERRORS as e:
                 print(f"  ⚠ scan trigger for {lib_name!r} failed: {e}")
 
     # 9. Summary + log.
@@ -16091,15 +16061,9 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         _collection_meta = None        # {tmdb_id, name, original_name} — used to mirror as Plex Collection
         while True:
             print(f"          query: {_clean_q!r}")
-            try:
-                tv_hits         = _search_unmatched_candidates(_clean_q, 'tv') or []
-                movie_hits      = _search_unmatched_candidates(_clean_q, 'movie') or []
-                collection_hits = _search_tmdb_collections(_clean_q) or []
-            except Exception as e:
-                print(f"  ⚠ online search failed: {e} — skipping")
-                _confirmation_skip = True
-                log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'online-search: {e}'})
-                break
+            tv_hits         = _search_unmatched_candidates(_clean_q, 'tv') or []
+            movie_hits      = _search_unmatched_candidates(_clean_q, 'movie') or []
+            collection_hits = _search_tmdb_collections(_clean_q) or []
             print(f"          TMDB tv:         {len(tv_hits)} hit(s)")
             print(f"          TMDB movie:      {len(movie_hits)} hit(s)")
             print(f"          TMDB collection: {len(collection_hits)} hit(s)")
@@ -16407,7 +16371,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             series_item = plex.fetchItem(rk)
             series_item.delete()
             print(f"  ✓ deleted Plex Series:{rk}")
-        except Exception as e:
+        except PLEX_ERRORS as e:
             print(f"  ⚠ delete Plex Series:{rk} failed (non-fatal — Plex will clean up on scan): {e}")
 
         libs_to_scan.add(chosen_target)
@@ -16548,7 +16512,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 try:
                     plex.fetchItem(rk).delete()
                     print(f"    ✓ deleted Plex Movie:{rk}")
-                except Exception as e:
+                except PLEX_ERRORS as e:
                     print(f"    ⚠ delete Movie:{rk} failed: {e}")
             libs_to_scan.add(target_series_lib)
             libs_to_scan.add(lib_name)
@@ -16573,12 +16537,8 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 # Per CACHE INTEGRITY rule: refresh my-plex cache in-process
                 # so the user never has to run --update-cache after this command.
                 print(f">>> Refreshing my-plex cache for {lib_name!r}…")
-                try:
-                    update_cache_for_library(lib_name)
-                except Exception as e:
-                    print(f"  ⚠ in-process cache refresh failed for {lib_name!r}: {e}")
-                    print(f"    Fall back to: my-plex --update-cache")
-            except Exception as e:
+                update_cache_for_library(lib_name)
+            except PLEX_ERRORS as e:
                 print(f"  ⚠ scan of {lib_name!r} failed: {e}")
 
         # 8b. Mirror TMDB collections as Plex Collections.  When a Phase-A
@@ -16589,7 +16549,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         # makes 'edelstein' searchable in Plex Web UI).
         try:
             from plexapi.collection import Collection as _PlexCollection
-        except Exception:
+        except ImportError:
             _PlexCollection = None
         for _act in log_payload.get('actions', []):
             if _act.get('status') != 'fixed':
@@ -16625,7 +16585,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                 continue
             try:
                 _section = plex.library.section(_tgt_lib)
-            except Exception as _e:
+            except PLEX_ERRORS as _e:
                 print(f"  ⚠ Plex section {_tgt_lib!r} not accessible for collection mirror: {_e}")
                 continue
             # Look up the new Movie items by file path.  Plex's REST search
@@ -16639,7 +16599,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                             _fp = getattr(_part, 'file', None)
                             if _fp:
                                 _path_map[_fp] = _it
-            except Exception as _e:
+            except PLEX_ERRORS as _e:
                 print(f"  ⚠ enumerating {_tgt_lib!r} for collection mirror failed: {_e}")
                 continue
             _items = [_path_map.get(d) for d in _dests]
@@ -16657,23 +16617,23 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                     try:
                         _existing = _PlexCollection.create(plex, title=_coll_name, section=_section, items=_items)
                         print(f"  ✓ created Plex Collection {_coll_name!r} with {len(_items)} item(s) in {_tgt_lib!r}")
-                    except Exception as _e:
+                    except PLEX_ERRORS as _e:
                         print(f"  ⚠ Plex Collection.create({_coll_name!r}) failed: {_e}")
                         _existing = None
                 if _existing is not None:
                     try:
                         _existing.addItems(_items)
                         print(f"  ✓ added {len(_items)} item(s) to existing Plex Collection {_coll_name!r}")
-                    except Exception as _e:
+                    except PLEX_ERRORS as _e:
                         # If addItems is not supported (older plexapi), fall back to per-item addCollection
                         try:
                             for _it in _items:
                                 _it.addCollection(_coll_name)
                             print(f"  ✓ tagged {len(_items)} item(s) with collection {_coll_name!r} (per-item)")
-                        except Exception as _e2:
+                        except PLEX_ERRORS as _e2:
                             print(f"  ⚠ failed to add items to {_coll_name!r}: {_e} / {_e2}")
                 _act['plex_collection'] = _coll_name
-            except Exception as _e:
+            except PLEX_ERRORS as _e:
                 print(f"  ⚠ Plex Collection mirror for {_coll_name!r} failed: {_e}")
 
     # 9. Log + summary.
