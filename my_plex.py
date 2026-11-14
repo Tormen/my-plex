@@ -742,7 +742,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from datetime import datetime, timedelta
 from functools import reduce
 from pathlib import Path
-from pprint import pprint, pformat
+from pprint import pformat
 import threading
 
 # ---------------------------------------------------------------------------
@@ -933,7 +933,6 @@ if TYPE_CHECKING:
     import requests.exceptions
     import plexapi.exceptions
     from xml.etree.ElementTree import ParseError as _XMLParseError
-    from plexapi.media import Media
     from plexapi.server import PlexServer
     from plexapi.playlist import Playlist
     from plexapi.collection import Collection
@@ -951,7 +950,6 @@ else:
         import requests.exceptions
         import plexapi.exceptions
         from xml.etree.ElementTree import ParseError as _XMLParseError
-        from plexapi.media import Media
         from plexapi.server import PlexServer
         from plexapi.playlist import Playlist
         from plexapi.collection import Collection
@@ -964,7 +962,7 @@ else:
         if not (_PRINT_ONLY_RUN or _AS_ROOT):
             raise
         readchar = urllib3 = requests = None
-        Media = PlexServer = Playlist = Collection = None
+        PlexServer = Playlist = Collection = None
         PLEX_ERRORS = ()
 
 
@@ -9353,54 +9351,7 @@ def _load_test_mod() -> ModuleType:
     setattr(_test_mod, "BOOT_SOURCE", os.path.realpath(_boot.__file__))
     return _test_mod
 
-# Episode TSV functions are defined later in this file, so they are injected
-# into the test module just before the tests run.
-# Names of episode TSV functions to inject into test module (defined later in this file)
-_EPISODE_FUNC_NAMES = ('read_episodes_tsv', 'write_episodes_tsv', 'is_episodes_tsv_stale',
-                       'extract_episode_date', 'is_special_episode', '_BUILTIN_EXTRACTORS',
-                       'scrape_episodes', 'cmd_missing', '_determine_episode_source',
-                       'EMPTY_LIBRARY_STATS', 'CONFIG_DEFAULTS', 'CACHE',
-                       'write_episodes_err', 'read_episodes_err', 'clear_episodes_err',
-                       'get_episodes_err_path', 'EPISODES_ERR_FILENAME',
-                       'DISK_MAP_VARIABLES',
-                       'validate_disk_plex_map', 'compute_markers_dpm',
-                       'read_markers_from_disk',
-                       'resolve_disk_map_variables',
-                       'strip_our_markers', 'apply_markers',
-                       'apply_markers_to_dir', 'strip_markers_from_dir',
-                       'load_disk_map_sidecar', 'save_disk_map_sidecar',
-                       'update_sidecar_entry',
-                       '_PLEX_WRITABLE_FIELDS', '_merge_marker',
-                       '_extract_legacy_vu_marker', '_migrate_legacy_vu_sidecar',
-                       '_check_all_children_watched', '_update_cache_child_paths',
-                       'transfer_disk_map_markers_dir',
-                       'cmd_plex2disk', 'cmd_disk2plex', 'rename_file_siblings',
-                       'finalize_disk_plex_map_uniform_fields',
-                       '_disk_plex_map_promoted_vars',
-                       '_classify_migration_action',
-                       '_resolve_audio_lang_from_filename',
-                       '_resolve_target_to_cache_keys_via_filepath',
-                       'parse_ondisk_labels', 'collect_ondisk_labels_for_obj',
-                       'build_ondisk_labels_index', 'refresh_ondisk_labels_from_cache',
-                       'ONDISK_LABEL_START_MARKER', 'ONDISK_LABEL_END_MARKER', 'PROBLEMS2DISK',
-                       '_format_episode_range',
-                       '_season_token_match', 'SORT_NEW_SEASON_TOKEN_REGEX',
-                       'NamingFieldMissing', 'apply_naming_modifier',
-                       'render_naming_template', 'apply_naming_transforms',
-                       'naming_variables', 'split_name_for_naming',
-                       'assemble_naming_name', 'validate_naming_rules',
-                       'derive_naming_paths', 'build_naming_plan',
-                       '_naming_sanitize', '_naming_strip_diacritics',
-                       'connect_to_plex',
-                       'PLEX_Media')
-def _inject_episode_funcs_into_test_mod():
-    """Inject episode TSV functions into test module namespace (they're defined after the test import)."""
-    _mod = _load_test_mod()
-    for _name in _EPISODE_FUNC_NAMES:
-        if _name in globals():
-            setattr(_mod, _name, globals()[_name])
 def run_regression_tests(scope: str | None = None) -> None:
-    _inject_episode_funcs_into_test_mod()
     _load_test_mod().run_regression_tests(scope=scope)
 
 
@@ -9893,7 +9844,7 @@ def parse_ondisk_labels(name: str | None) -> list[str]:
     return re.findall(pattern, basename)
 
 
-def collect_ondisk_labels_for_obj(obj: MediaRecord | CollectionRecord) -> list[str]:
+def collect_ondisk_labels_for_obj(obj: Mapping[str, Any]) -> list[str]:
     """Return list of on-disk labels found in filename/directory components for a cached object.
 
     For Movies:   checks filename + movie-dir name
@@ -34890,7 +34841,7 @@ def read_episodes_tsv(tsv_path: str) -> tuple[dict[str, str], list[EpisodeTsvRow
     return metadata, episodes
 
 
-def write_episodes_tsv(tsv_path: str, metadata: dict[str, str], episodes: list[EpisodeTsvRow]) -> None:
+def write_episodes_tsv(tsv_path: str, metadata: dict[str, str], episodes: Sequence[Mapping[str, Any]]) -> None:
     """Write standardized episodes.tsv via SSH to the Plex server, or locally
     when no PLEX_DB_REMOTE_HOST is configured.
 
@@ -37382,7 +37333,7 @@ def _extract_legacy_vu_marker(name: str) -> str | None:
     return match.group(0) if match else None
 
 def _migrate_legacy_vu_sidecar(name: str, is_dir: bool = False,
-                               obj: ScopeRecord | None = None) -> tuple[dict[str, Any] | None, str]:
+                               obj: Mapping[str, Any] | None = None) -> tuple[dict[str, Any] | None, str]:
     """Create synthetic sidecar entry from legacy [vu] marker on a file/dir.
 
     Args:
@@ -46692,8 +46643,6 @@ def run() -> None:
     # SystemExit, so every sys.exit() and every err() passes straight through.
     try:
         if len(sys.argv) > 1 and sys.argv[1] == '--unittest':
-            # Inject episode TSV functions into test module (defined after test import)
-            _inject_episode_funcs_into_test_mod()
             # Load test classes into this module's namespace for unittest discovery
             for _cls in _load_test_mod()._UNITTEST_CLASSES:
                 globals()[_cls.__name__] = _cls

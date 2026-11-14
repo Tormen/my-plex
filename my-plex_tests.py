@@ -3,12 +3,9 @@
 #
 # This file is imported by '52' at runtime via importlib.
 #
-# pyright: reportUndefinedVariable=false, reportConstantRedefinition=false
-#   The main script injects its own functions into this module's namespace
-#   before the tests run (_EPISODE_FUNC_NAMES / _inject_episode_funcs_into_test_mod),
-#   so ~300 names used here are bound at runtime and invisible to a checker.
-#   Re-declaring them would be a second copy of that list to keep in sync.
+# pyright: reportConstantRedefinition=false, reportPrivateUsage=false
 #   Uppercase names reassigned here (_SUITE_TEMP_DIR, OBJ_BY_*, _FIXTURE_*) are suite state, not constants.
+#   A suite tests the tool's private helpers by name.
 
 from __future__ import annotations
 
@@ -32,6 +29,31 @@ import importlib.machinery
 import importlib.util
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, NoReturn, TYPE_CHECKING, cast
+
+# The tool's names the tests call directly.  Only the tool loads this suite
+# (--run-tests, --unittest), after its own import, so this binds the very
+# module that runs.
+from my_plex import (
+    read_episodes_tsv, write_episodes_tsv, is_episodes_tsv_stale,
+    extract_episode_date, is_special_episode, _BUILTIN_EXTRACTORS,
+    scrape_episodes, cmd_missing, EMPTY_LIBRARY_STATS, CONFIG_DEFAULTS,
+    write_episodes_err, read_episodes_err, clear_episodes_err,
+    get_episodes_err_path, validate_disk_plex_map, compute_markers_dpm,
+    read_markers_from_disk, resolve_disk_map_variables, strip_our_markers,
+    apply_markers, apply_markers_to_dir, strip_markers_from_dir,
+    update_sidecar_entry, _PLEX_WRITABLE_FIELDS, _merge_marker,
+    _extract_legacy_vu_marker, _migrate_legacy_vu_sidecar,
+    _check_all_children_watched, _update_cache_child_paths, cmd_plex2disk,
+    cmd_disk2plex, rename_file_siblings,
+    finalize_disk_plex_map_uniform_fields, _disk_plex_map_promoted_vars,
+    _classify_migration_action, _resolve_audio_lang_from_filename,
+    parse_ondisk_labels, collect_ondisk_labels_for_obj,
+    build_ondisk_labels_index, _format_episode_range, _season_token_match,
+    NamingFieldMissing, apply_naming_modifier, render_naming_template,
+    apply_naming_transforms, split_name_for_naming, assemble_naming_name,
+    validate_naming_rules, derive_naming_paths, build_naming_plan,
+    _naming_sanitize, connect_to_plex, PLEX_Media,
+)
 
 if TYPE_CHECKING:
     from my_plex import CollectionRecord, MediaRecord
@@ -2953,10 +2975,10 @@ class TestOndiskLabels(unittest.TestCase):
         original = dict(PLEX_Media.OBJ_BY_ID)
         try:
             PLEX_Media.OBJ_BY_ID.clear()
-            PLEX_Media.OBJ_BY_ID['Movie:99'] = {
+            PLEX_Media.OBJ_BY_ID['Movie:99'] = cast('MediaRecord', {
                 'type': 'Movie', 'ondisk_labels': ['reencode'],
                 'files': {},
-            }
+            })
             idx = build_ondisk_labels_index()
             self.assertIn('reencode', idx)
             self.assertIn('Movie:99', idx['reencode'])
@@ -2969,7 +2991,7 @@ class TestOndiskLabels(unittest.TestCase):
         original = dict(PLEX_Media.OBJ_BY_ID)
         try:
             PLEX_Media.OBJ_BY_ID.clear()
-            PLEX_Media.OBJ_BY_ID['Movie:1'] = {'type': 'Movie', 'ondisk_labels': [], 'files': {}}
+            PLEX_Media.OBJ_BY_ID['Movie:1'] = cast('MediaRecord', {'type': 'Movie', 'ondisk_labels': [], 'files': {}})
             idx = build_ondisk_labels_index()
             self.assertEqual(idx, {})
         finally:
@@ -5317,6 +5339,8 @@ class TestEpisodesTSV(unittest.TestCase):
         try:
             write_episodes_tsv(tsv_path, metadata, episodes)
             read_meta, read_eps = read_episodes_tsv(tsv_path)
+            assert read_meta is not None
+            assert read_eps is not None
 
             self.assertEqual(read_meta['source'], 'fernsehserien.de')
             self.assertEqual(read_meta['slug'], 'test-show')
@@ -6041,19 +6065,19 @@ class TestRenameShared(unittest.TestCase):
 
     def test_rename_episode_file_skips_no_file(self):
         """_rename_episode_file returns 'skipped' when ep has no file."""
-        ep = {'type': 'Episode'}
+        ep = cast('MediaRecord', {'type': 'Episode'})
         result = PLEX_Media._rename_episode_file(ep, 'Episode:1', 'new.mkv', dry_run=True)
         self.assertEqual(result, 'skipped')
 
     def test_rename_episode_file_skips_same_name(self):
         """_rename_episode_file returns 'skipped' when filename already matches."""
-        ep = {'type': 'Episode', 'file': '/media/shows/s01/S01E01 - Pilot.mkv'}
+        ep = cast('MediaRecord', {'type': 'Episode', 'file': '/media/shows/s01/S01E01 - Pilot.mkv'})
         result = PLEX_Media._rename_episode_file(ep, 'Episode:1', 'S01E01 - Pilot.mkv', dry_run=True)
         self.assertEqual(result, 'skipped')
 
     def test_rename_episode_file_dry_run_prints(self):
         """_rename_episode_file in dry_run mode prints the rename and returns 'renamed'."""
-        ep = {'type': 'Episode', 'file': '/media/shows/s01/old_name.mkv'}
+        ep = cast('MediaRecord', {'type': 'Episode', 'file': '/media/shows/s01/old_name.mkv'})
         import io, contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -6160,6 +6184,7 @@ class TestEpisodesErr(unittest.TestCase):
                                'No TMDB ID — use Plex > Fix Match')
             result = read_episodes_err(series_dir)
             self.assertIsNotNone(result)
+            assert result is not None
             self.assertEqual(result['error_type'], 'no_external_ids')
             self.assertEqual(result['source'], 'tmdb')
             self.assertIn('Fix Match', result['message'])
@@ -7671,15 +7696,6 @@ class TestMultiEpisodeSiblings(unittest.TestCase):
         # There must be a guard that skips non-leader siblings
         self.assertIn('siblings[0]', section)
 
-    def test_episode_func_names_includes_format_range(self):
-        """_format_episode_range must be injectable into tests via
-        _EPISODE_FUNC_NAMES so test cases can call it directly."""
-        content = self._read_script()
-        idx = content.index('_EPISODE_FUNC_NAMES')
-        end = content.index("'PLEX_Media')", idx)
-        section = content[idx:end]
-        self.assertIn("'_format_episode_range'", section)
-
     def test_is_multi_ep_non_leader_helper_exists(self):
         """PLEX_Media._is_multi_ep_non_leader helper must exist and be
         used by file-touching commands to skip sibling duplicates."""
@@ -8504,6 +8520,7 @@ class TestDiskMap(unittest.TestCase):
         """_migrate_legacy_vu_sidecar creates synthetic sidecar entry with bare value."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu@2026-01-15].mkv')
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2026-01-15')
         self.assertEqual(entry['clean_name'], 'Movie.mkv')
         self.assertEqual(ts_source, 'marker')
@@ -8513,6 +8530,7 @@ class TestDiskMap(unittest.TestCase):
         """_migrate_legacy_vu_sidecar with is_dir creates dir entry."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie (2024) [vu@2026-01-15]', is_dir=True)
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertTrue(entry.get('is_dir'))
         self.assertEqual(ts_source, 'marker')
 
@@ -8520,6 +8538,7 @@ class TestDiskMap(unittest.TestCase):
         """_migrate_legacy_vu_sidecar for bare [vu] without obj uses today's date."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu].mkv')
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertIn('vu@', entry['markers']['watched'])
         self.assertEqual(ts_source, 'today')
 
@@ -8528,6 +8547,7 @@ class TestDiskMap(unittest.TestCase):
         obj = {'lastViewedAt': 1711065600}  # 2024-03-22
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie.[vu].mkv', obj=obj)
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2024-03-22')
         self.assertEqual(ts_source, 'plex')
 
@@ -8535,6 +8555,7 @@ class TestDiskMap(unittest.TestCase):
         """_migrate_legacy_vu_sidecar handles [VU] case-insensitively."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [VU].mkv')
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertIn('vu@', entry['markers']['watched'])
         self.assertEqual(ts_source, 'today')
 
@@ -8548,6 +8569,7 @@ class TestDiskMap(unittest.TestCase):
         """Legacy [VU] with no space before bracket is detected and stripped."""
         entry, _ts_source = _migrate_legacy_vu_sidecar('Betty[VU].mp4')
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['clean_name'], 'Betty.mp4')
         self.assertIn('vu@', entry['markers']['watched'])
 
@@ -8555,6 +8577,7 @@ class TestDiskMap(unittest.TestCase):
         """Incomplete date [vu@2022-12] is padded to vu@2022-12-01."""
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi')
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2022-12-01')
         self.assertEqual(ts_source, 'marker')
 
@@ -8565,6 +8588,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2022-12-15', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2022-12-15')
         self.assertEqual(ts_source, 'plex')
 
@@ -8574,6 +8598,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2023-05-10', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2023-05-10')
         self.assertEqual(ts_source, 'plex')
 
@@ -8583,6 +8608,7 @@ class TestDiskMap(unittest.TestCase):
         ts = calendar.timegm(time.strptime('2022-06-01', '%Y-%m-%d'))
         entry, ts_source = _migrate_legacy_vu_sidecar('Movie [vu@2022-12].avi', obj={'lastViewedAt': ts})
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['markers']['watched'], 'vu@2022-12-01')
         self.assertEqual(ts_source, 'marker')
 
@@ -8777,8 +8803,8 @@ class TestDiskMap(unittest.TestCase):
         """Season is WATCHED when all child episodes are watched in Plex."""
         saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
-            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 2, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'})
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = cast('MediaRecord', {'viewCount': 2, 'lastViewedAt': 2000, 'file': 'e2.mkv'})
             PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
             season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, max_lv = _check_all_children_watched(season_obj, 'Season')
@@ -8791,8 +8817,8 @@ class TestDiskMap(unittest.TestCase):
         """Season is NOT WATCHED when some episodes are unwatched."""
         saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
-            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'})
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = cast('MediaRecord', {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'})
             PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
             season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, _ = _check_all_children_watched(season_obj, 'Season')
@@ -8804,8 +8830,8 @@ class TestDiskMap(unittest.TestCase):
         """Episode with [vu] on disk but unwatched in Plex still counts as watched."""
         saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
-            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.[vu@2026-01-01].mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'})
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = cast('MediaRecord', {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.[vu@2026-01-01].mkv'})
             PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
             season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1'}
             watched, _ = _check_all_children_watched(season_obj, 'Season')
@@ -8817,9 +8843,9 @@ class TestDiskMap(unittest.TestCase):
         """Show is WATCHED only if ALL seasons' episodes are watched."""
         saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Series:1'] = {'type_str': 'Series'}
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
-            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_ID['Series:1'] = cast('MediaRecord', {'type_str': 'Series'})
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'})
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = cast('MediaRecord', {'viewCount': 0, 'lastViewedAt': None, 'file': 'e2.mkv'})
             PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {
                 'S01': {'E01': {'v': ['Episode:1']}},
                 'S02': {'E01': {'v': ['Episode:2']}}
@@ -8834,8 +8860,8 @@ class TestDiskMap(unittest.TestCase):
         """resolve_disk_map_variables for Season derives WATCHED from child episodes."""
         saved = (PLEX_Media.OBJ_BY_ID.copy(), PLEX_Media.OBJ_BY_SERIES_EPISODES.copy())
         try:
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'}
-            PLEX_Media.OBJ_BY_ID['Episode:2'] = {'viewCount': 1, 'lastViewedAt': 2000, 'file': 'e2.mkv'}
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 1000, 'file': 'e1.mkv'})
+            PLEX_Media.OBJ_BY_ID['Episode:2'] = cast('MediaRecord', {'viewCount': 1, 'lastViewedAt': 2000, 'file': 'e2.mkv'})
             PLEX_Media.OBJ_BY_SERIES_EPISODES['Series:1'] = {'S01': {'E01': {'v': ['Episode:1']}, 'E02': {'v': ['Episode:2']}}}
             season_obj = {'type_str': 'Season', 'series_key': 'Series:1', 'season': 'Season 1',
                           'viewCount': 0, 'lastViewedAt': None}
@@ -8849,6 +8875,7 @@ class TestDiskMap(unittest.TestCase):
         """Legacy migration strips trailing dots from dir names after removing [vu]."""
         entry, _ts = _migrate_legacy_vu_sidecar('movie.[2020].[vu]', is_dir=True)
         self.assertIsNotNone(entry)
+        assert entry is not None
         self.assertEqual(entry['clean_name'], 'movie.[2020]')
         self.assertFalse(entry['clean_name'].endswith('.'))
 
@@ -8857,8 +8884,8 @@ class TestDiskMap(unittest.TestCase):
         saved = (PLEX_Media.OBJ_BY_ID.copy(),
                  PLEX_Media.OBJ_BY_FILEPATH.copy() if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else {})
         try:
-            PLEX_Media.OBJ_BY_ID['Season:1'] = {'type': 'Season', 'file': '/a/b/s01', 'files': {}}
-            PLEX_Media.OBJ_BY_ID['Episode:1'] = {'type': 'Episode', 'file': '/a/b/s01/e1.mkv', 'files': {}}
+            PLEX_Media.OBJ_BY_ID['Season:1'] = cast('MediaRecord', {'type': 'Season', 'file': '/a/b/s01', 'files': {}})
+            PLEX_Media.OBJ_BY_ID['Episode:1'] = cast('MediaRecord', {'type': 'Episode', 'file': '/a/b/s01/e1.mkv', 'files': {}})
             _update_cache_child_paths('/a/b/s01', '/a/b/s01 [vu]')
             self.assertEqual(PLEX_Media.OBJ_BY_ID['Season:1']['file'], '/a/b/s01 [vu]')
             self.assertEqual(PLEX_Media.OBJ_BY_ID['Episode:1']['file'], '/a/b/s01 [vu]/e1.mkv')
