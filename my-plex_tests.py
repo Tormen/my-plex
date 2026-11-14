@@ -9854,7 +9854,7 @@ class TestUniversalScope(unittest.TestCase):
         assert m is not None, "the pattern above did not match"
         self.assertIsNotNone(m, "Must find _get_universal_scope body")
         body = m.group(1)
-        self.assertIn("set.intersection", body)
+        self.assertRegex(body, r"set\.intersection\(|\.intersection\(\*")
         self.assertIn("per_token_keysets", body)
 
     def test_cmd_move_uses_universal_scope_for_variadic(self):
