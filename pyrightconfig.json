@@ -4,15 +4,12 @@
   // No path is recorded here -- run pyright with the venv active, or pass
   // --pythonpath; README, "Type checking", has the command.
   //
-  // Strict is the mode.  The files come in one at a time: a file joins
-  // "strict" once it has no strict finding, and `--run-tests typecheck`
-  // holds every file at zero; when the last one joins, typeCheckingMode
-  // becomes "strict" and the list goes.  A rule a file turns off is turned
-  // off in that file, with its reason: the list overrides rule settings here.
+  // Strict, and `--run-tests typecheck` holds every file at zero findings.
+  // A rule a file turns off is turned off in that file's header, with its
+  // reason, never here for all of them.
   // The launcher `my-plex` is no .py file, so pyright does not read it;
   // it is a few lines that import my_plex_boot and call its main().
   "include": ["my_plex_boot.py", "my_plex.py", "my-plex_tests.py"],
   "exclude": ["playground", "__pycache__"],
-  "typeCheckingMode": "standard",
-  "strict": ["my_plex_boot.py", "my-plex_tests.py"]
+  "typeCheckingMode": "strict"
 }

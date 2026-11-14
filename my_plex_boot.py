@@ -20,8 +20,8 @@ owner here that the tool imports rather than a copy of its own.
 # pyright: reportConstantRedefinition=false
 #   Uppercase names here are module STATE set once at startup (LAUNCHER,
 #   QUIET_ACTIVE), as the house names its run flags (VRB, DBG, QUIET) -- not
-#   constants.  The rule is off per file because pyright's "strict" list
-#   overrides any rule setting in pyrightconfig.json.
+#   constants.  Off in this file, where the reason is, not in
+#   pyrightconfig.json for every file.
 # Error codes: err() takes a five-digit string code ("00042"), UNIQUE per
 # source line, numbered from 00001 in file order with no gap across BOTH
 # files -- this one first, then my_plex.py -- so grepping a code lands on the

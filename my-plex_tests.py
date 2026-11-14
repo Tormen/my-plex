@@ -13214,8 +13214,7 @@ class TestUncollectedResolveOutcome(unittest.TestCase):
 
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
-    suite, under pyrightconfig.json -- strict for every file on its "strict"
-    list, standard for the others until they join it.
+    suite, under pyrightconfig.json -- strict mode.
 
     What a type check is worth here, concretely: four NameErrors sat in
     shipped commands until one was first run -- plan_movie and libs_affected

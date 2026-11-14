@@ -63,8 +63,8 @@ from __future__ import annotations
 #   config (VRB, DBG, FORMAT, CACHE_FILE, ...), as the house names its run
 #   flags -- not constants.  A leading underscore marks the tool's internals,
 #   not a class's: the dispatcher and the problem registry call PLEX_Media's
-#   _list_* commands from module scope.  Both off per file because pyright's
-#   "strict" list overrides any rule setting in pyrightconfig.json.
+#   _list_* commands from module scope.  Both off in this file, where the
+#   reason is, not in pyrightconfig.json for every file.
 
 # Coding guidelines, architecture docs, and test policies: see README.md
 # Error codes: one numbering across my_plex_boot.py and this file -- the rule
