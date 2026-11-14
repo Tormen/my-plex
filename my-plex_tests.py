@@ -13180,6 +13180,41 @@ class TestLabelTargetIsMedia(unittest.TestCase):
             self.mp._resolve_label_target('Collection:9')
 
 
+class TestDuplicateResolverAutoTrash(unittest.TestCase):
+    """--duplicates --resolve with AUTO_TRASH_DUPLICATES queues a byte-
+    identical pair without asking.  When every pending operation came from
+    there, the final 'A' (apply) read remote_host, which only an operation
+    run by hand binds, and the resolver died with UnboundLocalError instead
+    of applying them."""
+
+    def test_apply_after_only_auto_trashed_pairs(self):
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        mp = _main_module()
+        media = mp.PLEX_Media
+        saved = (media.OBJ_BY_ID, mp.AUTO_TRASH_DUPLICATES)
+        self.addCleanup(lambda: (setattr(media, 'OBJ_BY_ID', saved[0]),
+                                 setattr(mp, 'AUTO_TRASH_DUPLICATES', saved[1])))
+        media.OBJ_BY_ID = {'Movie:1': _make_movie(1, 'Film', '/lib/a/film.mkv'),
+                           'Movie:2': _make_movie(2, 'Film', '/lib/b/film.mkv')}
+        mp.AUTO_TRASH_DUPLICATES = True
+        applied: list[object] = []
+
+        def _apply(ops: list[object], _log: object, _host: object = None) -> bool:
+            applied.extend(ops)
+            return True
+
+        with mock.patch.object(mp, '_auto_trash_signals_match', return_value=True), \
+             mock.patch.object(mp, '_auto_trash_victim_index', return_value=2), \
+             mock.patch.object(mp, 'determine_remote_host', return_value=(None, True, '/lib/a/film.mkv')), \
+             mock.patch.object(mp, 'apply_pending_operations', side_effect=_apply), \
+             mock.patch.object(mp, '_write_resolve_log', return_value=None), \
+             mock.patch.object(mp, 'readchar', NS(readchar=lambda: 'A')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            media._resolve_duplicates_interactively([('movie:film:2023', ['Movie:1', 'Movie:2'])])
+        self.assertEqual(len(applied), 1)
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18788,7 +18823,7 @@ _UNITTEST_SCOPES = {
                    TestUpdateCacheSplit, TestCacheUpdateLog,
                    TestObjByLibraryDedup, TestFilepathIndexIsAList,
                    TestFilepathIndexReaders, TestPlexapiRecordsStoreEpochs],
-    'duplicates': [TestMultiVersionMerge, TestDuplicateKeyGeneration,
+    'duplicates': [TestDuplicateResolverAutoTrash, TestMultiVersionMerge, TestDuplicateKeyGeneration,
                    TestClassifyMultiVersion, TestDuplicatesIgnoreLibraryCombinations,
                    TestExcessVersions, TestExcessVersionsMainParser,
                    TestVersionStringCollision],

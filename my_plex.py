@@ -33277,6 +33277,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         operation_counter = 0
         pending_operations = []  # Track pending operations (not yet applied)
         operations_all_succeeded = True  # Track if all applied operations succeeded
+        remote_host: str | None = None   # set by the first action run here; an auto-trash queues without one
 
         # DEBUG: Show how many duplicates we're going to process
         total_duplicates = len(sorted_duplicates)
