@@ -7945,7 +7945,9 @@ def _meant_flag(word: str, known: "set[str]") -> "str | None":
     None when it is an option, too short, or the start of several.  No parser
     of my-plex takes an abbreviation, so such a word is never valid as it is."""
     stem = word.split('=', 1)[0]
-    if not stem.startswith('--') or len(stem) < 4 or stem in known:
+    # A renamed flag's OLD name is answered with its new one (_flag_hint),
+    # never as the start of a newer flag: --test is --run-tests, not --test-mail.
+    if not stem.startswith('--') or len(stem) < 4 or stem in known or stem in _RENAMED_FLAGS:
         return None
     hits = [k for k in known if k.startswith(stem)]
     return hits[0] if len(hits) == 1 else None
