@@ -11942,8 +11942,6 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
             "the call must be within ~2000 chars of the final save")
         # disk_map.json prune logic uses load_disk_map_sidecar
         self.assertIn("load_disk_map_sidecar()", src)
-        # episodes.err prune logic references the helper
-        self.assertIn("get_episodes_err_path", src.split("def _cleanup_managed_orphans")[1].split("\ndef ")[0])
 
     def test_orphaned_help_page_and_docs_wired(self):
         """Step 4b-followup: --help orphaned page must exist in the help

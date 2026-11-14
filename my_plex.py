@@ -12589,24 +12589,19 @@ def update_sidecar_entry(sidecar: dict[str, Any], old_path: str | None, new_path
 
 
 def _cleanup_managed_orphans():
-    """Prune sidecar files that --update-cache owns when their target is gone.
+    """Prune disk_map.json entries that --update-cache owns when their file is gone.
 
-    Two passes:
-      1. disk_map.json: any entry keyed by a filepath that no longer exists.
-         The DPM markers carried in that entry were tied to the on-disk file;
-         once the file is gone the entry has no anchor.
-      2. episodes.err: per-series error log living inside the series directory.
-         If the series directory itself has vanished (e.g. the series was
-         removed from Plex and its files deleted), nothing remains to track.
+    An entry is keyed by a filepath; the DPM markers it carries were tied to
+    that file, so once the file is gone the entry has no anchor.  (A series'
+    episodes.err needs no such pass: it lives inside the series directory
+    and goes with it.)
 
-    Runs only when FORCE_CACHE_UPDATE is True (i.e. inside --update-cache).
-    Prints a SUMMARY block with TRASHED / REMOVED counts even when zero so
-    the operator sees the housekeeping ran.
+    Runs only when FORCE_CACHE_UPDATE is True (i.e. inside --update-cache),
+    and prints a REMOVED block when it removed anything.
     """
     if not FORCE_CACHE_UPDATE:
         return
 
-    # ---- Pass 1: disk_map.json ----------------------------------------
     sidecar = load_disk_map_sidecar()
     dm_removed: list[str] = []
     if sidecar:
@@ -12620,64 +12615,16 @@ def _cleanup_managed_orphans():
         if dm_removed:
             save_disk_map_sidecar(sidecar)
 
-    # ---- Pass 2: episodes.err -----------------------------------------
-    # Walk every series dir we currently know about; record any episodes.err
-    # whose parent dir no longer exists.  Live filepaths are read straight
-    # from OBJ_BY_ID episodes (file field) so we don't depend on a separate
-    # series_dir cache field.
-    err_trashed: list[str] = []
-    err_failed: list[tuple[str, str]] = []
-    _seen_series_dirs: set[str] = set()
-    for _key, _obj in PLEX_Media.OBJ_BY_ID.items():
-        if _obj.get('type') != 'Episode':
-            continue
-        _fp = _obj.get('file')
-        if not _fp:
-            continue
-        # series_dir is typically <fp>/../.. (file → season → series),
-        # but layout varies; rely on the cached 'series_dir' or walk up.
-        _sd = _obj.get('series_dir')
-        if not _sd:
-            # Walk up until we hit a dir at library-root level or empty
-            _parent = os.path.dirname(_fp)
-            _gp = os.path.dirname(_parent)
-            _sd = _gp if _gp else _parent
-        if _sd in _seen_series_dirs:
-            continue
-        _seen_series_dirs.add(_sd)
-
-    # Any episodes.err under a tracked series_dir whose dir itself is gone:
-    for _sd in list(_seen_series_dirs):
-        _err = get_episodes_err_path(_sd)
-        if not os.path.isfile(_err):
-            continue
-        if os.path.isdir(_sd):
-            continue   # series_dir still there → not orphan
-        try:
-            move_to_trash(_err)
-            err_trashed.append(_err)
-        except (OSError, subprocess.SubprocessError) as _e:
-            err_failed.append((_err, str(_e)))
-
-    # ---- Summary ------------------------------------------------------
-    if dm_removed or err_trashed or err_failed:
+    if dm_removed:
         print()
         print(">>> --update-cache: managed-orphan housekeeping")
-        if dm_removed:
-            print(f"    > REMOVED {len(dm_removed)} disk_map.json entr"
-                  f"{'y' if len(dm_removed)==1 else 'ies'} pointing at vanished file(s)")
-            if VRB:
-                for _fp in dm_removed[:20]:
-                    print(f"      - {_fp}")
-                if len(dm_removed) > 20:
-                    print(f"      ... ({len(dm_removed)-20} more, use -V to see all not shown)")
-        if err_trashed:
-            print(f"    > TRASHED {len(err_trashed)} episodes.err "
-                  f"file{'' if len(err_trashed)==1 else 's'} from gone series dir(s)")
-        if err_failed:
-            print(f"    > NOT TRASHED {len(err_failed)} episodes.err file(s) — trash failed")
-            for _err, _e in err_failed[:10]:
-                print(f"      - {_err}: {_e}")
+        print(f"    > REMOVED {len(dm_removed)} disk_map.json entr"
+              f"{'y' if len(dm_removed)==1 else 'ies'} pointing at vanished file(s)")
+        if VRB:
+            for _fp in dm_removed[:20]:
+                print(f"      - {_fp}")
+            if len(dm_removed) > 20:
+                print(f"      ... ({len(dm_removed)-20} more, use -V to see all not shown)")
 
 
 ###########################################################################################
@@ -26770,13 +26717,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         _known_paths_live = sorted(_compute_known_filepaths_from_plex_db_live())
 
         # v3 step 4c: prune orphans from sidecar files we manage.
-        # --update-cache owns disk_map.json and episodes.err — anything pointing
-        # at a vanished filepath / series_dir is removed here so no separate
-        # housekeeping pass is needed.  --orphaned handles only what we DON'T
-        # manage (state-preservation, raw library walks).
+        # --update-cache owns disk_map.json — an entry pointing at a vanished
+        # filepath is removed here so no separate housekeeping pass is
+        # needed.  --orphaned handles only what we DON'T manage
+        # (state-preservation, raw library walks).
         try:
             _cleanup_managed_orphans()
-        except (OSError, subprocess.SubprocessError) as _e:
+        except OSError as _e:
             print(f"  WARNING: managed-orphan cleanup failed: {_e}", file=sys.stderr)
             if DBG:
                 import traceback
