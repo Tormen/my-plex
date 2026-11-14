@@ -18675,7 +18675,7 @@ def update_cache_for_file(file_path, library_name, old_cache_key=None):
 
                                 # Add to all cache structures
                                 PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
-                                PLEX_Media.OBJ_BY_FILEPATH[file_path] = cache_key
+                                _index_filepath(file_path, cache_key)
 
                                 if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
                                     PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
@@ -18934,6 +18934,15 @@ def get_series_dir(obj):
     series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
     return series_obj.get('file', '') if series_obj else ''
 
+def _index_filepath(filepath, cache_key):
+    """Record cache_key under filepath in PLEX_Media.OBJ_BY_FILEPATH, whose
+    value is a LIST of keys -- one file can belong to several libraries, and
+    every reader walks the list."""
+    keys = PLEX_Media.OBJ_BY_FILEPATH.setdefault(filepath, [])
+    if cache_key not in keys:
+        keys.append(cache_key)
+
+
 def undo_resolution_action(undo_info, remote_host):
     """Undo a previously performed resolution action
 
@@ -18975,8 +18984,8 @@ def undo_resolution_action(undo_info, remote_host):
         obj = undo_info.get('removed_obj')
         if key and obj:
             PLEX_Media.OBJ_BY_ID[key] = obj
-            if obj.get('file') and obj['file'] not in PLEX_Media.OBJ_BY_FILEPATH:
-                PLEX_Media.OBJ_BY_FILEPATH[obj['file']] = key
+            if obj.get('file'):
+                _index_filepath(obj['file'], key)
 
             # Restore to OBJ_BY_LIBRARY
             library = obj.get('library')
@@ -19034,8 +19043,8 @@ def undo_resolution_action(undo_info, remote_host):
         # Restore removed entry
         if removed_key and removed_obj:
             PLEX_Media.OBJ_BY_ID[removed_key] = removed_obj
-            if removed_obj.get('file') and removed_obj['file'] not in PLEX_Media.OBJ_BY_FILEPATH:
-                PLEX_Media.OBJ_BY_FILEPATH[removed_obj['file']] = removed_key
+            if removed_obj.get('file'):
+                _index_filepath(removed_obj['file'], removed_key)
 
             # Restore to OBJ_BY_LIBRARY
             library = removed_obj.get('library')
@@ -19057,7 +19066,7 @@ def undo_resolution_action(undo_info, remote_host):
             if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
                 del PLEX_Media.OBJ_BY_FILEPATH[old_file]
             if new_file:
-                PLEX_Media.OBJ_BY_FILEPATH[new_file] = updated_key
+                _index_filepath(new_file, updated_key)
 
             # Restore object state
             PLEX_Media.OBJ_BY_ID[updated_key] = old_obj_state.copy()
@@ -19708,7 +19717,7 @@ def undo_operation(operation_log, remote_host=None):
                         if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
                             del PLEX_Media.OBJ_BY_FILEPATH[old_file]
                         if new_file:
-                            PLEX_Media.OBJ_BY_FILEPATH[new_file] = cache_key
+                            _index_filepath(new_file, cache_key)
 
                         print(f"  ✓ Updated cache entry for {cache_key}")
                     else:
@@ -27322,7 +27331,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         # Update OBJ_BY_FILEPATH
         if filepath in PLEX_Media.OBJ_BY_FILEPATH:
             del PLEX_Media.OBJ_BY_FILEPATH[filepath]
-        PLEX_Media.OBJ_BY_FILEPATH[new_actual] = ep_key
+        _index_filepath(new_actual, ep_key)
 
         # Update files dict
         files = ep.get('files', {})

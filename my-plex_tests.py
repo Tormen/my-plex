@@ -12810,6 +12810,53 @@ class TestBareLibraryScope(unittest.TestCase):
                 self.assertTrue("SCAN_LIBRARIES=['Newlib'" in out, f"{where}:\n{out[-1500:]}")
 
 
+class TestFilepathIndexIsAList(unittest.TestCase):
+    """PLEX_Media.OBJ_BY_FILEPATH maps a path to a LIST of cache keys (one
+    file can be in several libraries), and every reader walks that list.  The
+    undo paths and three rename/refresh paths stored the bare key instead, so
+    a later `for key in OBJ_BY_FILEPATH[path]` walked its characters."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        self._saved = (media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY)
+        media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY = {}, {}, {}
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        media.OBJ_BY_ID, media.OBJ_BY_FILEPATH, media.OBJ_BY_LIBRARY = self._saved
+
+    def test_undo_of_a_cache_entry_indexes_the_restored_path_as_a_list(self):
+        from unittest import mock
+        media = self.mp.PLEX_Media
+        media.OBJ_BY_ID['Movie:7'] = _make_movie(7, 'Now', '/lib/now.mkv')
+        media.OBJ_BY_FILEPATH['/lib/now.mkv'] = ['Movie:7']
+        before = _make_movie(7, 'Before', '/lib/before.mkv')
+        with mock.patch.object(self.mp, 'update_and_save_cache'), \
+             mock.patch.object(self.mp, 'build_media_cache_dict'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ok = self.mp.undo_operation({'undo_instructions': [
+                {'action': 'update_cache_entry', 'cache_entry': before}]})
+        self.assertTrue(ok)
+        self.assertEqual(media.OBJ_BY_FILEPATH.get('/lib/before.mkv'), ['Movie:7'])
+
+    def test_undo_of_a_trash_adds_the_key_beside_the_path_s_other_keys(self):
+        from unittest import mock
+        media = self.mp.PLEX_Media
+        media.OBJ_BY_FILEPATH['/lib/both.mkv'] = ['Movie:1']
+        restored = _make_movie(2, 'Both', '/lib/both.mkv', library='lib2')
+        with mock.patch.object(self.mp, 'my_plex_file_operation', return_value=(True, None)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ok = self.mp.undo_resolution_action(
+                {'action': 'trash_file1', 'trashed_path': '/trash/both.mkv',
+                 'original_path': '/lib/both.mkv', 'removed_key': 'Movie:2',
+                 'removed_obj': restored}, None)
+        self.assertTrue(ok)
+        self.assertEqual(media.OBJ_BY_FILEPATH['/lib/both.mkv'], ['Movie:1', 'Movie:2'])
+        self.assertEqual([media.OBJ_BY_ID[k]['title'] for k in media.OBJ_BY_FILEPATH['/lib/both.mkv']
+                          if k in media.OBJ_BY_ID], ['Both'])
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18377,7 +18424,7 @@ _UNITTEST_SCOPES = {
                    TestVerifyCacheIntegrity, TestCacheFormatValidation,
                    TestCacheStructureParity, TestVerifyCacheSplit,
                    TestUpdateCacheSplit, TestCacheUpdateLog,
-                   TestObjByLibraryDedup],
+                   TestObjByLibraryDedup, TestFilepathIndexIsAList],
     'duplicates': [TestMultiVersionMerge, TestDuplicateKeyGeneration,
                    TestClassifyMultiVersion, TestDuplicatesIgnoreLibraryCombinations,
                    TestExcessVersions, TestExcessVersionsMainParser,
