@@ -13082,6 +13082,33 @@ class TestPlexapiRecordsStoreEpochs(unittest.TestCase):
                          int(self.WHEN.timestamp()))
 
 
+class TestLabelTargetIsMedia(unittest.TestCase):
+    """--add-label / --remove-label resolve their target in the cache, where
+    collections sit beside the media.  A collection has no item_id and no
+    labels list, so picking one crashed the command with a KeyError; and a
+    collection named like the movie made the title ambiguous."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        self._saved = self.mp.PLEX_Media.OBJ_BY_ID
+        collection = {'type': 'Collection', 'type_str': 'Collection', 'id': '9', 'title': 'Heroes',
+                      'subtype': 'movie', 'library': 'lib1', 'addedAt': None, 'updatedAt': None,
+                      'member_ids': []}
+        self.mp.PLEX_Media.OBJ_BY_ID = {'Collection:9': collection,
+                                        'Movie:1': _make_movie(1, 'Heroes', '/lib/heroes.mkv')}
+
+    def tearDown(self):
+        self.mp.PLEX_Media.OBJ_BY_ID = self._saved
+
+    def test_a_title_shared_with_a_collection_names_the_movie(self):
+        _obj, key = self.mp._resolve_label_target('Heroes')
+        self.assertEqual(key, 'Movie:1')
+
+    def test_a_collection_key_is_not_a_target(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.mp._resolve_label_target('Collection:9')
+
+
 class TestTypeCheck(unittest.TestCase):
     """pyright must report NOTHING about my_plex_boot.py, my_plex.py and this
     suite, under pyrightconfig.json -- strict for every file on its "strict"
@@ -18684,7 +18711,7 @@ _UNITTEST_SCOPES = {
                    TestMediaApiActionConsolidation, TestListMethodSplit,
                    TestExecuteTrashAndMoveSplit, TestListMethodsGuardMissingKeys],
     'filter':     [TestFilter, TestDefaultScope],
-    'misc':       [TestListPrinters, TestBadStructureResolve, TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
+    'misc':       [TestLabelTargetIsMedia, TestListPrinters, TestBadStructureResolve, TestLegacyInlineBlock, TestTopLevelHandlers, TestInitLoopRobustness, TestBrokenHeaderOrder, TestProblems, TestReencode, TestOndiskLabels,
                    TestDeployedCopy,
                    TestWaitForPlexScanComplete, TestErrorOutputConventions,
                    TestBrokenCrossValidation, TestEndToEnd,

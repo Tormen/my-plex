@@ -41139,16 +41139,17 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
 def _resolve_label_target(identifier):
     """Resolve a label target identifier to (obj, obj_key) in cache.
     Accepts: numeric Plex ID, cache key (e.g. Movie:123), or title search string.
-    Returns: (obj_dict, obj_key) or calls err() on failure."""
+    Returns: (obj_dict, obj_key) or calls err() on failure.  Collections
+    are never a target: they carry no labels here and no item_id to fetch."""
     # Try as cache key first
-    if identifier in PLEX_Media.OBJ_BY_ID:
+    if identifier in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[identifier].get('type') != 'Collection':
         return PLEX_Media.OBJ_BY_ID[identifier], identifier
 
     # Try as numeric Plex ID
     try:
         plex_id = int(identifier)
         for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-            if cached_obj.get('id') == plex_id:
+            if cached_obj.get('id') == plex_id and cached_obj.get('type') != 'Collection':
                 return cached_obj, key
         err("00157", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
     except ValueError:
@@ -41158,6 +41159,8 @@ def _resolve_label_target(identifier):
     matches = []
     search_lower = identifier.lower()
     for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
+        if cached_obj.get('type') == 'Collection':
+            continue
         title_lower = (cached_obj.get('title', '') or '').lower()
         orig_lower = (cached_obj.get('originalTitle', '') or '').lower()
         if search_lower == title_lower or search_lower == orig_lower:
