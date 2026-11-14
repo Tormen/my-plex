@@ -10071,7 +10071,7 @@ class TestCompoundFilter(unittest.TestCase):
         # NOT pass-through in argv normalization
         self.assertIn("'NOT', '('", src)
         # NOT compile branch
-        self.assertIn("if kind == 'NOT':", src)
+        self.assertRegex(src, r"if (?:kind|node\[0\]) == 'NOT':")
         # _is_scope_filter_token recognises NOT
         self.assertIn("'AND', 'OR', 'NOT'", src)
 
