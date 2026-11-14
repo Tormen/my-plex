@@ -3,11 +3,14 @@
 #
 # This file is imported by '52' at runtime via importlib.
 #
-# pyright: reportUndefinedVariable=false
+# pyright: reportUndefinedVariable=false, reportConstantRedefinition=false
 #   The main script injects its own functions into this module's namespace
 #   before the tests run (_EPISODE_FUNC_NAMES / _inject_episode_funcs_into_test_mod),
 #   so ~300 names used here are bound at runtime and invisible to a checker.
 #   Re-declaring them would be a second copy of that list to keep in sync.
+#   Uppercase names reassigned here (_SUITE_TEMP_DIR, OBJ_BY_*, _FIXTURE_*) are suite state, not constants.
+
+from __future__ import annotations
 
 import unittest
 import os
@@ -27,7 +30,11 @@ import tempfile
 import datetime as _dt
 import importlib.machinery
 import importlib.util
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, NoReturn, TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from my_plex import CollectionRecord, MediaRecord
 
 # The tool's files.  The tool overrides all three when it loads the suite
 # (_load_test_mod): only it knows them -- on a deployed copy the launcher is
@@ -133,7 +140,8 @@ def _use_a_private_temp_dir() -> None:
     os.environ['TMPDIR'] = _SUITE_TEMP_DIR
 
 
-def _import_tool(module_name='mp', argv=None, path=None) -> Any:
+def _import_tool(module_name: str = 'mp', argv: Iterable[str] | None = None,
+                 path: str | None = None) -> Any:
     """Import one of my-plex's modules afresh, under `module_name`: the tool
     (TOOL_SOURCE, the default) or the boot module (path=BOOT_SOURCE).
     (Any for the same reason as _main_module: the tests set its globals.)
@@ -169,7 +177,7 @@ def _import_tool(module_name='mp', argv=None, path=None) -> Any:
     return mod
 
 
-def _tool_import_snippet(argv, path=None):
+def _tool_import_snippet(argv: Iterable[str], path: str | None = None) -> str:
     """The same import, written out for the probes that run in a CHILD
     interpreter: it binds `mp`, with sys.argv set before the module body runs.
 
@@ -225,7 +233,7 @@ def _deployed_copy(root: str, with_suite: bool) -> str:
     return launcher
 
 
-def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
+def _pick_most_populated_library(list_libraries_stdout: str, lib_type: str | None = None) -> str | None:
     """Pick the library with the MOST items from `--list-libraries` output,
     optionally only among libraries of one TYPE ('Movie', 'Series').
 
@@ -235,7 +243,8 @@ def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
     must never hard-code one.
     Returns the library name, or None when no data row parses.
     """
-    best_name, best_items = None, -1
+    best_name: str | None = None
+    best_items = -1
     for line in list_libraries_stdout.splitlines():
         parts = line.split('\t')
         if len(parts) < 7:
@@ -254,7 +263,7 @@ def _pick_most_populated_library(list_libraries_stdout, lib_type=None):
     return best_name
 
 
-def _pick_any_title_word(lib):
+def _pick_any_title_word(lib: str) -> str | None:
     """A word from the title of an item that exists in LIB here, or None.
 
     `tagesschau` is one title in one person's library: on a machine without
@@ -277,7 +286,7 @@ def _pick_any_title_word(lib):
     return max(words, key=len).lower() if words else None
 
 
-def _registry_entry_block(content, category):
+def _registry_entry_block(content: str, category: str) -> str:
     """Return the source block of ONE PROBLEM_CATEGORIES_REGISTRY entry.
 
     Scoped to the registry dict so same-named keys elsewhere (e.g.
@@ -300,16 +309,16 @@ def _registry_entry_block(content, category):
 
 class StubPLEX_Media:
     """Minimal stand-in for the real PLEX_Media class."""
-    OBJ_BY_ID = {}
-    OBJ_BY_LIBRARY = {}
-    OBJ_BY_FILEPATH = {}
-    OBJ_BY_MOVIE = {}
-    OBJ_BY_SERIES = {}
-    OBJ_BY_SERIES_EPISODES = {}
-    OBJ_BY_COLLECTION = {}
+    OBJ_BY_ID: dict[str, MediaRecord | CollectionRecord] = {}
+    OBJ_BY_LIBRARY: dict[str, dict[str, list[str]]] = {}
+    OBJ_BY_FILEPATH: dict[str, list[str]] = {}
+    OBJ_BY_MOVIE: dict[str, dict[str, str]] = {}
+    OBJ_BY_SERIES: dict[str, dict[str, str]] = {}
+    OBJ_BY_SERIES_EPISODES: dict[str, dict[str, dict[str, dict[str, list[str]]]]] = {}
+    OBJ_BY_COLLECTION: dict[str, CollectionRecord] = {}
 
     @classmethod
-    def reset(cls):
+    def reset(cls) -> None:
         cls.OBJ_BY_ID = {}
         cls.OBJ_BY_LIBRARY = {}
         cls.OBJ_BY_FILEPATH = {}
@@ -319,8 +328,16 @@ class StubPLEX_Media:
         cls.OBJ_BY_COLLECTION = {}
 
 
-def _make_movie(mid, title, filepath, version="90.0min 1920x1080 (h264 aac)", filesize=1000000, library="lib1", year=2023, originalTitle=""):
-    return {
+# _make_movie / _make_episode, and the tests that add versions to them, write
+# each version as {filepath, filesize} alone -- without the part_id and the
+# languages FileEntry requires.  They are left out, not made up: an absent
+# 'audio_languages' is a state the tool itself tests for (`is None`: the
+# languages were never read), so filling them in would change what these
+# records say.  Those lines carry a pyright ignore that points here.
+def _make_movie(mid: int, title: str, filepath: str, version: str = "90.0min 1920x1080 (h264 aac)",
+                filesize: int = 1000000, library: str = "lib1", year: int = 2023,
+                originalTitle: str = "") -> MediaRecord:
+    return {  # pyright: ignore[reportReturnType]  -- a partial version: see _make_movie
         'type': 'Movie', 'type_str': 'Movie', 'id': mid, 'title': title,
         'originalTitle': originalTitle, 'year': year, 'library': library,
         'file': filepath, 'files': {version: {'filepath': filepath, 'filesize': filesize}},
@@ -338,8 +355,10 @@ def _make_movie(mid, title, filepath, version="90.0min 1920x1080 (h264 aac)", fi
     }
 
 
-def _make_episode(eid, title, filepath, series_key, series, s_num, e_num, version="22.0min 1920x1080 (h264 aac)", filesize=500000, library="lib6"):
-    return {
+def _make_episode(eid: int, title: str, filepath: str, series_key: str, series: str, s_num: int,
+                  e_num: int, version: str = "22.0min 1920x1080 (h264 aac)", filesize: int = 500000,
+                  library: str = "lib6") -> MediaRecord:
+    return {  # pyright: ignore[reportReturnType]  -- a partial version: see _make_movie
         'type': 'Episode', 'type_str': 'Episode', 'id': eid, 'title': title,
         'originalTitle': '', 'year': 0, 'library': library,
         'file': filepath, 'files': {version: {'filepath': filepath, 'filesize': filesize}},
@@ -358,7 +377,8 @@ def _make_episode(eid, title, filepath, series_key, series, s_num, e_num, versio
     }
 
 
-def _make_collection(cid, title, library, member_ids=None):
+def _make_collection(cid: int, title: str, library: str,
+                     member_ids: list[str] | None = None) -> CollectionRecord:
     return {
         'type': 'Collection', 'type_str': 'Collection',
         'id': cid, 'title': title, 'subtype': 'movie',
@@ -424,11 +444,11 @@ class TestMultiVersionMerge(unittest.TestCase):
         movie = _make_movie(90747, "Only 3 Days Left", "/path/v1.mkv",
                             version="87.46min 1024x428 (h264 ac3)", filesize=1562009362)
         v2 = "87.46min 720x300 (h264 ac3)"
-        movie['files'][v2] = {'filepath': '/path/v2.mkv', 'filesize': 863013870}
+        movie['files'][v2] = {'filepath': '/path/v2.mkv', 'filesize': 863013870}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
         movie['media_cnt'] = len(movie['files'])
         movie['type_str'] = 'Movie*'
         v3 = "87.46min 640x272 (mpeg4 ac3)"
-        movie['files'][v3] = {'filepath': '/path/v3.avi', 'filesize': 733327964}
+        movie['files'][v3] = {'filepath': '/path/v3.avi', 'filesize': 733327964}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
         movie['media_cnt'] = len(movie['files'])
         self.assertEqual(movie['media_cnt'], 3)
         self.assertEqual(movie['type_str'], 'Movie*')
@@ -439,9 +459,9 @@ class TestMultiVersionMerge(unittest.TestCase):
     def test_multi_version_all_filepaths_registered(self):
         """All filepaths in a multi-version item should be registerable in OBJ_BY_FILEPATH."""
         movie = _make_movie(100, "Test", "/path/v1.mkv", version="v1", filesize=100)
-        movie['files']["v2"] = {'filepath': '/path/v2.mkv', 'filesize': 200}
-        movie['files']["v3"] = {'filepath': '/path/v3.avi', 'filesize': 300}
-        filepath_index = {}
+        movie['files']["v2"] = {'filepath': '/path/v2.mkv', 'filesize': 200}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
+        movie['files']["v3"] = {'filepath': '/path/v3.avi', 'filesize': 300}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
+        filepath_index: dict[str, list[str]] = {}
         movie_key = f"Movie:{movie['id']}"
         for _version, file_info in movie.get('files', {}).items():
             fp = file_info.get('filepath')
@@ -469,7 +489,7 @@ class TestMultiVersionMerge(unittest.TestCase):
         """Multi-version episodes should get type_str 'Episode*'."""
         ep = _make_episode(200, "Pilot", "/path/ep_v1.mkv", "Series:1", "TestShow", 1, 1,
                            version="v1", filesize=500)
-        ep['files']["v2"] = {'filepath': '/path/ep_v2.mkv', 'filesize': 600}
+        ep['files']["v2"] = {'filepath': '/path/ep_v2.mkv', 'filesize': 600}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
         ep['media_cnt'] = len(ep['files'])
         ep['type_str'] = 'Episode*'
         self.assertEqual(ep['media_cnt'], 2)
@@ -492,8 +512,8 @@ class TestCacheResumeWithMultiVersion(unittest.TestCase):
         """Should update when new data has more files than cached entry."""
         cached = _make_movie(100, "Test", "/v1.mkv", version="v1")
         new_data = _make_movie(100, "Test", "/v1.mkv", version="v1")
-        new_data['files']["v2"] = {'filepath': '/v2.mkv', 'filesize': 200}
-        new_data['files']["v3"] = {'filepath': '/v3.avi', 'filesize': 300}
+        new_data['files']["v2"] = {'filepath': '/v2.mkv', 'filesize': 200}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
+        new_data['files']["v3"] = {'filepath': '/v3.avi', 'filesize': 300}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
         new_count = len(new_data.get('files', {}))
         cached_count = len(cached.get('files', {}))
         self.assertGreater(new_count, cached_count)
@@ -502,7 +522,7 @@ class TestCacheResumeWithMultiVersion(unittest.TestCase):
     def test_update_when_files_removed(self):
         """Should update when cached entry has MORE files than new data (files were deleted)."""
         cached = _make_movie(100, "Test", "/v1.mkv", version="v1")
-        cached['files']["v2"] = {'filepath': '/v2.mkv', 'filesize': 200}
+        cached['files']["v2"] = {'filepath': '/v2.mkv', 'filesize': 200}  # pyright: ignore[reportArgumentType]  -- a partial version: see _make_movie
         new_data = _make_movie(100, "Test", "/v1.mkv", version="v1")
         new_count = len(new_data.get('files', {}))
         cached_count = len(cached.get('files', {}))
@@ -513,7 +533,7 @@ class TestDuplicateKeyGeneration(unittest.TestCase):
     """Test the duplicate key generation logic (mirrors generate_duplicate_keys)."""
 
     @staticmethod
-    def generate_duplicate_keys(obj):
+    def generate_duplicate_keys(obj: MediaRecord | CollectionRecord) -> list[str]:
         """Local copy of the logic from my_plex.py for isolated testing."""
         obj_type = obj.get('type')
         if obj_type == 'Movie':
@@ -579,11 +599,11 @@ class TestDuplicateKeyGeneration(unittest.TestCase):
 class TestInitLoopRobustness(unittest.TestCase):
     """Simulate the PLEX_Media.init() loop over mixed object types."""
 
-    def _simulate_init_loop(self, objects):
+    def _simulate_init_loop(self, objects: Mapping[str, Mapping[str, object]]) -> list[str]:
         """Run the match logic from PLEX_Media.init() on a dict of objects.
         Returns list of types that were processed without error."""
-        processed = []
-        for key, obj in objects.items():
+        processed: list[str] = []
+        for _key, obj in objects.items():
             if 'file' in obj and obj['file']:
                 pass
             match obj['type']:
@@ -631,13 +651,13 @@ class TestInitLoopRobustness(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # classify_multi_version — copied from my_plex.py for standalone testing
 # ---------------------------------------------------------------------------
-def _test_classify_multi_version(obj):
+def _test_classify_multi_version(obj: MediaRecord) -> str:
     """Classify a multi-version item (single Plex entry with multiple files)."""
     import re
     files_dict = obj.get('files', {})
     if len(files_dict) <= 1:
         return 'single'
-    durations_ms = []
+    durations_ms: list[float | None] = []
     for version_str in files_dict.keys():
         dur_match = re.match(r'([\d.]+)min', version_str)
         if dur_match:
@@ -652,10 +672,10 @@ def _test_classify_multi_version(obj):
     max_diff_ms = max(valid_durations) - min(valid_durations)
     if max_diff_ms > 5000:
         return 'true_multiversion'
-    sizes = set()
-    codecs = set()
+    sizes: set[int] = set()
+    codecs: set[str] = set()
     for version_str, file_info in files_dict.items():
-        if isinstance(file_info, dict):
+        if isinstance(file_info, dict):  # pyright: ignore[reportUnnecessaryIsInstance]  -- the tool's guard, copied as is
             size = file_info.get('filesize')
             if size:
                 sizes.add(size)
@@ -676,7 +696,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_exact_duplicate_same_size_codec_duration(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/test1.mkv', 'filesize': 5000000},
             '120.0min 1920x1080 (h264 aac) ': {'filepath': '/test2.mkv', 'filesize': 5000000},
         }
@@ -684,7 +704,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_reencode_same_duration_different_codec(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/test1.mkv', 'filesize': 5000000},
             '120.0min 1920x1080 (hevc aac)': {'filepath': '/test2.mkv', 'filesize': 3000000},
         }
@@ -692,7 +712,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_reencode_same_duration_different_size(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/test1.mkv', 'filesize': 5000000},
             '120.0min 1280x720 (h264 aac)': {'filepath': '/test2.mkv', 'filesize': 2000000},
         }
@@ -700,7 +720,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_reencode_duration_within_5s_tolerance(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/test1.mkv', 'filesize': 5000000},
             '120.08min 1920x1080 (hevc aac)': {'filepath': '/test2.mkv', 'filesize': 3000000},
         }
@@ -708,7 +728,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_true_multiversion_different_duration(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '23.69min 960x720 (h264 aac)': {'filepath': '/east.coast.mkv', 'filesize': 147176738},
             '23.5min 960x720 (h264 aac)': {'filepath': '/west.coast.mkv', 'filesize': 147231158},
         }
@@ -716,7 +736,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_true_multiversion_theatrical_vs_directors_cut(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/theatrical.mkv', 'filesize': 5000000},
             '145.0min 1920x1080 (h264 aac)': {'filepath': '/directors_cut.mkv', 'filesize': 7000000},
         }
@@ -724,7 +744,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_episode_true_multiversion(self):
         obj = _make_episode(4620, "Live from Studio 6H", "/east.mkv", "Series:1", "30 Rock", 6, 19)
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '23.69min 960x720 (h264 aac)': {'filepath': '/east.coast.version.mkv', 'filesize': 147176738},
             '23.5min 960x720 (h264 aac)': {'filepath': '/west.coast.version.mkv', 'filesize': 147231158},
         }
@@ -732,7 +752,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_no_duration_in_version_string_fallback(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             'unknown_format_1': {'filepath': '/test1.mkv', 'filesize': 5000000},
             'unknown_format_2': {'filepath': '/test2.mkv', 'filesize': 3000000},
         }
@@ -740,7 +760,7 @@ class TestClassifyMultiVersion(unittest.TestCase):
 
     def test_three_versions_one_different_duration(self):
         obj = _make_movie(1, "Test", "/test1.mkv")
-        obj['files'] = {
+        obj['files'] = {  # pyright: ignore[reportGeneralTypeIssues]  -- a partial version: see _make_movie
             '120.0min 1920x1080 (h264 aac)': {'filepath': '/v1.mkv', 'filesize': 5000000},
             '120.0min 1280x720 (h264 aac)': {'filepath': '/v2.mkv', 'filesize': 2000000},
             '135.0min 1920x1080 (h264 aac)': {'filepath': '/v3_extended.mkv', 'filesize': 7000000},
@@ -757,10 +777,11 @@ class TestDuplicatesIgnoreLibraryCombinations(unittest.TestCase):
     """Test DUPLICATES_IGNORE_LIBRARY_COMBINATIONS filtering logic."""
 
     @staticmethod
-    def _filter_duplicates(items_with_duplicates, ignore_groups, obj_by_id):
+    def _filter_duplicates(items_with_duplicates: dict[str, list[str]], ignore_groups: list[list[str]],
+                           obj_by_id: dict[str, dict[str, str]]) -> tuple[dict[str, list[str]], int]:
         ignored_count = 0
         if ignore_groups:
-            filtered = {}
+            filtered: dict[str, list[str]] = {}
             for dup_key, keys in items_with_duplicates.items():
                 if len(keys) <= 1:
                     filtered[dup_key] = keys
@@ -809,7 +830,7 @@ class TestDuplicatesIgnoreLibraryCombinations(unittest.TestCase):
         }
         dups = {'dup1': ['Movie:1', 'Movie:2', 'Movie:3', 'Movie:4']}
         ignore = [['lib2', 'lib3', 'lib4']]
-        result, count = self._filter_duplicates(dups, ignore, obj_by_id)
+        result, _count = self._filter_duplicates(dups, ignore, obj_by_id)
         self.assertEqual(len(result), 1)
         self.assertEqual(len(result['dup1']), 4)
 
@@ -841,7 +862,7 @@ class TestDuplicatesIgnoreLibraryCombinations(unittest.TestCase):
         }
         dups = {'dup1': ['Movie:1']}
         ignore = [['lib2', 'lib3', 'lib4']]
-        result, count = self._filter_duplicates(dups, ignore, obj_by_id)
+        result, _count = self._filter_duplicates(dups, ignore, obj_by_id)
         self.assertEqual(len(result), 1)
 
     def test_multiple_ignore_groups_independent(self):
@@ -901,8 +922,10 @@ class TestRunToolOnPLEXServer(unittest.TestCase):
 class TestISO639Mapping(unittest.TestCase):
     """Tests for ISO 639-1 to 639-2 language code mapping."""
 
+    mapping: dict[str, str]
+
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         import re
         script_path = TOOL_SOURCE
         with open(script_path, 'r') as f:
@@ -933,7 +956,7 @@ class TestISO639Mapping(unittest.TestCase):
 class TestAutoResolveConfig(unittest.TestCase):
     """Tests for AUTO_RESOLVE_AUDIO_LANGUAGE_BY_LIBRARY config logic."""
 
-    def _lookup(self, library, config):
+    def _lookup(self, library: str, config: list[tuple[str, str]]) -> str | None:
         auto_resolve = {lib: lang for lib, lang in config}
         return auto_resolve.get(library)
 
@@ -1799,7 +1822,6 @@ class TestVerifyCacheIntegrity(unittest.TestCase):
         content = self._read_script()
         self.assertIn("_preserved_file_metadata", content,
             "--force-plex must extract file_metadata before clearing OBJ_BY_ID")
-        import re
         # Preservation must happen BEFORE clearing OBJ_BY_ID
         preserve_pos = content.find("_preserved_file_metadata = {}")
         clear_pos = content.find("PLEX_Media.OBJ_BY_ID = {}", preserve_pos if preserve_pos > 0 else 0)
@@ -2651,7 +2673,6 @@ class TestReencode(unittest.TestCase):
     def test_reencode_in_problems_summary(self):
         """--problems must count reencode candidates via the registry (v3)."""
         src = self._read_script()
-        import re
         reg = _registry_entry_block(src, 'reencode')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'reencode'")
         self.assertIn('_list_reencode_candidates', reg,
@@ -2830,7 +2851,6 @@ class TestReencode(unittest.TestCase):
         body = self._read_reencode_item_body()
         self.assertIn("PLEX_Media.OBJ_BY_ID.items()", body)
         # The old bug iterated `for key in obj_keys`; make sure that's not the sweep driver.
-        import re
         # Must NOT be the ONLY loop — the all-items loop must be present for the cache sweep
         self.assertIn("obj.get('file', '')", body)
         self.assertIn("fi.get('filepath'", body)
@@ -2923,7 +2943,7 @@ class TestOndiskLabels(unittest.TestCase):
 
     def test_collect_ondisk_labels_no_files(self):
         """collect_ondisk_labels_for_obj returns [] when obj has no files."""
-        obj = {'type': 'Movie', 'files': {}}
+        obj: dict[str, object] = {'type': 'Movie', 'files': {}}
         self.assertEqual(collect_ondisk_labels_for_obj(obj), [])
 
     # --- build_ondisk_labels_index ---
@@ -2990,7 +3010,7 @@ class TestOndiskLabels(unittest.TestCase):
         src = self._read_script()
         self.assertIn("def _mark_reencode_candidates_on_disk(", src)
 
-    def _reencode_handler_body(self, src):
+    def _reencode_handler_body(self, src: str) -> str:
         """Extract the full --reencode handler block from src."""
         import re
         match = re.search(r"# Handle --reencode.*?# Handle --list", src, re.DOTALL)
@@ -3406,21 +3426,24 @@ def _fixture_conf():
         os.chmod(_FIXTURE_CONF, 0o400)
     return _FIXTURE_CONF
 
-def _fixture_library(d):
+def _fixture_library(d: str) -> str:
     """Write the fixture cache and its config into d; return the config path.
 
     Objects carry every key a real cached object carries (the shapes were read
     off a real cache on 2026-11-08), so a command that reads any field finds
     it.  Genres go through the tool's own normaliser, as --update-cache does:
     the cache holds canonical English names, which is what makes
-    `genre:Comedy` find a title tagged 'Komödie'."""
+    `genre:Comedy` find a title tagged 'Komödie'.
+
+    The records are dict[str, Any]: a pickle payload, written as a real cache
+    holds it -- with keys MediaRecord does not name (AUDIO_LANG_uniform, ...)."""
     import pickle
     from datetime import datetime
     m = _main_module()
     version = "90.0min 1920x1080 (h264 aac) 1500MB"
 
-    def file_entry(fp, langs, **metadata):
-        entry = {'filepath': fp, 'filesize': 1572864000, 'part_id': '1',
+    def file_entry(fp: str, langs: Iterable[str], **metadata: object) -> dict[str, Any]:
+        entry: dict[str, Any] = {'filepath': fp, 'filesize': 1572864000, 'part_id': '1',
                  'audio_languages': list(langs), 'subtitle_languages': [],
                  'file_segment_words': [os.path.basename(fp).split('.')],
                  'file_metadata': {'container_duration': 5400000.0, 'filesize': 1572864000,
@@ -3429,7 +3452,7 @@ def _fixture_library(d):
         entry['file_metadata'].update(metadata)
         return entry
 
-    def base(type_, id_, library, title, fp, year):
+    def base(type_: str, id_: int, library: str, title: str, fp: str, year: int) -> dict[str, Any]:
         return {
             'type': type_, 'type_str': type_, 'id': str(id_), 'item_id': str(id_), 'library': library,
             'title': title, 'originalTitle': title, 'year': year, 'summary': '', 'file': fp,
@@ -3446,7 +3469,8 @@ def _fixture_library(d):
             'S0XE0X': None, 'episode': None, 'season': None,
         }
 
-    def movie(id_, library, title, year, genres, langs, **metadata):
+    def movie(id_: int, library: str, title: str, year: int, genres: list[str], langs: list[str],
+              **metadata: object) -> dict[str, Any]:
         fp = f"/lib/{library}/{title} ({year})/{title.lower().replace(' ', '.')}.{year}.mkv"
         o = base('Movie', id_, library, title, fp, year)
         o.update({'genres': m._normalize_genres(genres), 'audio_languages': list(langs),
@@ -3487,7 +3511,7 @@ def _fixture_library(d):
     season.update({'series': 'Une Serie', 'series_key': 'Series:10', 'season': 'Season 1',
                    'S_str': 'S01', 'S_idx': 1, 'S_count': 1, 'E_count': 2, 'abs_ep_max': 2,
                    'AUDIO_LANG_uniform': 'fr', 'members': ['Episode:12', 'Episode:13']})
-    episodes = []
+    episodes: list[dict[str, Any]] = []
     for n in (1, 2):
         fp = f'{series_dir}/S01/une.serie.s01e{n:02d}.mkv'
         e = base('Episode', 11 + n, 'library_fr', f'Episode {n}', fp, 2015)
@@ -3499,15 +3523,15 @@ def _fixture_library(d):
         episodes.append(e)
 
     obj_by_id = {f"{o['type']}:{o['id']}": o for o in movies + [series, season] + episodes}
-    obj_by_library = {}
+    obj_by_library: dict[str, dict[str, list[str]]] = {}
     for key, o in obj_by_id.items():
         obj_by_library.setdefault(o['library'], {}).setdefault(o['type'], []).append(key)
     with_files = {key: o for key, o in obj_by_id.items() if o['files']}
     obj_by_filepath = {fi['filepath']: key for key, o in with_files.items() for fi in o['files'].values()}
     now = datetime(2026, 1, 1)
-    stats = {k: {} for k in ('updatedAt', 'plexUpdatedAt', 'itemsCount', 'episodesCount', 'totalDuration',
+    stats: dict[str, dict[str, Any]] = {k: {} for k in ('updatedAt', 'plexUpdatedAt', 'itemsCount', 'episodesCount', 'totalDuration',
                              'totalStorage', 'agent', 'language', 'locations', 'language_distribution')}
-    counts = {}
+    counts: dict[str, dict[str, int]] = {}
     for lib, (ltype, lang, agent) in libs.items():
         per_type = obj_by_library.get(lib, {})
         stats['updatedAt'][lib] = now; stats['plexUpdatedAt'][lib] = now
@@ -3556,7 +3580,7 @@ class TestEndToEnd(unittest.TestCase):
     def setUpClass(cls):
         cls._conf = _fixture_conf()
 
-    def _run_cmd(self, *extra_args):
+    def _run_cmd(self, *extra_args: str) -> subprocess.CompletedProcess[str]:
         cmd = [sys.executable, MAIN_SCRIPT, '--config', self._conf] + list(extra_args)
         return subprocess.run(cmd, capture_output=True, text=True, timeout=E2E_TIMEOUT)
 
@@ -3802,7 +3826,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"genre:Comedy failed: {result.stderr}")
         self.assertRegex(result.stdout, r'(Movie|Episode|Show|Season):\d+')
 
-    def _pick_lib_with_language(self, lang_code):
+    def _pick_lib_with_language(self, lang_code: str) -> str | None:
         """Return any cached library whose configured language begins with lang_code,
         or None if none exists.  Used by localized-genre tests to stay agnostic
         of the actual library names: every install names them differently."""
@@ -3898,15 +3922,16 @@ class TestFilter(unittest.TestCase):
             self.skipTest("this machine's cache has no media to filter "
                           "-- run `my-plex --update-cache` here")
 
-    def _run(self, *args):
+    def _run(self, *args: str | None) -> subprocess.CompletedProcess[str]:
         import subprocess
         if any(a is None for a in args):
             self.skipTest("no library in this machine's cache for a scoped "
                           "test -- run `my-plex --update-cache` here")
-        return subprocess.run([sys.executable, MAIN_SCRIPT] + list(args),
+        argv = [a for a in args if a is not None]  # all of them: skipTest raised on a None
+        return subprocess.run([sys.executable, MAIN_SCRIPT] + argv,
                               capture_output=True, text=True, timeout=30)
 
-    def _lines(self, *args):
+    def _lines(self, *args: str | None) -> list[str]:
         return [l for l in self._run(*args).stdout.splitlines() if l.strip()]
 
     def _skip_if_no_lib(self):
@@ -4178,7 +4203,7 @@ class TestDefaultScope(unittest.TestCase):
         cls._any_lib = _pick_most_populated_library(libs_result.stdout)
         cls._any_title_word = _pick_any_title_word(cls._any_lib) if cls._any_lib else None
 
-    def _run(self, *args):
+    def _run(self, *args: str | None) -> subprocess.CompletedProcess[str]:
         """Run my-plex with these arguments.
 
         A None argument means setUpClass found no library -- which is what
@@ -4194,7 +4219,8 @@ class TestDefaultScope(unittest.TestCase):
         if any(a is None for a in args):
             self.skipTest("no library in this machine's cache for a scoped "
                           "test -- run `my-plex --update-cache` here")
-        return subprocess.run([sys.executable, MAIN_SCRIPT] + list(args),
+        argv = [a for a in args if a is not None]  # all of them: skipTest raised on a None
+        return subprocess.run([sys.executable, MAIN_SCRIPT] + argv,
                               capture_output=True, text=True, timeout=30)
 
     def _read_script(self):
@@ -4602,7 +4628,7 @@ class TestErrorOutputConventions(unittest.TestCase):
                     self.assertNotIn('file=sys.stderr', line,
                                      f"this is the command's own output, not an error: {line.strip()[:90]}")
 
-    def _run_cli(self, *args):
+    def _run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, MAIN_SCRIPT, *args],
                               capture_output=True, text=True, timeout=60)
 
@@ -4768,7 +4794,7 @@ class TestScan(unittest.TestCase):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
-    def _run_cmd(self, *extra_args):
+    def _run_cmd(self, *extra_args: str) -> subprocess.CompletedProcess[str]:
         cmd = [sys.executable, MAIN_SCRIPT] + list(extra_args)
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=E2E_TIMEOUT)
@@ -5247,8 +5273,8 @@ class TestEpisodesTSV(unittest.TestCase):
         g['PLEX_DB_REMOTE_HOST'] = ''
         # Calls are RECORDED as well as refused: code under test may swallow the
         # exception, the record it cannot.
-        self._subprocess_calls = []
-        def _no_ssh(*a, **k):
+        self._subprocess_calls: list[object] = []
+        def _no_ssh(*a: object, **k: object) -> NoReturn:
             self._subprocess_calls.append(a[0] if a else k)
             raise AssertionError(f"episodes.tsv test ran a subprocess: {a[0] if a else k}")
         self._patch = mock.patch('subprocess.run', side_effect=_no_ssh)
@@ -5332,7 +5358,7 @@ class TestEpisodesTSV(unittest.TestCase):
 
     def test_stale_detection(self):
         """Test that freshly written TSV is not stale, old one is."""
-        import tempfile, os, time
+        import tempfile, os
         with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
             f.write("season\tepisode\tdate\ttitle\n")
             tsv_path = f.name
@@ -5891,7 +5917,7 @@ def _fixture_server():
     return _FIXTURE_SERVER
 
 
-def _run_on_fixture_server(*argv, timeout=60):
+def _run_on_fixture_server(*argv: str, timeout: int = 60) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """`my-plex ARGV` against _fixture_server(); returns the run and the ssh
     command lines it started (the log is emptied first)."""
     conf, listing, log = _fixture_server()
@@ -5930,7 +5956,7 @@ class TestRename(unittest.TestCase):
         self.assertIn('ERROR', output)
         self.assertIn('--rename requires', output)
 
-    def _assert_dry_run(self, r, calls):
+    def _assert_dry_run(self, r: subprocess.CompletedProcess[str], calls: list[str]) -> None:
         out = r.stdout + r.stderr
         self.assertEqual(r.returncode, 0, out[-1500:])
         self.assertIn('[DRY-RUN]', r.stdout, out[-1500:])
@@ -6127,7 +6153,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_write_read_roundtrip(self):
         """Write episodes.err and read it back, verify data integrity."""
-        import tempfile, os
+        import tempfile
         series_dir = tempfile.mkdtemp()
         try:
             write_episodes_err(series_dir, 'no_external_ids', 'tmdb',
@@ -6209,7 +6235,7 @@ class TestEpisodesErr(unittest.TestCase):
             result = read_episodes_err(series_dir)
             self.assertIsNone(result)
         finally:
-            import shutil, os
+            import shutil
             shutil.rmtree(series_dir)
 
     def test_clear_removes_file(self):
@@ -6238,7 +6264,7 @@ class TestEpisodesErr(unittest.TestCase):
 
     def test_err_file_format(self):
         """Verify episodes.err has expected format with comments and key-value lines."""
-        import tempfile, os
+        import tempfile
         series_dir = tempfile.mkdtemp()
         try:
             write_episodes_err(series_dir, 'suspicious_title', 'fernsehserien.de',
@@ -6279,7 +6305,6 @@ class TestEpisodesErr(unittest.TestCase):
         """--problems must run TSV detection via the registry's 'tsv' category (v3)."""
         with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
-        import re
         reg = _registry_entry_block(content, 'tsv')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'tsv'")
         self.assertIn('_list_tsv_problems', reg, "Must invoke _list_tsv_problems")
@@ -6291,7 +6316,6 @@ class TestEpisodesErr(unittest.TestCase):
         """--problems summary must surface the tsv count via the registry-driven warnings."""
         with open(TOOL_SOURCE, 'r') as f:
             content = f.read()
-        import re
         # The shared warning printer iterates the registry, which carries the
         # tsv description shown in the summary.
         idx = content.index('def _print_problem_warnings(')
@@ -6407,7 +6431,6 @@ class TestUnmatched(unittest.TestCase):
     def test_problems_includes_unmatched(self):
         """--problems must run unmatched detection via PROBLEM_CATEGORIES_REGISTRY (v3)."""
         content = self._read_script()
-        import re
         # v3: the --problems handler iterates the registry instead of
         # calling each lister literally.  Assert both halves of the chain:
         # 1) handler walks _enabled_problem_categories()
@@ -6558,7 +6581,6 @@ class TestUnsorted(unittest.TestCase):
 
     def test_problems_includes_unsorted(self):
         """--problems must run unsorted detection via PROBLEM_CATEGORIES_REGISTRY (v3)."""
-        import re
         content = self._read_script()
         # v3: the --problems handler iterates the registry instead of
         # calling each lister literally.  Assert both halves of the chain:
@@ -6577,7 +6599,6 @@ class TestUnsorted(unittest.TestCase):
 
     def test_problems_summary_includes_unsorted(self):
         """--problems summary must show unsorted count."""
-        import re
         content = self._read_script()
         self.assertIn('unsorted series', content, "Summary must show 'unsorted series' in problem warnings")
 
@@ -6815,7 +6836,7 @@ class TestTsvScrapersE2E(unittest.TestCase):
             pass
         return None
 
-    def _run_scraper_tmdb(self, tmdb_id, series_title) -> dict[str, Any]:
+    def _run_scraper_tmdb(self, tmdb_id: str, series_title: str) -> dict[str, Any]:
         """Call TMDB API directly and return {'episodes': N, 'max_season': M} or {'error': ...}."""
         import json
         api_key = self._get_tmdb_api_key()
@@ -6843,7 +6864,7 @@ except Exception as e:
         except (json.JSONDecodeError, IndexError):
             return {'error': f'parse failed: {result.stderr[:200]}'}
 
-    def _run_scraper_fernsehserien(self, slug, series_id=None) -> dict[str, Any]:
+    def _run_scraper_fernsehserien(self, slug: str, series_id: str | None = None) -> dict[str, Any]:
         """Scrape fernsehserien.de directly and return episode/season count."""
         import json
         code = f"""
@@ -7146,7 +7167,6 @@ class TestJunk(unittest.TestCase):
     def test_problems_integration(self):
         """--junk must be wired into --problems via the registry's 'junk' category (v3)."""
         content = self._read_script()
-        import re
         reg = _registry_entry_block(content, 'junk')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'junk'")
         self.assertIn('_list_junk_files', reg,
@@ -7198,7 +7218,7 @@ class TestJunk(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.d, True)
 
-    def _junk(self, *argv):
+    def _junk(self, *argv: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         """`my-plex --junk ARGV` against the fixture; returns the run and the
         ssh command lines it started."""
         log = os.path.join(self.d, 'ssh.log')
@@ -7565,7 +7585,7 @@ class TestS0XE0XPadding(unittest.TestCase):
 
     def test_pad_width_formula_produces_expected_values(self):
         """Sanity-check the padding formula directly."""
-        def pad_width(n):
+        def pad_width(n: int) -> int:
             return max(2, len(str(n))) if n else 2
         self.assertEqual(pad_width(0), 2)
         self.assertEqual(pad_width(1), 2)
@@ -7579,7 +7599,7 @@ class TestS0XE0XPadding(unittest.TestCase):
 
     def test_s0xe0x_format_matches_widths(self):
         """Verify that the padding format string renders as expected."""
-        def fmt(s_idx, e_idx, s_pad, e_pad):
+        def fmt(s_idx: int, e_idx: int, s_pad: int, e_pad: int) -> str:
             return f"S{s_idx:0{s_pad}d}E{e_idx:0{e_pad}d}"
         # Small show (≤99 eps): same as legacy
         self.assertEqual(fmt(7, 15, 2, 2), "S07E15")
@@ -8212,9 +8232,9 @@ class TestDiskMap(unittest.TestCase):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
 
-    def _mock_obj(self, **overrides):
+    def _mock_obj(self, **overrides: object) -> dict[str, object]:
         """Create a mock cache entry with sensible defaults for testing."""
-        obj = {
+        obj: dict[str, object] = {
             'type': 'Movie', 'title': 'Test Movie', 'year': 2024,
             'library': 'lib3', 'file': '/path/to/Test Movie.mkv',
             'files': {'90.0min 1920x1080 (h264 aac)': {'filepath': '/path/to/Test Movie.mkv'}},
@@ -8235,7 +8255,7 @@ class TestDiskMap(unittest.TestCase):
 
     # --- PREFERRED_AUDIO_LANGUAGES ---
 
-    def _with_preferred(self, prefs):
+    def _with_preferred(self, prefs: list[str]) -> tuple[Any, object, list[str]]:
         """Context-manager-like helper: temporarily set PREFERRED_AUDIO_LANGUAGES."""
         main_mod = _main_module()
         return main_mod, main_mod.PREFERRED_AUDIO_LANGUAGES, prefs
@@ -8526,7 +8546,7 @@ class TestDiskMap(unittest.TestCase):
 
     def test_migrate_legacy_vu_no_space(self):
         """Legacy [VU] with no space before bracket is detected and stripped."""
-        entry, ts_source = _migrate_legacy_vu_sidecar('Betty[VU].mp4')
+        entry, _ts_source = _migrate_legacy_vu_sidecar('Betty[VU].mp4')
         self.assertIsNotNone(entry)
         self.assertEqual(entry['clean_name'], 'Betty.mp4')
         self.assertIn('vu@', entry['markers']['watched'])
@@ -8827,7 +8847,7 @@ class TestDiskMap(unittest.TestCase):
 
     def test_migrate_legacy_vu_dir_trailing_dot(self):
         """Legacy migration strips trailing dots from dir names after removing [vu]."""
-        entry, ts = _migrate_legacy_vu_sidecar('movie.[2020].[vu]', is_dir=True)
+        entry, _ts = _migrate_legacy_vu_sidecar('movie.[2020].[vu]', is_dir=True)
         self.assertIsNotNone(entry)
         self.assertEqual(entry['clean_name'], 'movie.[2020]')
         self.assertFalse(entry['clean_name'].endswith('.'))
@@ -8918,13 +8938,11 @@ class TestDiskMap(unittest.TestCase):
         """--plex2disk dispatch passes force to cmd_plex2disk."""
         content = self._read_script()
         # Match cmd_plex2disk(target, ... force=force ...) regardless of other kw args
-        import re
         self.assertRegex(content, r'cmd_plex2disk\(target,[^)]*\bforce=force\b[^)]*\)')
 
     def test_disk2plex_dispatch_passes_force(self):
         """--disk2plex dispatch passes force to cmd_disk2plex."""
         content = self._read_script()
-        import re
         self.assertRegex(content, r'cmd_disk2plex\(target,[^)]*\bforce=force\b[^)]*\)')
 
     def test_series_dir_uses_get_series_dir_helper(self):
@@ -9035,17 +9053,17 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(validate_disk_plex_map(cfg), [])
 
     def test_validate_dpm_unknown_plex_var(self):
-        cfg = {'NOT_A_PLEX_VAR': {'scope': 'file', 'values': {}}}
+        cfg: dict[str, dict[str, object]] = {'NOT_A_PLEX_VAR': {'scope': 'file', 'values': {}}}
         errs = validate_disk_plex_map(cfg)
         self.assertTrue(any('unknown plex variable' in e for e in errs), errs)
 
     def test_validate_dpm_bad_scope(self):
-        cfg = {'WATCHED': {'scope': 'nope', 'values': {}}}
+        cfg: dict[str, dict[str, object]] = {'WATCHED': {'scope': 'nope', 'values': {}}}
         errs = validate_disk_plex_map(cfg)
         self.assertTrue(any('scope' in e for e in errs), errs)
 
     def test_validate_dpm_bad_merge(self):
-        cfg = {'WATCHED': {'scope': 'file', 'merge': 'lol', 'values': {}}}
+        cfg: dict[str, dict[str, object]] = {'WATCHED': {'scope': 'file', 'merge': 'lol', 'values': {}}}
         errs = validate_disk_plex_map(cfg)
         self.assertTrue(any('merge' in e for e in errs), errs)
 
@@ -9087,7 +9105,7 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(out, {'AUDIO_LANG': '[es]'})
 
     def test_compute_dpm_muted(self):
-        cfg = {'AUDIO_LANG': {'scope': 'file',
+        cfg: dict[str, dict[str, object]] = {'AUDIO_LANG': {'scope': 'file',
                               'values': {'unknown': {}}}}
         out = compute_markers_dpm(cfg, {'AUDIO_LANG': 'unknown'}, 'file')
         self.assertNotIn('AUDIO_LANG', out)
@@ -9190,18 +9208,18 @@ class TestDiskMap(unittest.TestCase):
         self.assertEqual(validate_disk_plex_map(cfg), [])
 
     def test_validate_dpm_series_strategy_bad(self):
-        cfg = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'lol', 'values': {}}}
+        cfg: dict[str, dict[str, object]] = {'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'lol', 'values': {}}}
         errs = validate_disk_plex_map(cfg)
         self.assertTrue(any('series_strategy' in e for e in errs), errs)
 
     def test_promoted_vars_helper(self):
-        cfg = {
+        cfg: dict[str, dict[str, object]] = {
             'AUDIO_LANG': {'scope': 'file', 'series_strategy': 'bottom_up', 'values': {}},
             'WATCHED':    {'scope': 'file', 'values': {}},  # default flat
         }
         self.assertEqual(_disk_plex_map_promoted_vars(cfg), ['AUDIO_LANG'])
 
-    def _stub_series_for_promotion(self, series_key, seasons_episodes_audio):
+    def _stub_series_for_promotion(self, series_key: str, seasons_episodes_audio: dict[str, dict[str, list[list[str]]]]) -> tuple[Any, tuple[object, object, object]]:
         """Build a stub PLEX_Media cache for promotion tests.
 
         seasons_episodes_audio = {S_str: {E_str: [audio_languages_lists]}}
@@ -9218,14 +9236,14 @@ class TestDiskMap(unittest.TestCase):
                  dict(main_mod.PLEX_Media.OBJ_BY_SERIES),
                  dict(main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES))
         # Reset
-        main_mod.PLEX_Media.OBJ_BY_ID = {}
-        main_mod.PLEX_Media.OBJ_BY_SERIES = {}
-        main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES = {}
+        main_mod.PLEX_Media.OBJ_BY_ID = dict[str, dict[str, object]]()
+        main_mod.PLEX_Media.OBJ_BY_SERIES = dict[str, dict[str, str]]()
+        main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES = dict[str, dict[str, dict[str, dict[str, list[str]]]]]()
         # Build
-        series_obj = {'type_str': 'Series', 'title': 'Test'}
+        series_obj: dict[str, object] = {'type_str': 'Series', 'title': 'Test'}
         main_mod.PLEX_Media.OBJ_BY_ID[series_key] = series_obj
-        seasons_map = {}
-        episodes_map = {}
+        seasons_map: dict[str, str] = {}
+        episodes_map: dict[str, dict[str, dict[str, list[str]]]] = {}
         for S_str, eps in seasons_episodes_audio.items():
             season_key = f'Season:{series_key}:{S_str}'
             main_mod.PLEX_Media.OBJ_BY_ID[season_key] = {
@@ -9252,7 +9270,7 @@ class TestDiskMap(unittest.TestCase):
         main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key] = episodes_map
         return main_mod, saved
 
-    def _restore_series(self, main_mod, saved):
+    def _restore_series(self, main_mod: Any, saved: tuple[object, object, object]) -> None:
         main_mod.PLEX_Media.OBJ_BY_ID = saved[0]
         main_mod.PLEX_Media.OBJ_BY_SERIES = saved[1]
         main_mod.PLEX_Media.OBJ_BY_SERIES_EPISODES = saved[2]
@@ -9384,12 +9402,12 @@ class TestDiskMap(unittest.TestCase):
                    '/fake/dir/Movie.srt',
                    '/fake/dir/Movie.en.srt',
                    '/fake/dir/SomeoneElse.nfo']  # not a sibling
-        renamed_calls = []
-        def _fake_op(op, path, host=None, **kw):
+        renamed_calls: list[tuple[str, str]] = []
+        def _fake_op(op: str, path: str, host: str | None = None, **kw: object) -> tuple[bool, list[str] | None]:
             if op == 'LIST_DIR':
                 return (True, listing)
             return (True, None)
-        def _fake_rename(src, new_filename, remote_host=None):
+        def _fake_rename(src: str, new_filename: str, remote_host: str | None = None) -> tuple[bool, str]:
             renamed_calls.append((src, new_filename))
             return (True, os.path.join(os.path.dirname(src), new_filename))
         main_mod = _main_module()
@@ -9413,10 +9431,10 @@ class TestDiskMap(unittest.TestCase):
         old_path = '/fake/dir/Movie.mkv'
         new_path = '/fake/dir/Movie [en].mkv'
         listing = ['/fake/dir/Movie.mkv', '/fake/dir/Movie.nfo']
-        rename_calls = []
-        def _fake_op(op, path, host=None, **kw):
+        rename_calls: list[tuple[str, str]] = []
+        def _fake_op(op: str, path: str, host: str | None = None, **kw: object) -> tuple[bool, list[str] | None]:
             return (True, listing) if op == 'LIST_DIR' else (True, None)
-        def _fake_rename(src, new, remote_host=None):
+        def _fake_rename(src: str, new: str, remote_host: str | None = None) -> tuple[bool, str]:
             rename_calls.append((src, new))
             return (True, src)
         main_mod = _main_module()
@@ -9425,7 +9443,7 @@ class TestDiskMap(unittest.TestCase):
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
              patch.object(main_mod, 'rename_file', _fake_rename), \
              contextlib.redirect_stdout(buf):
-            r, e = rename_file_siblings(old_path, new_path, remote_host=None,
+            r, _e = rename_file_siblings(old_path, new_path, remote_host=None,
                                         dry_run=True, log_prefix='PFX| ')
         self.assertEqual(rename_calls, [], "rename_file must not be called in dry_run")
         self.assertEqual(r, 1)
@@ -9434,8 +9452,8 @@ class TestDiskMap(unittest.TestCase):
     def test_rename_file_siblings_no_change(self):
         """If old_path == new_path stem, nothing is done (skip listing too)."""
         from unittest.mock import patch
-        listing_calls = []
-        def _fake_op(op, path, host=None, **kw):
+        listing_calls: list[str] = []
+        def _fake_op(op: str, path: str, host: str | None = None, **kw: object) -> tuple[bool, list[str]]:
             listing_calls.append(op)
             return (True, [])
         main_mod = _main_module()
@@ -9453,25 +9471,25 @@ class TestDiskMap(unittest.TestCase):
         listing = ['/fake/Foo.mkv', '/fake/Foo.nfo',
                    '/fake/Foo bar.mkv',         # different file, not a sibling
                    '/fake/FooFighters.nfo']     # name prefix but no '.' separator
-        renamed = []
-        def _fake_op(op, path, host=None, **kw):
+        renamed: list[tuple[str, str]] = []
+        def _fake_op(op: str, path: str, host: str | None = None, **kw: object) -> tuple[bool, list[str] | None]:
             return (True, listing) if op == 'LIST_DIR' else (True, None)
-        def _fake_rename(src, new, remote_host=None):
+        def _fake_rename(src: str, new: str, remote_host: str | None = None) -> tuple[bool, str]:
             renamed.append((src, new))
             return (True, src)
         main_mod = _main_module()
         with patch.object(main_mod, 'my_plex_file_operation', _fake_op), \
              patch.object(main_mod, 'rename_file', _fake_rename):
-            r, e = rename_file_siblings(old_path, new_path)
+            r, _e = rename_file_siblings(old_path, new_path)
         self.assertEqual(r, 1)  # only Foo.nfo
         self.assertEqual([os.path.basename(s) for s, _ in renamed], ['Foo.nfo'])
 
     # --- v1.4: _classify_migration_action / cmd_remux / --problems wiring ---
 
-    def _mock_video_obj(self, ext='.avi', vc='h264', ac='mp3',
-                        duration_ms=3_000_000, filesize_bytes=400_000_000,
-                        audio_languages=None, type_str='Episode',
-                        filepath_override=None):
+    def _mock_video_obj(self, ext: str = '.avi', vc: str = 'h264', ac: str = 'mp3',
+                        duration_ms: int = 3_000_000, filesize_bytes: int = 400_000_000,
+                        audio_languages: list[str] | None = None, type_str: str = 'Episode',
+                        filepath_override: str | None = None) -> dict[str, object]:
         """Build a minimal cache entry suitable for _classify_migration_action."""
         fp = filepath_override or f'/Volumes/2/watch.v/test/foo{ext}'
         version = f"50.0min 1280x720 ({vc} {ac}) {filesize_bytes//1_000_000}MB"
@@ -9495,7 +9513,7 @@ class TestDiskMap(unittest.TestCase):
             'series_key': 'Series:1', 'series': 'Test',
         }
 
-    def _set_dpm(self, dpm):
+    def _set_dpm(self, dpm: dict[str, dict[str, object]]) -> tuple[Any, object]:
         main_mod = _main_module()
         saved = main_mod.DISK_PLEX_MAP
         main_mod.DISK_PLEX_MAP = dpm
@@ -9607,7 +9625,6 @@ class TestDiskMap(unittest.TestCase):
     def test_disk2plex_dispatch_passes_yes(self):
         """--disk2plex dispatch passes yes flag to cmd_disk2plex."""
         content = self._read_script()
-        import re
         self.assertRegex(content, r'cmd_disk2plex\(target,[^)]*\byes=yes\b[^)]*\)')
 
     def test_cmd_disk2plex_accepts_yes(self):
@@ -10170,7 +10187,7 @@ class TestUncataloguedFolderMove(unittest.TestCase):
         src = self._read_script()
         import re
         # Look for the Folder branch's MOVE call
-        m = re.search(
+        _m = re.search(
             r"if type_str == 'Folder':(.*?)(?=if type_str not in \('Movie', 'Episode'\):|^\s*title = obj\.get)",
             src, re.DOTALL | re.MULTILINE
         )
@@ -10328,7 +10345,6 @@ class TestUnrecognized(unittest.TestCase):
     def test_problems_integration(self):
         """--problems must include 'unrecognized' via the registry (v3)."""
         src = self._read_script()
-        import re
         reg = _registry_entry_block(src, 'unrecognized')
         self.assertIsNotNone(reg, "PROBLEM_CATEGORIES_REGISTRY must define 'unrecognized'")
         self.assertIn('_count_unrecognized_top_level', reg,
@@ -10398,7 +10414,7 @@ class TestOriginalLanguages(unittest.TestCase):
         """Cat-B regex must include country / countries."""
         src = self._read_script()
         import re
-        m = re.search(r"_field_re = re\.match\(\s*r'(\^.*?\$)'", src, re.DOTALL)
+        _m = re.search(r"_field_re = re\.match\(\s*r'(\^.*?\$)'", src, re.DOTALL)
         # Regex is multi-line; just confirm country is referenced as a field
         self.assertIn("country|countries", src)
 
@@ -10967,13 +10983,13 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
 
     def test_state_file_round_trip(self):
         """Write → read → assert equality.  Real I/O under tmp dir."""
-        import tempfile, json
+        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             # Patch _MOVE_STATE_DIR to the tmpdir.
             saved = self.m._MOVE_STATE_DIR
             self.m._MOVE_STATE_DIR = tmpdir
             try:
-                state = {
+                state: dict[str, object] = {
                     'version': 1, 'status': 'snapshotted', 'old_rk': 99001,
                     'old_library': 'inbox', 'old_filepath': '/tmp/old.mkv',
                     'dest_library': 'library2',
@@ -11009,7 +11025,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         """Snapshot must capture addedAt + lastViewedAt + lastRatedAt +
         originallyAvailableAt — a cross-library move resets them on the new
         ratingKey, so they must be preserved."""
-        obj = {'id': 42, 'addedAt': 1600000000, 'lastViewedAt': 1610000000,
+        obj: dict[str, object] = {'id': 42, 'addedAt': 1600000000, 'lastViewedAt': 1610000000,
                'viewCount': 3, 'userRating': 7.0, 'labels': [], 'collections': [],
                'guid': 'plex://movie/x'}
         snap = self.m._snapshot_plex_item_state(plex=None, obj=obj, playlist_map={})
@@ -11067,19 +11083,19 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         """The cleanup must NOT delete a Plex Collection that still has members,
         even if its name matches a snapshotted source collection."""
         class FakeItem:
-            def __init__(self, name, members):
+            def __init__(self, name: str, members: list[str]) -> None:
                 self._name = name; self._members = list(members)
                 self.title = name; self.deleted = False
-            def items(self): return list(self._members)
+            def items(self) -> list[str]: return list(self._members)
             def delete(self): self.deleted = True
         class FakeSection:
-            def __init__(self, colls): self._colls = colls
-            def collections(self): return list(self._colls)
+            def __init__(self, colls: list[FakeItem]) -> None: self._colls = colls
+            def collections(self) -> list[FakeItem]: return list(self._colls)
         class FakePlex:
-            def __init__(self, by_lib): self._by_lib = by_lib
+            def __init__(self, by_lib: dict[str, list[FakeItem]]) -> None: self._by_lib = by_lib
             class _Library:
-                def __init__(self, parent): self._p = parent
-                def section(self, name): return FakeSection(self._p._by_lib.get(name, []))
+                def __init__(self, parent: FakePlex) -> None: self._p = parent
+                def section(self, name: str) -> FakeSection: return FakeSection(self._p._by_lib.get(name, []))
             @property
             def library(self): return self._Library(self)
         coll = FakeItem('Test Collection', members=['some_member'])  # still has members
@@ -11092,17 +11108,17 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
     def test_cleanup_emptied_source_collections_deletes_empty(self):
         """Empty same-name collection in source library MUST be deleted."""
         class FakeItem:
-            def __init__(self, name): self.title = name; self.deleted = False
-            def items(self): return []
+            def __init__(self, name: str) -> None: self.title = name; self.deleted = False
+            def items(self) -> list[str]: return []
             def delete(self): self.deleted = True
         class FakeSection:
-            def __init__(self, c): self._c = c
-            def collections(self): return list(self._c)
+            def __init__(self, c: list[FakeItem]) -> None: self._c = c
+            def collections(self) -> list[FakeItem]: return list(self._c)
         class FakePlex:
-            def __init__(self, by_lib): self._b = by_lib
+            def __init__(self, by_lib: dict[str, list[FakeItem]]) -> None: self._b = by_lib
             class _Library:
-                def __init__(self, p): self._p = p
-                def section(self, name): return FakeSection(self._p._b.get(name, []))
+                def __init__(self, p: FakePlex) -> None: self._p = p
+                def section(self, name: str) -> FakeSection: return FakeSection(self._p._b.get(name, []))
             @property
             def library(self): return self._Library(self)
         coll = FakeItem('Test Collection')
@@ -11502,7 +11518,7 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
     # behavior the source-pattern tests missed.
     # ------------------------------------------------------------------
 
-    def _mock_disk_plex_map_watched_audio(self, m):
+    def _mock_disk_plex_map_watched_audio(self, m: Any) -> dict[str, dict[str, object]]:
         """Reusable DPM stub: WATCHED ('newer') + AUDIO_LANG ('disk')."""
         return {
             'WATCHED': {
@@ -11695,7 +11711,8 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
         """With no library roots known (empty library_stats.locations),
         --orphaned reports nothing and returns 0 — does NOT crash."""
         m = self.m
-        saved = m.CACHE.copy() if isinstance(m.CACHE, dict) else None
+        cache = m.CACHE
+        saved = cast('dict[str, Any]', cache).copy() if isinstance(cache, dict) else None   # Any: the cache pickle
         try:
             m.CACHE = {}  # No library_stats → no roots
             from io import StringIO
@@ -11951,8 +11968,8 @@ class TestNaming(unittest.TestCase):
     """--naming engine: template render, modifiers, transforms, name
     split/assembly, NAMING_RULES validation, dir-shape derivation, plan."""
 
-    def _movie_obj(self, **overrides):
-        obj = {
+    def _movie_obj(self, **overrides: object) -> dict[str, object]:
+        obj: dict[str, object] = {
             'type': 'Movie', 'title': 'Test Movie', 'year': 2020,
             'library': 'library1',
             'file': '/roots/library1/Test Movie (2020)/Test Movie.mkv',
@@ -11969,7 +11986,7 @@ class TestNaming(unittest.TestCase):
         obj.update(overrides)
         return obj
 
-    def _episode_obj(self, **overrides):
+    def _episode_obj(self, **overrides: object) -> dict[str, object]:
         obj = self._movie_obj(
             type='Episode', title='Pilot', series='Tagesschau',
             series_key='', S_idx=1, E_idx=7, S_str='S01', E_str='E07',
@@ -12042,7 +12059,7 @@ class TestNaming(unittest.TestCase):
         self.assertEqual(extension, '.mkv')
 
     def test_split_without_sidecar_treats_brackets_as_labels(self):
-        clean_stem, labels, extension = split_name_for_naming(
+        clean_stem, labels, _extension = split_name_for_naming(
             'Test Movie [whatever].mkv', None, is_dir=False)
         self.assertEqual(clean_stem, 'Test Movie')
         self.assertEqual(labels, ['whatever'])
@@ -12110,7 +12127,8 @@ class TestNaming(unittest.TestCase):
 
     # --- plan builder ----------------------------------------------------
 
-    def _plan(self, items, rules, sidecar=None, roots=None):
+    def _plan(self, items: list[tuple[str, dict[str, object]]], rules: Mapping[str, Mapping[str, object]],
+              sidecar: Mapping[str, object] | None = None, roots: set[str] | None = None):
         usable, problems = validate_naming_rules(rules)
         self.assertFalse(problems, f"rules must validate cleanly: {problems}")
         return build_naming_plan(items, usable, sidecar or {},
@@ -12346,11 +12364,11 @@ class TestPlexConnectNotRequired(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def _connect(self, required):
+    def _connect(self, required: bool) -> tuple[SystemExit | None, str, str | None, object]:
         """Call connect_to_plex in-process; returns (SystemExit or None, stdout, PLEX_CONNECT_ERROR)."""
         import socket
         g = connect_to_plex.__globals__
-        saved = {k: g[k] for k in ('OFFLINE', 'PLEX_SERVER', 'PLEX_CONNECT_ERROR')}
+        saved: dict[str, object] = {k: g[k] for k in ('OFFLINE', 'PLEX_SERVER', 'PLEX_CONNECT_ERROR')}
         saved_timeout = socket.getdefaulttimeout()
         g['OFFLINE'] = False; g['PLEX_SERVER'] = None; g['PLEX_CONNECT_ERROR'] = None
         buf, exc = io.StringIO(), None
@@ -12415,13 +12433,13 @@ class TestVersionAndStamp(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def git(self, *a, cwd=None):
+    def git(self, *a: str, cwd: str | None = None) -> str:
         r = subprocess.run(['git', *a], cwd=cwd or self.work, env=self.env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, f"git {' '.join(a)}: {r.stderr}")
         return r.stdout.strip()
 
-    def run_tool(self, *a):
+    def run_tool(self, *a: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, self.launcher, *a], cwd=self.work, env=self.env,
                               capture_output=True, text=True, timeout=60)
 
@@ -12575,7 +12593,7 @@ class TestVersionNamesItsRelease(unittest.TestCase):
         here = os.path.dirname(MAIN_SCRIPT)
         with open(TOOL_SOURCE) as f:
             version = _must(re.search(r'^SCRIPT_VERSION\s*=\s*"([^"]+)"', f.read(), re.M), 'SCRIPT_VERSION').group(1)
-        def git(*a):
+        def git(*a: str) -> subprocess.CompletedProcess[str]:
             return subprocess.run(['git', '-C', here, *a], capture_output=True, text=True)
         if git('rev-parse', '--git-dir').returncode != 0:
             self.skipTest('not a git checkout')
@@ -12623,7 +12641,7 @@ class TestArgvValueFlags(unittest.TestCase):
     value of a flag that takes one.  Probed with -D and a trailing --help, so
     the normalizer runs and prints its translations but nothing executes."""
 
-    def _probe(self, *args):
+    def _probe(self, *args: str) -> str:
         r = subprocess.run([sys.executable, MAIN_SCRIPT, '--offline', '-D', *args, '--help'],
                            capture_output=True, text=True, timeout=60)
         return r.stdout + r.stderr
@@ -12678,9 +12696,11 @@ class TestBareLibraryScope(unittest.TestCase):
 
         def renamed(o: Any) -> Any:
             if isinstance(o, dict):
-                return {renamed(k): renamed(v) for k, v in o.items()}
+                entries = cast('dict[object, object]', o)
+                return {renamed(k): renamed(v) for k, v in entries.items()}
             if isinstance(o, list):
-                return [renamed(x) for x in o]
+                elements = cast('list[object]', o)
+                return [renamed(x) for x in elements]
             if isinstance(o, str):
                 return o.replace('library_de', name)
             return o
@@ -12707,7 +12727,7 @@ class TestBareLibraryScope(unittest.TestCase):
         with open(cls._conf_no_cache, 'w') as f:
             f.write(conf.replace(os.path.join(d, 'cache.pkl'), os.path.join(d, 'absent', 'cache.pkl')))
 
-    def _run(self, *args, conf=None):
+    def _run(self, *args: str, conf: str | None = None) -> tuple[subprocess.CompletedProcess[str], str]:
         r = subprocess.run([sys.executable, MAIN_SCRIPT, '--config', conf or self._conf, *args],
                            capture_output=True, text=True, timeout=E2E_TIMEOUT)
         return r, r.stdout + r.stderr
@@ -12742,14 +12762,14 @@ class TestBareLibraryScope(unittest.TestCase):
 
     def test_an_explicit_library_scope_makes_a_library_name_a_title_search(self):
         """`library:NAME` anywhere: every other bare word is searched, as --help scope says."""
-        r, out = self._run('-D', 'library:library1', 'Kids')
+        _r, out = self._run('-D', 'library:library1', 'Kids')
         self.assertIn("Search token 'Kids'", out, "'Kids' was not searched in the titles")
         self.assertNotIn('Irgendein Film', out)
         self.assertNotIn('Some Movie', out, "'Kids' was not searched in the titles of library1")
 
     def test_with_no_cache_a_bare_word_is_still_read(self):
         """No cache file: no library is known, the word is a title search, nothing crashes."""
-        r, out = self._run('-D', 'Kids', conf=self._conf_no_cache)
+        _r, out = self._run('-D', 'Kids', conf=self._conf_no_cache)
         self.assertNotIn('Traceback', out)
         self.assertIn("Search token 'Kids'", out)
 
@@ -12804,7 +12824,7 @@ class TestBareLibraryScope(unittest.TestCase):
         SCAN_LIBRARIES empty, and the run scanned and refreshed every library."""
         for with_cache in (True, False):
             for argv in (('-D', 'Newlib', '--scan'), ('-D', '--scan', 'Newlib')):
-                r, out = self._run(*argv, conf=self._scan_conf(with_cache))
+                _r, out = self._run(*argv, conf=self._scan_conf(with_cache))
                 where = f"{' '.join(argv)} ({'with' if with_cache else 'no'} cache)"
                 self.assertFalse("Search token 'Newlib'" in out, f"{where}: searched in the titles")
                 self.assertFalse('SCAN_LIBRARIES=None' in out, f"{where}: every library was scanned")
@@ -12890,7 +12910,7 @@ class TestListPrinters(unittest.TestCase):
          media.OBJ_BY_SERIES_EPISODES) = self._saved_maps
         self.mp.FORMAT, self.mp.VRB, self.mp.VERYVRB = self._saved_flags
 
-    def _print(self, key, fmt, verbose):
+    def _print(self, key: str, fmt: str, verbose: bool) -> str:
         self.mp.FORMAT, self.mp.VRB, self.mp.VERYVRB = fmt, verbose, False
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -13054,7 +13074,7 @@ class TestPlexapiRecordsStoreEpochs(unittest.TestCase):
         media = NS(id=50, duration=5400000, videoResolution='1080', videoCodec='h264',
                    audioCodec='aac', width=1920, height=1080)
         part = NS(id=500, file='/lib/film.mkv', size=1000,
-                  audioStreams=lambda: [], subtitleStreams=lambda: [])
+                  audioStreams=lambda: list[object](), subtitleStreams=lambda: list[object]())
         self.mp.FORCE_CACHE_UPDATE = True
         with mock.patch.object(self.mp, 'plex_rate_limit_delay'), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -13075,10 +13095,10 @@ class TestPlexapiRecordsStoreEpochs(unittest.TestCase):
                    contentRating=None, studio=None, reload=lambda: None)
         media = NS(id=50, duration=5400000, videoResolution='1080', videoCodec='h264',
                    audioCodec='aac', width=1920, height=1080)
-        first = NS(id=500, file='/lib/a.mkv', size=1_000_000_000, audioStreams=lambda: [],
-                   subtitleStreams=lambda: [])
+        first = NS(id=500, file='/lib/a.mkv', size=1_000_000_000, audioStreams=lambda: list[object](),
+                   subtitleStreams=lambda: list[object]())
         second = NS(id=501, file='/lib/b.mkv', size=2_000_000_000,
-                    audioStreams=lambda: [NS(language='fr')], subtitleStreams=lambda: [])
+                    audioStreams=lambda: [NS(language='fr')], subtitleStreams=lambda: list[object]())
         self.mp.FORCE_CACHE_UPDATE = True
         with mock.patch.object(self.mp, 'plex_rate_limit_delay'), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -13115,7 +13135,7 @@ class TestLabelTargetIsMedia(unittest.TestCase):
     def setUp(self):
         self.mp = _main_module()
         self._saved = self.mp.PLEX_Media.OBJ_BY_ID
-        collection = {'type': 'Collection', 'type_str': 'Collection', 'id': '9', 'title': 'Heroes',
+        collection: CollectionRecord = {'type': 'Collection', 'type_str': 'Collection', 'id': '9', 'title': 'Heroes',
                       'subtype': 'movie', 'library': 'lib1', 'addedAt': None, 'updatedAt': None,
                       'member_ids': []}
         self.mp.PLEX_Media.OBJ_BY_ID = {'Collection:9': collection,
@@ -13192,7 +13212,7 @@ class TestDeployedCopy(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls._dir, ignore_errors=True)
 
-    def _run(self, *args):
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, '-B', self.copy, *args],
                               capture_output=True, text=True, timeout=180)
 
@@ -13581,7 +13601,7 @@ class TestRunTestsTAP(unittest.TestCase):
         was right to read it as 26 missing. The skip has to be per test, in
         setUp or in the test, so each announced test prints its own line."""
         import inspect, textwrap
-        offenders = []
+        offenders: list[str] = []
         for cls in _UNITTEST_CLASSES:
             f = cls.__dict__.get('setUpClass')
             if f is None:
@@ -13816,7 +13836,7 @@ class TestAtomicPickleWrites(unittest.TestCase):
     def test_no_pickle_dump_outside_the_atomic_helper(self):
         import ast
         tree = ast.parse(io.open(TOOL_SOURCE, encoding='utf-8').read())
-        offenders = []
+        offenders: list[str] = []
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -13867,7 +13887,7 @@ class TestTopLevelHandlers(unittest.TestCase):
     only honest way to test this is to make it really happen."""
 
     @staticmethod
-    def _copy_with(first_line_of_main):
+    def _copy_with(first_line_of_main: str) -> tuple[str, str]:
         d = tempfile.mkdtemp(prefix='my-plex-handler-')
         dst = _tool_copy(d, {'tool': [('\ndef main():\n',
                                        f'\ndef main():\n    {first_line_of_main}\n')]})
@@ -13933,7 +13953,7 @@ class TestTopLevelHandlers(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def _interrupt_with(self, signum):
+    def _interrupt_with(self, signum: int) -> tuple[int, str]:
         """Send a REAL signal to a copy that has said it is running, and give
         back (returncode, output)."""
         d, copy = self._copy_with(
@@ -13980,7 +14000,7 @@ class TestTopLevelHandlers(unittest.TestCase):
                                  env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
             time.sleep(2.0)
             p.send_signal(signal.SIGINT)
-            out, errtext = p.communicate(timeout=30)
+            _out, errtext = p.communicate(timeout=30)
             self.assertEqual(p.returncode, 130,
                              f"128+SIGINT, not {p.returncode}:\n{errtext[-400:]}")
             self.assertNotIn('Traceback', errtext,
@@ -14040,7 +14060,7 @@ class TestTopLevelHandlers(unittest.TestCase):
         wrapper that checked the status was told the run had done its job."""
         import ast
         tree = ast.parse(io.open(TOOL_SOURCE, encoding='utf-8').read())
-        offenders = []
+        offenders: list[str] = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
@@ -14125,11 +14145,11 @@ class TestSshOptions(unittest.TestCase):
     so a later interactive login of the user's keeps my-plex waiting long
     after the remote has answered."""
 
-    def _opts(self, **kw):
+    def _opts(self, **kw: bool) -> list[str]:
         main_mod = _main_module()
         return main_mod._ssh_opts(**kw)
 
-    def _joined(self, **kw):
+    def _joined(self, **kw: bool) -> str:
         return " ".join(self._opts(**kw))
 
     def test_every_connection_can_fail_instead_of_waiting(self):
@@ -14223,7 +14243,8 @@ class TestSecretArgs(unittest.TestCase):
     def _mod(self):
         return _main_module()
 
-    def _resolve(self, flag, value, argv=None, stdin=None):
+    def _resolve(self, flag: str, value: str, argv: list[str] | None = None,
+                 stdin: str | None = None) -> tuple[object, str]:
         import contextlib
         mod = self._mod()
         err_buf = io.StringIO()
@@ -14288,7 +14309,7 @@ class TestNearMissFlag(unittest.TestCase):
     word was judged before the flag beside it, and no parser of my-plex
     takes an abbreviation, so the flag the user meant was never named."""
 
-    def _run(self, *argv):
+    def _run(self, *argv: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([MAIN_SCRIPT, '--config', _fixture_conf(), *argv],
                               capture_output=True, text=True, timeout=E2E_TIMEOUT,
                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
@@ -14328,7 +14349,7 @@ class TestStrayWordRefused(unittest.TestCase):
     checked 2026-11-05).  _ARGV_REWRITTEN is the one owner of "what the
     normalisation rewrote", and both commands ask it."""
 
-    def _run(self, *argv):
+    def _run(self, *argv: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([MAIN_SCRIPT, '--config', _fixture_conf(), *argv],
                               capture_output=True, text=True, timeout=E2E_TIMEOUT,
                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
@@ -14403,7 +14424,7 @@ class TestErrCodes(unittest.TestCase):
         cmd = _must(re.search(r'^#   (perl .*)$', boot, re.M), 'the renumber command').group(1)
         d = tempfile.mkdtemp(prefix='my-plex-renumber-')
         try:
-            originals = {}
+            originals: dict[str, str] = {}
             for path in (BOOT_SOURCE, TOOL_SOURCE):
                 with open(path) as f:
                     text = f.read()
@@ -14444,7 +14465,7 @@ class TestQuiet(unittest.TestCase):
     mode passes review while silencing not one line.
     """
 
-    def _run(self, *argv, stdin=None):
+    def _run(self, *argv: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
                               text=True, timeout=120, input=stdin,
                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
@@ -14582,7 +14603,7 @@ class TestVenvDetection(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def _ask(self, interpreter, expected, *flags: str):
+    def _ask(self, interpreter: str, expected: bool, *flags: str) -> None:
         """Import the boot module under `interpreter` (started with `flags`),
         point it at the temp venv, and have it answer _inside_our_venv().
         Importing it decides nothing -- its main() does -- so nothing
@@ -14636,6 +14657,7 @@ class TestVenvDetection(unittest.TestCase):
         and the old predicate answered "inside".  It is outside."""
         self.assertTrue(self.venv_built, "could not build the probe venv")
         self.assertTrue(self.shebang_python, "no python3 on PATH to build from")
+        assert self.shebang_python is not None  # assertTrue above has failed the test otherwise
         self._ask(self.shebang_python, False)
 
     def test_the_venvs_own_interpreter_is_inside_it(self):
@@ -14777,13 +14799,13 @@ class TestReadmeFlagsExist(unittest.TestCase):
     """
 
     @staticmethod
-    def _registered_flags():
+    def _registered_flags() -> set[str]:
         """Every option string the tool's parsers accept, read from the
         add_argument() calls themselves rather than from --help, which hides
         the ones carrying argparse.SUPPRESS."""
         with open(TOOL_SOURCE) as f:
             tree = ast.parse(f.read())
-        flags = set()
+        flags: set[str] = set()
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -14796,7 +14818,7 @@ class TestReadmeFlagsExist(unittest.TestCase):
                     flags.add(a.value)
         return flags
 
-    def _run(self, *argv):
+    def _run(self, *argv: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
                               text=True, timeout=120,
                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
@@ -14808,7 +14830,7 @@ class TestReadmeFlagsExist(unittest.TestCase):
     HANDLED_OUTSIDE_ARGPARSE = {'--unittest'}
 
     @staticmethod
-    def _readme_flags():
+    def _readme_flags() -> set[str]:
         """The flags the README CLAIMS my-plex has.
 
         Two things count as a claim: an inline `--flag` code span, and a flag
@@ -14831,7 +14853,7 @@ class TestReadmeFlagsExist(unittest.TestCase):
         with open(_rp) as f:
             text = f.read()
         flag_re = re.compile(r'(?<![\w-])(--[a-z][a-z0-9-]*)')
-        found = set()
+        found: set[str] = set()
         for block in re.findall(r'```.*?\n(.*?)```', text, re.DOTALL):
             for line in block.splitlines():
                 if re.match(r'\s*\$?\s*my-plex\b', line):
@@ -15061,7 +15083,8 @@ sys.exit(int(os.environ.get('FAKE_SSH_LOGIN_RC') or 0))
 '''
 
 
-def _fake_ssh_env(login_rc=0, find_listing=None, log=None, words=None):
+def _fake_ssh_env(login_rc: int = 0, find_listing: str | None = None, log: str | None = None,
+                  words: str | None = None) -> dict[str, str]:
     """An environment whose `ssh` answers -G with the REAL ssh -- it reads a
     config and connects to nothing -- and a login with LOGIN_RC, so an
     --install test reaches no host.  Its config file is the test's own
@@ -15105,7 +15128,7 @@ exec {shlex.quote(sys.executable)} -I {shlex.quote(server)} "$@"
                 PATH=_FAKE_SSH_DIR + os.pathsep + os.environ.get('PATH', ''))
 
 
-def _remote_words(call):
+def _remote_words(call: str) -> list[str]:
     """The words of the first simple command in a fake ssh LOG line -- the
     remote command after the host, as the remote shell splits it."""
     return shlex.split(call.split(' fixture-server ', 1)[1])
@@ -15126,7 +15149,7 @@ class TestRemoteQuoting(unittest.TestCase):
     DIR = "/srv/it's a \"test\" $HOME `id` dir"
     PATH = DIR + "/file 1.mkv"
 
-    def _remote(self, call, expands=False):
+    def _remote(self, call: Callable[[Any], object], expands: bool = False) -> list[list[str]]:
         """CALL(tool), in-process, with ssh answered by the fake: the simple
         commands the remote shell would run, each a list of its words.  No
         word may be one the shell expands -- a path's $ or ` run on the
@@ -15148,7 +15171,7 @@ class TestRemoteQuoting(unittest.TestCase):
             self.assertEqual([w for c in lines for w in c if w.startswith('<EXPANDED:')], [], lines)
         return lines
 
-    def _op(self, operation, expands=False, **kwargs):
+    def _op(self, operation: str, expands: bool = False, **kwargs: str) -> list[list[str]]:
         return self._remote(lambda mp: mp.my_plex_file_operation(
             operation, self.PATH, remote_host='fixture-server', skip_alternatives=True, **kwargs),
             expands=expands)
@@ -15199,7 +15222,7 @@ class TestRemoteQuoting(unittest.TestCase):
         words = os.path.join(d, 'words')
         env = _fake_ssh_env(words=words)
 
-        def run(cmd):
+        def run(cmd: str) -> tuple[int, list[Any]]:   # Any: json.loads lines (word lists, or an error dict)
             if os.path.exists(words):
                 os.remove(words)
             r = subprocess.run(['ssh', 'fixture-server', cmd], env=env, capture_output=True, text=True)
@@ -15213,7 +15236,7 @@ class TestRemoteQuoting(unittest.TestCase):
         self.assertEqual(lines[0]['error'], 'an unterminated single quote')
 
 
-def _install_lines(d, remote='me@192.0.2.10'):
+def _install_lines(d: str, remote: str = 'me@192.0.2.10') -> str:
     """The config lines an --install test needs: an endpoint, and an ssh
     config file in the test's own directory D."""
     return (f"PLEX_DB_REMOTE = {remote!r}\n"
@@ -15229,7 +15252,7 @@ class TestInstallFirewallRules(unittest.TestCase):
     happened on a real machine with www.fernsehserien.de.
     """
 
-    def _conf(self, cli_path):
+    def _conf(self, cli_path: str) -> tuple[str, str]:
         """A config whose LITTLE_SNITCH_CLI points where this test wants.
 
         CACHE_FILE and LOCK_FILE are its own: --install takes the cache lock
@@ -15244,7 +15267,7 @@ class TestInstallFirewallRules(unittest.TestCase):
             f.write(_install_lines(d))
         return d, c
 
-    def _run(self, *argv):
+    def _run(self, *argv: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([MAIN_SCRIPT, *argv], capture_output=True,
                               text=True, timeout=120, env=_fake_ssh_env())
 
@@ -15393,7 +15416,7 @@ class TestInstallFirewallRules(unittest.TestCase):
         import pwd
         me = pwd.getpwuid(os.getuid()).pw_name
         liar = 'root' if me != 'root' else 'nobody'
-        d, conf, _stub, sentinel = self._sentinel_conf()
+        d, conf, _stub, _sentinel = self._sentinel_conf()
         try:
             with open(conf, 'a') as f:
                 f.write(f"RUN_AS_USER = {me!r}\n")
@@ -15635,7 +15658,7 @@ class _RootInstallCase(unittest.TestCase):
         """The python3 a root run here names, as the firewall tool lists it."""
         return _listed_python(shutil.which('python3', path=_fake_ssh_env()['PATH']) or 'python3')
 
-    def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv=('--install',),
+    def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv: 'tuple[str, ...]' = ('--install',),
                  env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
                  copy: 'str | None' = None, firewall: bool = True,
                  touch: 'tuple[str, ...]' = (), conf_in_env: bool = False) -> _RootRun:
@@ -15934,7 +15957,9 @@ class TestInstallAsRoot(_RootInstallCase):
     def removed_block(stdout: str) -> 'tuple[list[str], list[str]]':
         """The REMOVED headings a root run printed, and the `   > ` lines
         under them (up to the next ` >>> `)."""
-        heads, items, inside = [], [], False
+        heads: list[str] = []
+        items: list[str] = []
+        inside = False
         for line in stdout.splitlines():
             if line.startswith(' >>> '):
                 inside = line.startswith(' >>> REMOVED')
@@ -16792,7 +16817,9 @@ class TestPlexDbPathRequired(unittest.TestCase):
         saved = mod.PLEX_DB_PATH, mod.PLEX_DB_REMOTE_HOST
         calls: list[Any] = []
         real_run = mod.subprocess.run
-        mod.subprocess.run = lambda *a, **k: calls.append(a) or real_run(['false'])
+        def _refused_run(*a: object, **k: object) -> object:
+            return calls.append(a) or real_run(['false'])
+        mod.subprocess.run = _refused_run
         mod.PLEX_DB_PATH, mod.PLEX_DB_REMOTE_HOST = '', 'plex-test-host'
         saved_files = mod.CONFIG_RECORD['files']
         mod.CONFIG_RECORD['files'] = []
@@ -16867,19 +16894,40 @@ class TestPlexDbPathRequired(unittest.TestCase):
             def fetchItem(self, i: int) -> _Media:
                 return _Media(i)
 
+        def _no_sidecar() -> dict[str, object]:
+            return {}
+
+        def _save_sidecar(sc: object) -> None:
+            return None
+
+        def _one_movie(t: object) -> list[tuple[str, dict[str, object]]]:
+            return [('Movie:7', {'title': 'T', 'item_id': 7})]
+
+        def _unwatched(o: object, k: object) -> dict[str, object]:
+            return {'WATCHED': False}
+
+        def _movie_paths(o: object) -> list[tuple[str, str, str]]:
+            return [('movie', 'T.mkv', '/x/T.mkv')]
+
+        def _watched_on_disk(*a: object) -> dict[str, object]:
+            return {'WATCHED': True, **extras}
+
+        def _write_succeeds(sql: str) -> bool:
+            return True
+
         e = io.StringIO()
         with mock.patch.multiple(
                 mod, PLEX_DB_PATH=db_path, DISK_PLEX_MAP={'WATCHED': {}},
                 _ensure_disk_plex_map_uniforms_computed=lambda: None,
-                load_disk_map_sidecar=lambda: {},
-                save_disk_map_sidecar=lambda sc: None,
-                _get_disk_map_scope=lambda t: [('Movie:7', {'title': 'T', 'item_id': 7})],
-                resolve_disk_map_variables=lambda o, k: {'WATCHED': False},
-                _scope_paths_for_obj=lambda o: [('movie', 'T.mkv', '/x/T.mkv')],
-                read_markers_from_disk=lambda *a: {'WATCHED': True, **extras},
+                load_disk_map_sidecar=_no_sidecar,
+                save_disk_map_sidecar=_save_sidecar,
+                _get_disk_map_scope=_one_movie,
+                resolve_disk_map_variables=_unwatched,
+                _scope_paths_for_obj=_movie_paths,
+                read_markers_from_disk=_watched_on_disk,
                 ensure_plex_api=lambda: _Plex()), \
                 mock.patch.object(mod, 'query_plex_database_write',
-                                  (lambda sql: True) if db_path else mod.query_plex_database_write), \
+                                  _write_succeeds if db_path else mod.query_plex_database_write), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(e):
             try:
                 mod.cmd_disk2plex(None, yes=True)
@@ -16912,10 +16960,13 @@ class TestPlexDbPathRequired(unittest.TestCase):
         from unittest import mock
         mod = _main_module()
         swept: list[bool] = []
+
+        def _no_scope(t: object) -> list[tuple[str, dict[str, object]]]:
+            return []
         common: dict[str, Any] = dict(
             OFFLINE=False, READ_ONLY_MODE=False, DISK_PLEX_MAP={'WATCHED': {}},
             _ensure_disk_plex_map_uniforms_computed=lambda: None,
-            _get_disk_map_scope=lambda t: [])
+            _get_disk_map_scope=_no_scope)
         e = io.StringIO()
         with mock.patch.multiple(mod, PLEX_DB_PATH='', **common), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(e):
@@ -16943,8 +16994,10 @@ class TestPlexDbPathRequired(unittest.TestCase):
                 contextlib.redirect_stderr(e):
             self.assertFalse(mod.PLEX_Playlist.detect_if_of_OBJ_TYPE(None, 'nosuchthing'))
         self.assertNotIn('PLEX_DB_PATH is empty', e.getvalue())
+        def _one_row(q: str, mode: str = 'rows') -> list[tuple[str]]:
+            return [('1',)]
         with mock.patch.multiple(mod, PLEX_DB_PATH='/srv/plex/x.db', OFFLINE=False,
-                                 query_plex_database=lambda q, mode='rows': [('1',)]):
+                                 query_plex_database=_one_row):
             self.assertTrue(mod.PLEX_Playlist.detect_if_of_OBJ_TYPE(None, 'mine'),
                             "control: set, the query decides")
 
@@ -17013,25 +17066,26 @@ class TestConfigLayers(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def write(self, rel, text):
+    def write(self, rel: str, text: str) -> str:
         path = os.path.join(self.d, rel)
         with open(path, 'w') as f:
             f.write(text)
         return path
 
-    def site(self, text):
+    def site(self, text: str) -> str:
         return self.write('LINKS/default/my-plex.conf', text)
 
-    def user(self, text):
+    def user(self, text: str) -> str:
         return self.write('home/.my-plex.conf', text)
 
-    def load(self, config_file=None):
+    def load(self, config_file: str | None = None) -> tuple[dict[str, Any], str]:
+        # dict[str, Any]: the values are whatever the config file assigns
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             conf = self.mp.load_config_file(config_file)
         return conf, err.getvalue()
 
-    def refused(self, config_file=None):
+    def refused(self, config_file: str | None = None) -> str:
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             self.mp.load_config_file(config_file)
@@ -17671,7 +17725,9 @@ class TestConfigLayers(unittest.TestCase):
                     else:
                         self.assertIn(p, searched, f"offered but not searched: {p}")
                 self.assertEqual(site_offer in offered, state == 'site')
-        self.write('site.conf', states['site'])
+        site_text = states['site']
+        assert site_text is not None  # the 'site' state has text
+        self.write('site.conf', site_text)
         text = self.mp.no_config_offer()
         self.assertIn(f"> my-plex --create-config > {site_offer}   (linked there by a run)", text)
         # Your own file is offered in the FILE form: created 0600 -- it is
@@ -17704,7 +17760,7 @@ class TestConfigLayers(unittest.TestCase):
         self.assertIn(f'#   site   {site}', out)
         self.assertIn(f'#   yours  {user}', out)
 
-        def line(key):
+        def line(key: str) -> str:
             return next(l for l in lines if l.startswith(key + ' '))
         self.assertIn("'site-host'", line('PLEX_DB_REMOTE_HOST'))
         self.assertTrue(line('PLEX_DB_REMOTE_HOST').endswith('(site)'), line('PLEX_DB_REMOTE_HOST'))
@@ -17810,7 +17866,7 @@ class TestConfigEnvVar(unittest.TestCase):
     and a test that forgot read the user's own 40 MB cache instead.
     """
 
-    def _conf(self, marker):
+    def _conf(self, marker: str) -> tuple[str, str]:
         """A config file whose PLEX_DB_REMOTE_HOST says which file it is."""
         d = tempfile.mkdtemp(prefix='my-plex-cfgenv-')
         c = os.path.join(d, 'my-plex.conf')
@@ -17818,7 +17874,7 @@ class TestConfigEnvVar(unittest.TestCase):
             f.write(f"PLEX_DB_REMOTE_HOST = {marker!r}\n")
         return d, c
 
-    def _run(self, *argv, **env):
+    def _run(self, *argv: str, **env: str | None) -> subprocess.CompletedProcess[str]:
         """MAIN_SCRIPT with ARGV; a variable given as None is removed."""
         e = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         e.pop('MY_PLEX_CONFIG', None)
@@ -18003,7 +18059,7 @@ class TestConfigEnvVar(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def _secret_conf(self, extra=''):
+    def _secret_conf(self, extra: str = '') -> tuple[str, str]:
         """A config holding a Plex token in a URL and an API key."""
         d = tempfile.mkdtemp(prefix='my-plex-cfgsecret-')
         c = os.path.join(d, 'my-plex.conf')
@@ -18152,7 +18208,7 @@ class TestInstallSshEntry(unittest.TestCase):
         return subprocess.run([MAIN_SCRIPT, '--config', c, '--install'], capture_output=True,
                               text=True, timeout=120, env=_fake_ssh_env(login_rc))
 
-    def read(self, path):
+    def read(self, path: str) -> str:
         with open(path) as f:
             return f.read()
 
@@ -18362,7 +18418,7 @@ class TestInstallPlexRule(_RootInstallCase):
     my-plex just stops talking with no error of its own.
     """
 
-    def _install(self, **keys):
+    def _install(self, **keys: str) -> list[str]:
         """The `allow go` calls a root --install makes with KEYS in its config."""
         run = self.run_root("RUN_AS_USER = 'nobody'\n"
                             + "".join(f"{k} = {v!r}\n" for k, v in keys.items()))
@@ -18588,8 +18644,11 @@ class TestBadStructureResolve(unittest.TestCase):
         import contextlib
         m = self._mod()
         saved = (m.PLEX_Media.OBJ_BY_ID, m.CACHE, m._write_resolve_log)
-        written = []
-        m._write_resolve_log = lambda name, payload: written.append((name, payload))
+        written: list[tuple[str, dict[str, Any]]] = []
+
+        def _record_log(name: str, payload: dict[str, Any]) -> None:   # Any: the log's JSON payload
+            return written.append((name, payload))
+        m._write_resolve_log = _record_log
         try:
             m.PLEX_Media.OBJ_BY_ID = {
                 'Movie:1': {'type': 'Movie', 'title': 'Some Movie', 'library': 'library1',
@@ -18767,6 +18826,12 @@ _UNITTEST_CLASSES = [cls for scope in _UNITTEST_SCOPES.values() for cls in scope
 # Inline regression tests + unittest runner
 # ---------------------------------------------------------------------------
 
+if TYPE_CHECKING:
+    from types import TracebackType
+    # what unittest hands a result's add* hooks: sys.exc_info()
+    _ExcInfo = tuple[type[BaseException], BaseException, TracebackType] | tuple[None, None, None]
+
+
 class _TAPResult(unittest.TextTestResult):
     """A unittest result that reports TAP-style: `ok K - title` per test.
 
@@ -18776,26 +18841,28 @@ class _TAPResult(unittest.TextTestResult):
     the stream; the failure detail is printed afterwards, in one piece.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Any: forwarded unchanged to unittest.TextTestResult's own signature
         super().__init__(*args, **kwargs)
         self._tap_k = 0
-        self._tap_verdict = None
+        self._tap_verdict: tuple[str, str] | None = None
 
     @staticmethod
-    def _tap_title(test):
+    def _tap_title(test: unittest.TestCase) -> str:
         return f"{test.__class__.__name__}.{test._testMethodName}"
 
-    def startTest(self, test):
+    def startTest(self, test: unittest.TestCase) -> None:
         self._tap_k += 1
         self._tap_verdict = None
         super().startTest(test)
 
-    def addSuccess(self, test):
+    def addSuccess(self, test: unittest.TestCase) -> None:
         super().addSuccess(test)
         if self._tap_verdict is None:   # never overwrite a failed subTest
             self._tap_verdict = ('ok', '')
 
-    def addSubTest(self, test, subtest, err):
+    def addSubTest(self, test: unittest.TestCase, subtest: unittest.TestCase,
+                   err: _ExcInfo | None) -> None:
         # A failed subTest never reaches addFailure -- unittest reports it
         # here and then calls stopTest once for the whole test.  Without this
         # the line read "not ok ... # no verdict recorded", which is the right
@@ -18804,27 +18871,27 @@ class _TAPResult(unittest.TextTestResult):
         if err is not None:
             self._tap_verdict = ('not ok', '')
 
-    def addFailure(self, test, err):
+    def addFailure(self, test: unittest.TestCase, err: _ExcInfo) -> None:
         super().addFailure(test, err)
         self._tap_verdict = ('not ok', '')
 
-    def addError(self, test, err):
+    def addError(self, test: unittest.TestCase, err: _ExcInfo) -> None:
         super().addError(test, err)
         self._tap_verdict = ('not ok', '')
 
-    def addSkip(self, test, reason):
+    def addSkip(self, test: unittest.TestCase, reason: str) -> None:
         super().addSkip(test, reason)
         self._tap_verdict = ('ok', f' # SKIP {reason}')
 
-    def addExpectedFailure(self, test, err):
+    def addExpectedFailure(self, test: unittest.TestCase, err: _ExcInfo) -> None:
         super().addExpectedFailure(test, err)
         self._tap_verdict = ('ok', ' # TODO known failure')
 
-    def addUnexpectedSuccess(self, test):
+    def addUnexpectedSuccess(self, test: unittest.TestCase) -> None:
         super().addUnexpectedSuccess(test)
         self._tap_verdict = ('not ok', ' # unexpected success')
 
-    def stopTest(self, test):
+    def stopTest(self, test: unittest.TestCase) -> None:
         # No verdict can only mean a hook this class does not know about: say
         # "not ok" rather than pass a test nobody judged.
         status, note = self._tap_verdict or ('not ok', ' # no verdict recorded')
@@ -18842,16 +18909,17 @@ class _TAPRunner(unittest.TextTestRunner):
 
     resultclass = _TAPResult
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
+        # Any: forwarded unchanged to unittest.TextTestRunner's own signature
         kwargs.setdefault('verbosity', 0)
         super().__init__(**kwargs)
 
-    def run(self, test):
+    def run(self, test: unittest.TestSuite | unittest.TestCase):
         print(f"1..{test.countTestCases()}", flush=True)
         return super().run(test)
 
 
-def _tap_suite(classes_or_tests):
+def _tap_suite(classes_or_tests: Iterable[type[unittest.TestCase] | unittest.TestCase]) -> unittest.TestSuite:
     """One suite out of test CLASSES, single TESTS, or a mix of both."""
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -18863,7 +18931,7 @@ def _tap_suite(classes_or_tests):
     return suite
 
 
-def _tests_matching_title(filter_text):
+def _tests_matching_title(filter_text: str) -> list[unittest.TestCase]:
     """Every test whose `Class.method` title contains FILTER_TEXT, any case."""
     loader = unittest.TestLoader()
     needle = filter_text.lower()
@@ -18891,7 +18959,7 @@ def describe_test_scopes():
     return "\n".join(rows)
 
 
-def _run_unittest_only(unittest_classes):
+def _run_unittest_only(unittest_classes: Iterable[type[unittest.TestCase] | unittest.TestCase]) -> NoReturn:
     """Run the unittest suite and exit: 0 when every test passed, else 1."""
     import sys
     _use_a_private_temp_dir()
@@ -18902,7 +18970,7 @@ def _run_unittest_only(unittest_classes):
         sys.exit(1)
     sys.exit(0 if result.wasSuccessful() else 1)
 
-def run_regression_tests(scope=None):
+def run_regression_tests(scope: str | None = None) -> None:
     """Run the suite: all of it, one scope, or the tests whose title matches.
 
     Usage: my-plex --run-tests          (the whole suite)
