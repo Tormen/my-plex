@@ -709,6 +709,7 @@ if not _AS_ROOT:
 
 from abc import ABC, abstractmethod
 import argparse
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import contextlib
 import csv
@@ -930,6 +931,11 @@ if TYPE_CHECKING:
     from plexapi.server import PlexServer
     from plexapi.playlist import Playlist
     from plexapi.collection import Collection
+    import plexapi.library
+    import plexapi.media
+    import plexapi.video
+    from collections.abc import Iterator
+    from typing import TypeAlias, TypeGuard
     PLEX_ERRORS: tuple[type[Exception], ...] = (plexapi.exceptions.PlexApiException,
                                                  requests.exceptions.RequestException, _XMLParseError)
 else:
@@ -3944,7 +3950,7 @@ def _normalize_genre(g: object) -> str:
     """Return canonical English genre name; fall back to original if no mapping."""
     return _GENRE_NORM.get(str(g).lower(), str(g))
 
-def _normalize_genres(genres: list[object] | None) -> list[str]:
+def _normalize_genres(genres: Sequence[object] | None) -> list[str]:
     """Normalize a list of genre tags to canonical English proper-case names."""
     return [_normalize_genre(g) for g in (genres or [])]
 
@@ -11954,7 +11960,7 @@ def finalize_disk_plex_map_uniform_fields(disk_plex_map: dict[str, Any] | None) 
                 series_obj[f'{p}_uniform'] = None
 
 
-def _check_all_children_watched(obj: MediaRecord | CollectionRecord, type_str: str) -> tuple[bool, int | None]:
+def _check_all_children_watched(obj: Mapping[str, Any], type_str: str) -> tuple[bool, int | None]:
     """Check if all child episodes of a Show or Season are watched.
 
     Both Plex AND disk are ground truth. An episode counts as "watched" if:
@@ -12019,7 +12025,7 @@ def _check_all_children_watched(obj: MediaRecord | CollectionRecord, type_str: s
         return False, None
     return all_watched, max_last_viewed
 
-def resolve_disk_map_variables(obj: MediaRecord | CollectionRecord, cache_key: str | None = None,
+def resolve_disk_map_variables(obj: Mapping[str, Any], cache_key: str | None = None,
                                _bottom_up_pass: bool = False) -> dict[str, Any]:
     """Build variable dict from an OBJ_BY_ID cache entry for disk map substitution.
 
@@ -12179,7 +12185,7 @@ def resolve_disk_map_variables(obj: MediaRecord | CollectionRecord, cache_key: s
     return var
 
 
-def _apply_bottom_up_promotion(obj: MediaRecord | CollectionRecord, type_str: str, var: dict[str, Any]) -> None:
+def _apply_bottom_up_promotion(obj: Mapping[str, Any], type_str: str, var: dict[str, Any]) -> None:
     """For each plex_var with series_strategy='bottom_up' in DISK_PLEX_MAP,
     rewrite var[plex_var] in line with the uniform fields stored on the
     Series and Season cache entries.
@@ -12384,7 +12390,7 @@ def read_markers_from_disk(name: str, disk_plex_map: dict[str, Any], plex_vars: 
                 break  # one matching pattern per (plex_val, scope); move on
     return out
 
-def strip_our_markers(filename: str, sidecar_entry: dict[str, Any] | None) -> str:
+def strip_our_markers(filename: str, sidecar_entry: Mapping[str, Any] | None) -> str:
     """Strip markers that we previously added (tracked in sidecar) from a filename.
 
     Handles both formats:
@@ -12414,7 +12420,7 @@ def strip_our_markers(filename: str, sidecar_entry: dict[str, Any] | None) -> st
             filename = filename.replace(f'.{bare}', '', 1)
     return filename
 
-def apply_markers(clean_filename: str, markers: dict[str, Any]) -> str:
+def apply_markers(clean_filename: str, markers: Mapping[str, Any]) -> str:
     """Insert non-empty markers into filename before extension, sorted by aspect name.
 
     Format: space + brackets before extension.
@@ -12458,10 +12464,6 @@ def apply_markers(clean_filename: str, markers: dict[str, Any]) -> str:
 # A disk_map.json entry, a NAMING_RULES rule and a record read only by key are
 # taken as Mapping[str, Any]: the values are JSON / CONF payloads, and the
 # tests hand these functions plain dicts, which a TypedDict would refuse.
-from collections.abc import Iterable, Mapping, Sequence
-if TYPE_CHECKING:
-    import plexapi.media
-    import plexapi.video
 
 
 def apply_markers_to_dir(clean_dirname: str, markers: Mapping[str, str]) -> str:
@@ -13970,7 +13972,7 @@ def _search_unmatched_candidates(title: str, kind: str, engines: list[str] | Non
     `year_hint`: if set, results whose year doesn't match are dropped
     (TMDB also accepts &year=YYYY natively; we filter post-hoc here for
     engine-uniform behaviour)."""
-    engines = engines or UNMATCHED_RESOLVE_LOOKUP_ENGINES or []
+    engine_names: list[str] = engines or UNMATCHED_RESOLVE_LOOKUP_ENGINES or []
     queries = [title]
     if extra_query and extra_query.strip().lower() != (title or '').strip().lower():
         queries.append(extra_query)
@@ -13987,7 +13989,7 @@ def _search_unmatched_candidates(title: str, kind: str, engines: list[str] | Non
     for q in queries:
         if not q:
             continue
-        for eng in engines:
+        for eng in engine_names:
             fn = _ENGINE_DISPATCH.get(eng.upper())
             if not fn:
                 if VRB: print(f"  ⚠ unknown lookup engine: {eng!r} (supported: {sorted(_ENGINE_DISPATCH)})")
@@ -17003,7 +17005,7 @@ def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = 
         print(">>> Stopped early (q).")
 
 
-def cmd_uncollected_resolve(scope: str | list[str] | None = None, auto: bool = False,
+def cmd_uncollected_resolve(scope: str | list[str] | bool | None = None, auto: bool = False,
                             dry_run: bool = False, yes: bool = False) -> None:
     """v2.69: Create-or-extend Plex Collections for TMDB-collection groups
     in scope that --uncollected has flagged.
@@ -17326,7 +17328,7 @@ def cmd_original_languages(target: str | None = None, dry_run: bool = False) -> 
                   "  Sign up at https://www.themoviedb.org/settings/api (free)\n"
                   "  then add: TMDB_API_KEY = 'your-bearer-token-here' to your config.")
 
-    items: list[tuple[str, MediaRecord | CollectionRecord]]
+    items: list[ScopeItem]
     if target:
         items = _get_disk_map_scope(target)
     else:
@@ -17336,7 +17338,7 @@ def cmd_original_languages(target: str | None = None, dry_run: bool = False) -> 
         ]
 
     # Reduce to one entry per cache key (scope may include episodes whose series we want)
-    work: list[tuple[str, MediaRecord | CollectionRecord, str]] = []
+    work: list[tuple[str, ScopeRecord, str]] = []
     seen: set[str] = set()
     for k, o in items:
         if o['type'] == 'Collection':
@@ -18062,7 +18064,7 @@ def display_duplicate_details(nr: int, obj: MediaRecord | CollectionRecord) -> N
                         print(f"       Missing:          {missing_min:.2f} min ({abs(diff_pct):.1f}%)")
                         print(f"       Threshold:        {TRUNCATION_THRESHOLD_PCT}%")
 
-def determine_remote_host(filepath: str | None) -> tuple[str | None, bool, Any]:  # Any: the path is None when not found, and callers read it after testing `exists`, which pyright cannot follow
+def determine_remote_host(filepath: str) -> tuple[str | None, bool, Any]:  # Any: the path is None when not found, and callers read it after testing `exists`, which pyright cannot follow
     """Determine if file is local or on remote SSH host
 
     Args:
@@ -19057,7 +19059,7 @@ def get_movie_dir_from_path(filepath: str, library_name: str | None) -> str:
     # Ultimate fallback: return the parent directory of the file
     return os.path.dirname(filepath)
 
-def get_episode_dir(obj: MediaRecord | CollectionRecord) -> str:
+def get_episode_dir(obj: Mapping[str, Any]) -> str:
     """Get the directory containing an episode file, from the cache object's 'file' field.
 
     Args:
@@ -19069,7 +19071,7 @@ def get_episode_dir(obj: MediaRecord | CollectionRecord) -> str:
     filepath = obj.get('file', '')
     return os.path.dirname(filepath) if filepath else ''
 
-def get_movie_dir(obj: MediaRecord | CollectionRecord) -> str:
+def get_movie_dir(obj: Mapping[str, Any]) -> str:
     """Get the movie directory from cache, using the object's file path and library name.
 
     Delegates to get_movie_dir_from_path() which knows the library directory structure.
@@ -19086,7 +19088,7 @@ def get_movie_dir(obj: MediaRecord | CollectionRecord) -> str:
         return ''
     return get_movie_dir_from_path(filepath, library)
 
-def get_season_dir(obj: MediaRecord | CollectionRecord) -> str:
+def get_season_dir(obj: Mapping[str, Any]) -> str:
     """Get the season directory path from cache for an Episode object.
 
     Looks up the Season object via series_key + S_str → OBJ_BY_SERIES → OBJ_BY_ID.
@@ -19107,7 +19109,7 @@ def get_season_dir(obj: MediaRecord | CollectionRecord) -> str:
     season_obj = PLEX_Media.OBJ_BY_ID.get(season_key)
     return season_obj.get('file', '') if season_obj else ''
 
-def get_series_dir(obj: MediaRecord | CollectionRecord) -> str:
+def get_series_dir(obj: Mapping[str, Any]) -> str:
     """Get the series/series directory path from cache for an Episode or Season object.
 
     Looks up the Series object via series_key → OBJ_BY_ID.
@@ -19200,7 +19202,7 @@ def undo_resolution_action(undo_info: dict[str, Any], remote_host: str | None) -
         trashed_path = undo_info.get('trashed_path')
         trashed_original = undo_info.get('trashed_original')
 
-        if not all([moved_from, moved_to, trashed_path, trashed_original]):
+        if not (moved_from and moved_to and trashed_path and trashed_original):
             print("✗ Cannot undo: missing path information")
             return False
 
@@ -21550,9 +21552,6 @@ def safe_getattr(obj: object, attr: str, default: Any = None) -> Any:  # Any: wh
     """
     return getattr(obj, attr, default) if hasattr(obj, attr) else default
 
-if TYPE_CHECKING:   # for the plexapi annotations below; belongs in the import block at the top
-    import plexapi.video
-
 # A plexapi object the cache builders read (an item, its media, part, library).
 # Any rather than plexapi's classes: plexapi types its ids and indexes as
 # float | bool | None and the items of its tag lists as Optional, so every value
@@ -21709,7 +21708,7 @@ def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexO
                 # Different item_id = GENUINE DUPLICATE (same ratingKey, different content)
                 if filepath is None: filepath = os.path.normpath( part.file )
                 else:                filepath = part.file
-                tmpstr = reduce(lambda s,e: s+f"alternative filename #{e[0]}:\t{e[1][0]} | {e[1][1]}\n", enumerate(get_alternative_paths(filepath, path_2nd=val['file'])), "") # e = (i, (x,y))  i from enumerate() and (x,y) = alternative-path-tuple
+                tmpstr = reduce(lambda s,e: s+f"alternative filename #{e[0]}:\t{e[1][0]} | {e[1][1]}\n", enumerate(get_alternative_paths(filepath, path_2nd=val['file'])), "") # e = (i, (x,y))  i from enumerate() and (x,y) = alternative-path-tuple  # pyright: ignore[reportArgumentType]  -- BUG (open): filepath is None when the caller gives no path; get_alternative_paths(None) then raises
 
                 uuid = f"{val['library']}:{val['item_id']}:{val['media_id']}:{val['part_id']}"
                 pattern = rf"^DUPLICATE FOUND WITH key:\t'{key}'\tuuid:\t'{uuid}'" # avoid DUPLICATE entries in DUPLICATE_FILE :D
@@ -23983,7 +23982,7 @@ def get_media_list_from_PLEX_OBJ_list( obj_list: list[MediaRecord | CollectionRe
     """
     mediae: list[Any] = []   # plexapi objects (Media) -- see retrieve_media_and_part
     for obj in obj_list:
-        media,_part = PLEX_Media.retrieve_media_and_part(obj, must_exist=True)
+        media,_part = PLEX_Media.retrieve_media_and_part(obj, must_exist=True)  # pyright: ignore[reportArgumentType]  -- a collection here raises KeyError in retrieve_media_and_part, as before
         assert media is not None  # must_exist=True guarantees this
         match obj["type"]:
             case "Movie":    print(f"File '{obj['file']}' found as movie '{media.title}' ({media.year})")
@@ -24176,9 +24175,11 @@ class PLEX_OBJ_TYPE_ABC(ABC):
         ...
 
 def add_PLEX_OBJ_TYPE(obj_class: type[PLEX_OBJ_TYPE_ABC]) -> None:
-    PLEXOBJ[PARSER][obj_class.TYPE_STR] = obj_class.argparser;
-    PLEXOBJ[FN][obj_class.TYPE_STR] = obj_class.execute_cmd;
-    PLEXOBJ[DETECT][obj_class.TYPE_STR] = obj_class.detect_if_of_OBJ_TYPE;
+    type_str = obj_class.TYPE_STR
+    assert type_str is not None, f"{obj_class.__name__} sets no TYPE_STR"   # every subclass sets one
+    PLEXOBJ[PARSER][type_str] = obj_class.argparser;
+    PLEXOBJ[FN][type_str] = obj_class.execute_cmd;
+    PLEXOBJ[DETECT][type_str] = obj_class.detect_if_of_OBJ_TYPE;
 
 
 ###########################################################################################
@@ -27529,7 +27530,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         return keys
 
     @staticmethod
-    def _resolve_to_media_keys(media_identifier: str | MediaRecord | CollectionRecord | _CacheItem | list[_CacheItem]) -> tuple[list[str], set[str], set[tuple[str, str]], set[str]]:
+    def _resolve_to_media_keys(media_identifier: object) -> tuple[list[str], set[str], set[tuple[str, str]], set[str]]:
         """Resolve a media identifier to episode/movie cache keys.
 
         Accepts: cache key string (e.g. 'Series:123'), title string, or
@@ -27556,7 +27557,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             else:
                 found_items = resolve_cache_items(media_identifier)
         else:
-            found_items = [media_identifier]
+            found_items = [media_identifier]   # pyright: ignore[reportAssignmentType]  -- any other value is taken as one item, as before
 
         obj_keys: list[str]                   = []
         explicit_series: set[str]             = set()
@@ -32749,7 +32750,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         remote_host: str | None = None
         if not dry_run:
             try:
-                remote_host = determine_remote_host(None)[0]
+                remote_host = determine_remote_host(None)[0]  # pyright: ignore[reportArgumentType]  -- BUG (open): determine_remote_host(None) raises TypeError; the caller's handler hides it
             except (TypeError, OSError, subprocess.SubprocessError):
                 remote_host = None
 
@@ -36445,7 +36446,7 @@ def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
     """
     from datetime import datetime
 
-    series_key, series_dict = resolve_series_for_episodes(series_ref)
+    series_key, series_dict = resolve_series_for_episodes(series_ref)  # pyright: ignore[reportArgumentType]  -- BUG (open): --missing with several tokens passes a list, and .lower() on it raises
     series_title = series_dict.get('title', '?')
     series_dir_server = series_dict.get('file', '')
 
@@ -36526,13 +36527,13 @@ def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
 
     # Build set of (season, episode) from TSV
     # a row of episodes.tsv: int season/episode, str date/title (read_episodes_tsv)
-    tsv_set: dict[tuple[int, int], dict[str, Any]] = {}  # (season, episode) -> {'date': ..., 'title': ...}
+    tsv_set: dict[tuple[int, int], EpisodeTsvRow] = {}  # (season, episode) -> {'date': ..., 'title': ...}
     for ep in all_episodes:
         key = (ep['season'], ep['episode'])
         tsv_set[key] = ep
 
     # Find missing: in TSV but not in cache
-    missing: list[dict[str, Any]] = []
+    missing: list[EpisodeTsvRow] = []
     for key, ep in sorted(tsv_set.items()):
         if key not in have_set:
             missing.append(ep)
@@ -36542,7 +36543,7 @@ def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
 
     # Group missing by season to detect fully missing seasons
     from collections import defaultdict
-    missing_by_season: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    missing_by_season: defaultdict[int, list[EpisodeTsvRow]] = defaultdict(list)
     tsv_by_season: defaultdict[int, int] = defaultdict(int)
     for ep in all_episodes:
         tsv_by_season[ep['season']] += 1
@@ -36651,7 +36652,7 @@ class MigrationClass(TypedDict):
     ext: str
 
 
-def _classify_migration_action(obj: ScopeRecord, version: str | None = None) -> MigrationClass:
+def _classify_migration_action(obj: Mapping[str, Any], version: str | None = None) -> MigrationClass:
     """Classify a single media-file version's migration need.
 
     Args:
@@ -36801,11 +36802,6 @@ _SCOPE_FILTER_RE = re.compile(
     r'(?P<op>[<>]=?|[:=!~]=?)(?P<val>.+)$',
     re.IGNORECASE
 )
-
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
-    from typing import TypeAlias, TypeGuard
 
 
 def _is_scope_filter_token(token: object) -> TypeGuard[str]:
@@ -43310,7 +43306,7 @@ def verify_cache() -> None:
 
     print("\n" + "="*76)
 
-def _print_problem_warnings(problems: dict[str, Any], lib_arg: str = '') -> None:
+def _print_problem_warnings(problems: Mapping[str, Any], lib_arg: str = '') -> None:
     """Print problem counts as >> ⚠ warning lines. Used by --update-cache and --problems.
 
     v2.69: registry-driven.  Iterates PROBLEM_CATEGORIES_REGISTRY in
@@ -43489,7 +43485,7 @@ def _write_cache_update_log(action: str, completion_status: str, total_added: in
         print(f"  ⚠ Failed to write update log: {e}", flush=True)
 
 
-def _get_broken_reason(file_info: FileEntry, plex_duration: int = 0) -> str | None:
+def _get_broken_reason(file_info: Mapping[str, Any], plex_duration: int = 0) -> str | None:
     """Return a human-readable broken reason string, or None if file is not broken."""
     fm = file_info.get('file_metadata')
     if fm:
@@ -43844,7 +43840,7 @@ def show_item_info(identifier: str | None, table_only: bool = False) -> None:
                 series_dir = get_local_path(series_dir_server)
                 tsv_path = get_episodes_tsv_path(series_dir)
                 tsv_meta: dict[str, str] | None
-                tsv_episodes: list[dict[str, int | str]] | None
+                tsv_episodes: list[EpisodeTsvRow] | None
                 tsv_meta, tsv_episodes = read_episodes_tsv(tsv_path)
                 if tsv_meta:
                     tsv_source = tsv_meta.get('source', '')
@@ -43854,8 +43850,8 @@ def show_item_info(identifier: str | None, table_only: bool = False) -> None:
                     tsv_ep_count = len(tsv_episodes) if tsv_episodes else 0
                     tsv_seasons: set[int | str] = set()
                     if tsv_episodes:
-                        for ep in tsv_episodes:
-                            tsv_seasons.add(ep.get('season', 0))
+                        for tsv_ep in tsv_episodes:
+                            tsv_seasons.add(tsv_ep.get('season', 0))
                     tsv_seasons_str = len(tsv_seasons)
                     print(f"\nScraped Data (episodes.tsv):")
                     print(f"  Source:\t{tsv_source}")
@@ -44204,8 +44200,8 @@ def execute_global_commands(args: Any, cmd_args: Any) -> None:
     # Helper: collapse a SCOPE arg (nargs='*' list, legacy single str, or
     # legacy `True` sentinel) into the shape every cmd_* + _get_disk_map_scope
     # expects: None / str / list[str].
-    def _collapse_scope_arg(val):  # type: (VariadicArg) -> VariadicArg
-        if val is None or val is True:
+    def _collapse_scope_arg(val: VariadicArg) -> ScopeTarget:
+        if val is None or isinstance(val, bool):   # argparse gives True for a bare flag, never False
             return None
         if isinstance(val, list):
             if not val:
