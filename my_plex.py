@@ -95,7 +95,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, Callable, Literal, NoReturn, TYPE_CHECKING, TypedDict
+from typing import Any, Callable, Literal, NoReturn, TYPE_CHECKING, TypedDict, cast
 
 import my_plex_boot as _boot
 from my_plex_boot import err
@@ -740,7 +740,7 @@ import time
 
 # Force unbuffered output for all print statements (important when redirecting to file)
 print = functools.partial(print, flush=True)
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from functools import reduce
 from pathlib import Path
@@ -25269,7 +25269,6 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
             # Process libraries in parallel
             global _active_executor, _shutdown_requested
-            from concurrent.futures import Future
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 _active_executor = executor  # Allow signal handler to shutdown
                 futures: dict[Future[bool], str] = {}   # each running library -> its display title
@@ -25653,7 +25652,6 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     print(f"\nProcessing {num_tasks} task(s) with {max_workers} worker(s)...")
                     print(f"{'='*76}")
 
-                    from concurrent.futures import Future
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         _active_executor = executor
                         futures: dict[Future[bool], str] = {}   # each running task -> its display title
@@ -39036,7 +39034,6 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
     lastViewedAt — markPlayed() stamps it to 'now'.  We still snapshot the
     original so the value is never lost from our own records.
     """
-    from typing import cast
     rk = int(obj.get('id') or 0)
     # Any: the snapshot is the state file's JSON payload
     snap: dict[str, Any] = {
@@ -39092,7 +39089,6 @@ def _snapshot_plex_item_state(plex: PlexServer | None, obj: ScopeRecord,
 def _restore_plex_item_state(plex: PlexServer | None, new_rk: int | str | None, snap: dict[str, Any],
                              dest_library: str) -> list[str]:
     """Re-apply snapshot to the new ratingKey.  Returns list of error strings."""
-    from typing import cast
     errors: list[str] = []
     if plex is None or not new_rk:
         return ['plex API unavailable or new_rk missing']
@@ -39180,7 +39176,6 @@ def _cleanup_emptied_source_collections(plex: PlexServer | None, drained_pairs: 
     their last member(s) out.  Only deletes collections WE emptied —
     queries live Plex to confirm zero items remain before deletion.
     """
-    from typing import cast
     if plex is None or not drained_pairs:
         return 0
     n_deleted = 0
