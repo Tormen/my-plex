@@ -12344,7 +12344,16 @@ def apply_markers(clean_filename, markers):
         return name + ' ' + ' '.join(marker_parts) + ext
     return clean_filename
 
-def apply_markers_to_dir(clean_dirname, markers):
+# A disk_map.json entry, a NAMING_RULES rule and a record read only by key are
+# taken as Mapping[str, Any]: the values are JSON / CONF payloads, and the
+# tests hand these functions plain dicts, which a TypedDict would refuse.
+from collections.abc import Iterable, Mapping, Sequence
+if TYPE_CHECKING:
+    import plexapi.media
+    import plexapi.video
+
+
+def apply_markers_to_dir(clean_dirname: str, markers: Mapping[str, str]) -> str:
     """Insert non-empty markers into directory name, space-separated, appended.
 
     Args:
@@ -12354,7 +12363,7 @@ def apply_markers_to_dir(clean_dirname, markers):
     Returns:
         str: Directory name with markers appended, e.g. "Movie (2024) [vu@2026-03-22]"
     """
-    marker_parts = []
+    marker_parts: list[str] = []
     for aspect in sorted(markers.keys()):
         val = markers[aspect]
         if val:
@@ -12364,7 +12373,7 @@ def apply_markers_to_dir(clean_dirname, markers):
         return clean_dirname + ' ' + ' '.join(marker_parts)
     return clean_dirname
 
-def strip_markers_from_dir(dirname, sidecar_entry):
+def strip_markers_from_dir(dirname: str, sidecar_entry: Mapping[str, Any] | None) -> str:
     """Strip markers that we previously added (tracked in sidecar) from a directory name.
 
     Handles both formats (bare value stored in sidecar):
@@ -12394,7 +12403,8 @@ def strip_markers_from_dir(dirname, sidecar_entry):
             dirname = dirname.replace(f' {bare}', '', 1)
     return dirname
 
-def _merge_marker(aspect, new_value, existing_value, merge_config):
+def _merge_marker(aspect: str, new_value: str, existing_value: str,
+                  merge_config: Mapping[str, str]) -> str:
     """Resolve conflict between Plex-computed value and disk-existing value.
 
     Args:
@@ -12431,7 +12441,7 @@ def _merge_marker(aspect, new_value, existing_value, merge_config):
 #### DISK MAP — Sidecar tracking file (disk_map.json)
 ###########################################################################################
 
-def load_disk_map_sidecar():
+def load_disk_map_sidecar() -> dict[str, Any]:
     """Load the disk map sidecar JSON from DISK_MAP_FILE.
 
     Returns:
@@ -12447,7 +12457,7 @@ def load_disk_map_sidecar():
         print(f"  WARNING: Failed to load {DISK_MAP_FILE}: {e}", file=sys.stderr)
         return {}
 
-def save_disk_map_sidecar(sidecar):
+def save_disk_map_sidecar(sidecar: Mapping[str, Any]) -> None:
     """Save the disk map sidecar JSON to DISK_MAP_FILE.
 
     Args:
@@ -12461,7 +12471,8 @@ def save_disk_map_sidecar(sidecar):
     with open(DISK_MAP_FILE, 'w', encoding='utf-8') as f:
         json.dump(sidecar, f, indent=2, ensure_ascii=False)
 
-def update_sidecar_entry(sidecar, old_path, new_path, markers, clean_name, is_dir=False):
+def update_sidecar_entry(sidecar: dict[str, Any], old_path: str | None, new_path: str,
+                         markers: Mapping[str, str], clean_name: str, is_dir: bool = False) -> None:
     """Update sidecar: remove old_path entry, add new_path entry.
 
     Args:
@@ -12476,7 +12487,7 @@ def update_sidecar_entry(sidecar, old_path, new_path, markers, clean_name, is_di
     # --naming bookkeeping (naming_original / renamed_at) must SURVIVE a
     # DPM rewrite of the entry — carry it over from whichever entry is
     # being replaced (the rename source first, else the target itself).
-    _naming_keys = {}
+    _naming_keys: dict[str, Any] = {}
     for _carrier_path in (old_path, new_path):
         _carrier = sidecar.get(_carrier_path) if _carrier_path else None
         if _carrier and 'naming_original' in _carrier:
@@ -12488,7 +12499,7 @@ def update_sidecar_entry(sidecar, old_path, new_path, markers, clean_name, is_di
     # Only store non-empty markers
     active_markers = {k: v for k, v in markers.items() if v}
     if active_markers or _naming_keys:
-        entry = {
+        entry: dict[str, Any] = {
             'clean_name': clean_name,
             'last_updated': date.today().isoformat(),
         }
@@ -12522,7 +12533,7 @@ def _cleanup_managed_orphans():
 
     # ---- Pass 1: disk_map.json ----------------------------------------
     sidecar = load_disk_map_sidecar()
-    dm_removed = []
+    dm_removed: list[str] = []
     if sidecar:
         for _fp in list(sidecar.keys()):
             try:
@@ -12539,9 +12550,9 @@ def _cleanup_managed_orphans():
     # whose parent dir no longer exists.  Live filepaths are read straight
     # from OBJ_BY_ID episodes (file field) so we don't depend on a separate
     # series_dir cache field.
-    err_trashed = []
-    err_failed = []
-    _seen_series_dirs = set()
+    err_trashed: list[str] = []
+    err_failed: list[tuple[str, str]] = []
+    _seen_series_dirs: set[str] = set()
     for _key, _obj in PLEX_Media.OBJ_BY_ID.items():
         if _obj.get('type') != 'Episode':
             continue
@@ -12609,7 +12620,7 @@ def _cleanup_managed_orphans():
 
 class NamingFieldMissing(Exception):
     """A template referenced a cache field that is empty/missing for the item."""
-    def __init__(self, field):
+    def __init__(self, field: str) -> None:
         self.field = field
         super().__init__(field)
 
@@ -12641,7 +12652,7 @@ _NAMING_TOKEN_RE = re.compile(r'\{([A-Z][A-Z0-9_]*)((?:\.[a-z][a-z0-9]*)*)\}')
 _NAMING_LABEL_RE = re.compile(r'\s*\[([^\][]+)\]')
 
 
-def apply_naming_modifier(value, modifier, field):
+def apply_naming_modifier(value: object, modifier: str, field: str) -> str:
     """Apply ONE template modifier.  Raises NamingFieldMissing when a pad
     modifier meets a non-integer value (the item is then skipped, not crashed)."""
     if modifier in ('pad2', 'pad3'):
@@ -12670,14 +12681,14 @@ def apply_naming_modifier(value, modifier, field):
     raise ValueError(f"unknown naming modifier '.{modifier}' on {{{field}}}")
 
 
-def render_naming_template(template, variables):
+def render_naming_template(template: str, variables: Mapping[str, object]) -> str:
     """Render every '{FIELD.mod…}' token in `template` from `variables`.
 
     Modifier chains apply left-to-right: {TITLE.lower.dots} lowercases
     first, then replaces spaces/underscores with dots.
     Raises NamingFieldMissing when a referenced field is absent, None or ''.
     """
-    def _render_token(match):
+    def _render_token(match: re.Match[str]) -> str:
         field, modifier_chain = match.group(1), match.group(2)
         if field not in variables:
             raise NamingFieldMissing(field)
@@ -12690,7 +12701,7 @@ def render_naming_template(template, variables):
     return _NAMING_TOKEN_RE.sub(_render_token, template)
 
 
-def apply_naming_transforms(name, transforms):
+def apply_naming_transforms(name: str, transforms: Sequence[Sequence[str]] | None) -> str:
     """Apply sed-style (regex, replacement) pairs in order.  Replacement
     supports backrefs (\\1, \\2, …).  Patterns are pre-validated by
     validate_naming_rules()."""
@@ -12699,7 +12710,8 @@ def apply_naming_transforms(name, transforms):
     return name
 
 
-def naming_variables(obj, cache_key=None):
+def naming_variables(obj: Mapping[str, Any],
+                     cache_key: str | None = None) -> dict[str, str | int | float | bool]:
     """Variable vocabulary for --naming templates of ONE cache item.
 
     Two layers (later wins):
@@ -12710,7 +12722,7 @@ def naming_variables(obj, cache_key=None):
          and bottom-up promotion do NOT apply to naming.
     Convenience aliases: {ORIGTITLE} = originalTitle, {S} = S_idx,
     {E} = E_idx (ints — combine with .pad2/.pad3)."""
-    variables = {}
+    variables: dict[str, str | int | float | bool] = {}
     for field_name, field_value in obj.items():
         if isinstance(field_value, (str, int, float, bool)):
             variables[field_name.upper()] = field_value
@@ -12727,13 +12739,15 @@ def naming_variables(obj, cache_key=None):
     return variables
 
 
-def split_name_for_naming(name, sidecar_entry, is_dir=False):
+def split_name_for_naming(name: str, sidecar_entry: Mapping[str, Any] | None,
+                          is_dir: bool = False) -> tuple[str, list[str], str]:
     """Split an on-disk basename into (clean_stem, user_labels, extension).
 
     DPM markers (tracked in `sidecar_entry`) are stripped first — they are
     owned by --plex2disk/--disk2plex, not by --naming.  Every OTHER
     bracketed token is a user label and is returned for re-attachment.
     Extension is '' for directories."""
+    without_markers: str
     if is_dir:
         without_markers = strip_markers_from_dir(name, sidecar_entry)
         stem, extension = without_markers, ''
@@ -12746,8 +12760,10 @@ def split_name_for_naming(name, sidecar_entry, is_dir=False):
     return clean_stem, labels, extension
 
 
-def assemble_naming_name(rendered_stem, labels, sidecar_entry, extension,
-                         preserve_labels=True, preserve_markers=True, is_dir=False):
+def assemble_naming_name(rendered_stem: str, labels: list[str],
+                         sidecar_entry: Mapping[str, Any] | None, extension: str,
+                         preserve_labels: bool = True, preserve_markers: bool = True,
+                         is_dir: bool = False) -> str:
     """Reassemble the canonical on-disk name:  <stem> [label …] [marker …]<ext>
 
     Labels keep their on-disk order; markers are re-applied via the shared
@@ -12763,7 +12779,7 @@ def assemble_naming_name(rendered_stem, labels, sidecar_entry, extension,
         fresh_labels = [label for label in labels if f'[{label}]' not in rendered_stem]
         if fresh_labels:
             name += ' ' + ' '.join(f'[{label}]' for label in fresh_labels)
-    markers = (sidecar_entry or {}).get('markers', {}) if preserve_markers else {}
+    markers: Mapping[str, str] = (sidecar_entry or {}).get('markers', {}) if preserve_markers else {}
     if is_dir:
         return apply_markers_to_dir(name, markers) if markers else name
     if markers:
@@ -12777,14 +12793,16 @@ _NAMING_RULE_KEYS = ('template', 'transforms', 'preserve_ext',
                      'preserve_markers', 'preserve_labels')
 
 
-def validate_naming_rules(rules):
+def validate_naming_rules(
+        rules: Mapping[str, object] | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Validate the NAMING_RULES CONF dict.
 
     Returns (usable_rules, problems):
       usable_rules — subset of `rules` that can actually run
       problems     — list of human-readable strings; a structural problem
                      drops the rule, an unknown extra key only warns."""
-    usable, problems = {}, []
+    usable: dict[str, dict[str, Any]] = {}
+    problems: list[str] = []
     for rule_type, rule in (rules or {}).items():
         if rule_type not in _NAMING_RULE_TYPES:
             problems.append(f"NAMING_RULES[{rule_type!r}]: unknown object-type key "
@@ -12829,7 +12847,7 @@ def validate_naming_rules(rules):
     return usable, problems
 
 
-def derive_naming_paths(obj, library_roots):
+def derive_naming_paths(obj: Mapping[str, Any], library_roots: set[str]) -> dict[str, str]:
     """Classify the on-disk shape of one Movie/Episode cache obj.
 
     Anchored on the known library roots (so an unsorted episode directly in
@@ -12859,14 +12877,14 @@ def derive_naming_paths(obj, library_roots):
     return {}
 
 
-def _naming_season_variables(episode_obj):
+def _naming_season_variables(episode_obj: Mapping[str, Any]) -> dict[str, str | int | float | bool]:
     """Variables for a SEASON_DIR rule, anchored on one episode.
 
     Uses the Season cache obj when it exists; always injects {S} from the
     episode so 's{S.pad2}' works even when no Season obj is cached."""
     series_key = episode_obj.get('series_key', '')
     season_string = episode_obj.get('S_str', '')
-    season_obj = {}
+    season_obj: Mapping[str, Any] = {}
     if series_key and season_string:
         season_key = (PLEX_Media.OBJ_BY_SERIES.get(series_key) or {}).get(season_string)
         if season_key:
@@ -12878,21 +12896,23 @@ def _naming_season_variables(episode_obj):
     return variables
 
 
-def _naming_series_variables(episode_obj):
+def _naming_series_variables(episode_obj: Mapping[str, Any]) -> dict[str, str | int | float | bool]:
     """Variables for a SERIES_DIR rule, anchored on one episode."""
     series_key = episode_obj.get('series_key', '')
-    series_obj = PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {}
+    series_obj: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(series_key, {}) if series_key else {}
     return naming_variables(series_obj, series_key) if series_obj else {}
 
 
-def _naming_sanitize(name):
+def _naming_sanitize(name: str) -> str:
     """Make a rendered name filesystem-safe: no path separators, no
     leading dot (hidden file), no trailing dots/spaces."""
     name = name.replace('/', '-').replace(':', '∶').strip()
     return name.lstrip('.').rstrip('. ').strip()
 
 
-def build_naming_plan(scope_items, rules, sidecar, library_roots):
+def build_naming_plan(scope_items: Iterable[tuple[str, Mapping[str, Any]]],
+                      rules: Mapping[str, Mapping[str, Any]], sidecar: Mapping[str, Any],
+                      library_roots: set[str]) -> list[dict[str, str]]:
     """Compute the full --naming rename plan.  PURE — no disk access.
 
     Args:
@@ -12910,9 +12930,10 @@ def build_naming_plan(scope_items, rules, sidecar, library_roots):
            'status': 'rename'|'unchanged'|'skipped'|'conflict',
            'reason': str}
     """
-    entries_by_old_path = {}
+    entries_by_old_path: dict[str, dict[str, str]] = {}
 
-    def _plan_one(cache_key, rule_type, old_path, variables, is_dir):
+    def _plan_one(cache_key: str, rule_type: str, old_path: str | None,
+                  variables: Mapping[str, object], is_dir: bool) -> None:
         rule = rules.get(rule_type)
         if not rule or not old_path:
             return
@@ -12923,9 +12944,9 @@ def build_naming_plan(scope_items, rules, sidecar, library_roots):
             basename, sidecar_entry, is_dir=is_dir)
         if not rule.get('preserve_ext', True):
             extension = ''
-        entry = {'key': cache_key, 'rule': rule_type,
-                 'old_path': old_path, 'new_path': old_path,
-                 'status': 'rename', 'reason': ''}
+        entry: dict[str, str] = {'key': cache_key, 'rule': rule_type,
+                                 'old_path': old_path, 'new_path': old_path,
+                                 'status': 'rename', 'reason': ''}
         try:
             template = rule.get('template')
             base = render_naming_template(template, variables) if template else clean_stem
@@ -12960,8 +12981,9 @@ def build_naming_plan(scope_items, rules, sidecar, library_roots):
         obj_type = obj.get('type', '')
         if obj_type == 'Movie':
             variables = naming_variables(obj, cache_key)
+            files: Mapping[str, Mapping[str, Any] | None] = obj.get('files') or {}
             version_paths = sorted({(info or {}).get('filepath') or ''
-                                    for info in (obj.get('files') or {}).values()} - {''}) \
+                                    for info in files.values()} - {''}) \
                             or ([obj['file']] if obj.get('file') else [])
             for filepath in version_paths:
                 _plan_one(cache_key, 'MOVIE_FILE', filepath, variables, is_dir=False)
@@ -12982,7 +13004,7 @@ def build_naming_plan(scope_items, rules, sidecar, library_roots):
     # Cross-entry collision check: two different sources demanding the SAME
     # new path, or a new path that already belongs to another cached file.
     plan = list(entries_by_old_path.values())
-    new_path_owners = {}
+    new_path_owners: dict[str, dict[str, str]] = {}
     for entry in plan:
         if entry['status'] != 'rename':
             continue
@@ -13012,7 +13034,7 @@ def build_naming_plan(scope_items, rules, sidecar, library_roots):
     return plan
 
 
-def move_file(src_path, dst_dir, remote_host=None):
+def move_file(src_path: str, dst_dir: str, remote_host: str | None = None) -> bool:
     """Move file from src to dst directory
 
     NOTE: This function uses its own SSH implementation and does NOT automatically
@@ -13123,7 +13145,7 @@ _COUNTRY_ALIASES = {
 }
 
 
-def _normalize_lang_name_or_code(token):
+def _normalize_lang_name_or_code(token: str | None) -> str:
     """Return canonical lowercase ISO 639-1 code for a language token.
 
     Accepts: 'fr', 'fre', 'fra', 'french', 'French', 'FR' → 'fr'.
@@ -13142,7 +13164,7 @@ def _normalize_lang_name_or_code(token):
     return t
 
 
-def _normalize_country_name_or_code(token):
+def _normalize_country_name_or_code(token: str | None) -> str:
     """Return canonical lowercase ISO 3166-1 alpha-2 country code for a token.
 
     Accepts: 'fr' → 'fr', 'France' → 'fr', 'united states' → 'us', 'USA' → 'us'.
@@ -13161,7 +13183,7 @@ def _normalize_country_name_or_code(token):
     return t
 
 
-def _country_matches(country_token, obj_countries):
+def _country_matches(country_token: str | None, obj_countries: Iterable[str] | None) -> bool:
     """True iff any country in obj_countries matches the user's country token.
 
     Matches by ISO 3166-1 code if available, else by case-insensitive substring
@@ -13182,7 +13204,8 @@ def _country_matches(country_token, obj_countries):
     return False
 
 
-def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
+def fetch_belongs_to_collection_from_tmdb(tmdb_id: str | int | None,
+                                          max_retries: int = 5) -> tuple[str | None, str | None]:
     """v2.69: Fetch `belongs_to_collection.{id,name}` for one Movie from TMDB.
     Returns (collection_id_str, collection_name) or (None, None).  Thin
     backward-compat wrapper around fetch_tmdb_movie_basics()."""
@@ -13190,7 +13213,7 @@ def fetch_belongs_to_collection_from_tmdb(tmdb_id, max_retries=5):
     return (data.get('tmdb_collection_id'), data.get('tmdb_collection_name'))
 
 
-def fetch_tmdb_movie_basics(tmdb_id, max_retries=5):
+def fetch_tmdb_movie_basics(tmdb_id: str | int | None, max_retries: int = 5) -> dict[str, str | None] | None:
     """v2.69: Fetch the `/movie/{id}` basics for one Movie in ONE API call:
       - belongs_to_collection.id / .name → tmdb_collection_id / _name
       - original_language               → original_language
@@ -13216,11 +13239,11 @@ def fetch_tmdb_movie_basics(tmdb_id, max_retries=5):
         'Accept': 'application/json',
     })
     backoff = 1.0
-    for attempt in range(max_retries + 1):
+    for _attempt in range(max_retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
-            col = data.get('belongs_to_collection') or {}
+            col: dict[str, Any] = data.get('belongs_to_collection') or {}
             _cid = col.get('id') if col else None
             return {
                 'tmdb_collection_id':   str(_cid) if _cid is not None else None,
@@ -13258,7 +13281,8 @@ def fetch_tmdb_movie_basics(tmdb_id, max_retries=5):
     return None
 
 
-def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5):
+def fetch_original_language_from_tmdb(tmdb_id: str | int | None, media_type: str = 'movie',
+                                      max_retries: int = 5) -> str | None:
     """Fetch `original_language` for one item from TMDB API v3.
 
     Robust against transient failures:
@@ -13289,7 +13313,7 @@ def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5
         'Accept': 'application/json',
     })
     backoff = 1.0
-    for attempt in range(max_retries + 1):
+    for _attempt in range(max_retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
@@ -13342,7 +13366,28 @@ def fetch_original_language_from_tmdb(tmdb_id, media_type='movie', max_retries=5
 # find the correct year for each item, then renames the wrapper directory
 # on disk so Plex auto-matches on the next scan.
 
-def _lookup_by_external_id(provider, ext_id, kind='tv'):
+class _CandidateOptional(TypedDict, total=False):
+    tmdb_collection_id: str | None                              # a TMDB collection hit
+    _raw: plexapi.media.SearchResult | _ManualSearchResult      # a Plex agent hit: what fixMatch takes
+
+
+class Candidate(_CandidateOptional):
+    """One title an online engine returned (TMDB, TVDB, a TMDB collection,
+    Plex's own match search) -- the shape every _search_* helper emits and
+    the --unmatched / --mismatched / --misplaced / --uncollected pickers read."""
+    engine: str
+    title: str | None
+    original_title: str | None
+    year: int | None
+    tmdb_id: str | None
+    tvdb_id: str | None
+    imdb_id: str | None
+    popularity: float
+    overview: str
+    lang: str
+
+
+def _lookup_by_external_id(provider: str, ext_id: str, kind: str = 'tv') -> Candidate | None:
     """v2.68: Look up a TMDB / TVDB / IMDB id and return a candidate dict in the
     same shape _search_tmdb_titles / _search_tvdb_titles emit.
 
@@ -13350,7 +13395,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
     kind:     'tv' | 'movie'
     Returns: candidate dict on success, None on failure.
     """
-    import urllib.request, urllib.error, json as _json
+    import urllib.request, json as _json
     endpoint = 'tv' if kind in ('tv', 'series', 'Series') else 'movie'
 
     if provider == 'tmdb':
@@ -13399,7 +13444,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
         except (OSError, ValueError, http.client.HTTPException) as e:
             if DBG: print(f"{DBGPFX}TVDB by-id {path}/{ext_id} → {e!r}", file=sys.stderr)
             return None
-        rec = (d.get('data') or {})
+        rec: dict[str, Any] = (d.get('data') or {})
         date = rec.get('firstAired') or rec.get('first_air_time') or ''
         year = int(date[:4]) if date[:4].isdigit() else None
         return {
@@ -13431,7 +13476,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
             if DBG: print(f"{DBGPFX}TMDB find imdb:{ext_id} → {e!r}", file=sys.stderr)
             return None
         bucket = 'tv_results' if endpoint == 'tv' else 'movie_results'
-        rows = d.get(bucket) or []
+        rows: list[dict[str, Any]] = d.get(bucket) or []
         if not rows:
             return None
         r = rows[0]
@@ -13454,7 +13499,7 @@ def _lookup_by_external_id(provider, ext_id, kind='tv'):
     return None
 
 
-def _search_tmdb_collections(title, max_retries=3):
+def _search_tmdb_collections(title: str, max_retries: int = 3) -> list[Candidate]:
     """v2.69: Search TMDB collections.  A "collection" on TMDB groups
     related movies (trilogy, saga, sequel chain).  When a query returns
     a collection but no individual movie / TV hits, that's a very strong
@@ -13479,8 +13524,9 @@ def _search_tmdb_collections(title, max_retries=3):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
-            results = []
-            for r in (data.get('results') or [])[:10]:
+            results: list[Candidate] = []
+            hits: list[dict[str, Any]] = data.get('results') or []
+            for r in hits[:10]:
                 results.append({
                     'engine':              'TMDB-collection',
                     'title':               r.get('name'),
@@ -13508,7 +13554,7 @@ def _search_tmdb_collections(title, max_retries=3):
     return []
 
 
-def _fetch_tmdb_collection_parts(collection_id):
+def _fetch_tmdb_collection_parts(collection_id: str | None) -> list[Candidate]:
     """v2.69: Fetch the individual movies belonging to a TMDB collection.
     Used by --misplaced --resolve to show the operator the actual films
     that the dir is supposed to contain.
@@ -13518,7 +13564,7 @@ def _fetch_tmdb_collection_parts(collection_id):
     """
     if not TMDB_API_KEY or not collection_id:
         return []
-    import urllib.request, urllib.error, json as _json
+    import urllib.request, json as _json
     url = f'https://api.themoviedb.org/3/collection/{collection_id}'
     req = urllib.request.Request(url, headers={
         'Authorization': f'Bearer {TMDB_API_KEY}',
@@ -13530,8 +13576,9 @@ def _fetch_tmdb_collection_parts(collection_id):
     except (OSError, ValueError, http.client.HTTPException) as e:
         if DBG: print(f"{DBGPFX}TMDB collection/{collection_id} → {e!r}", file=sys.stderr)
         return []
-    parts = []
-    for p in (data.get('parts') or []):
+    parts: list[Candidate] = []
+    hits: list[dict[str, Any]] = data.get('parts') or []
+    for p in hits:
         date = p.get('release_date') or ''
         year = int(date[:4]) if date[:4].isdigit() else None
         parts.append({
@@ -13551,7 +13598,7 @@ def _fetch_tmdb_collection_parts(collection_id):
     return parts
 
 
-def _search_tmdb_titles(title, kind='movie', max_retries=3):
+def _search_tmdb_titles(title: str, kind: str = 'movie', max_retries: int = 3) -> list[Candidate]:
     """Search TMDB for movies or TV shows by title.
 
     kind: 'movie' or 'tv'
@@ -13573,8 +13620,9 @@ def _search_tmdb_titles(title, kind='movie', max_retries=3):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
-            results = []
-            for r in (data.get('results') or [])[:10]:
+            results: list[Candidate] = []
+            hits: list[dict[str, Any]] = data.get('results') or []
+            for r in hits[:10]:
                 date_field = 'release_date' if endpoint == 'movie' else 'first_air_date'
                 date = r.get(date_field) or ''
                 year = int(date[:4]) if date[:4].isdigit() else None
@@ -13605,9 +13653,14 @@ def _search_tmdb_titles(title, kind='movie', max_retries=3):
 
 
 # Cached TVDB v4 access token (obtained from POST /login).
-_TVDB_TOKEN_CACHE = {'token': None, 'expires_at': 0}
+class _TvdbTokenCache(TypedDict):
+    token: str | None
+    expires_at: float
 
-def _tvdb_token():
+
+_TVDB_TOKEN_CACHE: _TvdbTokenCache = {'token': None, 'expires_at': 0}
+
+def _tvdb_token() -> str | None:
     """Return a valid TVDB v4 bearer token, refreshing if expired."""
     import time as _t
     if not TVDB_API_KEY:
@@ -13624,7 +13677,8 @@ def _tvdb_token():
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = _json.loads(resp.read().decode('utf-8'))
-        token = (data.get('data') or {}).get('token')
+        login: dict[str, Any] = data.get('data') or {}
+        token = login.get('token')
         if token:
             _TVDB_TOKEN_CACHE['token'] = token
             # TVDB tokens are valid for ~30 days; refresh every 24h to be safe.
@@ -13635,7 +13689,7 @@ def _tvdb_token():
     return None
 
 
-def _search_tvdb_titles(title, kind='movie', max_retries=3):
+def _search_tvdb_titles(title: str, kind: str = 'movie', max_retries: int = 3) -> list[Candidate]:
     """Search TVDB v4 for movies or series by title.
 
     kind: 'movie' or 'tv'/'series'
@@ -13659,11 +13713,12 @@ def _search_tvdb_titles(title, kind='movie', max_retries=3):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
-            results = []
-            for r in (data.get('data') or [])[:10]:
+            results: list[Candidate] = []
+            hits: list[dict[str, Any]] = data.get('data') or []
+            for r in hits[:10]:
                 year_str = r.get('year') or ''
                 year = int(year_str[:4]) if year_str[:4].isdigit() else None
-                rd = r.get('remote_ids') or []
+                rd: list[dict[str, Any]] = r.get('remote_ids') or []
                 imdb_id = next((x.get('id') for x in rd if (x.get('sourceName') or '').lower() == 'imdb'), None)
                 tmdb_id = next((x.get('id') for x in rd if (x.get('sourceName') or '').lower() == 'themoviedb.com'), None)
                 results.append({
@@ -13701,7 +13756,7 @@ def _search_tvdb_titles(title, kind='movie', max_retries=3):
     return []
 
 
-_ENGINE_DISPATCH = {
+_ENGINE_DISPATCH: dict[str, Callable[..., list[Candidate]]] = {
     'TMDB': _search_tmdb_titles,
     'TVDB': _search_tvdb_titles,
 }
@@ -13733,7 +13788,7 @@ _TVOON_SUFFIX_RE = re.compile(
 )
 
 
-def _strip_tvoon_suffix(basename):
+def _strip_tvoon_suffix(basename: str) -> str:
     """Strip the TVOON broadcast-metadata suffix from a wrapper basename.
 
     Preserves any trailing bracket tag (e.g. `.[vu]`) — it's NOT TVOON
@@ -13749,7 +13804,7 @@ def _strip_tvoon_suffix(basename):
     return basename[:m.start()] + tail
 
 
-def _clean_query_from_wrapper(wrapper_basename):
+def _clean_query_from_wrapper(wrapper_basename: str) -> tuple[str, int | None]:
     """Extract a clean `<title> [year]` search query from a wrapper basename.
 
     Drops Plex-confusing release-tag clutter and reduces to alphanumeric
@@ -13791,7 +13846,9 @@ def _clean_query_from_wrapper(wrapper_basename):
     return (base, year)
 
 
-def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, year_hint=None):
+def _search_unmatched_candidates(title: str, kind: str, engines: list[str] | None = None,
+                                 extra_query: str | None = None,
+                                 year_hint: int | None = None) -> list[Candidate]:
     """Cascade through UNMATCHED_RESOLVE_LOOKUP_ENGINES in order; merge
     candidates from each, deduplicated by (title, year).
 
@@ -13806,16 +13863,16 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
     queries = [title]
     if extra_query and extra_query.strip().lower() != (title or '').strip().lower():
         queries.append(extra_query)
-    seen = set()
-    seen_tmdb = set()
-    seen_imdb = set()
-    seen_tvdb = set()
-    merged = []
+    seen: set[tuple[str, int | None]] = set()
+    seen_tmdb: set[str] = set()
+    seen_imdb: set[str] = set()
+    seen_tvdb: set[str] = set()
+    merged: list[Candidate] = []
     # v2.69: track candidates that were dropped only by year_hint so we can
     # fall back to them when the year-filtered result set is empty (catches
     # the common case where the year in the wrapper basename is WRONG —
     # e.g. `hotel.rawanda.(2008)` for the real Hotel Rwanda (2004)).
-    _year_dropped = []
+    _year_dropped: list[Candidate] = []
     for q in queries:
         if not q:
             continue
@@ -13868,13 +13925,13 @@ def _search_unmatched_candidates(title, kind, engines=None, extra_query=None, ye
             if _imdb: seen_imdb.add(_imdb)
             if _tvdb: seen_tvdb.add(_tvdb)
             # Tag the engine to make the year-mismatch visible in the picker.
-            r = dict(r)
+            r = r.copy()
             r['engine'] = f"{r.get('engine','?')}†"
             merged.append(r)
     return merged
 
 
-def _score_candidate(query_title, candidate):
+def _score_candidate(query_title: str, candidate: Candidate) -> float:
     """Return a 0..100 confidence score for a candidate vs the query.
 
     Pure title-similarity (Ratcliff-Obershelp) on both `title` and
@@ -13883,7 +13940,7 @@ def _score_candidate(query_title, candidate):
     import difflib
     if not query_title:
         return 0
-    def _norm(s):
+    def _norm(s: str) -> str:
         s = s.lower()
         for a, b in (('ä','ae'), ('ö','oe'), ('ü','ue'), ('ß','ss'),
                      ('á','a'),('à','a'),('â','a'),('ã','a'),('å','a'),
@@ -13913,7 +13970,7 @@ def _score_candidate(query_title, candidate):
     return round(score, 1)
 
 
-def _derive_wrapper_path(obj):
+def _derive_wrapper_path(obj: Mapping[str, Any]) -> str | None:
     """Return the wrapper directory for a Movie/Series, or None.
 
     Movie wrapper = the first subdirectory under the library rootpath that
@@ -13926,9 +13983,9 @@ def _derive_wrapper_path(obj):
         d = obj.get('file') or ''
         return d.rstrip('/') if d else None
     if obj_type == 'Movie':
-        files = obj.get('files', {}) or {}
+        files: Mapping[str, FileEntry] = obj.get('files', {}) or {}
         # Pick any version's filepath; all versions should share the wrapper.
-        fp = None
+        fp: str | None = None
         for fi in files.values():
             fp = fi.get('filepath') if isinstance(fi, dict) else None
             if fp:
@@ -13939,7 +13996,7 @@ def _derive_wrapper_path(obj):
             return None
         # Walk back to first subdir under the library rootpath.
         lib = obj.get('library', '')
-        roots = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib, [])
+        roots: list[str] = (CACHE.get('library_stats', {}).get('locations', {}) or {}).get(lib, [])
         for root in roots:
             root_n = root.rstrip('/')
             if fp.startswith(root_n + '/'):
@@ -13954,7 +14011,7 @@ def _derive_wrapper_path(obj):
 _WRAPPER_YEAR_RE = re.compile(r'[\.\s\(\[\{]\(?(19\d{2}|20\d{2})\)?[\.\s\)\]\}]', re.IGNORECASE)
 
 
-def _strip_query_tags(text):
+def _strip_query_tags(text: str | None) -> str:
     """Strip tag/marker clutter that confuses TMDB/TVDB search.
 
     Drops everything matching `#tag#`, `#tag`, `{tag}`, `(tag)`, `[tag]`
@@ -14013,13 +14070,13 @@ def _strip_query_tags(text):
     return s
 
 
-def _wrapper_already_has_year(wrapper_path):
+def _wrapper_already_has_year(wrapper_path: str | None) -> bool:
     """True iff the wrapper basename already contains a 19xx/20xx token."""
     base = os.path.basename(wrapper_path or '')
     return bool(_WRAPPER_YEAR_RE.search('.' + base + '.'))
 
 
-def _slugify_title_for_wrapper(title):
+def _slugify_title_for_wrapper(title: str | None) -> str:
     """Plex-friendly slug for a movie/series title.
 
     Lowercase, ASCII-friendly, words joined by '.'  Punctuation that would
@@ -14037,7 +14094,8 @@ def _slugify_title_for_wrapper(title):
     return s.strip('.')
 
 
-def _add_year_to_wrapper(wrapper_path, year, canonical_title=None, audio_lang_marker=None):
+def _add_year_to_wrapper(wrapper_path: str, year: int | str | None, canonical_title: str | None = None,
+                         audio_lang_marker: str | None = None) -> str:
     """Return a renamed wrapper path with the year added (and optionally a
     canonical-form basename if `canonical_title` is supplied).
 
@@ -14115,10 +14173,10 @@ def _detect_plex_auto_scan_enabled():
     return False
 
 
-def _print_candidate_row(idx, cand, score):
+def _print_candidate_row(idx: int | str, cand: Candidate, score: float) -> None:
     yr = cand.get('year') or '----'
     pop = cand.get('popularity') or 0.0
-    ids = []
+    ids: list[str] = []
     if cand.get('tmdb_id'): ids.append(f"tmdb:{cand['tmdb_id']}")
     if cand.get('imdb_id'): ids.append(f"imdb:{cand['imdb_id']}")
     if cand.get('tvdb_id'): ids.append(f"tvdb:{cand['tvdb_id']}")
@@ -14133,7 +14191,8 @@ def _print_candidate_row(idx, cand, score):
         print(f"       {ov}")
 
 
-def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
+def cmd_bad_structure_resolve(scope: str | list[str] | None = None, auto: bool = False,
+                              dry_run: bool = False, yes: bool = False) -> None:
     """v2.38: --bad-structure --resolve — flatten nested wrappers.
 
     For each item flagged by --bad-structure (Movie/Episode file nested
@@ -14152,31 +14211,33 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     """
     import shlex as _shlex, subprocess as _sp, os as _os
 
-    obj_keys = []
+    obj_keys: list[str] = []
     if scope:
         scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
         obj_keys = [k for (k, _o) in (scope_items or [])]
     else:
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
-    lib_locations = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
+    lib_locations: dict[str, list[str]] = (CACHE.get('library_stats', {}) or {}).get('locations', {}) or {}
 
     # ---------- 1.  Collect candidates -----------------------------------
-    candidates = []           # too-deep: (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
-    candidates_shallow = []   # too-shallow Movie: (key, obj, filepath, lib_root, target_wrapper)
-    seen = set()
+    # too-deep: (key, obj, filepath, lib_root, depth_overrun, wrapper_dir, src_dir)
+    candidates: list[tuple[str, MediaRecord, str, str, int, str, str]] = []
+    # too-shallow Movie: (key, obj, filepath, lib_root, target_wrapper)
+    candidates_shallow: list[tuple[str, MediaRecord, str, str, str]] = []
+    seen: set[str] = set()
     for key in obj_keys:
         if key in seen: continue
         seen.add(key)
-        obj = PLEX_Media.OBJ_BY_ID.get(key)
+        obj = media_record(key)
         if not obj or obj.get('type') not in ('Movie', 'Episode'): continue
         lib = obj.get('library', '')
         roots = lib_locations.get(lib) or []
         # Walk every per-version file (Movies can have multi-version).
         files_dict = obj.get('files') or {}
-        file_entries = []
+        file_entries: list[str] = []
         if files_dict:
-            for ver, fi in files_dict.items():
+            for _ver, fi in files_dict.items():
                 fp = fi.get('filepath') if isinstance(fi, dict) else fi
                 if fp: file_entries.append(fp)
         else:
@@ -14219,7 +14280,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
         return
 
     # ---------- 2.  Pre-build wrapper → Movie-key index (multi-movie check) -----
-    wrapper_to_keys = {}
+    wrapper_to_keys: dict[str, set[str]] = {}
     for k, o in PLEX_Media.OBJ_BY_ID.items():
         if o.get('type') != 'Movie': continue
         w = _derive_wrapper_path(o)
@@ -14227,15 +14288,17 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             wrapper_to_keys.setdefault(w, set()).add(k)
 
     # ---------- 3.  Per-candidate planning -------------------------------
-    plan_auto = []   # (key, obj, filepath, wrapper_dir, src_dir, ssh_host)
-    plan_conflict = []  # same shape + 'reason'
+    plan_auto: list[tuple[str, MediaRecord, str, str, str, str | None]] = []   # (key, obj, filepath, wrapper_dir, src_dir, ssh_host)
+    # (key, obj, filepath, wrapper_dir, src_dir, details, reason)
+    plan_conflict: list[tuple[str, MediaRecord, str, str, str, list[str], str]] = []
     VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg', '.ts', '.flv', '.webm')
 
     print(f">>> --bad-structure --resolve: {len(candidates)} candidate file(s) found")
     print()
 
     # Plan a separate queue for Episode atomic season-dir relocations.
-    plan_episode = []  # (key, obj, filepath, src_dir, target_season_dir, intermediates, host)
+    # (key, obj, filepath, src_dir, target_season_dir, intermediates, host)
+    plan_episode: list[tuple[str, MediaRecord, str, str, str, list[str], str | None]] = []
 
     for key, obj, filepath, lib_root, overrun, wrapper_dir, src_dir in candidates:
         # ---------- Episode path ---------- v2.39
@@ -14259,7 +14322,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             # v2.50: strip on-disk marker tags (e.g. `s01 [vu]`, `Season 02 [reencode]`)
             # before the season-name regex check.  Whitespace + `[…]` clusters are
             # ignored as if they weren't part of the basename.
-            def _strip_dir_markers(name):
+            def _strip_dir_markers(name: str) -> str:
                 # Drop every `[…]` tag and surrounding whitespace.
                 _stripped = re.sub(r'\s*\[[^\]]*\]\s*', '', name).strip()
                 return _stripped or name
@@ -14289,7 +14352,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
                                       'episode-no-season-parent'))
                 continue
             # Walk intermediates between series_dir and src_dir (parents to rmdir later).
-            intermediates = []
+            intermediates: list[str] = []
             cur = _os.path.dirname(src_dir)
             while cur != series_dir and cur.startswith(series_dir + '/'):
                 intermediates.append(cur)
@@ -14338,7 +14401,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
             + ' -o '.join(f"-iname '*{ext}'" for ext in VIDEO_EXTS)
             + " \\) -print"
         )
-        videos_on_disk = []
+        videos_on_disk: list[str] = []
         try:
             if remote_host:
                 rc = _sp.run(_ssh_args(remote_host) + [find_cmd], capture_output=True, text=True, timeout=20)
@@ -14373,7 +14436,7 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     if plan_episode:
         # Deduplicate by (src_dir) — many episodes share one season-dir move.
-        _ep_by_src = {}
+        _ep_by_src: dict[str, list[tuple[str, MediaRecord, str, str, str, list[str], str | None]]] = {}
         for entry in plan_episode:
             _ep_by_src.setdefault(entry[3], []).append(entry)
         print(f"--- Auto-flatten queue (Episodes — relocate season dir up to series level, "
@@ -14392,11 +14455,11 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     # v2.46: too-shallow Movies — wrap candidates.  Conflict if target wrapper
     # already exists; otherwise queued for auto-wrap.
-    plan_wrap = []  # (key, obj, filepath, target_wrapper)
+    plan_wrap: list[tuple[str, MediaRecord, str, str]] = []  # (key, obj, filepath, target_wrapper)
     if candidates_shallow:
         # Detect dest-exists conflicts (multi-key SSH stat in one call).
         targets = sorted({tw for (_k, _o, _fp, _lr, tw) in candidates_shallow})
-        existing = set()
+        existing: set[str] = set()
         if targets:
             import shlex as _shlex, subprocess as _sp
             check_script = "\n".join(f"[ -e {_shlex.quote(t)} ] && echo 'EXISTS|'{_shlex.quote(t)}" for t in targets)
@@ -14463,11 +14526,11 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # v2.48: dedupe by src_dir.  Multiple Episodes can share the same
     # too-deep-by-one parent dir (e.g. all episodes of a season inside
     # `Series/sNN/Pack-Name/`); the flatten happens ONCE per unique src.
-    auto_by_src = {}
+    auto_by_src: dict[str, list[tuple[str, MediaRecord, str, str, str, str | None]]] = {}
     for entry in plan_auto:
         auto_by_src.setdefault(entry[4], []).append(entry)  # entry[4] = src
-    movie_moves = []   # parallel to auto_groups
-    auto_groups = []
+    movie_moves: list[tuple[str, str]] = []   # parallel to auto_groups
+    auto_groups: list[tuple[str, str, list[tuple[str, MediaRecord, str, str, str, str | None]]]] = []
     for src, group in auto_by_src.items():
         first = group[0]
         _k, _o, _fp, wrapper, _src, _h = first
@@ -14496,11 +14559,11 @@ def cmd_bad_structure_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # Multiple Episodes of the same season share the same (src, target) move.
     # Group by src_dir → execute mv ONCE per group, then update cache for
     # every Episode that lives under it.
-    by_src = {}
+    by_src: dict[str, list[tuple[str, MediaRecord, str, str, str, list[str], str | None]]] = {}
     for entry in plan_episode:
         by_src.setdefault(entry[3], []).append(entry)  # entry[3] = src_dir
-    season_moves = []   # [(src, target, intermediates), …]  parallel to by_src.items() order
-    season_groups = []
+    season_moves: list[tuple[str, str, list[str]]] = []   # [(src, target, intermediates), …]  parallel to by_src.items() order
+    season_groups: list[tuple[str, str, list[tuple[str, MediaRecord, str, str, str, list[str], str | None]]]] = []
     for src, group in by_src.items():
         first = group[0]
         _key, _obj, _fp, _src, target, intermediates, _host = first
@@ -14757,7 +14820,7 @@ bs_merge_dir() {
 '''
 
 
-def _bad_structure_flatten_block(i, src_q, dst_q):
+def _bad_structure_flatten_block(i: int, src_q: str, dst_q: str) -> str:
     """Bash block (string) that flattens one src_q → dst_q.
 
     v2.47: PRE-RENAME the source dir to a temp name before merging.  On
@@ -14786,7 +14849,7 @@ def _bad_structure_flatten_block(i, src_q, dst_q):
     )
 
 
-def _bad_structure_wrap_batch(moves):
+def _bad_structure_wrap_batch(moves: list[tuple[str, str]]) -> dict[int, tuple[bool, str]]:
     """v2.46: batched wrap — for each (bare_filepath, wrapper_dir) pair,
     `mkdir wrapper_dir && mv bare_filepath wrapper_dir/`, plus any sibling
     files (same basename-stem, e.g. .nfo / .srt / .jpg / artwork) get
@@ -14800,15 +14863,15 @@ def _bad_structure_wrap_batch(moves):
     Always SSHes to PLEX_DB_REMOTE_HOST.  Returns {idx: (ok, reason)}.
     """
     import shlex as _shlex, subprocess as _sp, os as _os
-    results = {}
+    results: dict[int, tuple[bool, str]] = {}
     if not moves:
         return results
-    blocks = []
+    blocks: list[str] = []
     for i, (bare_fp, wrapper_dir) in enumerate(moves):
         if not bare_fp or not wrapper_dir:
             results[i] = (False, "invalid filepath / wrapper")
             continue
-        bare_q = _shlex.quote(bare_fp)
+        _bare_q = _shlex.quote(bare_fp)
         wrap_q = _shlex.quote(wrapper_dir)
         parent_q = _shlex.quote(_os.path.dirname(bare_fp))
         bare_base = _os.path.basename(bare_fp)
@@ -14857,7 +14920,7 @@ def _bad_structure_wrap_batch(moves):
     return results
 
 
-def _bad_structure_flatten_batch(moves):
+def _bad_structure_flatten_batch(moves: list[tuple[str, str]]) -> dict[int, tuple[bool, str]]:
     """v2.42: batched flatten — single SSH/bash session processes every (src, dst) pair.
 
     `moves`: list of (src_dir, dst_dir).  Each move is wrapped in a subshell
@@ -14872,10 +14935,10 @@ def _bad_structure_flatten_batch(moves):
     handshake across the whole batch into a single TCP connection.
     """
     import shlex as _shlex, subprocess as _sp
-    results = {}
+    results: dict[int, tuple[bool, str]] = {}
     if not moves:
         return results
-    blocks = []
+    blocks: list[str] = []
     for i, (src, dst) in enumerate(moves):
         if not src or not dst or src == dst:
             results[i] = (False, "invalid src/dst")
@@ -14911,7 +14974,7 @@ def _bad_structure_flatten_batch(moves):
     return results
 
 
-def _bad_structure_flatten(remote_host, src_dir, dst_dir):
+def _bad_structure_flatten(remote_host: str | None, src_dir: str, dst_dir: str) -> bool:
     """Single-shot flatten — thin wrapper over the batch path.
 
     Kept for the interactive `f` choice in the conflict-resolve loop;
@@ -14924,7 +14987,7 @@ def _bad_structure_flatten(remote_host, src_dir, dst_dir):
     return ok
 
 
-def _bad_structure_relocate_season_batch(moves):
+def _bad_structure_relocate_season_batch(moves: list[tuple[str, str, list[str]]]) -> dict[int, tuple[bool, str]]:
     """v2.42: batched season-dir relocate — single SSH/bash session.
 
     `moves`: list of (src_season_dir, target_season_dir, intermediates_to_rmdir).
@@ -14932,10 +14995,10 @@ def _bad_structure_relocate_season_batch(moves):
     Returns {idx: (ok, reason)}.  Always uses PLEX_DB_REMOTE_HOST.
     """
     import shlex as _shlex, subprocess as _sp
-    results = {}
+    results: dict[int, tuple[bool, str]] = {}
     if not moves:
         return results
-    blocks = []
+    blocks: list[str] = []
     for i, (src, target, intermediates) in enumerate(moves):
         if not src or not target or src == target:
             results[i] = (False, "invalid src/target")
@@ -14983,7 +15046,8 @@ def _bad_structure_relocate_season_batch(moves):
     return results
 
 
-def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_dir, intermediates_to_rmdir):
+def _bad_structure_relocate_season(remote_host: str | None, src_season_dir: str, target_season_dir: str,
+                                   intermediates_to_rmdir: list[str]) -> bool:
     """v2.39: atomically move src_season_dir → target_season_dir and rmdir
     intermediate empty dirs.  Used when an Episode is at series/x/.../Sxx/file
     and we want to lift Sxx up to series/Sxx.
@@ -15020,7 +15084,7 @@ def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_di
     return True
 
 
-def _bad_structure_update_cache(key, old_filepath, new_filepath):
+def _bad_structure_update_cache(key: str, old_filepath: str, new_filepath: str) -> None:
     """After a successful flatten, update cache indices for `key`."""
     obj = media_record(key)
     if not obj: return
@@ -15028,7 +15092,7 @@ def _bad_structure_update_cache(key, old_filepath, new_filepath):
         obj['file'] = new_filepath
     # Multi-version: update files dict entry whose filepath matches.
     files = obj.get('files') or {}
-    for ver, fi in files.items():
+    for _ver, fi in files.items():
         if isinstance(fi, dict) and fi.get('filepath') == old_filepath:
             fi['filepath'] = new_filepath
     # Cross-index: PLEX_Media.OBJ_BY_FILEPATH if present.
@@ -15039,7 +15103,14 @@ def _bad_structure_update_cache(key, old_filepath, new_filepath):
             fbi[new_filepath] = entries
 
 
-def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
+# One queued --unmatched rename: (key, record, src_wrapper, dest_wrapper, year,
+# tmdb_id).  The record is None for a pair the operator typed in the editor
+# under a source path that was not queued.
+_UnmatchedRename = tuple[str, MediaRecord | None, str, str, int | None, str | None]
+
+
+def cmd_unmatched_resolve(scope: str | list[str] | None = None, auto: bool = False,
+                          dry_run: bool = False, yes: bool = False) -> None:
     """Interactive resolver for Plex-unmatched items.
 
     For each unmatched Movie / Series in scope:
@@ -15057,7 +15128,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     """
     # Resolve scope to a list of object keys.  Without a scope, walk the
     # whole cache and let _list_unmatched-style logic filter.
-    obj_keys = []
+    obj_keys: list[str] = []
     if scope:
         scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
         obj_keys = [k for (k, _o) in (scope_items or [])]
@@ -15065,9 +15136,9 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
     # Filter to unmatched Movies / Series.
-    unmatched = []
+    unmatched: list[tuple[str, MediaRecord]] = []
     for key in obj_keys:
-        obj = PLEX_Media.OBJ_BY_ID.get(key)
+        obj = media_record(key)
         if not obj:
             continue
         if obj.get('type') not in ('Movie', 'Series'):
@@ -15089,13 +15160,13 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         print(f">>> AUTO mode: auto-pick threshold = {UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT}%")
     print()
 
-    rename_queue = []     # list of (key, obj, src_wrapper, dest_wrapper, year, tmdb_id)
-    skipped = []
+    rename_queue: list[_UnmatchedRename] = []     # list of (key, obj, src_wrapper, dest_wrapper, year, tmdb_id)
+    skipped: list[tuple[str, str]] = []
     # v2.19: items whose wrapper is ALREADY canonical (rename would be a no-op)
     # but that Plex still has 'local://' for.  We force item.refresh() on
     # them at the end so Plex re-queries the metadata agent.  Without this
     # the unmatched count never drops for canonical-but-stuck items.
-    refresh_only = []     # list of (key, obj)
+    refresh_only: list[tuple[str, MediaRecord]] = []     # list of (key, obj)
     quit_early = False
     for i, (key, obj) in enumerate(unmatched, 1):
         title = obj.get('title') or ''
@@ -15125,7 +15196,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         print(f"\n──────────────────────────────────────────────────────────────────────────")
         print(f"[{i}/{len(unmatched)}] {key}  {title!r}  ({lib})")
-        _hint_bits = []
+        _hint_bits: list[str] = []
         if _wrapper_has_year: _hint_bits.append("has year — try canonical rename")
         if _lang_marker:     _hint_bits.append(f"audio: {_lang_marker} → will add [{_lang_marker}]")
         _hint_str = f"  [{' / '.join(_hint_bits)}]" if _hint_bits else ''
@@ -15160,7 +15231,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         #     → must pick the longer one, otherwise the right
         #       candidate ('The Kangaroo Chronicles') scores ~0
         #       against 'tv' and falls off the top-5 list.
-        def _query_strength(q):
+        def _query_strength(q: str | None) -> int:
             if not q: return 0
             return len([w for w in re.split(r'\W+', q) if w])
         if _query_strength(_clean_q) >= _query_strength(_title_for_search):
@@ -15319,11 +15390,11 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # one folder).  Renaming the same src twice → second mv hits ENOENT.
     #   - same src AND same dst → keep one (silent dedupe).
     #   - same src AND different dsts → conflict; drop ALL, warn user.
-    _by_src = {}
+    _by_src: dict[str, list[_UnmatchedRename]] = {}
     for entry in rename_queue:
         _by_src.setdefault(entry[2], []).append(entry)
-    deduped_queue = []
-    conflicts = []
+    deduped_queue: list[_UnmatchedRename] = []
+    conflicts: list[tuple[str, list[_UnmatchedRename]]] = []
     for src, group in _by_src.items():
         dests = {e[3] for e in group}
         if len(dests) == 1:
@@ -15353,7 +15424,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # Per-item skips emitted earlier (no candidates / user 's' / user 'q'
         # before reaching this item / already-canonical).  Surface a summary
         # so the user knows what didn't make it into the queue.
-        _by_reason = {}
+        _by_reason: dict[str, list[str]] = {}
         for key, reason in skipped:
             _by_reason.setdefault(reason, []).append(key)
         print(f"\nℹ {len(skipped)} item(s) skipped during picker:")
@@ -15365,11 +15436,11 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         print(f"\nNothing to rename after conflict pruning. Bye.")
         return
 
-    def _print_queue(queue):
+    def _print_queue(queue: list[_UnmatchedRename]) -> None:
         print(f"\n──────────────────────────────────────────────────────────────────────────")
         print(f">>> {len(queue)} rename operation(s) queued:")
         print()
-        for key, _obj, src, dst, year, tmdb_id in queue:
+        for key, _obj, src, dst, year, _tmdb_id in queue:
             print(f"  {key:<18} {year}  {src}")
             print(f"  {'':>18}        → {dst}")
         print()
@@ -15426,7 +15497,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     except OSError: pass
                 # Parse pairs.  Map original src→entry so we preserve key/year/tmdb_id.
                 by_src = {e[2]: e for e in rename_queue}
-                new_queue = []
+                new_queue: list[_UnmatchedRename] = []
                 for i in range(0, len(edited_lines) - 1, 2):
                     s, d = edited_lines[i], edited_lines[i + 1]
                     if s in by_src:
@@ -15448,9 +15519,9 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # Build a single bulk SSH command of MV statements, separated by `;`.
     # ControlMaster multiplexing keeps this to one connection.
     # Skip entirely if rename_queue is empty (refresh-only path).
-    libs_affected = set()
+    libs_affected: set[str] = set()
     if rename_queue:
-        bulk_cmds = []
+        bulk_cmds: list[str] = []
         for _key, _obj, src, dst, _yr, _tmdb in rename_queue:
             # POSIX-safe quoting — quote the paths to survive special chars.
             bulk_cmds.append(f"mv -n {shlex.quote(src)} {shlex.quote(dst)} && echo MOVED || echo FAILED")
@@ -15479,23 +15550,23 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # --resolve reads stale OBJ_BY_ID and re-suggests the same item.
         # Plex assigns NEW ratingKeys on rescan; --update-cache (or the
         # FSEvents-driven cache refresh) picks them up later.
-        _moved_keys = []
+        _moved_keys: list[str] = []
         for (key, obj, _src, _dst, _yr, _tmdb), outcome in zip(rename_queue, outcomes):
             if outcome.strip() != 'MOVED':
                 continue
             _moved_keys.append(key)
-            obj_type_str = obj.get('type', '')
+            obj_type_str = obj.get('type', '')  # pyright: ignore[reportOptionalMemberAccess]  # bug: an editor-typed pair has no record
             # Per-version filepath entries
-            for _v, _fi in (obj.get('files', {}) or {}).items():
+            for _v, _fi in (obj.get('files', {}) or {}).items():  # pyright: ignore[reportOptionalMemberAccess]
                 fp = _fi.get('filepath') if isinstance(_fi, dict) else None
                 if fp and fp in PLEX_Media.OBJ_BY_FILEPATH:
                     del PLEX_Media.OBJ_BY_FILEPATH[fp]
             # Top-level path (Series/Season point at the dir)
-            obj_fp = obj.get('file', '')
+            obj_fp = obj.get('file', '')  # pyright: ignore[reportOptionalMemberAccess]
             if obj_fp and obj_fp in PLEX_Media.OBJ_BY_FILEPATH:
                 del PLEX_Media.OBJ_BY_FILEPATH[obj_fp]
             # Library-type index
-            lib = obj.get('library', '')
+            lib = obj.get('library', '')  # pyright: ignore[reportOptionalMemberAccess]
             if lib in PLEX_Media.OBJ_BY_LIBRARY and obj_type_str in PLEX_Media.OBJ_BY_LIBRARY[lib]:
                 try: PLEX_Media.OBJ_BY_LIBRARY[lib][obj_type_str].remove(key)
                 except ValueError: pass
@@ -15515,7 +15586,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # libs_affected: from both rename_queue and refresh_only — both need
     # scan + refresh to actually update Plex state.
     for _key, obj, src, dst, _yr, _tmdb in rename_queue:
-        libs_affected.add(obj.get('library', ''))
+        libs_affected.add(obj.get('library', ''))  # pyright: ignore[reportOptionalMemberAccess]  # bug: an editor-typed pair has no record
     for _key, obj in refresh_only:
         libs_affected.add((obj or {}).get('library', ''))
 
@@ -15559,7 +15630,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                 # creates a new one for the renamed wrapper.  In that case
                 # fetchItem(old_rk) → HTTP 404; treat as "Plex already
                 # rescanned and the new entry will match on its own".
-                def _is_404(exc):
+                def _is_404(exc: BaseException) -> bool:
                     s = str(exc).lower()
                     return '404' in s or 'not_found' in s or 'not found' in s
                 for key, obj in _refresh_targets:
@@ -15577,7 +15648,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                             continue
                         try:
                             item.fixMatch(auto=True)
-                            print(f"  ✓ matched: {key}  {obj.get('title','?')!r}")
+                            print(f"  ✓ matched: {key}  {obj.get('title','?')!r}")  # pyright: ignore[reportOptionalMemberAccess]  # a record-less pair has rk 0 and was skipped above
                         except PLEX_ERRORS as fm_exc:
                             if _is_404(fm_exc):
                                 # 404 on the match endpoint = old ratingKey
@@ -15625,7 +15696,7 @@ def cmd_unmatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     print(">>> Done.  Run --update-cache once Plex finishes scanning to refresh cache state.")
 
 
-def _adapt_plex_match_to_candidate(r):
+def _adapt_plex_match_to_candidate(r: plexapi.media.SearchResult | _ManualSearchResult) -> Candidate:
     """Adapt a plexapi SearchResult (from item.matches()) into the dict
     shape _score_candidate / _print_candidate_row expect."""
     name = getattr(r, 'name', None) or getattr(r, 'title', None) or ''
@@ -15669,7 +15740,8 @@ class _ManualSearchResult:
     name: str
 
 
-def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
+def cmd_mismatched_resolve(scope: str | list[str] | None = None, auto: bool = False,
+                           dry_run: bool = False, yes: bool = False) -> None:
     """v2.68: Interactive resolver for title-vs-directory MISMATCHED Series.
 
     For each Series flagged by --mismatched as having its directory name
@@ -15683,10 +15755,10 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     library.update(path=series_dir) + wait_for_plex_scan_complete(),
     write resolve log.
     """
-    import os, time, datetime as _dt
+    import os, datetime as _dt
 
     # 1. Determine scoped Series keys.
-    obj_keys = []
+    obj_keys: list[str] = []
     if scope:
         scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
         obj_keys = [k for (k, _o) in (scope_items or [])]
@@ -15699,7 +15771,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     _buf = io.StringIO()
     with contextlib.redirect_stdout(_buf):
         PLEX_Media._list_potential_mismatches(obj_keys, None)
-    series_keys = sorted(getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set())
+    series_keys: list[str] = sorted(getattr(PLEX_Media, '_title_mismatched_series_keys', set()) or set())
     if not series_keys:
         print("No mismatched Series in scope — nothing to resolve.")
         return
@@ -15713,7 +15785,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     plex = ensure_plex_api(required=not dry_run)
 
-    log_payload = {
+    log_payload: dict[str, Any] = {     # the JSON resolve log
         'command':   'mismatched_resolve',
         'started':   _dt.datetime.now().isoformat(timespec='seconds'),
         'dry_run':   dry_run,
@@ -15723,10 +15795,10 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
     fixed = 0
     skipped = 0
     quit_early = False
-    libs_to_scan = {}   # lib_name -> set(series_dir)
+    libs_to_scan: dict[str, set[str]] = {}   # lib_name -> set(series_dir)
 
     for i, key in enumerate(series_keys, 1):
-        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        obj: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(key) or {}
         title    = obj.get('title') or ''
         lib_name = obj.get('library', '')
         wrapper  = _derive_wrapper_path(obj) or ''
@@ -15761,13 +15833,14 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # Clean query from DIR name (strip _[tags], collapse separators).
         _clean_q = _apply_unmatched_title_normalize(_strip_query_tags(dir_name.replace('.', ' ').replace('_', ' ')))
 
-        def _query_agent(q):
+        def _query_agent(q: str) -> tuple[list[plexapi.media.SearchResult | _ManualSearchResult], str | None]:
             print(f"          query: {q!r}")
             try:
                 return series_item.matches(title=q) or [], None
             except PLEX_ERRORS as e:
                 return [], str(e)
 
+        raw_results: list[plexapi.media.SearchResult | _ManualSearchResult]
         raw_results, err = _query_agent(_clean_q)
         if err:
             print(f"  ⚠ series.matches() failed: {err} — skipping")
@@ -15775,9 +15848,10 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             log_payload['actions'].append({'key': key, 'status': 'skip', 'reason': f'matches-failed: {err}'})
             continue
 
-        chosen = None
+        chosen: Candidate | None = None
         skipped_this = False
 
+        scored: list[tuple[Candidate, float]]
         while True:
             if not raw_results:
                 print(f"  (Plex agent returned no candidates)")
@@ -15789,7 +15863,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     key=lambda x: x[1], reverse=True,
                 )[:5]
 
-            def _auto_pick_ok(top_score, runner_score):
+            def _auto_pick_ok(top_score: float, runner_score: float) -> bool:
                 return (
                     top_score >= 100
                     or (top_score >= 95 and top_score >= UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT)
@@ -15903,7 +15977,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                         print(f"  → single online hit → boosting conf to 100.0")
                     # Convert online candidates into synthesized-guid form so
                     # the operator can pick them directly from the next prompt.
-                    online_picker = []
+                    online_picker: list[tuple[Candidate, float]] = []
                     for cand, score in online_scored:
                         guid = None
                         if cand.get('tvdb_id'):
@@ -15926,11 +16000,11 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     o_runner = online_picker[1][1] if len(online_picker) > 1 else 0
                     if _auto_pick_ok(o_top_score, o_runner):
                         chosen = o_top
-                        print(f"  ✓ AUTO-PICK [{o_top['engine']}→synth] guid={o_top['_raw'].guid}  conf={o_top_score:.1f}")
+                        print(f"  ✓ AUTO-PICK [{o_top['engine']}→synth] guid={o_top['_raw'].guid}  conf={o_top_score:.1f}")  # pyright: ignore[reportTypedDictNotRequiredAccess, reportUnknownMemberType]  # online_picker holds only candidates given a _raw above; plexapi sets .guid untyped
                         break
                     # Otherwise show the online candidates as the new picker list.
                     scored = online_picker
-                    raw_results = [c['_raw'] for (c, _) in online_picker]
+                    raw_results = [c['_raw'] for (c, _) in online_picker]  # pyright: ignore[reportTypedDictNotRequiredAccess]  # each was given a _raw above
                     for idx, (cand, score) in enumerate(scored, 1):
                         _print_candidate_row(idx, cand, score)
                 continue
@@ -15987,7 +16061,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
             })
             continue
         try:
-            series_item.fixMatch(chosen['_raw'])
+            series_item.fixMatch(chosen['_raw'])  # pyright: ignore[reportTypedDictNotRequiredAccess]  # every path that sets chosen gives it a _raw
         except PLEX_ERRORS as e:
             print(f"  ✗ fixMatch failed: {e}")
             log_payload['actions'].append({'key': key, 'dir': dir_name, 'status': 'fail',
@@ -16010,7 +16084,7 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
         # 7. Re-scrape episodes — writer auto-rotates stale TSV.
         try:
-            new_ext_ids = {}
+            new_ext_ids: dict[str, str | None] = {}
             if chosen.get('tmdb_id'): new_ext_ids['tmdb'] = chosen['tmdb_id']
             if chosen.get('tvdb_id'): new_ext_ids['tvdb'] = chosen['tvdb_id']
             if chosen.get('imdb_id'): new_ext_ids['imdb'] = chosen['imdb_id']
@@ -16061,7 +16135,8 @@ def cmd_mismatched_resolve(scope=None, auto=False, dry_run=False, yes=False):
         print(">>> Stopped early (q).")
 
 
-def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
+def cmd_misplaced_resolve(scope: str | list[str] | None = None, dry_run: bool = False,
+                          yes: bool = False) -> None:
     """v2.69: interactive Series→Movies disk transition for --misplaced items.
 
     For every flagged Series-of-Movies in scope:
@@ -16085,7 +16160,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     import os, subprocess, shlex, datetime as _dt
 
     # 1. Build the flagged set (capture _list_misplaced output silently).
-    obj_keys = []
+    obj_keys: list[str] = []
     if scope:
         scope_items = _get_universal_scope(scope) if isinstance(scope, list) else _get_disk_map_scope(scope)
         obj_keys = [k for (k, _o) in (scope_items or [])]
@@ -16102,13 +16177,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     elif isinstance(scope, list) and scope and all(isinstance(s, str) and s.startswith('Series:') for s in scope):
         explicit_series = True
 
-    flagged = []  # [(key, obj, episode_keys)]
+    flagged: list[tuple[str, Mapping[str, Any], list[str]]] = []  # [(key, obj, episode_keys)]
     thresh_ms = MISPLACED_FEATURE_LENGTH_MIN * 60 * 1000
     for key in obj_keys:
-        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        obj: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(key) or {}
         if obj.get('type') != 'Series':
             continue
-        episode_keys = []
+        episode_keys: list[str] = []
         seasons = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(key, {})
         for _s, ep_dict in (seasons or {}).items():
             for _e, version_dict in (ep_dict or {}).items():
@@ -16124,8 +16199,8 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             continue
         _all_feature = True
         for ek in episode_keys:
-            eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
-            files = eobj.get('files') or {}
+            eobj: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            files: Mapping[str, FileEntry] = eobj.get('files') or {}
             _ep_dur_ms = 0
             for fi in files.values():
                 if not isinstance(fi, dict):
@@ -16158,9 +16233,9 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
 
     # Target Movie library defaults.  Optional CONFIG: MISPLACED_TARGET_LIBRARY
     # dict mapping source series.* lib name → target movies.* lib name.
-    target_map = globals().get('MISPLACED_TARGET_LIBRARY', {}) or {}
+    target_map: dict[str, str] = globals().get('MISPLACED_TARGET_LIBRARY', {}) or {}
 
-    log_payload = {
+    log_payload: dict[str, Any] = {     # the JSON resolve log
         'command':  'misplaced_resolve',
         'started':  _dt.datetime.now().isoformat(timespec='seconds'),
         'dry_run':  bool(dry_run),
@@ -16170,7 +16245,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     fixed = 0
     skipped = 0
     quit_early = False
-    libs_to_scan = set()
+    libs_to_scan: set[str] = set()
 
     for i, (key, obj, ep_keys) in enumerate(flagged, 1):
         title    = obj.get('title') or '?'
@@ -16194,10 +16269,12 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         # [] and not None: the search below can raise, and every reader of
         # these does len() or [0] -- a None here was a TypeError waiting on
         # the path where the online search failed.
+        tv_hits: list[Candidate]
+        movie_hits: list[Candidate]
         tv_hits = movie_hits = []
         _confirmation_skip = False
         _collection_expanded = False   # set when movie_hits came from TMDB collection parts
-        _collection_meta = None        # {tmdb_id, name, original_name} — used to mirror as Plex Collection
+        _collection_meta: dict[str, str | None] | None = None   # {tmdb_id, name, original_name} — used to mirror as Plex Collection
         while True:
             print(f"          query: {_clean_q!r}")
             tv_hits         = _search_unmatched_candidates(_clean_q, 'tv') or []
@@ -16333,13 +16410,13 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             r'(?:S\d{1,2}E\d{1,3}|\[\d+x\d+\]|\b\d{1,2}x\d{1,3}\b)'
             r'[\s\-_.]*'
         )
-        def _strip_sxx_from_basename(name):
+        def _strip_sxx_from_basename(name: str) -> str:
             cleaned = _sxx_strip.sub('', name, count=1)
             return re.sub(r'^[\s\-_.]+', '', cleaned).strip()
 
         # Slug helper for filesystem-friendly wrapper dir names
         # ("Smaragdgrün" → "smaragdgruen.(2016).[de]" style).
-        def _slug_wrapper(t, y=None, lang=None):
+        def _slug_wrapper(t: str | None, y: int | None = None, lang: str | None = None) -> str:
             base = _slugify_title_for_wrapper(t) if t else 'movie'
             parts_ = [base]
             if y:
@@ -16350,31 +16427,33 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
 
         # Sort episode keys by (season, episode) for stable mapping to
         # collection parts ordered by release year.
-        def _se_sort_key(ek):
-            eo = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+        def _se_sort_key(ek: str) -> tuple[int, int]:
+            eo: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(ek) or {}
             return (int(eo.get('S_idx') or 0), int(eo.get('E_idx') or 0))
         ordered_ep_keys = sorted(ep_keys, key=_se_sort_key)
 
-        plan = []   # (ep_key, src_path, dest_dir, dest_path)
+        plan: list[tuple[str, str, str, str]] = []   # (ep_key, src_path, dest_dir, dest_path)
 
         # Pre-compute total source-file count (each ep may have multiple
         # versions — we sum all to decide whether to use per-film mapping).
         _total_source_files = 0
         for ek in ordered_ep_keys:
-            files = (PLEX_Media.OBJ_BY_ID.get(ek) or {}).get('files') or {}
+            eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+            files = eobj.get('files') or {}
             for _v, fi in files.items():
                 if isinstance(fi, dict) and fi.get('filepath'):
                     _total_source_files += 1
 
-        per_film_map = None  # ek → (canonical_title, canonical_year)
+        per_film_map: dict[int, tuple[str, int | None]] | None = None  # ek → (canonical_title, canonical_year)
         if _collection_expanded and len(movie_hits) == _total_source_files:
             # Build ordinal map: i-th source file (by S/E order) → i-th
             # collection part (already sorted by release year in
             # _fetch_tmdb_collection_parts).
             print(f"  → collection has {len(movie_hits)} parts matching {_total_source_files} source files; using PER-FILM wrappers")
-            _flat_files = []
+            _flat_files: list[tuple[str, FileEntry]] = []
             for ek in ordered_ep_keys:
-                files = (PLEX_Media.OBJ_BY_ID.get(ek) or {}).get('files') or {}
+                eobj = PLEX_Media.OBJ_BY_ID.get(ek) or {}
+                files = eobj.get('files') or {}
                 for _v, fi in files.items():
                     if isinstance(fi, dict) and fi.get('filepath'):
                         _flat_files.append((ek, fi))
@@ -16444,9 +16523,9 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
 
         # 6. Execute moves via SSH (mkdir -p + mv per file).
         remote_host = PLEX_DB_REMOTE_HOST
-        _moves_done = []
+        _moves_done: list[tuple[str, str]] = []
         _move_failed = False
-        _source_dirs = set()
+        _source_dirs: set[str] = set()
         for ek, src, dest_dir, dest in plan:
             _esc_dir  = shlex.quote(dest_dir)
             _esc_src  = shlex.quote(src)
@@ -16536,8 +16615,8 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
     sxxeyy_pat = re.compile(r'(?i)S(\d{1,2})E(\d{1,3})')
     bracket_pat = re.compile(r'\[(\d+)x(\d+)\]')
     bare_pat    = re.compile(r'\b(\d{1,2})x(\d{1,3})\b')
-    movies_b = []
-    seen_b = set()
+    movies_b: list[tuple[str, Mapping[str, Any], str, int, int]] = []
+    seen_b: set[str] = set()
     for key in obj_keys:
         if key in seen_b:
             continue
@@ -16719,7 +16798,8 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                     continue
                 _coll_name = _input or _coll_suggest
             _tgt_lib = _act.get('target_library') or ''
-            _dests   = [_m.get('dest') for _m in (_act.get('moves') or []) if _m.get('dest')]
+            _moves: list[Any] = _act.get('moves') or []     # this run's log entries: {'src', 'dest'} dicts
+            _dests   = [_m.get('dest') for _m in _moves if _m.get('dest')]
             if not _tgt_lib or not _dests:
                 continue
             try:
@@ -16730,7 +16810,7 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
             # Look up the new Movie items by file path.  Plex's REST search
             # by path is not always available; iterate section.all() once
             # and build a path → item map (small library scan).
-            _path_map = {}
+            _path_map: dict[str, Any] = {}     # plexapi items, reached through ensure_plex_api's Any
             try:
                 for _it in _section.all():
                     for _media in (getattr(_it, 'media', None) or []):
@@ -16754,14 +16834,14 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
                         _existing = _c; break
                 if _existing is None and _PlexCollection is not None:
                     try:
-                        _existing = _PlexCollection.create(plex, title=_coll_name, section=_section, items=_items)
+                        _existing = _PlexCollection.create(plex, title=_coll_name, section=_section, items=_items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                         print(f"  ✓ created Plex Collection {_coll_name!r} with {len(_items)} item(s) in {_tgt_lib!r}")
                     except PLEX_ERRORS as _e:
                         print(f"  ⚠ Plex Collection.create({_coll_name!r}) failed: {_e}")
                         _existing = None
                 if _existing is not None:
                     try:
-                        _existing.addItems(_items)
+                        _existing.addItems(_items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                         print(f"  ✓ added {len(_items)} item(s) to existing Plex Collection {_coll_name!r}")
                     except PLEX_ERRORS as _e:
                         # If addItems is not supported (older plexapi), fall back to per-item addCollection
@@ -16812,7 +16892,8 @@ def cmd_misplaced_resolve(scope=None, dry_run=False, yes=False):
         print(">>> Stopped early (q).")
 
 
-def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
+def cmd_uncollected_resolve(scope: str | list[str] | None = None, auto: bool = False,
+                            dry_run: bool = False, yes: bool = False) -> None:
     """v2.69: Create-or-extend Plex Collections for TMDB-collection groups
     in scope that --uncollected has flagged.
 
@@ -16825,7 +16906,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     --auto + --try mirror the conventions of the other --resolve cmds.
     """
-    import os, datetime as _dt
+    import datetime as _dt
     try:
         from plexapi.collection import Collection as _PlexCollection
     except ImportError:
@@ -16836,10 +16917,10 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
     # filter expressions like `lang:fr year>2020`, but wrong for multiple
     # discrete cache keys (Movie:A Movie:B).  Union each token's resolution
     # so per-key scoping works.
-    obj_keys = []
+    obj_keys: list[str] = []
     if scope:
         _tokens = scope if isinstance(scope, list) else [scope]
-        _seen = set()
+        _seen: set[str] = set()
         for _t in _tokens:
             if not _t:
                 continue
@@ -16853,13 +16934,13 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         obj_keys = list(PLEX_Media.OBJ_BY_ID.keys())
 
     # Group by tmdb_collection_id (same logic as the detector).
-    coll_groups = {}
-    seen = set()
+    coll_groups: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+    seen: set[str] = set()
     for key in obj_keys:
         if key in seen:
             continue
         seen.add(key)
-        obj = PLEX_Media.OBJ_BY_ID.get(key) or {}
+        obj: Mapping[str, Any] = PLEX_Media.OBJ_BY_ID.get(key) or {}
         if obj.get('type') != 'Movie':
             continue
         cid = obj.get('tmdb_collection_id')
@@ -16870,7 +16951,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         coll_groups.setdefault(str(cid), []).append((key, obj))
 
     # Filter by min-members + already-covered.
-    plex_coll_by_lib = {}   # library_name → list[(cache_key, title, set_of_ratingKeys)]
+    plex_coll_by_lib: dict[str, list[tuple[str, str, set[int]]]] = {}   # library_name → list[(cache_key, title, set_of_ratingKeys)]
     for k, o in PLEX_Media.OBJ_BY_ID.items():
         if o.get('type') != 'Collection':
             continue
@@ -16878,7 +16959,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         mids = set(int(m) for m in (o.get('member_ids') or []) if str(m).isdigit())
         plex_coll_by_lib.setdefault(lib, []).append((k, o.get('title') or '', mids))
 
-    candidates = []   # (cid, tmdb_name, members, target_library)
+    candidates: list[tuple[str, str, list[tuple[str, Mapping[str, Any]]], str]] = []   # (cid, tmdb_name, members, target_library)
     for cid, members in coll_groups.items():
         if len(members) < UNCOLLECTED_MIN_MEMBERS:
             continue
@@ -16886,6 +16967,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
         # so a multi-library group becomes per-library siblings sharing
         # one name (UNCOLLECTED_ALLOW_CROSS_LIBRARY = True), or is
         # skipped entirely (False).
+        per_lib: dict[str, list[tuple[str, Mapping[str, Any]]]]
         per_lib = {}   # library_name → [(key, obj)]
         for _k, _o in members:
             _lib = (_o.get('library') or '')
@@ -16919,7 +17001,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
 
     plex = ensure_plex_api(required=not dry_run)
 
-    log_payload = {
+    log_payload: dict[str, Any] = {     # the JSON resolve log
         'command':  'uncollected_resolve',
         'started':  _dt.datetime.now().isoformat(timespec='seconds'),
         'dry_run':  bool(dry_run),
@@ -16973,7 +17055,7 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
             log_payload['actions'].append({'tmdb_id': cid, 'library': lib_name, 'status': 'fail', 'reason': f'section: {e}'})
             continue
         try:
-            items = []
+            items: list[plexapi.video.Movie] = []
             for k, o in members:
                 rk = int(o.get('id') or 0)
                 if not rk:
@@ -17001,20 +17083,20 @@ def cmd_uncollected_resolve(scope=None, auto=False, dry_run=False, yes=False):
                     existing = c; break
             if existing is None and _PlexCollection is not None:
                 try:
-                    existing = _PlexCollection.create(plex, title=coll_name, section=section, items=items)
+                    existing = _PlexCollection.create(plex, title=coll_name, section=section, items=items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                     print(f"  ✓ created Plex Collection {coll_name!r} with {len(items)} item(s)")
                 except PLEX_ERRORS as _e:
                     print(f"  ⚠ Plex Collection.create({coll_name!r}) failed: {_e}")
                     existing = None
             if existing is not None:
                 try:
-                    existing.addItems(items)
+                    existing.addItems(items)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                     print(f"  ✓ added {len(items)} item(s) to Plex Collection {coll_name!r}")
                 except PLEX_ERRORS as _e:
                     # Per-item fallback for older plexapi
                     for it in items:
                         try:
-                            it.addCollection(coll_name)
+                            it.addCollection(coll_name)  # pyright: ignore[reportUnknownMemberType]  # plexapi leaves its parameters unannotated
                         except PLEX_ERRORS:
                             pass
                     print(f"  ✓ tagged {len(items)} item(s) with collection {coll_name!r} (per-item fallback)")
