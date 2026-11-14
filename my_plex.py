@@ -8781,19 +8781,21 @@ def plex_retry_operation(operation: object, *args: object, context: str | None =
             attempt += 1
 
 
-def plex_get_all_items(library):
+# plexapi leaves title, all(), seasons() and episodes() untyped: each line
+# that touches one carries its ignore.
+def plex_get_all_items(library: plexapi.library.LibrarySection) -> Any:
     """API required: used by brute_force_search() and undo_operation() only. Wrapper for library.all() with retry logic."""
-    return plex_retry_operation(lambda: library.all(), context=f"'{library.title}'.all()")
+    return plex_retry_operation(lambda: library.all(), context=f"'{library.title}'.all()")  # pyright: ignore[reportUnknownMemberType, reportUnknownLambdaType]
 
-def plex_get_seasons(item, library_title: str | None = ""):
+def plex_get_seasons(item: plexapi.video.Show, library_title: str | None = "") -> Any:
     """Wrapper for item.seasons() with retry logic"""
-    ctx = f"'{library_title}' {item.title}" if library_title else item.title
-    return plex_retry_operation(lambda: item.seasons(), context=f"{ctx}.seasons()")
+    ctx = f"'{library_title}' {item.title}" if library_title else item.title  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return plex_retry_operation(lambda: item.seasons(), context=f"{ctx}.seasons()")  # pyright: ignore[reportUnknownMemberType, reportUnknownLambdaType]
 
-def plex_get_episodes(season, library_title: str | None = "", series_title: str = ""):
+def plex_get_episodes(season: plexapi.video.Season, library_title: str | None = "", series_title: str = "") -> Any:
     """Wrapper for season.episodes() with retry logic"""
-    ctx = f"'{library_title}' {series_title} {season.title}" if library_title else f"{series_title} {season.title}"
-    return plex_retry_operation(lambda: season.episodes(), context=f"{ctx}.episodes()")
+    ctx = f"'{library_title}' {series_title} {season.title}" if library_title else f"{series_title} {season.title}"  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return plex_retry_operation(lambda: season.episodes(), context=f"{ctx}.episodes()")  # pyright: ignore[reportUnknownMemberType, reportUnknownLambdaType]
 
 class CacheLock:
     """Context manager for file-based locking to prevent concurrent cache access"""
@@ -9454,8 +9456,8 @@ def _get_active_scan_section_ids(plex: PlexServer) -> set[str]:
         pass
     return active
 
-def wait_for_plex_scans_complete(plex: PlexServer, libraries, scan_start_times: dict[str, float],
-                                 max_wait: float = 120) -> None:
+def wait_for_plex_scans_complete(plex: PlexServer, libraries: list[tuple[str, plexapi.library.LibrarySection]],
+                                 scan_start_times: dict[str, float], max_wait: float = 120) -> None:
     """Wait for multiple Plex library scans to complete in parallel.
 
     Checks both lib.refreshing (file discovery phase) and plex.activities
@@ -9470,7 +9472,7 @@ def wait_for_plex_scans_complete(plex: PlexServer, libraries, scan_start_times: 
     """
     pending = {name: lib for name, lib in libraries if name in scan_start_times}
     # Phase 1 done = lib.refreshing went False; Phase 2 done = no activity in plex.activities
-    phase1_done = set()
+    phase1_done: set[str] = set()
 
     while pending:
         time.sleep(2)
@@ -9490,8 +9492,8 @@ def wait_for_plex_scans_complete(plex: PlexServer, libraries, scan_start_times: 
             # Phase 1: Wait for lib.refreshing to go False
             if lib_name not in phase1_done:
                 try:
-                    lib.reload()
-                    if not lib.refreshing:
+                    lib.reload()  # pyright: ignore[reportUnknownMemberType] -- plexapi: reload's parameters untyped
+                    if not lib.refreshing:  # pyright: ignore[reportUnknownMemberType] -- plexapi: an untyped attribute
                         phase1_done.add(lib_name)
                     else:
                         continue  # Still scanning
@@ -9501,12 +9503,12 @@ def wait_for_plex_scans_complete(plex: PlexServer, libraries, scan_start_times: 
                     continue
 
             # Phase 2: Check plex.activities for ongoing indexing
-            section_id = str(lib.key) if hasattr(lib, 'key') else ''
+            section_id = str(lib.key) if hasattr(lib, 'key') else ''  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType] -- plexapi: an untyped attribute
             if section_id not in active_sections and '*' not in active_sections:
                 print(f"  ✓ Completed: {lib_name} ({elapsed:.0f}s)")
                 del pending[lib_name]
 
-def wait_for_plex_scan_complete(plex: PlexServer, lib_name: str, lib, max_wait: float = 120,
+def wait_for_plex_scan_complete(plex: PlexServer, lib_name: str, lib: plexapi.library.LibrarySection, max_wait: float = 120,
                                 verbose: bool = True) -> tuple[bool, float]:
     """Wait for a single Plex library scan to complete (convenience wrapper).
 
@@ -9754,21 +9756,22 @@ def get_library_stats(supported: bool = True):
     return library_stats
 
 
-def get_fullID(media_obj, obj_type: str | None = None, obj_ratingKey: int | str | None = None) -> str:
+def get_fullID(media_obj: plexapi.video.Video | None, obj_type: str | None = None,
+               obj_ratingKey: object = None) -> str:
     if media_obj is None:
         if obj_type is None: err("00057")      # needed if media_obj is None
         if obj_ratingKey is None: err("00058") # needed if media_obj is None
     else:
-        if obj_type is None: obj_type = _plex_type(media_obj.type)
-        if obj_ratingKey is None: obj_ratingKey = media_obj.ratingKey
+        if obj_type is None: obj_type = _plex_type(media_obj.type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType] -- plexapi: an untyped attribute
+        if obj_ratingKey is None: obj_ratingKey = media_obj.ratingKey  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- plexapi: an untyped attribute
     match obj_type:  # like in output of Plex-API :)
         case "Movie" | "Series" | "Season" | "Episode" : return f"{obj_type}_ID:{obj_ratingKey}"
         #case "Media" | "Part"                        : return f"{obj_type}_ID:{obj.id}"
         case _ : err("00059", f"obj_type={obj_type}")
 
 
-def obj_needs_updating(obj, val: MediaRecord | CollectionRecord | None = None, key: str | None = None,
-                       obj_type: str | None = None, obj_ratingKey: int | str | None = None) -> bool:
+def obj_needs_updating(obj: plexapi.video.Video, val: MediaRecord | CollectionRecord | None = None, key: str | None = None,
+                       obj_type: str | None = None, obj_ratingKey: object = None) -> bool:
     """ This needs obj and val. But if val is None, you can provide key to look it up, else key will be determined via get_fullID() using optional obj_type and obj_ratingKey parameter
         For Movies + Episodes: This is dangerous as for different MEDIA or different PARTS the update would be needed!
         For Series + Season: No problem to just judge based on obj.updatedAt time.
@@ -9791,7 +9794,9 @@ def obj_needs_updating(obj, val: MediaRecord | CollectionRecord | None = None, k
         return True
 
 
-def brute_force_search(media_identifier: str, library_name: str | None = None):
+def brute_force_search(media_identifier: str, library_name: str | None = None) -> Any:
+    # Any: the plexapi item, season, episode or media part found (each from
+    # plex_retry_operation), or None.
     """ API required: exhaustive search via library.all() when cache-based lookup fails.
         Returns the matching object if found, else None. """
     global PLEX_SERVER
