@@ -16084,10 +16084,10 @@ def cmd_mismatched_resolve(scope: str | list[str] | None = None, auto: bool = Fa
 
         # 7. Re-scrape episodes — writer auto-rotates stale TSV.
         try:
-            new_ext_ids: dict[str, str | None] = {}
-            if chosen.get('tmdb_id'): new_ext_ids['tmdb'] = chosen['tmdb_id']
-            if chosen.get('tvdb_id'): new_ext_ids['tvdb'] = chosen['tvdb_id']
-            if chosen.get('imdb_id'): new_ext_ids['imdb'] = chosen['imdb_id']
+            new_ext_ids: dict[str, str] = {}
+            if tmdb := chosen.get('tmdb_id'): new_ext_ids['tmdb'] = tmdb
+            if tvdb := chosen.get('tvdb_id'): new_ext_ids['tvdb'] = tvdb
+            if imdb := chosen.get('imdb_id'): new_ext_ids['imdb'] = imdb
             print(f"  >>> Re-scraping episodes for new match…")
             scrape_episodes(chosen.get('title') or title, wrapper, force=True,
                             external_ids=new_ext_ids, library_name=lib_name,
