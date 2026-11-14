@@ -25,6 +25,7 @@ import signal
 import subprocess
 import tempfile
 import datetime as _dt
+import time
 import importlib.machinery
 import importlib.util
 from collections.abc import Callable, Iterable, Mapping
@@ -14448,7 +14449,7 @@ class TestErrCodes(unittest.TestCase):
 
     # [ \t]*\( -- a call written `err (1008, ...)` is a call: it escaped both this
     # check and the renumber one-liner for as long as the pattern demanded `err(`.
-    CALL = re.compile(r'(\b(?:err|_stamp_fail)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
+    CALL = re.compile(r'(\b(?:err|_stamp_fail|_reencode_failed)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
     BARE = re.compile(r'\berr[ \t]*\(\s*(?!"\d{5}"|err_code\b)[^\s)]')
 
     def test_codes_are_unique_and_in_file_order(self):
@@ -15714,10 +15715,12 @@ class _RootInstallCase(unittest.TestCase):
     def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv: 'tuple[str, ...]' = ('--install',),
                  env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
                  copy: 'str | None' = None, firewall: bool = True,
-                 touch: 'tuple[str, ...]' = (), conf_in_env: bool = False) -> _RootRun:
+                 touch: 'tuple[str, ...]' = (), conf_in_env: bool = False,
+                 run_dir: 'str | None' = None) -> _RootRun:
         """One root --install.  Its config is named by --config, or with
-        CONF_IN_ENV by $MY_PLEX_CONFIG and nothing in argv."""
-        d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
+        CONF_IN_ENV by $MY_PLEX_CONFIG and nothing in argv.  RUN_DIR: the
+        folder of an earlier run, to run again with the very same files."""
+        d = run_dir or tempfile.mkdtemp(prefix='run-', dir=self.tmp)
         stub = _firewall_stub(d) if firewall else os.path.join(d, 'no-such-firewall-tool')
         _su_stub(d)
         for name in touch:
@@ -15726,7 +15729,7 @@ class _RootInstallCase(unittest.TestCase):
             with open(os.path.join(d, 'listing'), 'w') as f:
                 f.write(listing)
         home = os.path.join(d, 'home')
-        os.makedirs(home)
+        os.makedirs(home, exist_ok=True)
         conf = os.path.join(d, 'my-plex.conf')
         with open(conf, 'w') as f:
             f.write(f"LITTLE_SNITCH_CLI = {stub!r}\n" + _install_lines(d) + conf_lines)
@@ -18889,6 +18892,564 @@ class TestLegacyInlineBlock(unittest.TestCase):
         self.assertIn('--collections requires a library name', body)
 
 
+_REENCODE_STUBS = {
+    # my-handbrake: `file <SRC> -- encode reencode --output-fn <OUT>`.  The
+    # media are text files, "duration=<S> end=<S>": the encode copies the
+    # original, or -- as $STUB_DIR/hb_mode says -- comes out SHORT, does not
+    # END cleanly, FAILs, or HANGs as a real encode does (a child that writes,
+    # in a process group the stub shares).
+    'my-handbrake': r'''#!/bin/dash
+src=$2; out=
+while [ $# -gt 0 ]; do [ "$1" = --output-fn ] && out=$2; shift; done
+echo "$src -> $out" >> "$STUB_DIR/hb_calls"
+mode=$(cat "$STUB_DIR/hb_mode" 2>/dev/null)
+case $mode in
+  short) echo "duration=100 end=100" > "$out" ;;
+  noend) d=$(sed -n 's/.*duration=\([0-9]*\).*/\1/p' "$src"); echo "duration=$d end=10" > "$out" ;;
+  fail)  exit 3 ;;
+  hang)  echo "partial" > "$out"; sleep 60 & echo $! > "$STUB_DIR/hb_child"; wait ;;
+  *)     cp "$src" "$out" ;;
+esac
+''',
+    # ffprobe: format=duration,size -> the file's duration= and its size;
+    # packet=pts_time -> its end=.
+    'ffprobe': r'''#!/bin/dash
+for f; do :; done
+[ -f "$f" ] || { echo "$f: No such file" >&2; exit 1; }
+d=$(sed -n 's/.*duration=\([0-9]*\).*/\1/p' "$f")
+e=$(sed -n 's/.*end=\([0-9]*\).*/\1/p' "$f")
+case " $* " in
+  *format=duration,size*) [ -n "$d" ] || exit 1; echo "duration=$d.000000"; echo "size=$(wc -c < "$f" | tr -d ' ')" ;;
+  *packet=pts_time*) echo "$e.000000" ;;
+esac
+''',
+    # pgrep: a Plex Transcoder runs while $STUB_DIR/transcoding holds a count
+    # of looks left.
+    'pgrep': r'''#!/bin/dash
+n=$(cat "$STUB_DIR/transcoding" 2>/dev/null || echo 0)
+[ "$n" -gt 0 ] || exit 1
+echo $((n - 1)) > "$STUB_DIR/transcoding"; echo 4711
+''',
+    # lsof -t: a file listed in $STUB_DIR/open is open.
+    'lsof': r'''#!/bin/dash
+for f; do :; done
+grep -qxF "$f" "$STUB_DIR/open" 2>/dev/null && { echo 999; exit 0; }
+exit 1
+''',
+    # my-mail: its argv and its stdin logged; exit $STUB_DIR/mail_rc.
+    'my-mail': r'''#!/bin/dash
+echo "$*" >> "$STUB_DIR/mail_calls"; cat >> "$STUB_DIR/mail_bodies"
+exit $(cat "$STUB_DIR/mail_rc" 2>/dev/null || echo 0)
+''',
+    # ssh for the server-over-ssh test: runs the remote command HERE, stdin
+    # passed through -- the server's shell, minus the network.
+    'ssh': r'''#!/bin/dash
+for last; do :; done
+exec /bin/sh -c "$last"
+''',
+}
+
+
+class TestReencodeResolve(unittest.TestCase):
+    """--reencode --resolve: encode what carries [reencode], check it, swap it
+    in -- with stub my-handbrake, ffprobe, pgrep, lsof and my-mail, media that
+    are small text files, a trash of the test's own, and the tool's globals
+    set back after each test.  Never the real home, never the real Plex."""
+
+    SAVED = ('EXTERNAL_TOOLS', 'PLEX_DB_PATH', 'PLEX_DB_REMOTE_HOST', 'MAIL_CMD', 'REENCODE_SCHEDULE',
+             'REENCODE_DURATION', 'REENCODE_POLL_S', 'REENCODE_PLEX_WAIT_S', 'REENCODE_LAUNCHER',
+             'REENCODE_DAEMON_LABEL', 'get_trash_dir', 'update_and_save_cache', 'build_media_cache_dict',
+             'ensure_plex_api', 'READ_ONLY_MODE')
+
+    def setUp(self):
+        self.m = m = _main_module()
+        self.saved = {k: getattr(m, k) for k in self.SAVED}
+        self.saved_index = (PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_FILEPATH, PLEX_Media.OBJ_BY_ONDISK_LABEL)
+        self.d = tempfile.mkdtemp(prefix='my-plex-reencode-')
+        self.stubs = os.path.join(self.d, 'stubs')
+        self.media = os.path.join(self.d, 'media')
+        self.trash = os.path.join(self.d, 'trash')
+        for p in (self.stubs, self.media, self.trash):
+            os.makedirs(p)
+        for name, text in _REENCODE_STUBS.items():
+            path = os.path.join(self.stubs, name)
+            with open(path, 'w') as f:
+                f.write(text)
+            os.chmod(path, 0o755)
+        os.environ['STUB_DIR'] = self.stubs
+        db = os.path.join(self.d, 'plex.db')
+        open(db, 'w').close()
+        def stub(name: str) -> str:
+            return os.path.join(self.stubs, name)
+
+        def trash_dir(*_a: object, **_k: object) -> str:
+            return self.trash
+
+        def save(d: object) -> None:
+            self.saved_cache.append(d)
+
+        def cache_dict(*_a: object, **_k: object) -> dict[str, object]:
+            return {}
+
+        def no_plex(required: bool = True) -> None:
+            return None
+
+        m.EXTERNAL_TOOLS = {'LOCAL': {}, 'SERVER': {n: stub(n) for n in ('my-handbrake', 'ffprobe', 'pgrep', 'lsof')}}
+        m.PLEX_DB_PATH = db                 # the database is here: this is the server
+        m.MAIL_CMD = stub('my-mail')
+        m.REENCODE_POLL_S = 0.05
+        m.REENCODE_PLEX_WAIT_S = 0.2
+        m.get_trash_dir = trash_dir
+        self.saved_cache: list[object] = []
+        m.update_and_save_cache = save
+        m.build_media_cache_dict = cache_dict
+        m.ensure_plex_api = no_plex
+        m.READ_ONLY_MODE = False
+        m._REENCODE_STOP = 0                # a SIGTERM test leaves it set
+        PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_FILEPATH, PLEX_Media.OBJ_BY_ONDISK_LABEL = {}, {}, {}
+        if os.path.exists(m._reencode_speed_path()):
+            os.remove(m._reencode_speed_path())     # each test measures its own
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(self.m, k, v)
+        PLEX_Media.OBJ_BY_ID, PLEX_Media.OBJ_BY_FILEPATH, PLEX_Media.OBJ_BY_ONDISK_LABEL = self.saved_index
+        os.environ.pop('STUB_DIR', None)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    # -- fixtures -------------------------------------------------------
+    def put(self, rel: str, duration: int = 3000, text: str | None = None) -> str:
+        path = os.path.join(self.media, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text if text is not None else f"duration={duration} end={duration}\n")
+        return path
+
+    def cache(self, key: str, path: str, added: int = 1, duration: int = 3000) -> None:
+        """A cached Movie or Episode owning PATH, its labels from its path."""
+        rec: dict[str, Any] = {'type': key.split(':')[0], 'file': path, 'library': 'lib1', 'title': key,
+                               'addedAt': added, 'duration': duration * 1000,
+                               'files': {'v1': {'filepath': path, 'filesize': os.path.getsize(path)}}}
+        rec['ondisk_labels'] = collect_ondisk_labels_for_obj(rec)
+        PLEX_Media.OBJ_BY_ID[key] = cast('MediaRecord', rec)
+        PLEX_Media.OBJ_BY_FILEPATH[path] = [key]
+        PLEX_Media.OBJ_BY_ONDISK_LABEL = build_ondisk_labels_index()
+
+    def cached_path(self, key: str) -> str:
+        rec = self.m.media_record(key)
+        assert rec is not None, key
+        return rec['files']['v1']['filepath']
+
+    def mode(self, mode: str) -> None:
+        with open(os.path.join(self.stubs, 'hb_mode'), 'w') as f:
+            f.write(mode)
+
+    def lines(self, name: str) -> list[str]:
+        p = os.path.join(self.stubs, name)
+        return open(p).read().splitlines() if os.path.exists(p) else []
+
+    def resolve(self, targets: list[str] | None = None, now: bool = True, dry_run: bool = False) -> tuple[int, str, str]:
+        """cmd_reencode_resolve, its exit status and output."""
+        out, errs = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errs):
+            try:
+                self.m.cmd_reencode_resolve(targets or [], dry_run=dry_run, yes=True, now=now)
+                code = 0
+            except SystemExit as e:
+                code = int(e.code or 0)
+        return code, out.getvalue(), errs.getvalue()
+
+    def trashed(self) -> list[str]:
+        return sorted(n.split('_', 2)[-1] for n in os.listdir(self.trash))
+
+    # -- the swap ---------------------------------------------------------
+    def test_the_encode_takes_the_name_without_the_label_and_its_siblings_follow(self):
+        """The whole path of one labelled file: encoded, checked, swapped in
+        as .mkv without ` [reencode]`, the original trashed, the subtitle
+        renamed with it, the cache pointing at the new file."""
+        src = self.put('Some Movie (2001)/movie [reencode].avi')
+        srt = self.put('Some Movie (2001)/movie [reencode].de.srt', text='subs')
+        self.cache('Movie:1', src)
+        code, out, errs = self.resolve()
+        self.assertEqual(code, 0, out + errs)
+        folder = os.path.dirname(src)
+        self.assertEqual(sorted(os.listdir(folder)), ['movie.de.srt', 'movie.mkv'], out + errs)
+        self.assertEqual(self.trashed(), ['movie [reencode].avi'])
+        new = os.path.join(folder, 'movie.mkv')
+        self.assertEqual(self.cached_path('Movie:1'), new)
+        self.assertEqual(PLEX_Media.OBJ_BY_FILEPATH.get(new), ['Movie:1'])
+        self.assertNotIn(src, PLEX_Media.OBJ_BY_FILEPATH)
+        self.assertNotIn('Movie:1', PLEX_Media.OBJ_BY_ONDISK_LABEL.get('reencode', []),
+                         "the cache still lists the file as labelled")
+        self.assertTrue(self.saved_cache, "the cache was not saved in the same run")
+        self.assertIn('checked: duration 50:00 = 50:00, ends cleanly', out)
+        self.assertFalse(os.path.exists(srt))
+
+    def test_an_encode_SHORTER_than_the_original_is_never_swapped_in(self):
+        """The input that makes a swap confident and wrong: my-handbrake exits
+        0 with a file a fraction of the original's length."""
+        src = self.put('M (1999)/broken [reencode].mkv')
+        self.cache('Movie:2', src)
+        self.mode('short')
+        code, out, errs = self.resolve()
+        self.assertEqual(code, 1, out + errs)
+        self.assertTrue(os.path.exists(src), "the original is gone")
+        self.assertEqual(os.listdir(os.path.dirname(src)), ['broken [reencode].mkv'],
+                         "the temp file was left beside it")
+        self.assertIn('is 1:40 long, the original 50:00', errs)
+        self.assertIn('original kept and still labelled', errs)
+
+    def test_an_encode_of_the_right_length_that_does_not_END_cleanly_is_refused(self):
+        """Duration alone passes this one: the container claims the full
+        length, the last packet is minutes before it."""
+        src = self.put('M (1999)/cut [reencode].mkv')
+        self.cache('Movie:3', src)
+        self.mode('noend')
+        code, out, errs = self.resolve()
+        self.assertEqual(code, 1, out + errs)
+        self.assertTrue(os.path.exists(src))
+        self.assertIn('its last packet is at 0:10', errs)
+
+    def test_a_name_taken_by_ANOTHER_file_stops_before_anything_is_encoded(self):
+        """`x [reencode].avi` becomes `x.mkv` -- which may be another file
+        already.  A local rename would replace it without a word."""
+        src = self.put('M (2000)/x [reencode].avi')
+        other = self.put('M (2000)/x.mkv', text='duration=10 end=10 other\n')
+        self.cache('Movie:4', src)
+        code, out, errs = self.resolve()
+        self.assertEqual(code, 1, out + errs)
+        self.assertEqual(self.lines('hb_calls'), [], "it encoded anyway")
+        self.assertEqual(open(other).read(), 'duration=10 end=10 other\n')
+        self.assertTrue(os.path.exists(src))
+
+    def test_newest_download_first(self):
+        old = self.put('Old (1990)/old [reencode].mkv')
+        new = self.put('New (2020)/new [reencode].mkv')
+        self.cache('Movie:5', old, added=100)
+        self.cache('Movie:6', new, added=200)
+        plan = self.m.reencode_labelled_plan(None)
+        self.assertEqual([i.key for i in plan], ['Movie:6', 'Movie:5'])
+
+    def test_a_folder_label_moves_onto_the_files_not_encoded_yet(self):
+        """A series labelled at its folder, one episode encoded: the folder
+        loses the label and the other episode carries it.  Left on the
+        folder, the next run would encode the finished episode again; taken
+        off alone, the other episode would never be encoded."""
+        e1 = self.put('Serie [reencode]/Season 01/s01e01.mkv')
+        e2 = self.put('Serie [reencode]/Season 01/s01e02.mkv')
+        self.cache('Episode:11', e1)
+        self.cache('Episode:12', e2)
+        run = self.m._ReencodeRun([self.m._reencode_item('Episode:11', e1)], None, False, None)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errs:
+            run.run()
+        season = os.path.join(self.media, 'Serie', 'Season 01')
+        self.assertEqual(sorted(os.listdir(season)), ['s01e01.mkv', 's01e02 [reencode].mkv'], errs.getvalue())
+        self.m.refresh_ondisk_labels_from_cache()
+        self.assertEqual(PLEX_Media.OBJ_BY_ONDISK_LABEL.get('reencode'), ['Episode:12'])
+
+    def test_a_path_is_encoded_labelled_or_not_every_video_file_under_it(self):
+        a = self.put('dir/sub/a.mkv')
+        b = self.put('dir/b.avi')
+        self.put('dir/.hidden.mkv')
+        self.put('dir/notes.txt', text='x')
+        code, out, errs = self.resolve([os.path.join(self.media, 'dir')], now=False)
+        self.assertEqual(code, 0, out + errs)
+        self.assertEqual(sorted(c.split(' -> ')[0] for c in self.lines('hb_calls')), sorted([a, b]))
+        self.assertTrue(os.path.exists(os.path.join(self.media, 'dir', 'b.mkv')))
+
+    # -- stopping -----------------------------------------------------------
+    def sigterm_once_encoding(self) -> None:
+        """SIGTERM to this process once the stub encoder's child runs -- not
+        after a fixed delay, which a slow machine outruns."""
+        import threading
+
+        def send() -> None:
+            child = os.path.join(self.stubs, 'hb_child')
+            for _ in range(600):
+                if os.path.exists(child) and os.path.getsize(child):
+                    break
+                time.sleep(0.05)
+            time.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGTERM)
+        threading.Thread(target=send, daemon=True).start()
+
+    def assert_stopped(self, code: int, out: str, src: str) -> None:
+        self.assertEqual(code, 143, out)
+        self.assertIn('stopped: SIGTERM', out)
+        self.assertTrue(os.path.exists(src), "the original is gone")
+        self.assertEqual(os.listdir(os.path.dirname(src)), [os.path.basename(src)], "the temp file stayed")
+        child = int(self.lines('hb_child')[0])
+        time.sleep(0.3)
+        with self.assertRaises(ProcessLookupError, msg="the encoder's child runs on"):
+            os.kill(child, 0)
+
+    def test_SIGTERM_stops_the_encode_trashes_its_file_and_keeps_the_original(self):
+        """launchd sends SIGTERM at a restart or a stop.  Every process of the encode
+        stops (a child of my-handbrake too), the half-written file goes to
+        the trash, the original stays with its label, and the run exits 143."""
+        src = self.put('Long (2010)/long [reencode].mkv')
+        self.cache('Movie:7', src)
+        self.mode('hang')
+        self.sigterm_once_encoding()
+        code, out, _errs = self.resolve()
+        self.assert_stopped(code, out, src)
+
+    def test_over_ssh_stopping_the_run_stops_the_encode_on_the_server(self):
+        """The server's shell runs the encode; closing ssh must stop it there
+        -- killing the local ssh alone leaves HandBrake encoding on."""
+        self.m.PLEX_DB_PATH = os.path.join(self.d, 'no-such.db')
+        self.m.PLEX_DB_REMOTE_HOST = 'server'
+        os.environ['PATH'] = self.stubs + os.pathsep + os.environ['PATH']
+        try:
+            src = self.put('Long (2010)/long [reencode].mkv')
+            self.cache('Movie:8', src)
+            self.mode('hang')
+            self.sigterm_once_encoding()
+            code, out, _errs = self.resolve()
+        finally:
+            os.environ['PATH'] = os.environ['PATH'].split(os.pathsep, 1)[1]
+        self.assert_stopped(code, out, src)
+
+    def test_a_half_written_encode_is_trashed_unless_a_process_has_it_open(self):
+        """The plug's cut at 01:00 is how a late encode normally ends: it
+        leaves a half-written file and no process.  The one a running encode
+        writes (open) is never touched."""
+        src = self.put('M (2003)/m [reencode].mkv')
+        self.cache('Movie:9', src)
+        gone = self.put('M (2003)/.old.reencode.UNFINISHED.mkv', text='x')
+        running = self.put('M (2003)/.busy.reencode.UNFINISHED.mkv', text='x')
+        with open(os.path.join(self.stubs, 'open'), 'w') as f:
+            f.write(running + '\n')
+        run = self.m._ReencodeRun(self.m.reencode_labelled_plan(None), None, False, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            acted = run.repair(False)
+        self.assertEqual(acted, [gone])
+        self.assertTrue(os.path.exists(running), "a running encode's file was trashed")
+        self.assertEqual([i.key for i in run.todo], ['Movie:9'])
+
+    def cut_case(self, original_there: bool) -> tuple[int, str, str, str]:
+        """A checked encode the swap left behind, as a cut leaves it: the
+        DONE file, the original there or (trashed already) not, a subtitle
+        still with the label, the cache still naming the original."""
+        src = os.path.join(self.media, 'Cut (2006)', 'cut [reencode].avi')
+        self.put('Cut (2006)/.cut [reencode].reencode.DONE.mkv', text='duration=3000 end=3000 encoded\n')
+        self.put('Cut (2006)/cut [reencode].srt', text='subs')
+        self.put('Cut (2006)/cut [reencode].avi')
+        self.cache('Movie:16', src)
+        if not original_there:
+            os.rename(src, os.path.join(self.trash, 'cut [reencode].avi'))
+        code, out, errs = self.resolve()
+        return code, out, errs, os.path.dirname(src)
+
+    def test_a_cut_after_the_original_was_trashed_is_finished_by_the_next_run(self):
+        """The worst point of the swap: the original in the trash, the
+        encode not yet named.  Taken for a leftover, it would be trashed too
+        -- and the film gone from the library."""
+        code, out, errs, folder = self.cut_case(original_there=False)
+        self.assertEqual(code, 0, out + errs)
+        self.assertEqual(sorted(os.listdir(folder)), ['cut.mkv', 'cut.srt'], out + errs)
+        self.assertIn('encoded', open(os.path.join(folder, 'cut.mkv')).read())
+        self.assertEqual(self.lines('hb_calls'), [], "it encoded again what was done")
+        self.assertEqual(self.cached_path('Movie:16'), os.path.join(folder, 'cut.mkv'))
+        self.assertTrue(self.saved_cache, "the cache was not saved")
+
+    def test_a_cut_before_the_original_was_trashed_keeps_the_original(self):
+        """Cut between the rename to DONE and the trash: the original is
+        whole, so the DONE file goes and the original is encoded again --
+        nothing is lost either way."""
+        code, out, errs, folder = self.cut_case(original_there=True)
+        self.assertEqual(code, 0, out + errs)
+        self.assertIn('an encode whose swap never began', out)
+        self.assertEqual(len(self.lines('hb_calls')), 1, out)
+        self.assertEqual(sorted(os.listdir(folder)), ['cut.mkv', 'cut.srt'], out + errs)
+
+    def test_the_swap_never_leaves_the_encode_under_its_leftover_name_once_checked(self):
+        """The order of the swap itself: before the original is trashed, the
+        checked encode has left the UNFINISHED name -- which a run trashes --
+        for the DONE one, which a run finishes."""
+        src = self.put('Ord (2007)/ord [reencode].mkv')
+        self.cache('Movie:17', src)
+        seen: list[list[str]] = []
+        real = self.m.my_plex_file_operation
+
+        def spy(operation: str, filepath: str, remote_host: str | None = None, **kwargs: Any) -> Any:
+            if operation == 'TRASH' and filepath == src:
+                seen.append(sorted(os.listdir(os.path.dirname(src))))
+            return real(operation, filepath, remote_host, **kwargs)
+        self.m.my_plex_file_operation = spy
+        try:
+            code, out, errs = self.resolve()
+        finally:
+            self.m.my_plex_file_operation = real
+        self.assertEqual(code, 0, out + errs)
+        self.assertEqual(seen, [['.ord [reencode].reencode.DONE.mkv', 'ord [reencode].mkv']],
+                         "when the original went to the trash, the encode was not under its DONE name")
+
+    # -- the load and the window ------------------------------------------
+    def test_no_new_file_starts_while_Plex_transcodes(self):
+        src = self.put('M (2004)/m [reencode].mkv')
+        self.cache('Movie:10', src)
+        with open(os.path.join(self.stubs, 'transcoding'), 'w') as f:
+            f.write('2')
+        code, out, errs = self.resolve()
+        self.assertEqual(code, 0, out + errs)
+        self.assertEqual(out.count('waiting: Plex is transcoding (Plex Transcoder pid 4711)'), 2, out)
+        self.assertLess(out.index('waiting: Plex'), out.index('done in'))
+
+    def test_outside_the_window_the_scheduled_run_starts_nothing(self):
+        src = self.put('M (2005)/m [reencode].mkv')
+        self.cache('Movie:13', src)
+        other = (_dt.datetime.now() + _dt.timedelta(hours=3)).strftime('%M %H') + ' * * *'
+        self.m.REENCODE_SCHEDULE, self.m.REENCODE_DURATION = other, '1h'
+        code, out, errs = self.resolve(now=False)
+        self.assertEqual(code, 0, out + errs)
+        self.assertIn('outside the window', out)
+        self.assertEqual(self.lines('hb_calls'), [])
+
+    def test_the_window_end_mails_what_is_left_but_only_from_the_schedule(self):
+        a = self.put('A (2001)/a [reencode].mkv')
+        b = self.put('B (2002)/b [reencode].mkv')
+        self.cache('Movie:14', a)
+        self.cache('Movie:15', b)
+        items = self.m.reencode_labelled_plan(None)
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        with quiet:
+            self.m._ReencodeRun(list(items), None, False, _dt.datetime.now()).run()
+        self.assertEqual(self.lines('mail_calls'), [], "a run by hand mailed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.m._ReencodeRun(list(items), None, True, _dt.datetime.now()).run()
+        self.assertEqual(self.lines('hb_calls'), [], "a file started after the window's end")
+        calls = self.lines('mail_calls')
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue(calls[0].startswith('warn my-plex: 2 files still [reencode], '), calls)
+
+    def test_cron_fields_windows_and_launchd_entries(self):
+        m = self.m
+        dt = _dt.datetime
+        cron = m.parse_cron('30 18 * * *')
+        # 00:10 is inside the window that started at 18:30 the day before
+        self.assertEqual(m.window_start(cron, _dt.timedelta(hours=6), dt(2026, 11, 17, 0, 10)), dt(2026, 11, 16, 18, 30))
+        self.assertIsNone(m.window_start(cron, _dt.timedelta(hours=6), dt(2026, 11, 17, 0, 31)))
+        # Monday's window reaches into Tuesday; Sunday as 7 or 0
+        mon = m.parse_cron('30 18 * * 1')
+        self.assertIsNotNone(m.window_start(mon, _dt.timedelta(hours=6), dt(2026, 11, 17, 0, 10)))     # a Tuesday
+        self.assertTrue(m.cron_matches(m.parse_cron('0 9 * * 7'), dt(2026, 11, 15, 9, 0)))         # a Sunday
+        # day of month AND day of week restricted: either matches (cron's rule)
+        either = m.parse_cron('0 9 1 * 1')
+        self.assertTrue(m.cron_matches(either, dt(2026, 11, 16, 9, 0)))     # a Monday, not the 1st
+        self.assertTrue(m.cron_matches(either, dt(2026, 12, 1, 9, 0)))      # the 1st, a Tuesday
+        self.assertFalse(m.cron_matches(either, dt(2026, 11, 17, 9, 0)))
+        self.assertEqual(m.launchd_intervals(m.parse_cron('30 18 * * 1-5')),
+                         [{'Hour': 18, 'Minute': 30, 'Weekday': d} for d in range(1, 6)])
+        self.assertEqual(len(m.launchd_intervals(either)), 2)
+        for bad in ('30 18 * *', '60 18 * * *', '30 18 * * mon', '*/0 * * * *'):
+            with self.assertRaises(ValueError, msg=bad):
+                m.parse_cron(bad)
+        self.assertEqual(m.parse_window_duration('1h30m'), _dt.timedelta(minutes=90))
+
+    def test_the_speed_file_lives_in_the_runs_own_home(self):
+        self.m._record_reencode_speed(4100.0, 1000.0)
+        self.assertTrue(self.m._reencode_speed_path().startswith(self.m._data_home()))
+        self.assertNotEqual(self.m._data_home(), os.path.expanduser('~'))
+        self.assertAlmostEqual(self.m.reencode_speed() or 0, 4.1)
+
+    # -- mail and the LaunchDaemon --------------------------------------------
+    def test_test_mail_fails_when_the_mail_was_only_queued(self):
+        def run() -> int:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    self.m.cmd_test_mail()
+                except SystemExit as e:
+                    return int(e.code or 0)
+            return -1
+        self.assertEqual(run(), 0)
+        with open(os.path.join(self.stubs, 'mail_rc'), 'w') as f:
+            f.write('75')
+        self.assertEqual(run(), 75, "a queued test mail passed")
+        self.assertEqual(self.lines('mail_calls')[0], 'warn --must-send my-plex test mail')
+
+    def test_test_mail_HELP_sends_nothing(self):
+        """`--test-mail --help` is the help page: before, the mail went out."""
+        conf = os.path.join(self.d, 'my-plex.conf')
+        with open(conf, 'w') as f:
+            f.write(f"MAIL_CMD = {os.path.join(self.stubs, 'my-mail')!r}\n")
+        r = subprocess.run([MAIN_SCRIPT, '--config', conf, '--test-mail', '--help'], capture_output=True,
+                           text=True, timeout=E2E_TIMEOUT, env=dict(os.environ, STUB_DIR=self.stubs))
+        self.assertIn('TEST-MAIL HELP', r.stdout, r.stdout[-500:] + r.stderr[-500:])
+        self.assertEqual(self.lines('mail_calls'), [], "the help sent a mail")
+
+    def test_the_LaunchDaemon_starts_the_launcher_as_root_or_my_plex_as_the_user(self):
+        import getpass
+        user = getpass.getuser()
+        self.m.REENCODE_SCHEDULE = '30 18 * * 1-5'
+        self.m.REENCODE_LAUNCHER = ''
+        plain = self.m.reencode_daemon_plist(user, None)
+        self.assertEqual(plain['UserName'], user)
+        self.assertEqual(plain['ProgramArguments'][1:], ['--reencode', '--resolve', '--yes', '-Q'])
+        self.assertEqual(plain['ProcessType'], 'Background')
+        self.assertEqual(len(plain['StartCalendarInterval']), 5)
+        self.m.REENCODE_LAUNCHER = '/Library/PrivilegedHelperTools/fda-x'
+        fda = self.m.reencode_daemon_plist(user, None)
+        self.assertNotIn('UserName', fda, "a launcher that drops to the user must start as root")
+        self.assertEqual(fda['ProgramArguments'][0], '/Library/PrivilegedHelperTools/fda-x')
+
+
+_LAUNCHCTL_STUB = r'''#!/bin/dash
+echo "$*" >> "$(dirname "$0")/launchctl_calls"
+case $1 in
+  print) [ -f "$(dirname "$0")/loaded" ] ;;
+  bootstrap) touch "$(dirname "$0")/loaded" ;;
+esac
+'''
+
+
+class TestReencodeDaemonInstall(_RootInstallCase):
+    """--install as root writes the reencode LaunchDaemon on the Plex server,
+    loads it, and leaves it alone when nothing changed."""
+
+    def test_written_on_the_server_loaded_and_stable(self):
+        d = tempfile.mkdtemp(prefix='daemon-', dir=self.tmp)
+        launchd = os.path.join(d, 'LaunchDaemons')
+        os.makedirs(launchd)
+        stub = os.path.join(d, 'launchctl')
+        with open(stub, 'w') as f:
+            f.write(_LAUNCHCTL_STUB)
+        os.chmod(stub, 0o755)
+        db = os.path.join(d, 'plex.db')
+        open(db, 'w').close()
+        conf = ("RUN_AS_USER = 'nobody'\n"
+                f"PLEX_DB_PATH = {db!r}\n"
+                "REENCODE_SCHEDULE = '30 18 * * 0,6'\n"
+                "REENCODE_DAEMON_LABEL = 'test.my-plex.reencode'\n"
+                f"EXTERNAL_TOOLS = {{'LOCAL': {{'launchctl': {stub!r}}}, 'SERVER': {{}}}}\n")
+        env = {'MY_PLEX_TEST_LAUNCHD_DIR': launchd}
+        first = self.run_root(conf_lines=conf, env=env)
+        self.assertEqual(first.r.returncode, 0, first.text())
+        plist_path = os.path.join(launchd, 'test.my-plex.reencode.plist')
+        import plistlib
+        with open(plist_path, 'rb') as f:
+            plist = plistlib.load(f)
+        self.assertEqual(plist['UserName'], 'nobody')
+        self.assertEqual(plist['StartCalendarInterval'],
+                         [{'Hour': 18, 'Minute': 30, 'Weekday': 0}, {'Hour': 18, 'Minute': 30, 'Weekday': 6}])
+        self.assertIn('--reencode', plist['ProgramArguments'])
+        calls = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
+        self.assertIn(f'bootstrap system {plist_path}', calls)
+        second = self.run_root(conf_lines=conf, env=env, run_dir=first.d)
+        self.assertEqual(second.r.returncode, 0, second.text())
+        self.assertIn('unchanged, loaded', second.r.stdout)
+        again = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
+        self.assertEqual([c for c in again if not c.startswith('print')],
+                         [c for c in calls if not c.startswith('print')], "the second run reloaded it")
+
+    def test_not_written_where_the_Plex_database_is_not(self):
+        d = tempfile.mkdtemp(prefix='daemon-', dir=self.tmp)
+        run = self.run_root(env={'MY_PLEX_TEST_LAUNCHD_DIR': d})
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('none: the Plex database is not on this machine', run.r.stdout)
+        self.assertEqual(os.listdir(d), [])
+
+
 _UNITTEST_SCOPES = {
     'cache':      [TestAtomicPickleWrites,
                    TestObjTypeHandling, TestCacheResumeWithMultiVersion,
@@ -18955,6 +19516,7 @@ _UNITTEST_SCOPES = {
     'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
     'launcher':           [TestLauncherAndModules],
     'quoting':            [TestRemoteQuoting, TestSqliteHeaderOrder, TestSchemaCheckStopsTheUpdate],
+    'reencode':           [TestReencodeResolve, TestReencodeDaemonInstall],
 }
 
 # List of all unittest classes for run_regression_tests()

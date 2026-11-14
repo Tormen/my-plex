@@ -143,7 +143,9 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **Label management** — add/remove labels with scope support (single item, title, or entire library)
 - **Watch status** — mark watched/unwatched, set view offset
 - **Playlist management** — create, modify, delete playlists
-- **Installing** (`--install`, as root) — the firewall rules my-plex needs and the ssh Host entry it connects through; see [Installing](#installing---install-as-root)
+- **Installing** (`--install`, as root) — the firewall rules my-plex needs and the ssh Host entry it connects through, and on the Plex server the nightly re-encode LaunchDaemon; see [Installing](#installing---install-as-root)
+- **Re-encoding** (`--reencode --resolve`) — encode what is labelled `[reencode]`, checked before it replaces the original, in a nightly window; see [Re-encoding](#re-encoding-what-is-labelled---reencode---resolve)
+- **`--test-mail`** — one mail through `MAIL_CMD`, the call every warning takes; exit 75 when it could only be queued
 
 ### Output control
 - **`-V` / `-VV`** — more detail for the reader; **`-D` / `-DD`** — diagnostics
@@ -163,6 +165,89 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
   or `-D` overrides it, including against a `QUIET` pinned in the config. A
   command that would ask a yes/no question refuses under `-Q` rather than wait
   on an invisible prompt — answer it with `-Y`/`--yes` or `-N`/`--no`.
+
+### Re-encoding what is labelled (`--reencode --resolve`)
+
+`--reencode` lists what needs re-encoding; `--reencode --mark` labels it
+`[reencode]` on disk (a movie folder, a series or season folder, or single
+episode files). `--reencode --resolve [SCOPE]` encodes everything labelled:
+
+- **What it takes:** every video file under a labelled folder, and every
+  labelled file, from the cache's `ondisk_labels_index` -- nothing is read
+  off the disk to find them -- newest download (Plex's `addedAt`) first.
+- **By hand, on any path:** `my-plex --reencode --resolve <PATH>` takes a
+  video file or a folder -- every video file under it, to any depth --
+  labelled or not, and encodes it NOW, ignoring the schedule. The path may
+  be in any of its `ALTERNATIVE_ROOTPATHS` forms.
+- **How:** my-handbrake's `reencode` preset, writing to `<TMP>`, on the Plex
+  server -- here when the Plex database is here (a Full Disk
+  Access launcher's grant reaches no ssh session), else over ssh. `<TMP>` is
+  hidden in the same folder, `.<name>.reencode.UNFINISHED.mkv`, so Plex
+  never picks up a half-written file.
+- **The check before the swap:** the new file's duration matches the
+  original's within 2 seconds, and its last packet reaches its end with no
+  error (ffprobe). A file that fails is trashed; the original stays,
+  labelled, and the failure is printed (`ERROR <code> [1]`) and logged.
+- **The swap:** the checked encode is renamed `.<name>.reencode.DONE.mkv`,
+  the original goes to the trash on the server (never `rm`), and the encode
+  takes the original's name, as `.mkv` and without ` [reencode]`; its
+  `.srt` / `.nfo` follow. In that order, a power cut at any point leaves the
+  original or the checked encode, never neither: the next run trashes a DONE
+  file whose original is still there (and encodes it again), and finishes the
+  swap of one whose original is in the trash. A name already taken by another file stops that
+  file before it is encoded. A labelled folder loses its label at the first
+  file done under it, and the files under it not encoded yet carry the label
+  instead -- so a series cut off by the window is taken up where it stopped.
+- **The cache** follows each swap and is saved at once (temp file + rename),
+  so a cut later in the night loses nothing; Plex rescans the library
+  (`lib.update()`).
+- **The log:** `~/.my-plex/logs/reencode_resolve_<TS>.json`, one record per
+  file (sizes, time, result); my-handbrake's output beside it
+  (`.handbrake.log`).
+
+**The window and the load.** A run with neither `--now` nor a path starts
+new files only inside `REENCODE_SCHEDULE` (cron's five fields: `30 18 * * 1-5`
+is 18:30 Monday to Friday) for `REENCODE_DURATION` (`6h`). A file started
+inside the window runs on to its end, whatever the clock; a sleep suspends
+it and it goes on at the wake. A power cut ends it with no warning -- on a
+machine whose plug cuts the power at night, that is how a late encode
+normally ends -- and the next run's first step takes up what it left, in the
+folders of the files it encodes, where no process has the file open
+(`lsof`): a half-written `.<name>.reencode.UNFINISHED.mkv` is trashed, a
+checked `.DONE.mkv` is handled as above; the original was never touched, keeps
+its label, and is encoded again from the start. SIGTERM -- a restart, a
+`launchctl` stop -- stops the encode: the temp file is trashed, the original
+kept with its label, a record logged (`stopped: SIGTERM`), exit 143. No new file starts while a `Plex Transcoder`
+runs (it looks again every 5 minutes). Each finished file records its speed
+in `~/.my-plex/reencode-speed.json`, which `--try` and the mail use: when the
+window ends with work left, that moment -- not the shutdown -- it mails
+`my-plex: 40 files still [reencode], ~17h left` through `MAIL_CMD`
+(`my-mail warn "<SUBJECT>"`, the body on stdin), and a run's failed files at
+its end. `--test-mail` sends one mail through that very call and fails --
+exit 75 -- when it could only be queued. `--try` prints the plan.
+
+```
+$ my-plex --reencode --resolve --yes
+>>> 3 file(s) labelled [reencode] -- window 18:30-00:30, about 2h10 of work at 4.1x
+>>> Episode:63767 Season 01/une.serie.s01e01 [reencode].mkv  (1.4 GB, 44:02)
+    > done in 10:51 -- 1.4 GB -> 610 MB; checked: duration 44:02 = 44:02, ends cleanly
+    > renamed: une.serie.s01e01.mkv; original trashed; folder label removed: Une Serie (moved onto 1 file(s) not encoded yet)
+    > waiting: Plex is transcoding (Plex Transcoder pid 4711) -- next look 21:15
+...
+>>> SUMMARY: 3 encoded (12.7 GB -> 5.45 GB)
+    > log: ~/.my-plex/logs/reencode_resolve_20261115_183000.json
+```
+
+**The nightly job.** `my-plex --install`, as root on the Plex server, also
+writes and loads the LaunchDaemon `REENCODE_DAEMON_LABEL`: it starts
+`my-plex --reencode --resolve --yes -Q` at every time `REENCODE_SCHEDULE`
+expands to (launchd has no cron syntax: one `StartCalendarInterval` entry
+each), with `ProcessType Background`, so it gives way to Plex and everything
+else. Media on an external volume need Full Disk Access, which a launcher
+holds -- e.g. one built by `my-fda create` to run my-plex as `RUN_AS_USER`,
+granted by `my-fda add`: name it in `REENCODE_LAUNCHER` and the LaunchDaemon starts it,
+as root, and it becomes the user. Unset, the LaunchDaemon starts my-plex as
+`RUN_AS_USER`.
 
 ### Remote Operation
 - **SSH-transparent** — reads and writes episode data on the Plex server via SSH
@@ -415,6 +500,8 @@ A fresh machine, in a root shell. The site config, `/etc/my-plex.conf`, says
  >>> firewall half: 14 rule(s) written, 0 already there (7 remote(s) x 2)
     > a STORED rule is not a MATCHING rule: the proof is the next run
       getting through (my-little-snitch log /opt/homebrew/bin/python3)
+ >>> the reencode LaunchDaemon (my-plex.reencode)
+    > none: the Plex database is not on this machine (PLEX_DB_PATH) -- it runs on the Plex server
 
  >>> dropping to plexuser for the rest -- nothing below this line runs as root
 ```
@@ -592,6 +679,14 @@ PLEX_DB_REMOTE_HOST = 'my-plex'
 # user who ran sudo), and the Plex server's API address, without the token
 RUN_AS_USER = 'plexuser'
 PLEX_API_REMOTE = '192.0.2.10:32400'
+# Site config: when --reencode --resolve, started by the LaunchDaemon
+# --install writes on the Plex server, may start new files (cron's fields);
+# the launcher holding Full Disk Access it starts, when the media need one
+REENCODE_SCHEDULE = '30 18 * * *'
+REENCODE_DURATION = '6h'
+REENCODE_LAUNCHER = '/Library/PrivilegedHelperTools/fda-my-plex'
+# The command line warnings are mailed through (my-plex appends `warn SUBJECT`)
+MAIL_CMD = 'my-mail'
 
 # Site config: the Plex database's path on the server.  No default: a
 # command that reads the database stops without it, naming where to set it;

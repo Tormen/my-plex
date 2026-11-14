@@ -25,11 +25,11 @@ owner here that the tool imports rather than a copy of its own.
 # Error codes: err() takes a five-digit string code ("00042"), UNIQUE per
 # source line, numbered from 00001 in file order with no gap across BOTH
 # files -- this one first, then my_plex.py -- so grepping a code lands on the
-# one line that raised it.  _stamp_fail() and the _media_api_action() callers
-# in my_plex.py share the numbering.  After adding a call (any placeholder
+# one line that raised it.  _stamp_fail(), _reencode_failed() and the
+# _media_api_action() callers in my_plex.py share the numbering.  After adding a call (any placeholder
 # code), renumber both files with one counter (`my-plex --run-tests errcodes`
 # checks the result):
-#   perl -0pi -e 'BEGIN{$n=0} s/(\b(?:err|_stamp_fail)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my_plex_boot.py my_plex.py
+#   perl -0pi -e 'BEGIN{$n=0} s/(\b(?:err|_stamp_fail|_reencode_failed)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my_plex_boot.py my_plex.py
 
 import os
 import subprocess
@@ -508,6 +508,7 @@ def _root_install(launcher: str, argv: "list[str]") -> "NoReturn":
     config = _root_install_config(argv)
     try:
         user, named = tool.install_firewall(config)
+        tool.install_reencode_daemon(user, named)
     except Exception as unexpected:  # the top of root's --install half: one ERROR line, the trace in a file, exit 70
         # Outside the tool's run(), so its bug handler is called here: one
         # ERROR line and a trace file, never a traceback -- and no drop.

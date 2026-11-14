@@ -95,7 +95,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, Callable, Literal, NoReturn, TYPE_CHECKING, TypedDict, cast
+from typing import IO, Any, Callable, Literal, NoReturn, TYPE_CHECKING, TypedDict, cast
 
 import my_plex_boot as _boot
 from my_plex_boot import err
@@ -554,9 +554,11 @@ _my-plex() {
         '--mark[Detect high-bitrate candidates and write on-disk labels (use with --reencode; respects --try)]'
         '--detect[Deprecated alias for --reencode (candidates are now always listed)]'
         '--force[With --reencode --mark: also remove labels from items below threshold]'
+        '--now[With --reencode --resolve: run now, ignoring the window of REENCODE_SCHEDULE]'
+        '--test-mail[Send ONE test mail through MAIL_CMD; exit 75 when it could only be queued]'
         '--scan[Trigger Plex lib.refresh() (re-walk disk on the server) + sync cache. Does NOT re-probe files via ffmpeg — add --force-metadata for that.]'
         '--rename[Rename episode files according to EPISODE_NAME_PATTERN config]'
-        '--resolve[Interactive resolver: duplicates / no-audio-language / unmatched. With --unmatched: year-lookup + bulk rename via TMDB/TVDB]'
+        '--resolve[Interactive resolver: duplicates / no-audio-language / unmatched. With --unmatched: year-lookup + bulk rename via TMDB/TVDB. With --reencode: encode what is labelled]'
         '--auto[Skip interactive prompts in --resolve-style operations: --unmatched --resolve (top hit ≥ UNMATCHED_RESOLVE_AUTO_CONFIDENCE_PCT), --bad-structure --resolve (skip conflict prompts), pipeline phases.]'
         '(--collections --collection)'{--collections,--collection}'[List collections in a library]'
         '--list-labels[List all labels and item counts]'
@@ -573,7 +575,7 @@ _my-plex() {
         '(--remove --rm)'{--remove,--rm}'[Trash media files (optionally specify version indices/ranges)]:indices:'
         '(--delete --del)'{--delete,--del}'[Delete Plex entry (metadata only)]'
         '--run-tests[Run the test suite: FILTER is a scope or part of a test title]:filter:'
-        '--install[As root, write the firewall rules; then, as the user, the ssh Host entry]'
+        '--install[As root, write the firewall rules (and, on the Plex server, the reencode LaunchDaemon); then, as the user, the ssh Host entry]'
         '--version[Print version, released commit and a build id hashed from the launcher and both modules]'
         '--stamp-version[Record the commit this file is released from; analyze only unless go]:go:(go)'
         '(-C --config-file)'{-C,--config-file}'[Config file path]:file:_files'
@@ -1095,7 +1097,8 @@ USER_CONFIG_NAMES = ('.my-plex/my-plex.conf', '.my-plex.conf')
 # nothing in a user's own file -- yet would win there.  Both are refused.
 USER_ONLY_KEYS = frozenset({'PLEX_TOKEN', 'PLEX_XML_URL', 'TVDB_API_KEY', 'TMDB_API_KEY'})
 SITE_ONLY_KEYS = frozenset({'LITTLE_SNITCH_CLI', 'PLEX_DB_REMOTE', 'PLEX_DB_REMOTE_IDENTITY',
-                            'RUN_AS_USER', 'PLEX_API_REMOTE'})
+                            'RUN_AS_USER', 'PLEX_API_REMOTE', 'REENCODE_SCHEDULE',
+                            'REENCODE_DURATION', 'REENCODE_DAEMON_LABEL', 'REENCODE_LAUNCHER'})
 
 
 def _site_farm_paths() -> list[str]:
@@ -1887,6 +1890,21 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # after a successful migration.  False keeps the original alongside.
     'REMUX_TRASH_ORIGINAL': True,
     'REENCODE_EXCLUDE_FILEPATH_CONTAINS': ['_TVOON_DE.'],  # Skip reencode detection for files whose path contains any of these strings
+    # --reencode --resolve: when a run started by the schedule may START new
+    # files -- cron's five fields, and how long from each start.  A file
+    # started inside the window runs on to its end.  Site config only: the
+    # LaunchDaemon --install writes starts at these times.
+    'REENCODE_SCHEDULE': '30 18 * * *',
+    'REENCODE_DURATION': '6h',
+    # The launchd label of that LaunchDaemon.  Site config only.
+    'REENCODE_DAEMON_LABEL': 'my-plex.reencode',
+    # The program the LaunchDaemon starts instead of my-plex itself: a Full
+    # Disk Access launcher that runs my-plex as RUN_AS_USER.  '' = my-plex,
+    # started as RUN_AS_USER.  Site config only.
+    'REENCODE_LAUNCHER': '',
+    # The command LINE a warning is mailed through, split into words; my-plex
+    # appends `warn <SUBJECT>` and writes the body to its stdin.
+    'MAIL_CMD': 'my-mail',
 
     # PROBLEM_CATEGORIES_ENABLED — list of problem-category names to run
     # when `--problems` executes.  Each entry must be registered in
@@ -2651,6 +2669,41 @@ EXAMPLE_CONF = f"""# my-plex configuration file
 #
 # Default:
 # REENCODE_EXCLUDE_FILEPATH_CONTAINS = {CONFIG_DEFAULTS['REENCODE_EXCLUDE_FILEPATH_CONTAINS']!r}
+
+# REENCODE_SCHEDULE / REENCODE_DURATION: when `--reencode --resolve`, started
+# by the schedule (the LaunchDaemon `--install` writes), may START new files:
+# cron's five fields -- minute, hour, day of month, month, day of week;
+# numbers, lists (1,3), ranges (1-5) and steps (*/2) -- and how long from each
+# start ('6h', '90m', '1h30m').  '30 18 * * 1-5' runs Monday to Friday only.
+# A file started inside the window runs on to its end.  SITE config only: the
+# LaunchDaemon is written from them.  '' writes no LaunchDaemon.
+#
+# Default:
+# REENCODE_SCHEDULE = {CONFIG_DEFAULTS['REENCODE_SCHEDULE']!r}
+# REENCODE_DURATION = {CONFIG_DEFAULTS['REENCODE_DURATION']!r}
+
+# REENCODE_DAEMON_LABEL: the launchd label of that LaunchDaemon, and its file
+# name in /Library/LaunchDaemons.  SITE config only.
+#
+# Default:
+# REENCODE_DAEMON_LABEL = {CONFIG_DEFAULTS['REENCODE_DAEMON_LABEL']!r}
+
+# REENCODE_LAUNCHER: the program that LaunchDaemon starts, with my-plex's
+# arguments, instead of my-plex itself -- a launcher holding Full Disk Access
+# that becomes RUN_AS_USER and runs my-plex (needed when the media are on an
+# external volume).  Empty: my-plex itself, started as RUN_AS_USER.  SITE
+# config only.  The default is empty; the value is an example.
+#
+# Example:
+# REENCODE_LAUNCHER = '/Library/PrivilegedHelperTools/fda-my-plex'
+
+# MAIL_CMD: the command LINE warnings are mailed through, split into words
+# like a shell would; my-plex appends `warn "<SUBJECT>"` and writes the body
+# to its stdin -- the call of my-mail.  `--test-mail` sends one through it.
+# A LaunchDaemon's PATH is short: name the program by its path there.
+#
+# Default:
+# MAIL_CMD = {CONFIG_DEFAULTS['MAIL_CMD']!r}
 
 ###############################################################################
 # --problems Category Selection
@@ -3731,6 +3784,11 @@ def _compile_junk_patterns() -> dict[str, tuple[str, re.Pattern[str] | None, int
     _JUNK_PATTERNS_COMPILED = out
     return out
 REENCODE_EXCLUDE_FILEPATH_CONTAINS = CONFIG_DEFAULTS.get('REENCODE_EXCLUDE_FILEPATH_CONTAINS', ['_TVOON_DE.'])
+REENCODE_SCHEDULE            = CONFIG_DEFAULTS['REENCODE_SCHEDULE']
+REENCODE_DURATION            = CONFIG_DEFAULTS['REENCODE_DURATION']
+REENCODE_DAEMON_LABEL        = CONFIG_DEFAULTS['REENCODE_DAEMON_LABEL']
+REENCODE_LAUNCHER            = CONFIG_DEFAULTS['REENCODE_LAUNCHER']
+MAIL_CMD                     = CONFIG_DEFAULTS['MAIL_CMD']
 PROBLEM_CATEGORIES_ENABLED   = CONFIG_DEFAULTS.get('PROBLEM_CATEGORIES_ENABLED', None)
 UNCOLLECTED_MIN_MEMBERS      = CONFIG_DEFAULTS.get('UNCOLLECTED_MIN_MEMBERS', 2)
 UNCOLLECTED_IGNORED_COLLECTION_IDS = CONFIG_DEFAULTS.get('UNCOLLECTED_IGNORED_COLLECTION_IDS', [])
@@ -3919,6 +3977,8 @@ PROBLEM DETECTION:
   --mismatched [SCOPE]     Mismatches: title vs directory + multi-version Plex grouping
   --reencode [SCOPE]       Reencode candidates above bitrate threshold (read-only)
     --mark [--try]         Write (or dry-run) on-disk reencode labels
+    --resolve [PATH] [--now] [--try]
+                           Encode what is labelled [reencode] (or PATH), on the schedule
   SERIES ONLY:
   --unsorted [SCOPE]       Series with episodes not in season subdirs
   --missing [SERIES]       Missing episodes — scraped data vs Plex cache
@@ -4208,6 +4268,7 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print()
             print("COMMAND MODIFIERS:")
             print("  --mark [--try]           With --reencode: write on-disk labels")
+            print("  --resolve [--now]        With --reencode: encode what is labelled (see --help reencode)")
             print("  --plex                   With --renumber: show Plex metadata issues")
             print("  --fix [--try]            With --renumber or --unsorted: apply changes")
             print("  --force                  With --reencode --mark: also remove old labels")
@@ -5855,6 +5916,7 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print()
             print("Usage: my-plex --reencode [LIBRARY]")
             print("       my-plex --reencode [LIBRARY] --mark [--try] [--force]")
+            print("       my-plex --reencode --resolve [SCOPE | PATH...] [--now] [--try] [--yes]")
             print()
             print("Lists media items that NEED REENCODE.  Two reasons trigger inclusion:")
             print()
@@ -5919,6 +5981,46 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("  When AUTO_MARK_ON_DISK = True (default in PROBLEMS2DISK config),")
             print("  --problems also runs detection and marks automatically.")
             print()
+            print("ENCODE (--resolve): every video file labelled [reencode] -- the file, or a")
+            print("  folder above it -- from the cache's on-disk label index, newest Plex")
+            print("  addedAt first.  PATH instead: that file, or every video file under that")
+            print("  folder, labelled or not, now (each in any ALTERNATIVE_ROOTPATHS form).")
+            print("  Each file:  my-handbrake file <FILE> -- encode reencode --output-fn <TMP>")
+            print(f"  on the Plex server (here when its database is here, else over ssh); TMP is")
+            print(f"  hidden beside it: .<name>{REENCODE_TEMP_SUFFIX}")
+            print(f"  The check: duration within {REENCODE_DURATION_TOLERANCE_S:g}s of the original's and a clean end")
+            print("  (ffprobe).  Failed: TMP trashed, the original kept and still labelled.")
+            print("  Passed: the original to the trash, the encode takes its name -- .mkv,")
+            print("  without the label -- and its .srt/.nfo follow.  A labelled folder loses")
+            print("  the label at its first file done; the files under it not done yet carry")
+            print("  it instead.  The cache follows in the same run; Plex rescans the library.")
+            print("  Log: ~/.my-plex/logs/reencode_resolve_<TS>.json (my-handbrake's output")
+            print("  beside it, .handbrake.log).")
+            print()
+            print("THE WINDOW: a run with neither --now nor a PATH starts new files only")
+            print("  inside REENCODE_SCHEDULE (cron's 5 fields) + REENCODE_DURATION.  A file")
+            print("  started runs on to its end, whatever the clock -- a power cut ends it with")
+            print("  no warning.  SIGTERM (a restart, a launchctl stop) or Ctrl-C stops it: TMP")
+            print("  trashed, the original kept, labelled; exit 143/130.")
+            print("  THE SWAP: the checked encode is renamed .<name>.reencode.DONE.mkv, the")
+            print("  original trashed, DONE given its name; the cache is saved after each.")
+            print("  A run first takes up what a cut left (where lsof finds no process): a")
+            print("  half-written TMP is trashed; a DONE file is trashed while its original")
+            print("  is there (encoded again), its swap finished when the original is gone.")
+            print(f"  No new file starts while a `Plex Transcoder` runs: it looks again every")
+            print(f"  {REENCODE_PLEX_WAIT_S // 60} minutes.  When the window ends with work left, it mails --")
+            print('  MAIL_CMD warn "my-plex: N files still [reencode], ~Nh left" -- with the')
+            print("  hours and evenings left at the speed measured here")
+            print("  (~/.my-plex/reencode-speed.json); a failed file is mailed at the end.")
+            print("  --try: the plan, nothing encoded.  --yes: no question.")
+            print()
+            print("THE NIGHTLY JOB: `my-plex --install`, as root on the Plex server, writes")
+            print("  and loads the LaunchDaemon REENCODE_DAEMON_LABEL, starting")
+            print("  `--reencode --resolve --yes -Q` at every time REENCODE_SCHEDULE expands")
+            print("  to, at background priority -- through REENCODE_LAUNCHER, a launcher with")
+            print("  Full Disk Access that becomes RUN_AS_USER, when it is set; else my-plex as")
+            print("  RUN_AS_USER.  See --help install.")
+            print()
             print("CONFIG (in my-plex.conf):")
             print(f"  # Threshold — set ONE or BOTH keys (lower wins if both given):")
             print(f"  REENCODE_THRESHOLD = {{'mbps': {REENCODE_THRESHOLD_MBPS}}}         # Megabits/second (current)")
@@ -5932,6 +6034,12 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print( "  # Delimiters for on-disk labels — any string works (default: [ ])")
             print( "  ONDISK_LABEL_START_MARKER = '['")
             print( "  ONDISK_LABEL_END_MARKER   = ']'")
+            print()
+            print(f"  REENCODE_SCHEDULE     = {REENCODE_SCHEDULE!r}   # current; site config")
+            print(f"  REENCODE_DURATION     = {REENCODE_DURATION!r}")
+            print(f"  REENCODE_DAEMON_LABEL = {REENCODE_DAEMON_LABEL!r}")
+            print(f"  REENCODE_LAUNCHER     = {REENCODE_LAUNCHER!r}")
+            print(f"  MAIL_CMD              = {MAIL_CMD!r}   # see --help test-mail")
             print()
             print( "  PROBLEMS2DISK = {")
             print( "      'reencode': {")
@@ -5951,6 +6059,10 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("  my-plex --reencode lib4 --mark       # Detect + label one library")
             print("  my-plex --reencode --mark --force         # Also remove labels below threshold")
             print("  my-plex --reencode --mark --force --try   # Preview --force without writes")
+            print()
+            print("  my-plex --reencode --resolve --try        # Tonight's plan, nothing encoded")
+            print("  my-plex --reencode --resolve --now --yes  # Encode all labelled, now")
+            print("  my-plex --reencode --resolve /PATH/TO/DIR # Every video file under it, now")
             print()
             print("  my-plex --problems                        # Includes reencode in full report")
             print("  my-plex --update-cache                    # Refresh on-disk label cache")
@@ -7263,6 +7375,29 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("=" * 76)
             sys.exit(0)
 
+        case 'test-mail':
+            print()
+            print("=" * 76)
+            print("TEST-MAIL HELP")
+            print("=" * 76)
+            print()
+            print("Usage: my-plex --test-mail")
+            print()
+            print("Sends ONE mail through exactly the call every warning of my-plex takes")
+            print("(the window's end of --reencode --resolve, a failed encode):")
+            print()
+            print("  <MAIL_CMD> warn --must-send \"my-plex test mail\"     the body on stdin")
+            print()
+            print("with host, user, time and the config files read in the body, and does")
+            print("nothing else.  Exit 0: sent.  Exit 75: only queued or held (it still goes")
+            print("later, but the path did not work now).  Anything else: not sent.")
+            print()
+            print(f"  MAIL_CMD = {MAIL_CMD!r}   (current) -- the command LINE, split into words;")
+            print("  a LaunchDaemon's PATH is short: name the program by its path there.")
+            print()
+            print("=" * 76)
+            sys.exit(0)
+
         case 'install':
             print()
             print("=" * 76)
@@ -7274,6 +7409,11 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print('                           through, as the user root hands over to;')
             print('                           as any other user, the ssh Host entry alone')
             print('                           [needs PLEX_DB_REMOTE]')
+            print()
+            print("On the Plex server (PLEX_DB_PATH is a file here), root's half also")
+            print("writes and loads the LaunchDaemon REENCODE_DAEMON_LABEL that runs")
+            print("`--reencode --resolve` on REENCODE_SCHEDULE (see --help reencode);")
+            print("unchanged and loaded, it is left alone.")
             print()
             print("Everything my-plex connects to, from the one list --install")
             print("writes the rules from:")
@@ -8283,6 +8423,88 @@ def install_firewall(config_file: "str | None" = None) -> "tuple[str, str | None
     return user, named
 
 
+# Where LaunchDaemons live.  A test run writes into the folder it names,
+# never the machine's.
+LAUNCH_DAEMONS_DIR = (os.environ.get('MY_PLEX_TEST_LAUNCHD_DIR', '/nonexistent/LaunchDaemons')
+                      if _TEST_RUN else '/Library/LaunchDaemons')
+
+
+def reencode_daemon_plist(user: str, named: "str | None") -> "dict[str, Any]":
+    """The LaunchDaemon that runs `--reencode --resolve` on the schedule:
+    REENCODE_LAUNCHER (it becomes the user itself) or my-plex as USER, at
+    every time REENCODE_SCHEDULE expands to, at background priority.  Its
+    PATH is this run's: a LaunchDaemon's own finds neither my-handbrake nor
+    ffprobe."""
+    import pwd
+    program = REENCODE_LAUNCHER or _boot.LAUNCHER
+    env = {'PATH': os.environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'}
+    plist: dict[str, Any] = {
+        'Label': REENCODE_DAEMON_LABEL,
+        'ProgramArguments': [program, *(['--config', os.path.abspath(named)] if named else []),
+                             '--reencode', '--resolve', '--yes', '-Q'],
+        'StartCalendarInterval': launchd_intervals(parse_cron(REENCODE_SCHEDULE)),
+        'ProcessType': 'Background',
+        'EnvironmentVariables': env,
+    }
+    if not REENCODE_LAUNCHER:
+        plist['UserName'] = user
+        env['HOME'] = pwd.getpwnam(user).pw_dir
+    return plist
+
+
+def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
+    """--install's root half, on the Plex server: write and load the
+    LaunchDaemon REENCODE_DAEMON_LABEL (reencode_daemon_plist).  Nowhere
+    else -- the encode works on the server's own files -- and not with an
+    empty REENCODE_SCHEDULE.  Unchanged and loaded, it is left alone."""
+    import plistlib
+    print(f" >>> the reencode LaunchDaemon ({REENCODE_DAEMON_LABEL})")
+    if not REENCODE_SCHEDULE.strip():
+        print(f"    > none: REENCODE_SCHEDULE is empty")
+        return
+    if not _plex_db_here():
+        print(f"    > none: the Plex database is not on this machine (PLEX_DB_PATH) -- it runs on the Plex server")
+        return
+    try:
+        parse_window_duration(REENCODE_DURATION)
+        plist = reencode_daemon_plist(user, named)
+    except ValueError as e:
+        err("00040", f"REENCODE_SCHEDULE {REENCODE_SCHEDULE!r} / REENCODE_DURATION {REENCODE_DURATION!r}: {e}"
+                     f" -- no LaunchDaemon written")
+    if REENCODE_LAUNCHER and not os.path.isfile(REENCODE_LAUNCHER):
+        err("00041", f"REENCODE_LAUNCHER {REENCODE_LAUNCHER!r} is not there -- no LaunchDaemon written\n"
+                     f"  build the launcher first, or empty the key to start my-plex itself")
+    data = plistlib.dumps(plist)
+    path = os.path.join(LAUNCH_DAEMONS_DIR, f"{REENCODE_DAEMON_LABEL}.plist")
+    try:
+        with open(path, 'rb') as f:
+            old: "bytes | None" = f.read()
+    except OSError:
+        old = None
+    target = f"system/{REENCODE_DAEMON_LABEL}"
+    shown = run_tool_locally('launchctl', ['print', target])
+    loaded = shown is not None and shown.returncode == 0
+    starts = len(plist['StartCalendarInterval'])
+    if old == data and loaded:
+        print(f"    > {path}: unchanged, loaded  ({starts} start time(s))")
+        return
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, 'wb') as f:
+        f.write(data)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    if loaded:
+        run_tool_locally('launchctl', ['bootout', target])
+    r = run_tool_locally('launchctl', ['bootstrap', 'system', path])
+    if r is None or r.returncode != 0:
+        err("00042", f"launchctl bootstrap system {path} failed [rc {r.returncode if r else '?'}]: "
+                     f"{(r.stderr if r else '').strip()[-300:]}")
+    print(f"    > {path}: {'rewritten' if old is not None else 'written'} and loaded  ({starts} start time(s) from"
+          f" REENCODE_SCHEDULE {REENCODE_SCHEDULE!r})")
+    print(f"    > runs: {shlex.join(plist['ProgramArguments'])}"
+          + ("" if REENCODE_LAUNCHER else f"   (as {user})"))
+
+
 def _little_snitch_remotes() -> list[tuple[str, list[str], str]]:
     """Every remote my-plex connects to: (program, argv tail, why).
 
@@ -8383,7 +8605,7 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
     import datetime as _dt
     alias = (PLEX_DB_REMOTE_HOST or '').strip()
     if not alias or ' ' in alias:
-        err("00040", f"PLEX_DB_REMOTE_HOST = {PLEX_DB_REMOTE_HOST!r} is no ssh alias --"
+        err("00043", f"PLEX_DB_REMOTE_HOST = {PLEX_DB_REMOTE_HOST!r} is no ssh alias --"
                      f" --install writes the Host entry under that name")
     user, host, port = remote
     conf = _ssh_config_file()
@@ -8398,7 +8620,7 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
     if ident:
         print(f"    > key   {ident}   (PLEX_DB_REMOTE_IDENTITY, {_config_origin('PLEX_DB_REMOTE_IDENTITY')})")
         if not os.path.isfile(_ssh_path(ident)):
-            err("00041", f"PLEX_DB_REMOTE_IDENTITY = {ident!r} names no file for {_boot.caller_name()}"
+            err("00044", f"PLEX_DB_REMOTE_IDENTITY = {ident!r} names no file for {_boot.caller_name()}"
                          f" ({_ssh_path(ident)}) -- nothing was written: an entry for a key that is"
                          f" not there only moves the failure to the login.\n"
                          f"Possible reasons:\n"
@@ -8415,12 +8637,12 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
     if found:
         s, e, pats = found[0]
         if len(pats) > 1 or len(found) > 1:
-            err("00042", f"the Host block for {alias!r} in {conf}:{s + 1} names other aliases"
+            err("00045", f"the Host block for {alias!r} in {conf}:{s + 1} names other aliases"
                          f" too ({' '.join(pats)}) -- moving it would change more than my-plex's"
                          f" alias, so nothing was moved or written")
         got = {k: eff.get(k, '') for k in want}
         if got != want:
-            err("00043", f"two answers for the alias {alias!r} -- my-plex picks neither, so nothing"
+            err("00046", f"two answers for the alias {alias!r} -- my-plex picks neither, so nothing"
                          f" in {os.path.dirname(conf)} was moved or written:\n"
                          f"    your block  {got['user']}@{got['hostname']}:{got['port']}   ({conf}:{s + 1})\n"
                          f"    the config  {user}@{host}:{port}   (PLEX_DB_REMOTE, {_config_origin('PLEX_DB_REMOTE')})\n"
@@ -8432,7 +8654,7 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
         theirs = [_ssh_value(ln) for ln in block[1:]
                   if ln.split() and ln.split()[0].lower() == 'identityfile']
         if ident and any(_ssh_path(k) != _ssh_path(ident) for k in theirs):
-            err("00044", f"two answers for the key of {alias!r} -- my-plex picks neither, so nothing"
+            err("00047", f"two answers for the key of {alias!r} -- my-plex picks neither, so nothing"
                          f" in {os.path.dirname(conf)} was moved or written:\n"
                          f"    your block  {' '.join(theirs)}   ({conf}:{s + 1})\n"
                          f"    the config  {ident}   (PLEX_DB_REMOTE_IDENTITY, {_config_origin('PLEX_DB_REMOTE_IDENTITY')})\n"
@@ -8445,7 +8667,7 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
                    and ln.split()[0].lower() not in generated]
         migrated_from = (s, e, block)
     elif resolves and not os.path.exists(ours):
-        err("00045", f"the alias {alias!r} resolves to {eff.get('hostname')}, but from no Host block"
+        err("00048", f"the alias {alias!r} resolves to {eff.get('hostname')}, but from no Host block"
                      f" in {conf} -- from another Include, /etc/ssh/ssh_config or a Match block, which"
                      f" my-plex does not edit.  Nothing was moved or written; remove that entry or"
                      f" set PLEX_DB_REMOTE_HOST to another name.")
@@ -8506,14 +8728,14 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
     eff = _ssh_effective(alias) or {}
     got = {k: eff.get(k, '') for k in want}
     if got != want:
-        err("00046", f"after writing, ssh still resolves {alias!r} to"
+        err("00049", f"after writing, ssh still resolves {alias!r} to"
                      f" {got['user']}@{got['hostname']}:{got['port']}, not {user}@{host}:{port} --"
                      f" something earlier in {conf} answers first")
     # `ssh -G` prints an IdentityFile as written -- `~` unexpanded -- so both
     # sides are expanded the way ssh expands them before they are compared
     offered = _ssh_path(eff.get('identityfile') or '')
     if ident and offered != _ssh_path(ident):
-        err("00047", f"after writing, ssh offers {offered or 'no key'} first for"
+        err("00050", f"after writing, ssh offers {offered or 'no key'} first for"
                      f" {alias!r}, not {_ssh_path(ident)} (PLEX_DB_REMOTE_IDENTITY) -- an IdentityFile"
                      f" earlier in {conf} answers first")
     print(f"    > ssh -G {alias}: {got['user']}@{got['hostname']} port {got['port']}"
@@ -8525,7 +8747,7 @@ def _install_ssh_entry(remote: tuple[str, str, int]) -> Literal['written', 'migr
                        capture_output=True, text=True, timeout=SSH_CONNECT_TIMEOUT + 25)
     print(f" >>> one login through it: ssh {alias} true   [rc {r.returncode}]")
     if r.returncode != 0:
-        err("00048", f"the login through {alias!r} failed [rc {r.returncode}]: "
+        err("00051", f"the login through {alias!r} failed [rc {r.returncode}]: "
                      f"{(r.stderr or '').strip()[-300:]}\n"
                      f"Possible reasons:\n"
                      + (f"  - {user}@{host} does not accept the key {ident} (PLEX_DB_REMOTE_IDENTITY)\n" if ident else
@@ -8786,7 +9008,7 @@ def plex_retry_operation(operation: object, *args: object, context: str | None =
                     error_msg = f"PLEX connection failed after {len(retry_delays) + 1} attempts{ctx}.\n"
                     error_msg += f"Last error: {type(e).__name__}: {str(e)}\n"
                     error_msg += "Please check your PLEX server connection and try again later."
-                    err("00049", error_msg)
+                    err("00052", error_msg)
 
             # Check for shutdown before printing retry message
             if _shutdown_requested:
@@ -9108,7 +9330,7 @@ def load_media_cache(source: dict[str, Any]) -> None:
         if not lib_dict:
             continue
         if any(isinstance(v, dict) for v in lib_dict.values()):
-            err("00050", f"Cache format is outdated (OBJ_BY_LIBRARY has old structure).\n"
+            err("00053", f"Cache format is outdated (OBJ_BY_LIBRARY has old structure).\n"
                       f"Please rebuild: my-plex --update-cache --force-plex")
 
     # Detect missing guid field (added for --unmatched support)
@@ -9366,7 +9588,7 @@ def _load_test_mod() -> ModuleType:
     _path = next((c for c in _tried if os.path.isfile(c)), "")
     _spec = spec_from_file_location("_tests", _path) if _path else None
     if _spec is None or _spec.loader is None:
-        err("00051", "test suite not found -- looked in:\n"
+        err("00054", "test suite not found -- looked in:\n"
                      + "".join(f"    {c}\n" for c in _tried)
                      + "Possible reasons:\n"
                      "  - this copy of my-plex was deployed without its suite; a copy made by\n"
@@ -9408,11 +9630,11 @@ def parse_plex_xml_url(xml_url: str) -> tuple[str, str]:
         token = query_params.get('X-Plex-Token', [None])[0]
 
         if not token:
-            err("00052", "No X-Plex-Token found in the provided XML URL")
+            err("00055", "No X-Plex-Token found in the provided XML URL")
 
         return server_url, token
     except ValueError as e:
-        err("00053", f"Failed to parse Plex XML URL: {e}")
+        err("00056", f"Failed to parse Plex XML URL: {e}")
 
 # Connect to Plex server API
 def ensure_plex_api(required: bool = True) -> Any:
@@ -9424,14 +9646,14 @@ def ensure_plex_api(required: bool = True) -> Any:
     if PLEX_SERVER is not None:
         return PLEX_SERVER
     if OFFLINE:
-        if required: err("00054", "This operation requires the Plex API but --offline mode is active.")
+        if required: err("00057", "This operation requires the Plex API but --offline mode is active.")
         return None
     # A non-required caller does not retry a connect that already failed once
     # in this run; a required one does, so it fails with the real reason.
     if PLEX_URL and PLEX_TOKEN and (required or PLEX_CONNECT_ERROR is None):
         connect_to_plex(PLEX_URL, PLEX_TOKEN, required=required)
     if PLEX_SERVER is None and required:
-        err("00055", "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
+        err("00058", "This operation requires the Plex API but no credentials are configured.\nSet PLEX_URL and PLEX_TOKEN in config file or use --plex-url/--plex-token.")
     return PLEX_SERVER
 
 def _get_active_scan_section_ids(plex: PlexServer) -> set[str]:
@@ -9580,7 +9802,7 @@ def connect_to_plex(plex_url: str, plex_token: str, required: bool = True) -> No
             if DBG: print(f"{DBGPFX}Plex connect failed (not required, continuing): {e}")
             return
         # Never print the token itself: this message reaches terminals, logs and cron mail.
-        err("00056", f"Failed to connect to PLEX Server: {plex_url=} plex_token=<redacted, {len(plex_token)} chars> {PLEX_TIMEOUT=}: {e}")
+        err("00059", f"Failed to connect to PLEX Server: {plex_url=} plex_token=<redacted, {len(plex_token)} chars> {PLEX_TIMEOUT=}: {e}")
 
 
 def get_alternative_paths(path: str, including_path: bool = False, path_2nd: str | None = None) -> list[Any]:
@@ -9753,15 +9975,15 @@ def get_library_stats(supported: bool = True):
 def get_fullID(media_obj: plexapi.video.Video | None, obj_type: str | None = None,
                obj_ratingKey: object = None) -> str:
     if media_obj is None:
-        if obj_type is None: err("00057")      # needed if media_obj is None
-        if obj_ratingKey is None: err("00058") # needed if media_obj is None
+        if obj_type is None: err("00060")      # needed if media_obj is None
+        if obj_ratingKey is None: err("00061") # needed if media_obj is None
     else:
         if obj_type is None: obj_type = _plex_type(media_obj.type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType] -- plexapi: an untyped attribute
         if obj_ratingKey is None: obj_ratingKey = media_obj.ratingKey  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- plexapi: an untyped attribute
     match obj_type:  # like in output of Plex-API :)
         case "Movie" | "Series" | "Season" | "Episode" : return f"{obj_type}_ID:{obj_ratingKey}"
         #case "Media" | "Part"                        : return f"{obj_type}_ID:{obj.id}"
-        case _ : err("00059", f"obj_type={obj_type}")
+        case _ : err("00062", f"obj_type={obj_type}")
 
 
 def obj_needs_updating(obj: plexapi.video.Video, val: MediaRecord | CollectionRecord | None = None, key: str | None = None,
@@ -10425,7 +10647,7 @@ def my_plex_file_operation(operation: Literal['CHECK', 'TRASH', 'RENAME', 'MOVE'
         elif operation == 'RENAME':
             # Rename file/dir in ONE shot: check exists && move && echo success
             new_filename = kwargs.get('new_filename')
-            if not new_filename: err("00060", "RENAME operation requires kwargs['new_filename']")
+            if not new_filename: err("00063", "RENAME operation requires kwargs['new_filename']")
             src_dir = os.path.dirname(filepath)
             dst_path = os.path.join(src_dir, new_filename)
             escaped_dst = shlex.quote(dst_path)
@@ -10528,7 +10750,7 @@ def my_plex_file_operation(operation: Literal['CHECK', 'TRASH', 'RENAME', 'MOVE'
 
         elif operation == 'RENAME':
             new_filename = kwargs.get('new_filename')
-            if not new_filename: err("00061", "RENAME operation requires kwargs['new_filename']")
+            if not new_filename: err("00064", "RENAME operation requires kwargs['new_filename']")
             src_dir = os.path.dirname(filepath)
             dst_path = os.path.join(src_dir, new_filename)
 
@@ -10542,7 +10764,7 @@ def my_plex_file_operation(operation: Literal['CHECK', 'TRASH', 'RENAME', 'MOVE'
 
         elif operation == 'MOVE':
             dest_path = kwargs.get('dest_path')
-            if not dest_path: err("00062", "MOVE operation requires kwargs['dest_path']")
+            if not dest_path: err("00065", "MOVE operation requires kwargs['dest_path']")
             try:
                 shutil.move(filepath, dest_path)
                 if VRB: print(f"{VRBPFX}Moved: {filepath} -> {dest_path}")
@@ -10674,7 +10896,7 @@ def plex_db_path() -> str:
         where += ["--> set it in the site config -- the server's path, the same for every"
                   " user -- most common place first:"]
         where += [f"    > {p}{_offer_note(p)}" for p in site_config_offer_paths()]
-    err("00063", "\n".join([
+    err("00066", "\n".join([
         "PLEX_DB_PATH is empty -- this command reads the Plex database, and its path"
         " on the server is not set", *where,
         f"    e.g. PLEX_DB_PATH = {PLEX_DB_PATH_EXAMPLE!r}   (a macOS server's standard path)"]))
@@ -17162,7 +17384,7 @@ def cmd_pipeline(name: str, scope: str | None = None, dry_run: bool = False, yes
     """
     import subprocess as _sp
     if name not in PIPELINES:
-        err("00064", f"Unknown pipeline '{name}'. Available: {sorted(PIPELINES)}")
+        err("00067", f"Unknown pipeline '{name}'. Available: {sorted(PIPELINES)}")
     phases = PIPELINES[name]
     if not phases:
         print(f">>> Pipeline {name!r} is empty — nothing to do.")
@@ -17185,7 +17407,7 @@ def cmd_pipeline(name: str, scope: str | None = None, dry_run: bool = False, yes
     for i, phase_v in enumerate(phases, 1):
         phase: PlainData = phase_v
         if not isinstance(phase, (list, tuple)) or not phase:
-            err("00065", f"Pipeline {name!r} phase #{i}: expected non-empty list of CLI tokens, got {phase!r}")
+            err("00068", f"Pipeline {name!r} phase #{i}: expected non-empty list of CLI tokens, got {phase!r}")
         cli_head = phase[0]
         argv: list[str] = _scope_args + list(phase)
         if dry_run and cli_head in DRY_RUN_AWARE and '--try' not in argv and '--dry-run' not in argv:
@@ -17223,7 +17445,7 @@ def cmd_original_languages(target: str | None = None, dry_run: bool = False) -> 
         dry_run: print what would be fetched, no API calls, no cache writes.
     """
     if not TMDB_API_KEY:
-        err("00066", "--original-languages requires TMDB_API_KEY in config.\n"
+        err("00069", "--original-languages requires TMDB_API_KEY in config.\n"
                   "  Sign up at https://www.themoviedb.org/settings/api (free)\n"
                   "  then add: TMDB_API_KEY = 'your-bearer-token-here' to your config.")
 
@@ -17660,12 +17882,12 @@ def cmd_unrecognized(target: str | None = None) -> tuple[int, int, int]:
     library_stats = CACHE.get('library_stats', {})
     locations_by_lib = library_stats.get('locations', {})
     if not locations_by_lib:
-        err("00067", "--unrecognized: no library rootpaths in cache.\n  Run --update-cache first.")
+        err("00070", "--unrecognized: no library rootpaths in cache.\n  Run --update-cache first.")
 
     if target:
         if target not in PLEX_Library.OBJ_DICT:
             available = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-            err("00068", f"--unrecognized: library '{target}' not found.\n\nAvailable libraries: {available}")
+            err("00071", f"--unrecognized: library '{target}' not found.\n\nAvailable libraries: {available}")
         libraries = [target]
     else:
         libraries = sorted(PLEX_Library.OBJ_DICT.keys())
@@ -17763,7 +17985,7 @@ def format_duration(duration_ms: Any, unit: str = 'm') -> float:  # Any: --info 
     elif unit_lower in ['h', 'hours']:
         return round(duration_ms / 3600000, 2)
     else:
-        err("00069", f"Invalid duration unit '{unit}'. Must be 's'/'seconds', 'm'/'minutes', or 'h'/'hours'")
+        err("00072", f"Invalid duration unit '{unit}'. Must be 's'/'seconds', 'm'/'minutes', or 'h'/'hours'")
 
 def get_media_language(obj: MediaRecord | CollectionRecord) -> str:
     """Get 2-letter language code from a media object.
@@ -21286,7 +21508,7 @@ def resolve_scope_to_keys(scope_val: str | list[str] | tuple[str, ...] | bool | 
         return (obj_keys, None, f" for '{scope_val}'")
 
     # Nothing found
-    err("00070", f"'{scope_val}' is not a library name and could not be resolved as a media identifier.\n"
+    err("00073", f"'{scope_val}' is not a library name and could not be resolved as a media identifier.\n"
               f"  Possible reasons:\n"
               f"  - Typo in the name or cache key\n"
               f"  - Item not in cache (run --update-cache)\n"
@@ -21443,7 +21665,7 @@ def add_movie_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, v
             if key not in PLEX_Media.OBJ_BY_MOVIE: PLEX_Media.OBJ_BY_MOVIE[key] = {}
             # Store filepath with version for multi-version duplicate detection
             PLEX_Media.OBJ_BY_MOVIE[key][version] = filepath
-        case _: err("00071", f"obj = {obj}")
+        case _: err("00074", f"obj = {obj}")
     return val
 
 def add_series_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, item: PlexObject, season: PlexObject, episode: PlexObject, version: str, lib_title: str | None = None) -> MediaRecord:
@@ -21472,7 +21694,7 @@ def add_series_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, 
                 PLEX_Media.OBJ_BY_SERIES_EPISODES[series_key][S_str][E_str][version].append( key )
         case "Season":
             if series_key not in PLEX_Media.OBJ_BY_SERIES: PLEX_Media.OBJ_BY_SERIES[series_key] = {}
-            if S_str in PLEX_Media.OBJ_BY_SERIES and PLEX_Media.OBJ_BY_SERIES[series_key][S_str] is not None: err("00072", f"obj = {obj}")  # pyright: ignore[reportUnnecessaryComparison]  # suspected bug: tests S_str against the SERIES keys, see the report
+            if S_str in PLEX_Media.OBJ_BY_SERIES and PLEX_Media.OBJ_BY_SERIES[series_key][S_str] is not None: err("00075", f"obj = {obj}")  # pyright: ignore[reportUnnecessaryComparison]  # suspected bug: tests S_str against the SERIES keys, see the report
             PLEX_Media.OBJ_BY_SERIES[series_key][S_str] = key
             episode = None # to avoid that we add stuff about it to 'val'
         case "Series":
@@ -21480,10 +21702,10 @@ def add_series_info(val: MediaRecord, obj: PlexObject, obj_type: str, key: str, 
             val['genres']        = _normalize_genres(plex_retry_operation(lambda: [g.tag for g in obj.genres], context=f"{key} '{title}' genres", library=lib_title))
             val['contentRating'] = plex_retry_operation(lambda: obj.contentRating, context=f"{key} '{title}' contentRating", library=lib_title)
             val['studio']        = plex_retry_operation(lambda: obj.studio, context=f"{key} '{title}' studio", library=lib_title)
-            if key != series_key: err("00073", f"key='{key}', series_key='{series_key}'")
+            if key != series_key: err("00076", f"key='{key}', series_key='{series_key}'")
             if key not in PLEX_Media.OBJ_BY_SERIES: PLEX_Media.OBJ_BY_SERIES[ key ] = {}
             (season, episode) = (None, None) # to avoid that we add stuff about them to 'val'
-        case _: err("00074", f"obj_type = '{obj_type}', obj = {obj}")
+        case _: err("00077", f"obj_type = '{obj_type}', obj = {obj}")
 
     (val['series'], val['series_key']) = (item.title, series_key)
     if season is not None:
@@ -21588,7 +21810,7 @@ def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexO
                         if DBG: print(f"{DBGPFX}Wrote DUPLICATE with uuid:'{uuid}' to '{DUPLICATE_FILE}'")
                         return
                 except OSError as e:
-                    err("00075", f"Error wrinting to DUPLICATE_FILE '{DUPLICATE_FILE}': {e}")
+                    err("00078", f"Error wrinting to DUPLICATE_FILE '{DUPLICATE_FILE}': {e}")
 
     (media_id, part_id) = (media.id, part.id)
     match obj_type:
@@ -21601,11 +21823,11 @@ def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexO
             #(media_id, part_id)              = (media.id, part.id) # media_idx, media_cnt, part_idx, part_cnt stay as they are as they are relevant
             if media_cnt > 1: media_type_str = media_type_str + "*"
         #case "Media" | "Part"     : (media_type, media_type_str) = (obj_type, obj_type)
-        case _ : err("00076", f"obj_type={obj_type}")
+        case _ : err("00079", f"obj_type={obj_type}")
 
     # check optional parameters:
-    if season is not None and episode is None: err("00077")
-    if season is None and episode is not None: err("00078")
+    if season is not None and episode is None: err("00080")
+    if season is None and episode is not None: err("00081")
     if filepath is None: filepath = os.path.normpath( part.file ) # default value - good for type "Movie"/"Movie*" and "Episode"/"Episode*":
 
     # PERFORMANCE OPTIMIZATION: Batch-load all properties with a single API call
@@ -21699,7 +21921,7 @@ def add_media_obj_via_PLEX_API(obj: PlexObject, library: PlexObject, item: PlexO
     match obj_type:
         case "Episode" | "Season" | "Series":  val = add_series_info(val, obj, obj_type, key, item, season, episode, version, lib_title)
         case "Movie":                         val = add_movie_info(val, obj, obj_type, key, version, filepath, lib_title)
-        case _: err( "00079", f"UNSUPPORTED obj.type '{obj_type}' for add_media_obj_via_PLEX_API()" )
+        case _: err( "00082", f"UNSUPPORTED obj.type '{obj_type}' for add_media_obj_via_PLEX_API()" )
 
     if DBG:
         match media_type_str:
@@ -23102,7 +23324,7 @@ def _process_series_from_database(series_data_all: dict[str, DbSeries], library_
                     if len(path) > len(lib_root):  # longest match wins
                         lib_root = path
             if not lib_root:
-                err("00080", f"Cannot determine library root for series '{series_info['title']}' in library '{library_name}'.\n"
+                err("00083", f"Cannot determine library root for series '{series_info['title']}' in library '{library_name}'.\n"
                     f"  Episode path: {first_episode_filepath}\n"
                     f"  PATHS_DICT keys: {list(PLEX_Library.PATHS_DICT.keys())}\n"
                     f"Possible reasons:\n"
@@ -23113,7 +23335,7 @@ def _process_series_from_database(series_data_all: dict[str, DbSeries], library_
             remainder = first_episode_filepath[len(lib_root):].lstrip('/')
             series_subdir = remainder.split('/')[0] if '/' in remainder else ''
             if not series_subdir:
-                err("00081", f"Cannot extract series directory from episode path for '{series_info['title']}' in library '{library_name}'.\n"
+                err("00084", f"Cannot extract series directory from episode path for '{series_info['title']}' in library '{library_name}'.\n"
                     f"  Episode path: {first_episode_filepath}\n"
                     f"  Library root: {lib_root}\n"
                     f"  Remainder after root: '{remainder}'\n"
@@ -23750,7 +23972,7 @@ def update_movie_library_objs(library: Any, library_idx: int = 0, total_librarie
 
     # No API fallback — DB is the only data source for --update-cache
     if all_movies is None:
-        err("00082", f"Database fetch failed for movie library '{library_name}'. Check DB access (SSH or local).")
+        err("00085", f"Database fetch failed for movie library '{library_name}'. Check DB access (SSH or local).")
 
     return _process_movies_from_database(all_movies, library_name, library_idx, total_libraries, start_idx, end_idx)
 
@@ -23793,7 +24015,7 @@ def update_series_library_objs(library: Any, library_idx: int = 0, total_librari
 
     # No API fallback — DB is the only data source for --update-cache
     if series_data_all is None:
-        err("00083", f"Database fetch failed for series library '{library_name}'. Check DB access (SSH or local).")
+        err("00086", f"Database fetch failed for series library '{library_name}'. Check DB access (SSH or local).")
 
     return _process_series_from_database(series_data_all, library_name, library_idx, total_libraries, start_idx, end_idx)
 
@@ -23854,7 +24076,7 @@ def get_media_list_from_PLEX_OBJ_list( obj_list: list[MediaRecord | CollectionRe
             case "Episode":  print(f"File '{obj['file']}' found as episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")  # pyright: ignore[reportTypedDictNotRequiredAccess] -- every Episode builder writes 'series'
             case "Episode*": print(f"File '{obj['file']}' found as part {obj['part_id']} of media {obj['media_id']} of episode {obj['S_str']}{obj['E_str']} as part of series '{obj['series']}' ({obj['year']})")  # pyright: ignore[reportUnnecessaryComparison] -- 'Episode*' is a type_str, never a type: suspected bug, see the report
             case _:
-                err( "00084", "Unknown obj['type'] '{obj['type']}'.")
+                err( "00087", "Unknown obj['type'] '{obj['type']}'.")
         mediae.append( media )
     return mediae
 
@@ -23881,7 +24103,7 @@ def resolve_plex_media_obj(media_identifier: str, library_name: str | None = Non
     mediae: list[Any] = []   # plexapi objects of several classes (Media, Movie, Episode, ...)
 
     if DBG: print(f"{DBGPFX}resolve_plex_media_obj( media_identifier='{media_identifier}', library='{library_name}')")
-    if media_identifier is None: err("00085", "This should never be. Please contact maintainer.")  # pyright: ignore[reportUnnecessaryComparison] -- dead since the parameter is a str; stays until the err codes are renumbered (they run without gaps)
+    if media_identifier is None: err("00088", "This should never be. Please contact maintainer.")  # pyright: ignore[reportUnnecessaryComparison] -- dead since the parameter is a str; stays until the err codes are renumbered (they run without gaps)
 
 
 
@@ -24278,7 +24500,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         # Validate cache format
         if old_counts and not isinstance(old_counts, dict):  # pyright: ignore[reportUnnecessaryIsInstance] -- the counts come from the pickle payload unchecked (update_cache reads CACHE['library_object_counts']); this is their shape check
             print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
-            err("00086", f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
+            err("00089", f"Invalid cache format for library '{title:<22s}': expected dict, got {type(old_counts).__name__}. Run with --update-cache --force-plex to fix.")
 
         # For series libraries: compare series count AND episode count to detect new episodes
         # in existing series (series count alone won't change when episodes are added)
@@ -24384,7 +24606,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 case 'movie':   result = update_movie_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
                 case 'show':    result = update_series_library_objs(library, library_idx, total_libraries, start_idx, end_idx)
                 case 'artist':  pass
-                case _:         err("00087", f"UNSUPPORTED library.type '{library.type}'. Please check your parameters. If you believe this is a bug, please reach out to maintainer of this software.")
+                case _:         err("00090", f"UNSUPPORTED library.type '{library.type}'. Please check your parameters. If you believe this is a bug, please reach out to maintainer of this software.")
             # Check if library processing was interrupted
             if library.type in ('movie', 'show') and result is False:
                 completed = False  # Library was interrupted, not completed
@@ -24842,7 +25064,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             if not validate_plex_database_schema():
                 # Fatal: a `return` here let the run go on to "Cache update
                 # complete: no changes" and exit 0 with nothing read.
-                err("00088", "Plex database schema validation failed (the lines above) -- "
+                err("00091", "Plex database schema validation failed (the lines above) -- "
                     "cannot update the cache; report it with your Plex version")
 
             # FETCH LIBRARIES FROM DATABASE
@@ -24851,7 +25073,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             try:
                 libraries = get_library_sections_from_database()
                 if libraries is None:
-                    err("00089", "Failed to fetch libraries from Plex database.")
+                    err("00092", "Failed to fetch libraries from Plex database.")
                 if DBG: print(f"{DBGPFX}update_cache(): Found {len(libraries)} libraries in database")
 
                 # Clear and repopulate OBJ_DICT
@@ -24922,9 +25144,9 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                                     print(f"  --scan: Resolved {candidate} → library '{lib_name}'")
                                 break
                         else:
-                            err("00090", f"--scan: ID {candidate} not found in cache. Run --update-cache first or check the ID.")
+                            err("00093", f"--scan: ID {candidate} not found in cache. Run --update-cache first or check the ID.")
                     except ValueError:
-                        err("00091", f"--scan: Invalid ID format '{candidate}'. Expected 'ID:12345'.")
+                        err("00094", f"--scan: Invalid ID format '{candidate}'. Expected 'ID:12345'.")
                     continue
                 # Full cache key like Episode:12345
                 if candidate in PLEX_Media.OBJ_BY_ID:
@@ -24945,7 +25167,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     continue
                 # Unknown — error
                 available = ', '.join(sorted(PLEX_Library.OBJ_DICT_SUPPORTED.keys()))
-                err("00092", f"--scan: '{candidate}' is not a known library, Plex ID, or file path.\n\nAvailable libraries: {available}\nTo scan by ID, use: my-plex ID:12345 --scan")
+                err("00095", f"--scan: '{candidate}' is not a known library, Plex ID, or file path.\n\nAvailable libraries: {available}\nTo scan by ID, use: my-plex ID:12345 --scan")
             SCAN_LIBRARIES = list(resolved_libraries)
             if DBG: print(f"{DBGPFX}update_cache(): --scan resolved SCAN_LIBRARIES={SCAN_LIBRARIES}")
 
@@ -24974,7 +25196,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 for lib_name in SCAN_LIBRARIES:
                     if lib_name not in api_libraries:
                         available = ', '.join(sorted(api_libraries.keys()))
-                        err("00093", f"Library '{lib_name}' not found for --scan.\n\nAvailable libraries: {available}")
+                        err("00096", f"Library '{lib_name}' not found for --scan.\n\nAvailable libraries: {available}")
                 api_libraries = {name: lib for name, lib in api_libraries.items() if name in SCAN_LIBRARIES}
 
             print(f"\n{'='*76}")
@@ -25104,7 +25326,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                 # Validate cache format - must be dict with type counts
                 if not isinstance(counts, dict):  # pyright: ignore[reportUnnecessaryIsInstance] -- read from the pickle payload unchecked, a few lines up; this is its shape check
                     print("ERROR: Cache has old format. Please rebuild cache with: my-plex --update-cache --force-plex", file=sys.stderr)
-                    err("00094", f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
+                    err("00097", f"Invalid cache format for library '{lib:<22s}': expected dict, got {type(counts).__name__}. Run with --update-cache --force-plex to fix.")
                 count_str = ', '.join([f"{k}={v}" for k, v in counts.items()])
                 print(f"{DBGPFX}  Library '{lib}': {count_str}")
 
@@ -25643,7 +25865,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
         if close_matches:
             suggestions = ', '.join(f"'{lib}'" for lib in close_matches)
             available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-            err("00095", f"Library '{obj}' not found. Did you mean: {suggestions}?\n\nAvailable libraries: {available_libs}")
+            err("00098", f"Library '{obj}' not found. Did you mean: {suggestions}?\n\nAvailable libraries: {available_libs}")
 
         return False
 
@@ -25693,7 +25915,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj  # obj is the library name string
             lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             if lib_type != 'Series':
-                err("00096", f"--missing is only supported for series libraries ('{lib_name}' is type '{lib_type}').\n"
+                err("00099", f"--missing is only supported for series libraries ('{lib_name}' is type '{lib_type}').\n"
                     "  Use --missing with a series library or a specific series.")
             lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
             series_keys = lib_data.get('Series', [])
@@ -25709,7 +25931,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             lib_name = obj  # obj is the library name string
             lib_type = PLEX_Library.OBJ_DICT_TYPE.get(lib_name, '')
             if lib_type != 'Series':
-                err("00097", f"--rename is only available for Series libraries, not {lib_type} (library '{lib_name}')")
+                err("00100", f"--rename is only available for Series libraries, not {lib_type} (library '{lib_name}')")
             else:
                 lib_data = PLEX_Media.OBJ_BY_LIBRARY.get(lib_name, {})
                 series_keys = lib_data.get('Series', [])
@@ -25805,7 +26027,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             for media in results:
                 print(f"- {media.title} ({media.year}) [{media.type}]")
         except PLEX_ERRORS as e:
-            err("00098", f"Error in advanced search: {e}")
+            err("00101", f"Error in advanced search: {e}")
 
     @staticmethod
     def get_PATHS_DICT() -> dict[str, list[str]]:
@@ -25872,7 +26094,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
             for collection in library.collections():
                 print(f"- {collection.title}")
         except PLEX_ERRORS as e:
-            err("00099", f"Error listing collections: {e}")
+            err("00102", f"Error listing collections: {e}")
 
     @staticmethod
     def create(collection_name: str, library_name: str) -> None:
@@ -25886,7 +26108,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
         try:
             _collection = plex.library.collection(collection_name)   # raises when there is none
         except PLEX_ERRORS:
-            err("00100", f"Collection with name '{collection_name}' not found.")
+            err("00103", f"Collection with name '{collection_name}' not found.")
 
         for identifier in media_identifiers:
             for media in resolve_plex_media_obj(identifier):
@@ -25904,7 +26126,7 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
                     media.removeCollection(collection_name)
                     print(f"Media '{media.title}' removed from collection '{collection_name}'.")
         except PLEX_ERRORS as e:
-            err("00101", f"Error removing media from collection: {e}")
+            err("00104", f"Error removing media from collection: {e}")
 
 
 ###########################################################################################
@@ -26289,7 +26511,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         versions = []
                         S_count = 0
                         E_count = 0
-                case _: err("00102", f"obj['type'] = '{obj['type']}'")
+                case _: err("00105", f"obj['type'] = '{obj['type']}'")
 
             # ... to update PLEX_Media.OBJ_BY_ID[ key ]:
             match obj['type']:
@@ -26300,7 +26522,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     (obj['S_count'], obj['E_count'], obj['versions']) = (S_count, E_count, versions)
                 case "Movie":
                     obj['versions'] = versions
-                case _: err("00103", f"obj['type'] = '{obj['type']}'")
+                case _: err("00106", f"obj['type'] = '{obj['type']}'")
             PLEX_Media.OBJ_BY_ID[ key ] = obj
 
         if DEEPDBG: print_var(PLEX_Media.OBJ_BY_ID, var_name="PLEX_Media.OBJ_BY_ID", prefix=f"{DBGPFX}", intro=None, width=100, depth=None)
@@ -27170,7 +27392,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     @staticmethod
     def execute_cmd(args: argparse.Namespace, obj: str, obj_args: argparse.Namespace) -> None:  # Handling action(s) on media
         if obj_args.delete and not obj_args.remove:
-            err("00104", "--del requires --rm (Plex API delete also removes files from disk).\n"
+            err("00107", "--del requires --rm (Plex API delete also removes files from disk).\n"
                 "  Use --rm --del to explicitly confirm file removal.\n"
                 "  See --help del for details.")
         if obj_args.info:               PLEX_Media.get_info(obj)
@@ -27296,12 +27518,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         else:
             found_items: list[_CacheItem] = resolve_cache_items(media_identifier)
             if not found_items:
-                err("00105", f"No items found matching '{media_identifier}'")
+                err("00108", f"No items found matching '{media_identifier}'")
             if len(found_items) > 1:
                 # Multiple matches — filter to Series/Season/Episode only
                 series_items = [(k, o) for k, o in found_items if o.get('type') in ('Series', 'Season', 'Episode')]
                 if not series_items:
-                    err("00106", f"Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type")
+                    err("00109", f"Found {len(found_items)} items matching '{media_identifier}', but none are Show, Season, or Episode type")
                 if len(series_items) > 1:
                     # Multiple series/episodes — check if there's exactly one Series
                     series_matches = [(k, o) for k, o in series_items if o.get('type') == 'Series']
@@ -27322,7 +27544,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         obj_library = obj.get('library', '')
         lib_type = PLEX_Library.OBJ_DICT_TYPE.get(obj_library, '')
         if lib_type != 'Series':
-            err("00107", f"--rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'")
+            err("00110", f"--rename is only available for objects in Series libraries, not {lib_type} library '{obj_library}'")
 
         pattern = EPISODE_NAME_PATTERN
 
@@ -27345,7 +27567,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         elif obj['type'] == 'Episode':
             episode_keys = [key]
         else:
-            err("00108", f"--rename cannot operate on {obj['type']} objects (no episode files)")
+            err("00111", f"--rename cannot operate on {obj['type']} objects (no episode files)")
 
         renamed_count = 0
         skipped_count = 0
@@ -27979,9 +28201,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if media_type in ("Series", "Show"):  # "Show" accepted as synonym
                 media_type = "Series"
         if media_type is not None and media_type not in ["Series", "Movie"]:
-            err("00109", f"UNSUPPORTED media_type '{media_type}'. Valid types: movie, series (or show).")
+            err("00112", f"UNSUPPORTED media_type '{media_type}'. Valid types: movie, series (or show).")
         if library_name is not None and library_name not in PLEX_Media.OBJ_BY_LIBRARY.keys():
-            err("00110", f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
+            err("00113", f"library_name='{library_name}', PLEX_Media.OBJ_BY_LIBRARY.keys() = {PLEX_Media.OBJ_BY_LIBRARY.keys()}")
         if library_name is None and not media_type and not duplicates_only and not broken_only and not watched_only and not unwatched_only and not audio_filter and not no_audio_language and not excess_versions:
             PLEX_Library.print()
             return audio_filter, media_type, False  # False = should not continue
@@ -33960,7 +34182,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     case 'MULTI_EPISODE_SIBLINGS': label = '' if labeled else ''
                     case 'FILE_SEGMENTS':       label = 'SEGMENT:' if labeled else ''
                     case 'FILE_SEGMENT_WORDS':  label = 'SEGWORDS:' if labeled else ''
-                    case _:                     err("00111", f"Unknown list type (k={k})")
+                    case _:                     err("00114", f"Unknown list type (k={k})")
                 v = (label if len(v_list)>0 else'') + (','+label).join(str(x) for x in v_list)
             else:
                 if labeled: v = f"{k}:{v}"
@@ -33983,7 +34205,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             print( format_str.format(**var) )
         except KeyError as e:
-            err("00112", f"You used an invalid variable name '{e.args[0]}' in the format string. See --format for more info.")
+            err("00115", f"You used an invalid variable name '{e.args[0]}' in the format string. See --format for more info.")
 
     @staticmethod
     def print_OBJ_BY_ID___pretty( key: str ) -> None:
@@ -34099,7 +34321,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 media.refresh()
                 print(f"Refreshed '{media.title}'.")
         except PLEX_ERRORS as e:
-            err("00113", f"Error refreshing media: {e}")
+            err("00116", f"Error refreshing media: {e}")
 
     @staticmethod
     def delete(media_identifier: str, library_name: str | None = None) -> None:
@@ -34123,7 +34345,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     if mid:
                         PLEX_Media._remove_from_cache_by_id(int(mid))
         except PLEX_ERRORS as e:
-            err("00114", f"Error deleting media: {e}")
+            err("00117", f"Error deleting media: {e}")
 
     @staticmethod
     def _remove_from_cache_by_id(numeric_id: int) -> None:
@@ -34206,15 +34428,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         start, end = part.split('-', 1)
                         start, end = int(start), int(end)
                         if start < 1 or end < start:
-                            err("00115", f"Invalid range '{part}' in --rm (must be START-END with START >= 1)")
+                            err("00118", f"Invalid range '{part}' in --rm (must be START-END with START >= 1)")
                         rm_indices.update(range(start, end + 1))
                     else:
                         idx = int(part)
                         if idx < 1:
-                            err("00116", f"--rm indices must be >= 1, got: {idx}")
+                            err("00119", f"--rm indices must be >= 1, got: {idx}")
                         rm_indices.add(idx)
             except ValueError:
-                err("00117", f"--rm requires comma-separated numbers/ranges (e.g. --rm 2-25 or --rm 2,5,8), got: '{rm_spec}'")
+                err("00120", f"--rm requires comma-separated numbers/ranges (e.g. --rm 2-25 or --rm 2,5,8), got: '{rm_spec}'")
 
         # Find matching items in cache
         found_items: list[tuple[str, MediaRecord | CollectionRecord]] = []
@@ -34240,7 +34462,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         break
 
         if not found_items:
-            err("00118", f"Cannot remove: no cached item found for '{media_identifier}'")
+            err("00121", f"Cannot remove: no cached item found for '{media_identifier}'")
 
         # File paths in cache are from the Plex server's perspective.
         # Always use SSH to the Plex server for file operations — do NOT use
@@ -34260,7 +34482,7 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 max_idx = len(files_dict)
                 invalid = [i for i in rm_indices if i > max_idx]
                 if invalid:
-                    err("00119", f"--rm index {','.join(str(i) for i in sorted(invalid))} out of range (entry has {max_idx} version{'s' if max_idx != 1 else ''})")
+                    err("00122", f"--rm index {','.join(str(i) for i in sorted(invalid))} out of range (entry has {max_idx} version{'s' if max_idx != 1 else ''})")
 
             removed_versions: list[tuple[str, str]] = []
             for idx, (version, file_info) in enumerate(files_dict.items(), 1):
@@ -34335,47 +34557,47 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             print(f"Watched status of '{media.title}': {'Watched' if media.isWatched else 'Unwatched'}")
             print(f"Last viewed at: {media.lastViewedAt if media.isWatched else 'N/A'}")
             print(f"View count: {media.viewCount}")
-        PLEX_Media._media_api_action(media_identifier, action, "00120", "Error fetching watched status", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00123", "Error fetching watched status", library_name)
 
     @staticmethod
     def set_watched(media_identifier: str, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.markWatched(); print(f"Media '{media.title}' marked as watched.")
-        PLEX_Media._media_api_action(media_identifier, action, "00121", "Error setting watched status", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00124", "Error setting watched status", library_name)
 
     @staticmethod
     def set_unwatched(media_identifier: str, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.markUnwatched(); print(f"Media '{media.title}' marked as unwatched.")
-        PLEX_Media._media_api_action(media_identifier, action, "00122", "Error setting unwatched status", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00125", "Error setting unwatched status", library_name)
 
     @staticmethod
     def set_watched_date(media_identifier: str, watched_date: datetime, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.markWatched(); media.lastViewedAt = watched_date; media.save(); print(f"Watched date set to {watched_date} for '{media.title}'.")
-        PLEX_Media._media_api_action(media_identifier, action, "00123", "Error setting watched date", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00126", "Error setting watched date", library_name)
 
     @staticmethod
     def set_view_offset(media_identifier: str, offset: int, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.updateProgress(viewOffset=offset, viewCount=media.viewCount); print(f"View offset set to {offset} milliseconds for '{media.title}'.")
-        PLEX_Media._media_api_action(media_identifier, action, "00124", "Error setting view offset", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00127", "Error setting view offset", library_name)
 
     @staticmethod
     def get_view_offset(media_identifier: str, library_name: str | None = None) -> None:
         def action(media: Any) -> None: print(f"Current view offset of '{media.title}': {media.viewOffset} milliseconds.")
-        PLEX_Media._media_api_action(media_identifier, action, "00125", "Error fetching view offset", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00128", "Error fetching view offset", library_name)
 
     @staticmethod
     def get_user_rating(media_identifier: str, library_name: str | None = None) -> None:
         def action(media: Any) -> None: print(f"User rating of '{media.title}': {media.userRating if media.userRating is not None else 'N/A'}")
-        PLEX_Media._media_api_action(media_identifier, action, "00126", "Error fetching user rating", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00129", "Error fetching user rating", library_name)
 
     @staticmethod
     def set_user_rating(media_identifier: str, rating: float, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.userRating = rating; media.save(); print(f"User rating set to {rating} for '{media.title}'.")
-        PLEX_Media._media_api_action(media_identifier, action, "00127", "Error setting user rating", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00130", "Error setting user rating", library_name)
 
     @staticmethod
     def clear_user_rating(media_identifier: str, library_name: str | None = None) -> None:
         def action(media: Any) -> None: media.userRating = None; media.save(); print(f"User rating cleared for '{media.title}'.")
-        PLEX_Media._media_api_action(media_identifier, action, "00128", "Error clearing user rating", library_name)
+        PLEX_Media._media_api_action(media_identifier, action, "00131", "Error clearing user rating", library_name)
 
     @staticmethod
     def update_cache() -> None:
@@ -34424,13 +34646,13 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         try:
             library = plex.library.section( obj['library'] )
         except PLEX_ERRORS as e:
-            if must_exist: err("00129", f"section with library name not found: {e}\nOBJ = {obj}")
+            if must_exist: err("00132", f"section with library name not found: {e}\nOBJ = {obj}")
             return (None, None)
 
         try:
             item = library.fetchItem( int(obj['item_id']) )
         except PLEX_ERRORS as e:
-            if must_exist: err("00130", f"Item with ID not found: {e}\nOBJ = {obj}")
+            if must_exist: err("00133", f"Item with ID not found: {e}\nOBJ = {obj}")
             return (None, None)
 
         obj_media_id = int(obj['media_id'])  # pyright: ignore[reportArgumentType]  -- None (a Series/Season record) raises TypeError: see the report
@@ -34461,9 +34683,9 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                                     if part.id != obj_part_id: continue
                                     return (media, part)
             case "artist": pass
-            case _: err("00131", f"UNSUPPORTED library.type '{library.type}'.")
+            case _: err("00134", f"UNSUPPORTED library.type '{library.type}'.")
 
-        if must_exist: err( "00132", f"OBJ not fund in PLEX db. This should not happen. Please contact maintainer.\nOBJ = {obj}")
+        if must_exist: err( "00135", f"OBJ not fund in PLEX db. This should not happen. Please contact maintainer.\nOBJ = {obj}")
         return (None, None)
 
 
@@ -34537,7 +34759,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             Playlist.create(server=plex, title=playlist_name, items=media_items)  # pyright: ignore[reportUnknownMemberType]  -- plexapi leaves some of Playlist.create's parameters unannotated
             print(f"Playlist '{playlist_name}' created successfully.")
         except PLEX_ERRORS as e:
-            err("00133", f"Error creating playlist: {e}")
+            err("00136", f"Error creating playlist: {e}")
 
     @staticmethod
     def update(playlist_name: str, media_identifiers: list[str], action: Literal['add', 'remove']) -> None:
@@ -34556,7 +34778,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
                 playlist.removeItems(media_items)
                 print(f"Media removed from playlist '{playlist_name}'.")
         except PLEX_ERRORS as e:
-            err("00134", f"Error updating playlist: {e}")
+            err("00137", f"Error updating playlist: {e}")
 
     @staticmethod
     def delete(playlist_name: str) -> None:
@@ -34567,7 +34789,7 @@ class PLEX_Playlist(PLEX_OBJ_TYPE_ABC):
             playlist.delete()
             print(f"Playlist '{playlist_name}' deleted successfully.")
         except PLEX_ERRORS as e:
-            err("00135", f"Error deleting playlist: {e}")
+            err("00138", f"Error deleting playlist: {e}")
 
 
 ###########################################################################################
@@ -35546,12 +35768,12 @@ def _tvdb_login(api_key: str) -> str | None:
             if token:
                 _tvdb_state['cached_token'] = token
                 return token
-            err("00136", "TVDB login succeeded but no token in response.\n"
+            err("00139", "TVDB login succeeded but no token in response.\n"
                 "  Possible reasons:\n"
                 "  - TVDB API changed their response format\n"
                 "  - Temporary server issue — try again later")
     except (OSError, ValueError, http.client.HTTPException) as e:
-        err("00137", f"TVDB login failed: {e}\n"
+        err("00140", f"TVDB login failed: {e}\n"
             "  Possible reasons:\n"
             "  - TVDB_API_KEY is invalid or expired\n"
             "  - Network issue connecting to thetvdb.com\n"
@@ -35762,7 +35984,7 @@ def _scrape_tmdb(series_title: str, metadata: dict[str, str], existing_episodes:
             series_data = json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            err("00138", f"TMDB authentication failed for '{series_title}' (tmdb:{tmdb_id}).\n"
+            err("00141", f"TMDB authentication failed for '{series_title}' (tmdb:{tmdb_id}).\n"
                 "  Possible reasons:\n"
                 "  - TMDB_API_KEY is invalid or expired\n"
                 "  - TMDB_API_KEY should be the 'API Read Access Token' (long string), not the short 'API Key'\n"
@@ -36212,9 +36434,9 @@ def resolve_series_for_episodes(series_ref: str) -> tuple[str, MediaRecord]:
         print(f'  Ambiguous series reference "{series_ref}", matches:')
         for key, obj in matched_series:
             print(f'    {key:<14} "{obj.get("title", "?")}"')
-        err("00139", f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
+        err("00142", f"Please be more specific. Use Plex ID (e.g. my-plex ID:4215 --missing) or exact title.")
 
-    err("00140", f"Series not found: '{series_ref}'\n"
+    err("00143", f"Series not found: '{series_ref}'\n"
         "  Possible reasons:\n"
         "  - Series name doesn't match any series in the Plex cache\n"
         "  - Cache may be outdated — run my-plex --update-cache\n"
@@ -36305,7 +36527,7 @@ def cmd_missing(series_ref: object, source_override: str | None = None) -> None:
     series_dir_server = series_dict.get('file', '')
 
     if not series_dir_server:
-        err("00141", f"Show '{series_title}' ({series_key}) has no directory path in cache.\n"
+        err("00144", f"Show '{series_title}' ({series_key}) has no directory path in cache.\n"
             "  Run my-plex --update-cache to refresh.")
 
     series_dir = get_local_path(series_dir_server)
@@ -36832,23 +37054,23 @@ def _parse_compound_filter(expr_or_tokens: str | list[str] | list[str | None]
     def _parse_atom() -> _FilterNode:
         t = _peek()
         if t is None:
-            err("00142", "Filter expression: unexpected end of input.")
+            err("00145", "Filter expression: unexpected end of input.")
         if t == '(':
             _consume()
             inner = _parse_or()
             if _peek() != ')':
-                err("00143", f"Filter expression: expected ')' but got {_peek()!r}.")
+                err("00146", f"Filter expression: expected ')' but got {_peek()!r}.")
             _consume()
             return inner
         if t in ('AND', 'OR', 'NOT', ')'):
-            err("00144", f"Filter expression: unexpected operator {t!r}.")
+            err("00147", f"Filter expression: unexpected operator {t!r}.")
         _consume()
         leaves.append(t)
         return ('LEAF', t)
 
     tree = _parse_or()
     if pos[0] < len(tokens):
-        err("00145", f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
+        err("00148", f"Filter expression: unexpected trailing tokens {tokens[pos[0]:]!r}.")
 
     def _compile(node: _FilterNode) -> "tuple[str, Callable[..., bool]]":
         if node[0] == 'LEAF':
@@ -36865,7 +37087,7 @@ def _parse_compound_filter(expr_or_tokens: str | list[str] | list[str | None]
                 parsed = PLEX_Media._parse_filter_sub_expr(f'library:{atom}')
                 if parsed:
                     return parsed
-            err("00146", f"Cannot parse filter sub-expression: {atom!r}\n"
+            err("00149", f"Cannot parse filter sub-expression: {atom!r}\n"
                       f"  Supported fields: bitrate / resolution / codec / year / label /\n"
                       f"  genre / size / duration / rating / stars / critics / added /\n"
                       f"  watched / lang / subs / director / country / original_lang /\n"
@@ -37584,7 +37806,7 @@ def cmd_plex2disk(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
         force: If True, Plex is authoritative — remove markers when Plex has no value
     """
     if not DISK_PLEX_MAP:
-        err("00147", "DISK_PLEX_MAP is empty — nothing to write to disk.\n"
+        err("00150", "DISK_PLEX_MAP is empty — nothing to write to disk.\n"
               "  Configure DISK_PLEX_MAP in ~/.my-plex.conf "
               "(see `my-plex --help plex2disk`).")
 
@@ -38099,7 +38321,7 @@ def cmd_disk2plex(target: ScopeTarget, dry_run: bool = False, force: bool = Fals
         yes:      Skip the confirmation prompt before Phase 2.
     """
     if not DISK_PLEX_MAP:
-        err("00148", "DISK_PLEX_MAP is empty — nothing to push.\n"
+        err("00151", "DISK_PLEX_MAP is empty — nothing to push.\n"
               "  Configure DISK_PLEX_MAP in ~/.my-plex.conf "
               "(see `my-plex --help disk2plex`).")
 
@@ -38585,6 +38807,936 @@ def _remux_one_file(cache_key: str, obj: MediaRecord, version: str, classificati
 
     print(f"    OK")
     return True
+
+
+###########################################################################################
+#### --reencode --resolve: encode what carries the on-disk label [reencode]
+###########################################################################################
+
+# The encode's output while it is written: hidden, in the original's folder,
+# so Plex -- which skips dot-files -- never picks up a half-written file.  It
+# ends in .mkv because my-handbrake makes every output name end in its
+# preset's suffix: any other ending would gain one.
+REENCODE_TEMP_SUFFIX = '.reencode.UNFINISHED.mkv'
+# The encode once it passed the check, before the swap: the swap renames it to
+# this first, then trashes the original, then gives it its name -- so a power
+# cut at any point leaves the original or the checked encode, and the next run
+# tells which (repair_reencode_leftovers).
+REENCODE_DONE_SUFFIX = '.reencode.DONE.mkv'
+# How close the encode's duration must be to the original's, in seconds.
+REENCODE_DURATION_TOLERANCE_S = 2.0
+# How long to wait before looking again while Plex transcodes, in seconds.
+REENCODE_PLEX_WAIT_S = 300
+# How often a running encode is looked at (the signal, the window's end).
+REENCODE_POLL_S = 2.0
+# How many finished encodes the speed estimate averages.
+REENCODE_SPEED_KEEP = 20
+# my-mail's exit status for "only queued, or held by the flood guard".
+MAIL_QUEUED_RC = 75
+
+
+@dataclass(frozen=True)
+class CronSchedule:
+    """REENCODE_SCHEDULE parsed: each field's allowed values.  Weekdays as
+    cron counts them, 0 = Sunday (cron's 7 is folded into 0)."""
+    text: str
+    minutes: frozenset[int]
+    hours: frozenset[int]
+    days: frozenset[int]
+    months: frozenset[int]
+    weekdays: frozenset[int]
+    days_any: bool          # the day-of-month field is '*'
+    weekdays_any: bool      # the day-of-week field is '*'
+
+
+_CRON_FIELDS = (('minute', 0, 59), ('hour', 0, 23), ('day of month', 1, 31),
+                ('month', 1, 12), ('day of week', 0, 7))
+
+
+def parse_cron(text: str) -> CronSchedule:
+    """cron's five fields -- numbers, lists, ranges, */N and N-M/N steps --
+    as a CronSchedule.  ValueError naming the field that is wrong."""
+    words = text.split()
+    if len(words) != 5:
+        raise ValueError(f"{len(words)} field(s); cron has 5: minute hour day-of-month month day-of-week")
+    sets: list[frozenset[int]] = []
+    for word, (name, lo, hi) in zip(words, _CRON_FIELDS):
+        values: set[int] = set()
+        for part in word.split(','):
+            m = re.fullmatch(r'(?:\*|(\d+)(?:-(\d+))?)(?:/(\d+))?', part)
+            if not m:
+                raise ValueError(f"{name} {part!r}: not a number, a range, a list or a */N step")
+            step = int(m.group(3)) if m.group(3) else 1
+            if m.group(1) is None:
+                first, last = lo, hi
+            else:
+                first = int(m.group(1))
+                last = int(m.group(2)) if m.group(2) else (hi if m.group(3) else first)
+            if not lo <= first <= last <= hi or step < 1:
+                raise ValueError(f"{name} {part!r}: outside {lo}-{hi}")
+            values.update(range(first, last + 1, step))
+        sets.append(frozenset(values))
+    return CronSchedule(text, sets[0], sets[1], sets[2], sets[3], frozenset(d % 7 for d in sets[4]),
+                        words[2] == '*', words[4] == '*')
+
+
+def cron_matches(cron: CronSchedule, t: datetime) -> bool:
+    """True when minute T is one cron starts at.  Day of month and day of
+    week, both restricted, match when EITHER does -- cron's own rule."""
+    if t.minute not in cron.minutes or t.hour not in cron.hours or t.month not in cron.months:
+        return False
+    day = t.day in cron.days
+    weekday = t.isoweekday() % 7 in cron.weekdays
+    if cron.days_any and cron.weekdays_any:
+        return True
+    if cron.days_any:
+        return weekday
+    if cron.weekdays_any:
+        return day
+    return day or weekday
+
+
+def parse_window_duration(text: str) -> timedelta:
+    """REENCODE_DURATION -- '6h', '90m', '1h30m' -- as a timedelta;
+    ValueError when it is none of these, or zero."""
+    m = re.fullmatch(r'\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*', text)
+    if not m or not (m.group(1) or m.group(2)):
+        raise ValueError(f"{text!r}: hours and/or minutes, e.g. '6h', '90m', '1h30m'")
+    span = timedelta(hours=int(m.group(1) or 0), minutes=int(m.group(2) or 0))
+    if not span:
+        raise ValueError(f"{text!r}: a window of no time")
+    return span
+
+
+def window_start(cron: CronSchedule, span: timedelta, now: datetime) -> datetime | None:
+    """The start of the window NOW lies in -- the latest minute cron starts
+    at with NOW before its end -- or None outside every window."""
+    t = now.replace(second=0, microsecond=0)
+    for back in range(int(span.total_seconds() // 60) + 1):
+        start = t - timedelta(minutes=back)
+        if cron_matches(cron, start) and now < start + span:
+            return start
+    return None
+
+
+def next_window_start(cron: CronSchedule, now: datetime) -> datetime | None:
+    """The next minute after NOW that cron starts at, within a year."""
+    t = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    for ahead in range(366 * 24 * 60):
+        if cron_matches(cron, t + timedelta(minutes=ahead)):
+            return t + timedelta(minutes=ahead)
+    return None
+
+
+def launchd_intervals(cron: CronSchedule) -> list[dict[str, int]]:
+    """CRON as launchd's StartCalendarInterval: one dict per combination of
+    the fields it restricts (a field cron leaves at '*' is left out, as
+    launchd reads a missing key as "every").  launchd has no cron syntax, and
+    no OR of day of month and day of week, so both restricted give the day
+    entries AND the weekday entries."""
+    def field(key: str, values: frozenset[int], everything: frozenset[int]) -> list[tuple[str, int]]:
+        return [] if values == everything else [(key, v) for v in sorted(values)]
+
+    base: list[dict[str, int]] = [{}]
+    for key, values, everything in (('Month', cron.months, frozenset(range(1, 13))),
+                                    ('Hour', cron.hours, frozenset(range(24))),
+                                    ('Minute', cron.minutes, frozenset(range(60)))):
+        pairs = field(key, values, everything)
+        if pairs:
+            base = [{**entry, k: v} for entry in base for k, v in pairs]
+    days = [] if cron.days_any else [('Day', d) for d in sorted(cron.days)]
+    weekdays = [] if cron.weekdays_any else [('Weekday', d) for d in sorted(cron.weekdays)]
+    if not days and not weekdays:
+        return base
+    return [{**entry, k: v} for k, v in days + weekdays for entry in base]
+
+
+def _hm(seconds: float) -> str:
+    """A span for a person: '44:02', '2:12:05'."""
+    s = int(round(seconds))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def _hours(seconds: float) -> str:
+    """Work for a person: '32 min', '2h10', '17h'."""
+    m = int(round(seconds / 60))
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60}h{m % 60:02d}" if m < 600 and m % 60 else f"{round(m / 60)}h"
+
+
+def _reencode_speed_path() -> str:
+    return os.path.join(_data_home(), '.my-plex', 'reencode-speed.json')
+
+
+def reencode_speed() -> float | None:
+    """Media seconds encoded per second of encoding, over the last
+    REENCODE_SPEED_KEEP files encoded here; None before the first."""
+    import json
+    try:
+        with open(_reencode_speed_path(), encoding='utf-8') as f:
+            records: PlainData = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(records, list):
+        return None
+    media = encode = 0.0
+    for r in cast(list[PlainData], records):
+        if isinstance(r, dict):
+            rec = cast(dict[str, PlainData], r)
+            m, e = rec.get('media_s'), rec.get('encode_s')
+            if isinstance(m, (int, float)) and isinstance(e, (int, float)) and e > 0:
+                media += m
+                encode += e
+    return media / encode if encode > 0 else None
+
+
+def _record_reencode_speed(media_s: float, encode_s: float) -> None:
+    """Add one finished encode to the speed file (temp file + rename)."""
+    import json
+    path = _reencode_speed_path()
+    try:
+        with open(path, encoding='utf-8') as f:
+            old: PlainData = json.load(f)
+    except (OSError, ValueError):
+        old = []
+    records = cast(list[PlainData], old) if isinstance(old, list) else []
+    records = (records + [{'media_s': round(media_s, 1), 'encode_s': round(encode_s, 1)}])[-REENCODE_SPEED_KEEP:]
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(records, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"WARNING: could not record the encode speed in {path}: {e}", file=sys.stderr)
+
+
+def send_mail(subject: str, body: str, must_send: bool = False) -> tuple[int, str, str]:
+    """Mail a warning through MAIL_CMD: `<MAIL_CMD> warn [--must-send]
+    <SUBJECT>`, the body on stdin.  Returns (exit status, the command line
+    as a shell would show it, its output) -- 127 when the program is not
+    there.  my-mail picks the recipient and queues what cannot go now."""
+    argv = [*shlex.split(MAIL_CMD), 'warn', *(['--must-send'] if must_send else []), subject]
+    shown = shlex.join(argv)
+    try:
+        r = subprocess.run(argv, input=body, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return 127, shown, f"{argv[0]}: not found (MAIL_CMD)"
+    except subprocess.TimeoutExpired:
+        return 124, shown, "no answer in 120s"
+    return r.returncode, shown, (r.stdout + r.stderr).strip()
+
+
+def cmd_test_mail() -> NoReturn:
+    """--test-mail: ONE mail through exactly the call every warning of
+    my-plex takes, asked to be SENT -- `--must-send`, so a mail that could
+    only be queued or was held is a failure (exit 75), not a pass."""
+    import socket
+    files = [p for _l, p in CONFIG_RECORD['files']] or ['(none)']
+    body = (f"A test of the path my-plex's warnings take.\n\n"
+            f"host:   {socket.gethostname()}\n"
+            f"user:   {_boot.caller_name()}\n"
+            f"time:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"config: {', '.join(files)}\n"
+            f"call:   MAIL_CMD = {MAIL_CMD!r}\n")
+    rc, shown, out = send_mail('my-plex test mail', body, must_send=True)
+    if rc == 0:
+        print(f" >>> test mail sent: {shown} [rc 0]")
+        sys.exit(0)
+    if rc == MAIL_QUEUED_RC:
+        err("00152", f"the test mail was only queued or held, not sent: {shown} [rc {rc}]\n"
+                     f"  it still goes later; the path is down or the same subject went out in the\n"
+                     f"  last minutes (my-mail's flood guard)" + (f"\n  {out[-400:]}" if out else ""),
+            exit_code=MAIL_QUEUED_RC)
+    err("00153", f"the test mail was not sent: {shown} [rc {rc}]" + (f"\n  {out[-400:]}" if out else "")
+                 + "\nPossible reasons:\n  - MAIL_CMD names a program this PATH does not find: name it by its path")
+
+
+def _plex_db_here() -> bool:
+    """True when the Plex database is on this machine: this IS the server."""
+    return bool(PLEX_DB_PATH) and os.path.exists(os.path.expanduser(PLEX_DB_PATH))
+
+
+def _reencode_host() -> str | None:
+    """Where --reencode --resolve works: here (None) on the Plex server
+    itself -- a Full Disk Access launcher's grant reaches no ssh session, and
+    the media may be on a volume only that grant opens -- else over ssh on
+    PLEX_DB_REMOTE_HOST, as every write of my-plex."""
+    return None if _plex_db_here() else PLEX_DB_REMOTE_HOST
+
+
+def _label_marker() -> str:
+    labeltext = PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')
+    return f"{ONDISK_LABEL_START_MARKER}{labeltext}{ONDISK_LABEL_END_MARKER}"
+
+
+def _without_label(name: str) -> str:
+    """NAME with the [reencode] label taken out, and the space before it."""
+    return re.sub(r'\s*' + re.escape(_label_marker()), '', name).strip()
+
+
+def reencode_final_name(basename: str) -> str:
+    """The name the encode takes: the original's, without the label, as .mkv."""
+    return _without_label(os.path.splitext(basename)[0]) + '.mkv'
+
+
+def reencode_temp_path(path: str, suffix: str = REENCODE_TEMP_SUFFIX) -> str:
+    """The hidden file the encode of PATH is written to, beside it -- or,
+    with REENCODE_DONE_SUFFIX, the one it is once it passed the check."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return os.path.join(os.path.dirname(path), f".{stem}{suffix}")
+
+
+@dataclass
+class ReencodeItem:
+    """One file to encode.  PATH changes when a folder above it is renamed."""
+    key: str            # its cache key; '' for a file the cache does not know
+    path: str
+    library: str
+    media_s: float      # its duration from the cache, 0 when unknown
+    size: int           # its size from the cache, 0 when unknown
+
+    def label(self) -> str:
+        """Key and name, as a line names the file."""
+        return f"{self.key or '-'} {os.path.basename(self.path)}"
+
+
+def _reencode_item(key: str, path: str) -> ReencodeItem:
+    obj = media_record(key) if key else None
+    if obj is None:
+        return ReencodeItem('', path, '', 0.0, 0)
+    size = next((fi.get('filesize') or 0 for fi in obj['files'].values() if fi.get('filepath') == path), 0)
+    return ReencodeItem(key, path, obj.get('library', ''), (obj.get('duration') or 0) / 1000, size)
+
+
+def reencode_labelled_plan(scope: list[str] | None) -> list[ReencodeItem]:
+    """Every video file the cache holds with the label (on the file or a
+    folder above it), within SCOPE, newest Plex addedAt first.  Read from
+    the cache's ondisk_labels_index, never off the disk."""
+    labeltext = PROBLEMS2DISK.get('reencode', {}).get('LABELTEXT_ON_DISK', 'reencode')
+    keys = list(PLEX_Media.OBJ_BY_ONDISK_LABEL.get(labeltext, []))
+    if scope:
+        allowed = {k for k, _obj in _get_universal_scope(scope)}
+        keys = [k for k in keys if k in allowed]
+    found: list[tuple[int, ReencodeItem]] = []
+    seen: set[str] = set()
+    for key in keys:
+        obj = media_record(key)
+        if obj is None or obj['type'] not in ('Movie', 'Episode') or PLEX_Media._is_multi_ep_non_leader(key, obj):
+            continue
+        for fi in obj['files'].values():
+            path = fi.get('filepath') or ''
+            if path and path not in seen and os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS:
+                seen.add(path)
+                found.append((obj.get('addedAt') or 0, _reencode_item(key, path)))
+    found.sort(key=lambda added_item: -added_item[0])
+    return [item for _added, item in found]
+
+
+def _on_server(path: str, host: str | None) -> str | None:
+    """PATH in the first of its ALTERNATIVE_ROOTPATHS forms that exists
+    where the work happens -- here, or on HOST (never a local mount of a
+    remote server, whose paths are not the server's) -- or None."""
+    for p in get_alternative_paths(path, including_path=True):
+        if os.path.exists(p) if host is None else my_plex_file_operation('CHECK', p, host, skip_alternatives=True)[0]:
+            return p
+    return None
+
+
+def reencode_path_plan(paths: list[str], host: str | None) -> list[ReencodeItem]:
+    """The video files at PATHS, each a file or a folder searched to any
+    depth, labelled or not -- each path in any of its ALTERNATIVE_ROOTPATHS
+    forms.  A path that is nowhere is an ERROR."""
+    items: list[ReencodeItem] = []
+    for given in paths:
+        resolved = _on_server(given, host)
+        if resolved is None:
+            err("00154", f"--reencode --resolve {given}: no such file or folder"
+                         f" {'on ' + host if host else 'here'} (nor in its ALTERNATIVE_ROOTPATHS forms)")
+        path = resolved
+        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS:
+            files = [path]
+        else:
+            ok, listing = my_plex_file_operation('LIST_DIR', path, host, skip_alternatives=True)
+            if not ok:
+                err("00155", f"--reencode --resolve {given}: cannot list {path}")
+            files = sorted(f for f in cast(list[str], listing or [])
+                           if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+                           and not os.path.basename(f).startswith('.'))
+        for f in files:
+            keys = PLEX_Media.OBJ_BY_FILEPATH.get(f) or []
+            items.append(_reencode_item(next((k for k in keys if media_record(k)), ''), f))
+    return items
+
+
+def _probe(path: str, host: str | None) -> tuple[float, int] | None:
+    """(duration in seconds, size in bytes) of a media file, by ffprobe."""
+    r = run_tool_on_PLEX_server('ffprobe', ['-v', 'error', '-show_entries', 'format=duration,size',
+                                            '-of', 'default=nw=1', path], remote_host=host, timeout=120)
+    if r is None or r.returncode != 0:
+        return None
+    values = dict(line.split('=', 1) for line in str(r.stdout).splitlines() if '=' in line)
+    try:
+        return float(values['duration']), int(values.get('size') or 0)
+    except (KeyError, ValueError):
+        return None
+
+
+def _probe_end(path: str, host: str | None, duration: float) -> str | None:
+    """None when PATH ends cleanly -- its last packet within the tolerance
+    of its duration, and ffprobe reports no error reading its last seconds --
+    else what is wrong."""
+    r = run_tool_on_PLEX_server('ffprobe', ['-v', 'error', '-read_intervals', f"{max(duration - 10, 0):.3f}%",
+                                            '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', path],
+                                remote_host=host, timeout=120)
+    if r is None:
+        return "ffprobe is not there"
+    if r.returncode != 0 or str(r.stderr).strip():
+        return f"ffprobe reads errors at its end [rc {r.returncode}]: {str(r.stderr).strip()[-200:]}"
+    times = [float(t) for t in re.findall(r'^\s*(\d+(?:\.\d+)?)\s*$', str(r.stdout), re.M)]
+    if not times:
+        return "ffprobe finds no packet in its last seconds"
+    if duration - max(times) > REENCODE_DURATION_TOLERANCE_S:
+        return f"its last packet is at {_hm(max(times))}, its duration {_hm(duration)}"
+    return None
+
+
+def _plex_transcoding(host: str | None) -> str | None:
+    """The pid of a running `Plex Transcoder` on the server, or None."""
+    r = run_tool_on_PLEX_server('pgrep', ['-x', 'Plex Transcoder'], remote_host=host, timeout=30)
+    if r is None or r.returncode != 0:
+        return None
+    pids = str(r.stdout).split()
+    return pids[0] if pids else None
+
+
+def _file_in_use(path: str, host: str | None) -> bool:
+    """True when some process has PATH open (lsof)."""
+    r = run_tool_on_PLEX_server('lsof', ['-t', path], remote_host=host, timeout=60)
+    return r is not None and r.returncode == 0 and bool(str(r.stdout).strip())
+
+
+
+
+# The encode running now, and the signal that asked the run to stop: set by
+# the run's own SIGTERM / SIGINT handler, read where stopping is safe.
+_REENCODE_CHILD: 'subprocess.Popen[bytes] | None' = None
+_REENCODE_STOP = 0
+
+
+def _stop_child(child: 'subprocess.Popen[bytes]') -> None:
+    """Stop an encode and every process under it: locally its process
+    group; over ssh, closing its stdin makes the server's side stop it."""
+    if child.stdin is not None:
+        try:
+            child.stdin.close()
+        except OSError:
+            pass
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        child.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        child.wait()
+
+
+def _reencode_signal(signum: int, _frame: object) -> None:
+    """SIGTERM (launchd at a shutdown) or Ctrl-C during --reencode --resolve:
+    stop the running encode and let the run end where nothing is half done."""
+    global _REENCODE_STOP
+    _REENCODE_STOP = signum
+    child = _REENCODE_CHILD
+    if child is not None and child.poll() is None:
+        _stop_child(child)
+
+
+def _start_encode(src: str, tmp: str, host: str | None, log: IO[bytes]) -> 'subprocess.Popen[bytes] | None':
+    """Start `my-handbrake file <SRC> -- encode reencode --output-fn <TMP>`
+    on the server, in a process group of its own, its output into LOG.  Over
+    ssh the server's shell runs it in the background and stops its group
+    when ssh's stdin closes, so stopping ssh stops the encode too."""
+    tool = server_tool_path('my-handbrake', host)
+    if not tool:
+        return None
+    args = [tool, 'file', src, '--', 'encode', 'reencode', '--output-fn', tmp]
+    if host is None:
+        return subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    remote = (f"set -m; {shlex.join(args)} </dev/null & p=$!; "
+              f"(cat >/dev/null; kill -TERM -$p 2>/dev/null) </dev/stdin >/dev/null 2>&1 & wait $p")
+    return subprocess.Popen([*_ssh_args(host), f"sh -c {shlex.quote(remote)}"], stdin=subprocess.PIPE,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def _reencode_failed(code: str, message: str) -> str:
+    """Report one file's failure in err()'s shape -- the run goes on with
+    the next file and exits 1 at its end.  Returns MESSAGE for the log."""
+    print(f"ERROR {code} [1]: {message}", file=sys.stderr)
+    return message
+
+
+def _rescan_libraries(libraries: set[str]) -> None:
+    """Have Plex rescan LIBRARIES (lib.update()), unless it watches the disk."""
+    if not libraries:
+        return
+    plex = ensure_plex_api(required=False)
+    if plex is None:
+        print(f"    > Plex not reachable: `my-plex <LIBRARY> --scan` for {', '.join(sorted(libraries))}")
+        return
+    if _detect_plex_auto_scan_enabled():
+        print(">>> Plex auto-update-on-disk-change is enabled -- skipping manual lib.update().")
+        return
+    for name in sorted(libraries):
+        try:
+            plex.library.section(name).update()
+            print(f"    > Plex rescans '{name}'")
+        except PLEX_ERRORS as e:
+            print(f"WARNING: the rescan of '{name}' failed: {e}", file=sys.stderr)
+
+
+class _ReencodeRun:
+    """One --reencode --resolve run: the plan, what is done, what to log.
+    State with an invariant: an item is in exactly one of todo, done and
+    failed, and every rename on disk is applied to todo's paths."""
+
+    def __init__(self, items: list[ReencodeItem], host: str | None, scheduled: bool,
+                 window_end: datetime | None) -> None:
+        self.todo = list(items)
+        self.host = host
+        self.scheduled = scheduled          # started by the schedule: it mails
+        self.window_end = window_end
+        self.done: list[str] = []           # the encodes' final paths
+        self.failed: list[str] = []         # one line per failed file
+        self.records: list[dict[str, Any]] = []
+        self.before = self.after = 0
+        self.libraries: set[str] = set()
+        self.mailed_window = False
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        logs = os.path.join(_data_home(), '.my-plex', 'logs')
+        os.makedirs(logs, exist_ok=True)
+        self.encoder_log = os.path.join(logs, f"reencode_resolve_{ts}.handbrake.log")
+
+    def window_over(self) -> bool:
+        return self.window_end is not None and datetime.now() >= self.window_end
+
+    def work_left(self, current: ReencodeItem | None = None) -> tuple[int, float]:
+        """(files, media seconds) still to encode, CURRENT included."""
+        left = ([current] if current else []) + self.todo
+        return len(left), sum(i.media_s for i in left)
+
+    def estimate(self, media_s: float) -> str:
+        """'about 17h of work at 4.1x', or why there is no estimate."""
+        speed = reencode_speed()
+        if speed is None:
+            return "no speed measured yet"
+        return f"about {_hours(media_s / speed)} of work at {speed:.1f}x"
+
+    def mail_window_end(self, current: ReencodeItem | None) -> None:
+        """At the window's end with work left: one mail, once, now -- not at
+        the shutdown, when nothing may send."""
+        if self.mailed_window or not self.scheduled:
+            return
+        self.mailed_window = True
+        n, media_s = self.work_left(current)
+        if not n:
+            return
+        speed = reencode_speed()
+        left = f"~{_hours(media_s / speed)} left" if speed else "speed not measured yet"
+        evenings = ""
+        if speed and self.window_end is not None:
+            span = parse_window_duration(REENCODE_DURATION).total_seconds()
+            evenings = f", {max(1, int(-(-media_s / speed // span)))} more evening(s)"
+        so_far = (f"{len(self.done)} encoded so far ({format_filesize(self.before)} -> "
+                  f"{format_filesize(self.after)})") if self.done else "nothing encoded"
+        print(f">>> window ended: {so_far}, {n} left: {self.estimate(media_s)}{evenings}")
+        subject = f"my-plex: {n} files still {_label_marker()}, {left}"
+        body = (f"The reencode window ({REENCODE_SCHEDULE!r} for {REENCODE_DURATION}) ended with work left.\n\n"
+                f"{so_far}; {n} file(s) left: {self.estimate(media_s)}{evenings}.\n"
+                + (f"One of them is encoding now and runs on to its end.\n" if current else "")
+                + "\n" + "\n".join(f"  {i.label()}" for i in ([current] if current else []) + self.todo[:50])
+                + ("\n  ..." if len(self.todo) > 50 else "") + "\n")
+        self.mail(subject, body)
+
+    def mail(self, subject: str, body: str) -> None:
+        rc, shown, out = send_mail(subject, body)
+        print(f">>> mail: {shown} [rc {rc}]")
+        if rc != 0:
+            print(f"ERROR: the mail did not go out: {shown} [rc {rc}] {out[-300:]}", file=sys.stderr)
+
+    def rewrite_paths(self, old: str, new: str) -> None:
+        """A file or folder was renamed: the items under it follow."""
+        for i in self.todo:
+            if i.path == old:
+                i.path = new
+            elif i.path.startswith(old + os.sep):
+                i.path = new + i.path[len(old):]
+
+    def drop_folder_labels(self, final: str) -> tuple[str, list[str]]:
+        """The folders above FINAL that carry the label lose it now, so a
+        file done stays done: the label moves onto every other video file
+        under such a folder that is not encoded yet -- in the cache or in
+        this run's plan -- and the folder is renamed without it.  Returns
+        FINAL's path after that, and what was renamed."""
+        marker = _label_marker()
+        notes: list[str] = []
+        folder = os.path.dirname(final)
+        for _level in range(3):
+            name = os.path.basename(folder)
+            if marker in name:
+                others = {p for p in PLEX_Media.OBJ_BY_FILEPATH
+                          if p.startswith(folder + os.sep) and os.path.splitext(p)[1].lower() in VIDEO_EXTENSIONS}
+                others |= {i.path for i in self.todo if i.path.startswith(folder + os.sep)}
+                others -= {final, *self.done}
+                for p in sorted(others):
+                    base, ext = os.path.splitext(os.path.basename(p))
+                    if marker in base:
+                        continue
+                    new_name = f"{base} {marker}{ext}"
+                    ok, _new = rename_file(p, new_name, remote_host=self.host)
+                    if not ok:
+                        notes.append(_reencode_failed("00156", f"could not move the label onto {p} -- "
+                                                               f"{folder} keeps it"))
+                        return final, notes
+                    new_path = os.path.join(os.path.dirname(p), new_name)
+                    rename_file_siblings(p, new_path, remote_host=self.host)
+                    for k in PLEX_Media.OBJ_BY_FILEPATH.pop(p, []):
+                        obj = media_record(k)
+                        if obj is not None:
+                            _update_cache_filepath(obj, p, new_path)
+                        _index_filepath(new_path, k)
+                    self.rewrite_paths(p, new_path)
+                new_folder = os.path.join(os.path.dirname(folder), _without_label(name))
+                ok, _new = rename_file(folder, os.path.basename(new_folder), remote_host=self.host)
+                if not ok:
+                    notes.append(_reencode_failed("00157", f"could not take the label off {folder}"))
+                    return final, notes
+                _update_cache_child_paths(folder, new_folder)
+                self.rewrite_paths(folder, new_folder)
+                self.done = [new_folder + d[len(folder):] if d.startswith(folder + os.sep) else d
+                             for d in self.done]
+                final = new_folder + final[len(folder):]
+                notes.append(f"folder label removed: {os.path.basename(new_folder)}"
+                             + (f" (moved onto {len(others)} file(s) not encoded yet)" if others else ""))
+                folder = new_folder
+            folder = os.path.dirname(folder)
+        return final, notes
+
+    def repair(self, dry_run: bool) -> list[str]:
+        """Take up what a run cut off (the plug, a crash) left in the plan's
+        folders, where no process has the file open -- a running encode has:
+          .<name>.reencode.UNFINISHED.mkv  a half-written encode: trashed;
+          .<name>.reencode.DONE.mkv        a checked encode whose swap was cut:
+              its original still there -- the swap never began: trashed, and
+              the original is encoded again; the original gone (trashed by
+              the swap): the swap is finished, as an encode's own is.
+        Returns the files trashed or finished (with DRY_RUN: that would be)."""
+        host = self.host
+        acted: list[str] = []
+        for folder in sorted({os.path.dirname(i.path) for i in self.todo}):
+            ok, listing = my_plex_file_operation('LIST_DIR', folder, host, maxdepth=1, skip_alternatives=True)
+            names = sorted(os.path.basename(f) for f in (cast(list[str], listing or []) if ok else [])
+                           if os.path.dirname(f) == folder)
+            for name in names:
+                f = os.path.join(folder, name)
+                if not name.startswith('.') or not name.endswith((REENCODE_TEMP_SUFFIX, REENCODE_DONE_SUFFIX)):
+                    continue
+                if _file_in_use(f, host):
+                    continue
+                verb = 'would' if dry_run else ''
+                if name.endswith(REENCODE_TEMP_SUFFIX):
+                    if dry_run or my_plex_file_operation('TRASH', f, host, skip_alternatives=True)[0]:
+                        acted.append(f)
+                        print(f">>> {verb or 'trashed'}{' trash' if verb else ''} a half-written encode: {f}  "
+                              f"(no process has it open)")
+                    continue
+                stem = name[1:-len(REENCODE_DONE_SUFFIX)]
+                originals = [n for n in names if not n.startswith('.') and os.path.splitext(n)[0] == stem
+                             and os.path.splitext(n)[1].lower() in VIDEO_EXTENSIONS]
+                if originals:
+                    if dry_run or my_plex_file_operation('TRASH', f, host, skip_alternatives=True)[0]:
+                        acted.append(f)
+                        print(f">>> {verb or 'trashed'}{' trash' if verb else ''} an encode whose swap never began: {f}"
+                              f"  ({originals[0]} is still there, and is encoded again)")
+                    continue
+                item = next((i for i in self.todo if os.path.dirname(i.path) == folder
+                             and os.path.splitext(os.path.basename(i.path))[0] == stem), None)
+                if item is None:
+                    item = ReencodeItem('', os.path.join(folder, stem + '.mkv'), '', 0.0, 0)
+                else:
+                    self.todo.remove(item)
+                final = os.path.join(folder, reencode_final_name(os.path.basename(item.path)))
+                acted.append(f)
+                if dry_run:
+                    print(f">>> would finish a swap a cut stopped: {f} -> {os.path.basename(final)}")
+                    continue
+                probed = _probe(f, host)
+                print(f">>> finishing a swap a cut stopped: {f} -> {os.path.basename(final)}  (its original is"
+                      f" in the trash)")
+                rec: dict[str, Any] = {'key': item.key, 'file': item.path, 'repaired': f}
+                self.records.append(rec)
+                self.complete(item, item.path, f, final, probed[1] if probed else 0, rec)
+        return acted
+
+    def complete(self, item: ReencodeItem, src: str, done: str, final: str, size: int, rec: dict[str, Any],
+                 media_s: float = 0.0, took: float = 0.0) -> None:
+        """The swap of a checked encode DONE, and all that follows it: the
+        original SRC to the trash (when it is still there), DONE to FINAL,
+        the siblings, the cache -- saved now, so a cut later in the night
+        loses nothing -- and the folder labels."""
+        host = self.host
+        if my_plex_file_operation('CHECK', src, host, skip_alternatives=True)[0]:
+            trashed, _where = my_plex_file_operation('TRASH', src, host, skip_alternatives=True)
+            if not trashed:
+                my_plex_file_operation('TRASH', done, host, skip_alternatives=True)
+                rec['result'] = _reencode_failed("00158", f"could not trash {src} -- its encode trashed, the"
+                                                          f" original kept and still labelled")
+                self.failed.append(rec['result'])
+                return
+        renamed, _new = rename_file(done, os.path.basename(final), remote_host=host)
+        if not renamed:
+            rec['result'] = _reencode_failed("00159", f"the original of {final} is in the trash and its encode at"
+                                                      f" {done}: the next run finishes the swap")
+            self.failed.append(rec['result'])
+            return
+        rename_file_siblings(src, final, remote_host=host)
+        for k in PLEX_Media.OBJ_BY_FILEPATH.pop(item.path, []) + (PLEX_Media.OBJ_BY_FILEPATH.pop(src, []) if src != item.path else []):
+            obj = media_record(k)
+            if obj is not None:
+                for p in (item.path, src):
+                    _update_cache_filepath(obj, p, final)
+                for fi in obj['files'].values():
+                    if fi.get('filepath') == final:
+                        fi['filesize'] = size
+            _index_filepath(final, k)
+        self.done.append(final)
+        final, notes = self.drop_folder_labels(final)
+        self.done[-1] = final
+        refresh_ondisk_labels_from_cache()
+        if not READ_ONLY_MODE:
+            update_and_save_cache(build_media_cache_dict())
+        if item.library:
+            self.libraries.add(item.library)
+        before = item.size or 0
+        self.before += before
+        self.after += size
+        if took:
+            _record_reencode_speed(media_s, took)
+        rec.update({'result': 'encoded', 'final': final, 'size_before': before, 'size_after': size})
+        print(f"    > renamed: {os.path.basename(final)}; original trashed"
+              + "".join(f"; {n}" for n in notes if not n.startswith('could not')))
+
+    def wait(self, child: 'subprocess.Popen[bytes]', current: ReencodeItem) -> int:
+        """Wait for the encode, mailing at the window's end meanwhile."""
+        while child.poll() is None:
+            if self.window_over():
+                self.mail_window_end(current)
+            time.sleep(REENCODE_POLL_S)
+        return child.returncode
+
+    def encode(self, item: ReencodeItem) -> bool:
+        """Encode ITEM, check it, swap it in.  False when the run must stop
+        (a signal): the temp file is trashed, the original kept, labelled."""
+        global _REENCODE_CHILD
+        host = self.host
+        rec: dict[str, Any] = {'key': item.key, 'file': item.path}
+        self.records.append(rec)
+        kept = "temp file trashed, original kept and still labelled"
+        src = _on_server(item.path, host)
+        if src is None:
+            rec['result'] = _reencode_failed("00160", f"{item.path} is not there -- the cache is older than"
+                                                      f" the disk (--update-cache)")
+            self.failed.append(rec['result'])
+            return True
+        size_txt = f"{format_filesize(item.size)}, " if item.size else ""
+        print(f">>> {item.key or '-'} {os.path.relpath(src, os.path.dirname(os.path.dirname(src)))}"
+              f"  ({size_txt}{_hm(item.media_s) if item.media_s else '?'})")
+        original = _probe(src, host)
+        if original is None:
+            rec['result'] = _reencode_failed("00161", f"ffprobe cannot read {src} -- nothing encoded")
+            self.failed.append(rec['result'])
+            return True
+        final = os.path.join(os.path.dirname(src), reencode_final_name(os.path.basename(src)))
+        if final != src and my_plex_file_operation('CHECK', final, host, skip_alternatives=True)[0]:
+            rec['result'] = _reencode_failed("00162", f"the encode of {os.path.basename(src)} would take the name"
+                                                      f" of {final}, another file -- nothing encoded")
+            self.failed.append(rec['result'])
+            return True
+        if self.window_end is not None and item.media_s and (speed := reencode_speed()):
+            work = item.media_s / speed
+            room = (self.window_end - datetime.now()).total_seconds()
+            if work > room:
+                print(f"    > about {_hours(work)} of work; {_hours(max(room, 0))} of the window left -- "
+                      f"it runs on past {self.window_end.strftime('%H:%M')}")
+        tmp = reencode_temp_path(src)
+        started = time.time()
+        with open(self.encoder_log, 'ab') as log:
+            child = _start_encode(src, tmp, host, log)
+            if child is None:
+                rec['result'] = _reencode_failed("00163", "my-handbrake is not there -- nothing encoded")
+                self.failed.append(rec['result'])
+                return True
+            _REENCODE_CHILD = child
+            try:
+                rc = self.wait(child, item)
+            finally:
+                _REENCODE_CHILD = None
+        took = time.time() - started
+        rec['encode_s'] = round(took, 1)
+
+        def trash_tmp() -> None:
+            if my_plex_file_operation('CHECK', tmp, host, skip_alternatives=True)[0]:
+                my_plex_file_operation('TRASH', tmp, host, skip_alternatives=True)
+
+        if _REENCODE_STOP:
+            trash_tmp()
+            why = 'SIGTERM' if _REENCODE_STOP == signal.SIGTERM else 'interrupted (Ctrl-C)'
+            rec['result'] = f"stopped: {why}"
+            print(f"    > stopped: {why} ({signal.Signals(_REENCODE_STOP).name} at "
+                  f"{datetime.now().strftime('%H:%M:%S')}) -- {kept}")
+            self.todo.insert(0, item)
+            return False
+        checked = _probe(tmp, host) if rc == 0 else None
+        if rc != 0:
+            problem = f"my-handbrake failed [rc {rc}] (its output: {self.encoder_log})"
+        elif checked is None:
+            problem = f"no readable encode at {tmp} (my-handbrake's OUTPUT_DIR___FILE?)"
+        elif abs(checked[0] - original[0]) > REENCODE_DURATION_TOLERANCE_S:
+            problem = f"the encode is {_hm(checked[0])} long, the original {_hm(original[0])}"
+        else:
+            problem = _probe_end(tmp, host, checked[0])
+        if problem or checked is None:
+            trash_tmp()
+            rec['result'] = _reencode_failed("00164", f"{os.path.basename(src)}: {problem} -- {kept}")
+            self.failed.append(rec['result'])
+            return True
+        # The swap, in an order no cut can lose both files by: the checked
+        # encode is renamed DONE (still hidden), the original trashed, DONE
+        # given its name -- the next run repairs a cut between any two.
+        done = reencode_temp_path(src, REENCODE_DONE_SUFFIX)
+        if not rename_file(tmp, os.path.basename(done), remote_host=host)[0]:
+            trash_tmp()
+            rec['result'] = _reencode_failed("00165", f"could not rename {tmp} -- {kept}")
+            self.failed.append(rec['result'])
+            return True
+        before = item.size or 0
+        rec['duration_s'] = round(original[0], 1)
+        print(f"    > done in {_hm(took)} -- {format_filesize(before) if before else '?'} -> "
+              f"{format_filesize(checked[1])}; checked: duration {_hm(checked[0])} = {_hm(original[0])}, ends cleanly")
+        self.complete(item, src, done, final, checked[1], rec, original[0], took)
+        return True
+
+    def run(self) -> None:
+        """Encode the plan in order: a new file starts only inside the
+        window and while Plex transcodes nothing."""
+        while self.todo:
+            if _REENCODE_STOP:
+                return
+            if self.window_over():
+                self.mail_window_end(None)
+                return
+            pid = _plex_transcoding(self.host)
+            if pid:
+                if self.window_end is not None and datetime.now() + timedelta(seconds=REENCODE_PLEX_WAIT_S) > self.window_end:
+                    nxt = self.window_end
+                else:
+                    nxt = datetime.now() + timedelta(seconds=REENCODE_PLEX_WAIT_S)
+                print(f"    > waiting: Plex is transcoding (Plex Transcoder pid {pid}) -- next look {nxt.strftime('%H:%M')}")
+                while datetime.now() < nxt and not _REENCODE_STOP:
+                    time.sleep(min(REENCODE_POLL_S, max((nxt - datetime.now()).total_seconds(), 0)))
+                continue
+            if not self.encode(self.todo.pop(0)):
+                return
+
+
+def cmd_reencode_resolve(targets: list[str], dry_run: bool, yes: bool, now: bool) -> NoReturn:
+    """--reencode --resolve [SCOPE|PATH] [--now] [--try] [--yes]: encode with
+    my-handbrake's `reencode` preset every file labelled [reencode] within
+    SCOPE, newest download first -- or, given paths, every video file at
+    them, labelled or not -- and swap each in once it passes the check.
+
+    A run with neither --now nor a path is the scheduled one: it starts new
+    files only inside the window REENCODE_SCHEDULE / REENCODE_DURATION name
+    and mails what is left at the window's end.  A started file always runs
+    on to its end; SIGTERM (a shutdown) stops it, trashes its temp file and
+    keeps the original, labelled, for a later run."""
+    global _REENCODE_STOP
+    host = _reencode_host()
+    paths = [t for t in targets if t.startswith(('/', '~'))]
+    if paths and len(paths) != len(targets):
+        err("00166", f"--reencode --resolve takes paths or a SCOPE, not both: {' '.join(targets)}")
+    scheduled = not paths and not now
+    window_end: datetime | None = None
+    window_txt = "no window (--now)" if now else "no window (a path named)"
+    if scheduled:
+        try:
+            cron = parse_cron(REENCODE_SCHEDULE)
+            span = parse_window_duration(REENCODE_DURATION)
+        except ValueError as e:
+            err("00167", f"REENCODE_SCHEDULE {REENCODE_SCHEDULE!r} / REENCODE_DURATION {REENCODE_DURATION!r}: {e}")
+        start = window_start(cron, span, datetime.now())
+        if start is None:
+            nxt = next_window_start(cron, datetime.now())
+            print(f">>> outside the window (REENCODE_SCHEDULE {REENCODE_SCHEDULE!r} for {REENCODE_DURATION}) -- "
+                  f"nothing started; next {nxt.strftime('%a %H:%M') if nxt else 'never'}; --now runs anyway")
+            if not dry_run:
+                sys.exit(0)
+        else:
+            window_end = start + span
+            window_txt = f"window {start.strftime('%H:%M')}-{window_end.strftime('%H:%M')}"
+    items = reencode_path_plan([os.path.expanduser(p) for p in paths], host) if paths \
+        else reencode_labelled_plan(targets or None)
+    what = "file(s) at the path(s) given" if paths else f"file(s) labelled {_label_marker()}"
+    run = _ReencodeRun(items, host, scheduled, window_end)
+    print(f">>> {len(items)} {what} -- {window_txt}, {run.estimate(sum(i.media_s for i in items))}")
+    run.repair(dry_run)
+    items = list(run.todo)
+    if not items:
+        sys.exit(0)
+    if dry_run:
+        speed = reencode_speed()
+        for i in items:
+            est = f", about {_hours(i.media_s / speed)}" if speed and i.media_s else ""
+            print(f"   > {i.label()}  ({format_filesize(i.size) if i.size else '?'}, "
+                  f"{_hm(i.media_s) if i.media_s else '?'}{est})")
+        print(f">>> --try: nothing encoded")
+        sys.exit(0)
+    if not yes and not prompt_yes_no(f"Encode {len(items)} file(s) now, each replacing its original?"):
+        print(">>> nothing encoded")
+        sys.exit(0)
+    _REENCODE_STOP = 0
+    previous = {s: signal.signal(s, _reencode_signal) for s in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        run.run()
+    finally:
+        for s, h in previous.items():
+            signal.signal(s, h)
+    if run.done:
+        _rescan_libraries(run.libraries)
+    if run.failed and scheduled:
+        run.mail(f"my-plex: {len(run.failed)} reencode(s) FAILED",
+                 "--reencode --resolve could not encode:\n\n" + "\n".join(f"  {f}" for f in run.failed) + "\n")
+    log_path = _write_resolve_log('reencode_resolve', {
+        'window_end': window_end.isoformat(timespec='seconds') if window_end else None,
+        'stopped': signal.Signals(_REENCODE_STOP).name if _REENCODE_STOP else None,
+        'records': run.records, 'left': [i.path for i in run.todo]})
+    parts = [f"{len(run.done)} encoded ({format_filesize(run.before)} -> {format_filesize(run.after)})"] if run.done else []
+    if run.failed:
+        parts.append(f"{len(run.failed)} FAILED")
+    if run.todo:
+        parts.append(f"{len(run.todo)} left")
+    print(f">>> SUMMARY: {', '.join(parts) or 'nothing encoded'}")
+    if log_path:
+        print(f"    > log: {log_path}")
+    if _REENCODE_STOP:
+        sys.exit(128 + _REENCODE_STOP)
+    sys.exit(1 if run.failed else 0)
 
 
 def transfer_disk_map_markers(src_path: str, dst_path: str, remote_host: str | None = None,
@@ -39229,19 +40381,19 @@ def cmd_move(args_list: list[str], dry_run: bool = False, force: bool = False,
     if not dry_run:
         _maybe_refresh_cache_for_state_changing_command('--mv')
     if not args_list:
-        err("00149", "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE...]\n  Use --help mv for details.")
+        err("00168", "--mv requires at least DEST_LIB.\n  Usage: my-plex --mv DEST_LIB [SCOPE...]\n  Use --help mv for details.")
     dest_lib = args_list[0]
     scope_tokens = list(args_list[1:])   # variadic — every command sharing _get_universal_scope() ANDs these together
 
     # Validate destination library
     if dest_lib not in PLEX_Library.OBJ_DICT:
         available = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-        err("00150", f"--mv: destination library '{dest_lib}' not found.\n\nAvailable libraries: {available}")
+        err("00169", f"--mv: destination library '{dest_lib}' not found.\n\nAvailable libraries: {available}")
 
     dest_lib_type = PLEX_Library.OBJ_DICT_TYPE.get(dest_lib, '')
     dest_locations = CACHE.get('library_stats', {}).get('locations', {}).get(dest_lib, [])
     if not dest_locations:
-        err("00151", f"--mv: destination library '{dest_lib}' has no known rootpath in cache.\n  Run --update-cache first.")
+        err("00170", f"--mv: destination library '{dest_lib}' has no known rootpath in cache.\n  Run --update-cache first.")
     dest_root = dest_locations[0].rstrip('/')
 
     # v2.69: drain any leftover state from a prior crashed --mv run FIRST,
@@ -39304,9 +40456,9 @@ def cmd_move(args_list: list[str], dry_run: bool = False, force: bool = False,
             continue
         # Type compatibility
         if dest_lib_type == 'Movie' and base_type != 'Movie':
-            err("00152", f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Movie library '{dest_lib}'.\n  Movie libraries only accept Movies. Use a Series-type destination library for Episodes.")
+            err("00171", f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Movie library '{dest_lib}'.\n  Movie libraries only accept Movies. Use a Series-type destination library for Episodes.")
         if dest_lib_type == 'Series' and base_type != 'Episode':
-            err("00153", f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Series library '{dest_lib}'.\n  Series libraries only accept Episodes. Pick a Movie-type destination library for Movies.")
+            err("00172", f"--mv: cannot move {base_type} '{obj.get('title','?')}' ({cache_key}) into Series library '{dest_lib}'.\n  Series libraries only accept Episodes. Pick a Movie-type destination library for Movies.")
         filepaths = _get_all_filepaths(obj)
         if not filepaths:
             continue
@@ -41586,7 +42738,7 @@ def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'
     label_args: list from argparse nargs='+', first element is label, rest is scope.
     action: 'add' or 'remove'."""
     if len(label_args) < 2:
-        err("00154", f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
+        err("00173", f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
             f"  Usage: my-plex --{action}-label 'my-label' Movie:123\n"
             f"         my-plex --{action}-label 'my-label' 'Tagesschau'\n"
             f"         my-plex --{action}-label 'my-label' lib6\n"
@@ -41607,7 +42759,7 @@ def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'
         except SystemExit:
             obj_keys = []
         if not obj_keys:
-            err("00155", f"'{scope_str}' not found as library, cache key, Plex ID, or title.\n"
+            err("00174", f"'{scope_str}' not found as library, cache key, Plex ID, or title.\n"
                 f"  Use --help {action}-label for usage.")
 
     if not obj_keys:
@@ -41680,7 +42832,7 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
         for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
             if cached_obj.get('id') == plex_id and cached_obj['type'] != 'Collection':
                 return cached_obj, key
-        err("00156", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+        err("00175", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
     except ValueError:
         pass
 
@@ -41701,9 +42853,9 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
     elif len(matches) > 1:
         match_strs = [f"{k} ({o.get('title', '?')})" for o, k in matches[:5]]
         suffix = f' ... and {len(matches)-5} more' if len(matches) > 5 else ''
-        err("00157", f"Ambiguous: '{identifier}' matches {len(matches)} items. Use a cache key (e.g. Movie:123) to be precise.\n"
+        err("00176", f"Ambiguous: '{identifier}' matches {len(matches)} items. Use a cache key (e.g. Movie:123) to be precise.\n"
             f"  Matches: {', '.join(match_strs)}{suffix}")
-    err("00158", f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
+    err("00177", f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
 
 
 def add_label_to_item(label: str, plex_id: str) -> Literal['exists', 'added', 'error']:
@@ -41719,7 +42871,7 @@ def add_label_to_item(label: str, plex_id: str) -> Literal['exists', 'added', 'e
         library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
         item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
-        err("00159", f"Failed to fetch media item from Plex server: {e}")
+        err("00178", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label already exists
     if label in [l.tag for l in item.labels]:
@@ -41752,7 +42904,7 @@ def remove_label_from_item(label: str, plex_id: str) -> Literal['not_found', 're
         library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
         item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
-        err("00160", f"Failed to fetch media item from Plex server: {e}")
+        err("00179", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label exists
     if label not in [l.tag for l in item.labels]:
@@ -43988,7 +45140,7 @@ def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
     if not _ARGV_REWRITTEN:
         return
     words = ", ".join(f"'{w}'" for w, _ in _ARGV_REWRITTEN)
-    err("00161", f"Invalid parameter{'s' if len(_ARGV_REWRITTEN) > 1 else ''} {words} beside {flag}, "
+    err("00180", f"Invalid parameter{'s' if len(_ARGV_REWRITTEN) > 1 else ''} {words} beside {flag}, "
                  f"which takes only {takes} and exits before any --list filter is read.\n"
                  "Possible reasons:\n"
                  "  - the word was meant for another option, or as a second value\n"
@@ -44018,7 +45170,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
     if _missing_val is not None:
         # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
         if _missing_val is True or _missing_val == [] or _missing_val == '':
-            err("00162", "--missing requires a series reference (title, Plex ID, or filepath)\n"
+            err("00181", "--missing requires a series reference (title, Plex ID, or filepath)\n"
                 "  Usage: my-plex --missing <show>\n"
                 "         my-plex <library> --missing  (all series in library)\n"
                 "         my-plex <show> --missing     (specific series)\n"
@@ -44074,7 +45226,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
                    safe_getattr(args, 'sync', None))
     if sync_target is not None:
         if args.force:
-            err("00163", "--force cannot be used with --sync / --plex-disk-sync\n"
+            err("00182", "--force cannot be used with --sync / --plex-disk-sync\n"
                 "  --force is destructive and requires an explicit direction:\n"
                 "    my-plex --plex2disk --force   (Plex overwrites disk — removes markers for unwatched items)\n"
                 "    my-plex --disk2plex --force   (disk overwrites Plex — marks unwatched in Plex where no marker)")
@@ -44337,7 +45489,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
     # Validate parameter dependencies BEFORE checking if commands should run
     # Check if --type is used without --list, --duplicates, or --broken
     if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
-        err("00164", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
+        err("00183", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
 
     # Check if --resolve is used without a resolve-capable command.
     # Resolve-capable commands today: --duplicates, --no-audio-language,
@@ -44355,14 +45507,14 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
         or safe_getattr(cmd_args, 'problems', None) is not None
     )
     if safe_getattr(cmd_args, 'resolve', False) and not _resolve_capable_flags:
-        err("00165", "--resolve can only be used together with one of:\n"
+        err("00184", "--resolve can only be used together with one of:\n"
                   "  --duplicates / --no-audio-language / --junk / --naming /\n"
                   "  --unmatched / --bad-structure / --problems\n"
                   "Example: my-plex --problems --resolve")
 
     # Check if --collections is used without a library (global context = no library)
     if safe_getattr(cmd_args, 'collections', False):
-        err("00166", "--collections requires a library name.\nExample: my-plex lib1 --collections")
+        err("00185", "--collections requires a library name.\nExample: my-plex lib1 --collections")
 
     # Handle --problems: run all problem detection checks with summary
     problems_val = safe_getattr(cmd_args, 'problems', None)
@@ -44461,7 +45613,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
 
     # --tsv/--scrape requires --problems (which already returned above)
     if safe_getattr(cmd_args, 'tsv', False):
-        err("00167", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
+        err("00186", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
 
     # Handle --unmatched [SCOPE]: list items not matched by Plex metadata agent
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
@@ -44695,6 +45847,19 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
     # Handle --reencode [SCOPE]: list candidates above threshold; --mark writes on-disk labels
     reencode_val = safe_getattr(cmd_args, 'reencode', None)
     if reencode_val is not None:
+        if safe_getattr(cmd_args, 'resolve', False) or safe_getattr(args, 'resolve', False):
+            # --reencode --resolve [SCOPE|PATH]: the SCOPE may have landed in
+            # CMD_OR_PLEXOBJECT when it followed --resolve.
+            given: VariadicArg = reencode_val
+            targets: list[str] = list(given) if isinstance(given, list) else []
+            _cop: list[str] | str | None = safe_getattr(args, 'CMD_OR_PLEXOBJECT', None)
+            if not targets and _cop:
+                targets = list(_cop) if isinstance(_cop, list) else [_cop]
+            cmd_reencode_resolve(
+                targets,
+                dry_run=bool(safe_getattr(cmd_args, 'dry_run', False) or safe_getattr(args, 'dry_run', False)),
+                yes=bool(safe_getattr(cmd_args, 'yes', False) or safe_getattr(args, 'yes', False)),
+                now=bool(safe_getattr(cmd_args, 'now', False) or safe_getattr(args, 'now', False)))
         media_type   = safe_getattr(cmd_args, 'type', None) or safe_getattr(args, 'type', None)
         obj_keys, library_name, scope = resolve_scope_to_keys(reencode_val, media_type=media_type)
         reencode_cfg    = PROBLEMS2DISK.get('reencode', {})
@@ -44812,14 +45977,14 @@ def detect_PLEX_OBJ_TYPE(args: argparse.Namespace, obj: str) -> str | None: # de
         else:
             if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: obj is NOT of type '{obj_type}'" )
     return None
-    #err("00168", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
+    #err("00187", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
 
 def execute_plex_cmd(args: argparse.Namespace, obj: str, obj_type: str, obj_args_list: list[str]) -> list[str]:
     """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
         --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
     if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
-    if obj_type not in PLEXOBJ[PARSER]: err("00169", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
-    if obj_type not in PLEXOBJ[FN]: err("00170", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[PARSER]: err("00188", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[FN]: err("00189", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
     obj_parser: argparse.ArgumentParser = PLEXOBJ[PARSER][obj_type]
     remaining_args: list[str] = []
     no_args_given = len(obj_args_list) == 0
@@ -44871,7 +46036,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
         safe_getattr(args, 'plex_disk_sync', None) or safe_getattr(args, 'sync', None))
     if _early_sync is not None and not remaining_args:
         if args.force:
-            err("00171", "--force cannot be used with --sync / --plex-disk-sync")
+            err("00190", "--force cannot be used with --sync / --plex-disk-sync")
         _dry_run = safe_getattr(args, 'dry_run', False)
         # Inline equivalent of execute_global_commands._collapse_scope_arg.
         if _early_sync is True:
@@ -44910,7 +46075,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
                     # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
                     if cmd_args is not None and arg in unparsed:
                         # The flag wasn't recognized - it's an invalid flag
-                        err("00172", f"Invalid flag '{arg}'. Not a recognized global command flag."
+                        err("00191", f"Invalid flag '{arg}'. Not a recognized global command flag."
                                      + _flag_hint(arg))
                     if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
                         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
@@ -44937,10 +46102,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
         else:                      # no PLEXOBJECT and NO GLOBAL_CMD
             match state:
                 case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
-                    if obj is None: err("00173", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
+                    if obj is None: err("00192", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
                     # Series helpful error with available libraries
                     available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-                    err("00174", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
+                    err("00193", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
                 case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
                     obj_args_list.append(arg)
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
@@ -44948,10 +46113,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 3| as no remaining_args left!" )
                     state = 3;
                 case _: # state 2 should NEVER happen here as state 2 should only be set IF PLEXOBJECT FOUND and then directly USED below!
-                    err("00175", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+                    err("00194", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
-        if (state != 2 and state != 3): err("00176", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+        if (state != 2 and state != 3): err("00195", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # states 2 and 3 come only after obj and obj_type were set
         match state:
@@ -45007,7 +46172,7 @@ def _resolve_secret_arg(flag: str, value: str | None) -> str | None:
             with open(path) as f:
                 return f.readline().strip()
         except OSError as e:
-            err("00177", f"{flag} @{path}: cannot read it -- {e}")
+            err("00196", f"{flag} @{path}: cannot read it -- {e}")
     print(f"\n\u26a0  WARNING: {flag} was given its value on the command line.\n"
           f"   It is now in your shell history, and `ps auxww` showed it to every\n"
           f"   user on this machine while my-plex ran.\n"
@@ -45049,7 +46214,7 @@ def refuse_legacy_keys(loaded_config: dict[str, object]) -> None:
              + "".join(f"\n      set in {_config_file_label(p)}"
                        for p in CONFIG_RECORD['set_by'][k])
              for k in legacy_set]
-    err("00178", "Legacy config key(s) found:\n" + "\n".join(lines) +
+    err("00197", "Legacy config key(s) found:\n" + "\n".join(lines) +
            "\n  Delete each from the file that sets it to continue.")
 
 
@@ -45118,6 +46283,7 @@ def main():
         '--verbose': 'verbose', '-V': 'verbose', '--debug': 'verbose', '-D': 'verbose',
         '--quiet': 'quiet', '-Q': 'quiet',
         '--install': 'install',
+        '--test-mail': 'test-mail', '--now': 'reencode',
         '--try': 'try', '--dry-run': 'try', '--dry': 'try', '-T': 'try', '-n': 'try',
         '--yes': 'yes', '--no': 'no', '-Y': 'yes', '-N': 'no',
         '--verify-cache': 'verify-cache', '--force-tsv': 'force-tsv',
@@ -45150,7 +46316,7 @@ def main():
     # config its old twin --config-file names is not read first.
     _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
     if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
-        err("00179", "Invalid flag '--create'." + _flag_hint('--create'))
+        err("00198", "Invalid flag '--create'." + _flag_hint('--create'))
     # No abbreviations, as in every other parser of the tool: here a prefix of
     # --create-config ('--creat FILE') would write a config nobody asked for.
     config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -45193,7 +46359,7 @@ def main():
             if any(w in _CREATE_CONFIG_QUIET for w in _beside):
                 _hint += ("\n  Without a FILE the template on stdout is this run's only output:"
                           " -Q would silence it.")
-            err("00180", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
+            err("00199", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
                          + ", ".join(f"'{w}'" for w in _beside)
                          + " beside --create-config, which takes only its FILE, -V, -VV, -D, -DD,"
                            " and -Q only with a FILE."
@@ -45212,16 +46378,16 @@ def main():
             # the link first: isdir and isfile look through it
             _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
                      else 'a file' if os.path.isfile(target) else 'something else')
-            err("00181", f"refusing to write the config: {target} exists ({_kind})")
+            err("00200", f"refusing to write the config: {target} exists ({_kind})")
         except OSError as e:
-            err("00182", f"cannot create the config {target}: {e.strerror}")
+            err("00201", f"cannot create the config {target}: {e.strerror}")
         try:
             os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
             with os.fdopen(fd, 'w') as f:
                 f.write(config_content)
         except OSError as e:
             os.unlink(target)  # created by this run a moment ago: no half config left
-            err("00183", f"cannot write the config {target}: {e.strerror}")
+            err("00202", f"cannot write the config {target}: {e.strerror}")
         print(f"Created config file: {target} (mode 0600)")
         print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
         sys.exit(0)
@@ -45824,6 +46990,8 @@ def main():
     main_parser.add_argument('--unwatched', action='store_true', help=argparse.SUPPRESS)
     main_parser.add_argument('--run-tests', nargs='?', const='', default=None, metavar='FILTER', help=argparse.SUPPRESS)  # Consumed here to protect FILTER from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--install', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--test-mail', action='store_true', help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
+    main_parser.add_argument('--now', action='store_true', default=False, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--excess-versions', metavar='LIMIT', type=int, help=argparse.SUPPRESS)  # Consumed here to protect LIMIT from CMD_OR_PLEXOBJECT
     main_parser.add_argument('--missing', metavar='SHOW', nargs='*', default=None, help=argparse.SUPPRESS)  # Hidden - documented in GLOBAL_CMD_PARSER
     main_parser.add_argument('--all', action='store_true', help=argparse.SUPPRESS, default=False)
@@ -45979,6 +47147,8 @@ def main():
     GLOBAL_CMD_PARSER.add_argument('--dry-run', '--dry-mode', '--dry', '--try', '--try-mode', '--try-run', '-n', '-T', action='store_true', help=argparse.SUPPRESS, default=False)  # Hidden - documented in --sort-new/--rename help
     GLOBAL_CMD_PARSER.add_argument('--info', '--find', '--search', metavar='IDENTIFIER', nargs='?', const='', help="Show detailed information. Without argument: shows system info (cache status, server stats, libraries). With argument: searches by Plex ID (--info ID:2579), full cache key (--info Episode:17740), or partial title (--info hamlet). Title search is case-insensitive, with movies and shows listed before episodes. Aliases: --find, --search.")
     GLOBAL_CMD_PARSER.add_argument('--run-tests', nargs='?', const='', default=None, metavar='FILTER', help="Run the test suite. Bare: all of it. FILTER: a scope name, or part of a test title.")
+    GLOBAL_CMD_PARSER.add_argument('--test-mail', action='store_true', help="Send ONE test mail through MAIL_CMD, the call every warning of my-plex takes; exit 75 when it could only be queued (see --help test-mail).")
+    GLOBAL_CMD_PARSER.add_argument('--now', action='store_true', default=False, help="With --reencode --resolve: run now, ignoring REENCODE_SCHEDULE's window.")
     GLOBAL_CMD_PARSER.add_argument('--install', action='store_true', help="As root: write this tool's firewall rules, then hand over to RUN_AS_USER, whose run writes the ssh Host entry it connects through, from PLEX_DB_REMOTE; as any other user: that ssh Host entry alone (see --help install).")
 
     add_PLEX_OBJ_TYPE( PLEX_Library )    # Library commands   (fast: local dict lookup)
@@ -45990,7 +47160,7 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00184", f"{e}\nUse --help to see available options.")
+        err("00203", f"{e}\nUse --help to see available options.")
     # A near-miss is answered by the flag it misses, before any positional
     # word is judged: otherwise `--creat FILE` is refused for its FILE.
     _known = {o for p in (main_parser, GLOBAL_CMD_PARSER)
@@ -45998,14 +47168,14 @@ def main():
     for _w in remaining_args:
         _m = _meant_flag(_w, _known)
         if _m is not None:
-            err("00185", f"Invalid flag '{_w}'.\n  You mean '{_m}' -- no option of my-plex takes a shortened name.")
+            err("00204", f"Invalid flag '{_w}'.\n  You mean '{_m}' -- no option of my-plex takes a shortened name.")
     # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00186", _boot.root_refusal())
+        err("00205", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -46037,11 +47207,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00187", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00206", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00188", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00207", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -46266,6 +47436,10 @@ def main():
     # would hold a run that only prints a few commands until it finished.
     if '--install' in remaining_args:
         cmd_install()      # exits, always
+    # --test-mail reads the config and sends one mail: nothing else -- and
+    # never when help is asked for (`--test-mail --help`), which wins.
+    if safe_getattr(args, 'test_mail', False) and args.help is None:
+        cmd_test_mail()    # exits, always
 
     init(args)
 
@@ -46566,7 +47740,7 @@ def report_bug(unexpected: Exception) -> NoReturn:
     fixes the bug, it is just not the user's screen -- and exit 70
     (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
     and the root half of --install, which runs outside run()."""
-    err("00189",
+    err("00208",
         f"my-plex stopped on a bug -- this is not something you did wrong.\n"
         f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
         f"  full trace:    {_write_crash_trace()}\n"
