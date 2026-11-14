@@ -54,6 +54,10 @@
 #
 # =============================================================================
 
+# Every annotation is a string, read by the checker and never evaluated, so
+# a type may be named before the line that defines it.
+from __future__ import annotations
+
 # Coding guidelines, architecture docs, and test policies: see README.md
 # Error codes: one numbering across my_plex_boot.py and this file -- the rule
 # and the renumber command are in my_plex_boot.py, beside err().
@@ -83,7 +87,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, Callable, NoReturn, TYPE_CHECKING
+from typing import Any, Callable, NoReturn, TYPE_CHECKING, TypedDict
 
 import my_plex_boot as _boot
 from my_plex_boot import err
@@ -733,6 +737,88 @@ from functools import reduce
 from pathlib import Path
 from pprint import pprint, pformat
 import threading
+
+# ---------------------------------------------------------------------------
+# The cache's records, as the cache builders write them: one MediaRecord per
+# Movie, Episode, Season and Series in PLEX_Media.OBJ_BY_ID, one FileEntry
+# per version in its 'files'.  TypedDicts, not classes: the cache pickles
+# plain dicts, and these name their keys without changing a byte of it.
+# The unions are real: the database path stores ids and times as the
+# database gives them (str, epoch int), the plexapi path as plexapi does
+# (int, datetime) -- and a season's or an episode's 'season' / 'episode' is
+# its title from plexapi, its number from the database.
+# ---------------------------------------------------------------------------
+class FileEntry(TypedDict, total=False):
+    filepath: str
+    filesize: int | None
+    part_id: int | str | None
+    audio_languages: list[str]
+    subtitle_languages: list[str]
+    file_metadata: dict[str, Any]
+
+
+class _MediaRecordOptional(TypedDict, total=False):
+    """Keys a record carries for some types only, or since some version."""
+    audio_languages_plex: list[str]     # what Plex said, before completion
+    genres: list[str]
+    directors: list[str]
+    writers: list[str]
+    countries: list[str]
+    external_ids: dict[str, str]
+    guid: str
+    studio: str | None
+    S_pad_width: int
+    E_pad_width: int
+
+
+class MediaRecord(_MediaRecordOptional):
+    """Keys every builder writes, whatever the type."""
+    file: str
+    files: dict[str, FileEntry]
+    type: str
+    type_str: str
+    id: int | str
+    title: str
+    originalTitle: str | None
+    year: int
+    library: str
+    item_id: int | str
+    media_id: int | str | None
+    part_id: int | str | None
+    version: str
+    media_nr: str | None
+    media_idx: int | None
+    media_cnt: int | None
+    part_nr: str | None
+    part_idx: int | None
+    part_cnt: int | None
+    updatedAt: int | datetime | None
+    addedAt: int | datetime | None
+    lastViewedAt: int | datetime | None
+    viewCount: int
+    userRating: float | None
+    criticsRating: float | None
+    audienceRating: float | None
+    summary: str | None
+    duration: int | None
+    video_codec: str | None
+    audio_codec: str | None
+    resolution: str | None
+    resolution_full: str
+    filesize: int | None
+    audio_languages: list[str]
+    subtitle_languages: list[str]
+    collections: list[str]
+    labels: list[str]
+    actors: list[str]
+    contentRating: str | None
+    season: str | int | None
+    S_str: str | None
+    S_idx: int | None
+    episode: str | int | None
+    E_str: str | None
+    E_idx: int | None
+    S0XE0X: str | None
 #
 # The venv's own packages.  A print-only run skipped the venv (my_plex_boot.main), so it
 # reaches this with the system interpreter and none of them installed -- and
