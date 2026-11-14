@@ -87,7 +87,7 @@ SCRIPT_LICENSE_URL   = "https://www.gnu.org/licenses/gpl-3.0.html"
 import os
 import subprocess
 import sys
-from typing import Any, Callable, NoReturn, TYPE_CHECKING, TypedDict
+from typing import Any, Callable, Literal, NoReturn, TYPE_CHECKING, TypedDict
 
 import my_plex_boot as _boot
 from my_plex_boot import err
@@ -743,18 +743,25 @@ import threading
 # Movie, Episode, Season and Series in PLEX_Media.OBJ_BY_ID, one FileEntry
 # per version in its 'files'.  TypedDicts, not classes: the cache pickles
 # plain dicts, and these name their keys without changing a byte of it.
-# The unions are real: the database path stores ids and times as the
-# database gives them (str, epoch int), the plexapi path as plexapi does
-# (int, datetime) -- and a season's or an episode's 'season' / 'episode' is
-# its title from plexapi, its number from the database.
+# The unions are real: the database path stores ids as the database gives
+# them (str), the plexapi path as plexapi does (int) -- and a season's or an
+# episode's 'season' / 'episode' is its title from plexapi, its number from
+# the database.
 # ---------------------------------------------------------------------------
-class FileEntry(TypedDict, total=False):
+class _FileEntryOptional(TypedDict, total=False):
+    file_metadata: dict[str, Any]
+    file_segment_words: list[list[str]]     # its path's words, for title search
+
+
+class FileEntry(_FileEntryOptional):
     filepath: str
     filesize: int | None
     part_id: int | str | None
     audio_languages: list[str]
     subtitle_languages: list[str]
-    file_metadata: dict[str, Any]
+
+
+MediaType = Literal['Movie', 'Episode', 'Season', 'Series']
 
 
 class _MediaRecordOptional(TypedDict, total=False):
@@ -769,17 +776,29 @@ class _MediaRecordOptional(TypedDict, total=False):
     studio: str | None
     S_pad_width: int
     E_pad_width: int
+    series: str                         # Season, Episode: the series' title
+    series_key: str                     # Season, Episode: the series' cache key
+    versions: list[str]                 # Movie, Episode: the version names
+    members: list[str]                  # Series: 'S01'...; Season: 'E01'...
+    S_count: int                        # Series, Season
+    E_count: int                        # Series, Season
+    abs_ep_idx: int                     # Episode: its absolute number in the series
+    abs_ep_max: int
+    multi_episode_siblings: list[str]   # Episode: the keys sharing its file
+    file_segment_words: list[list[str]]
+    ondisk_labels: list[str]
+    scraped_E_str: str | None          # the scraped number, where it differs from Plex's
 
 
 class MediaRecord(_MediaRecordOptional):
     """Keys every builder writes, whatever the type."""
     file: str
     files: dict[str, FileEntry]
-    type: str
+    type: MediaType
     type_str: str
     id: int | str
     title: str
-    originalTitle: str | None
+    originalTitle: str
     year: int
     library: str
     item_id: int | str
@@ -792,9 +811,9 @@ class MediaRecord(_MediaRecordOptional):
     part_nr: str | None
     part_idx: int | None
     part_cnt: int | None
-    updatedAt: int | datetime | None
-    addedAt: int | datetime | None
-    lastViewedAt: int | datetime | None
+    updatedAt: int | None
+    addedAt: int | None
+    lastViewedAt: int | None
     viewCount: int
     userRating: float | None
     criticsRating: float | None
@@ -819,6 +838,60 @@ class MediaRecord(_MediaRecordOptional):
     E_str: str | None
     E_idx: int | None
     S0XE0X: str | None
+
+
+class _CollectionRecordOptional(TypedDict, total=False):
+    ondisk_labels: list[str]    # written on every record in OBJ_BY_ID
+
+
+class CollectionRecord(_CollectionRecordOptional):
+    """One Plex collection, in PLEX_Media.OBJ_BY_COLLECTION and, under the
+    same 'Collection:<id>' key, in OBJ_BY_ID."""
+    type: Literal['Collection']
+    type_str: str
+    id: int | str
+    title: str
+    subtype: str
+    library: str
+    addedAt: int | None
+    updatedAt: int | None
+    member_ids: list[str]
+
+
+def media_record(key: str) -> MediaRecord | None:
+    """The Movie, Episode, Season or Series cached under key; None when
+    there is none -- and when key names a collection, which OBJ_BY_ID holds
+    too but which has no file, versions or languages."""
+    record = PLEX_Media.OBJ_BY_ID.get(key)
+    if record is None or record['type'] == 'Collection':
+        return None
+    return record
+
+
+class ScrapedEpisode(TypedDict):
+    title: str
+    date: str
+    original_title: str
+
+
+class NumberingIssue(TypedDict):
+    """An episode whose Plex number and scraped number disagree."""
+    season: str
+    episode_plex: str
+    episode_scraped: str | None
+    plex_idx: int
+    scraped_idx: int
+    episode_id: int | str
+    reason: str
+
+
+class ScrapedSeries(TypedDict):
+    """One series' scraped episode list (PLEX_Media.OBJ_BY_SERIES_SCRAPED):
+    its episodes by 'S01' then 'E01'."""
+    title: str
+    source: str
+    episodes: dict[str, dict[str, ScrapedEpisode]]
+    numbering_issues: list[NumberingIssue]
 #
 # The venv's own packages.  A print-only run skipped the venv (my_plex_boot.main), so it
 # reaches this with the system interpreter and none of them installed -- and
@@ -10683,8 +10756,8 @@ def sync_view_state_into_cache():
         # Find the cache entry by Plex id.  Try both Movie:<id> and Episode:<id>.
         for prefix in ('Movie', 'Episode'):
             ck = f"{prefix}:{mid}"
-            obj = PLEX_Media.OBJ_BY_ID.get(ck) if hasattr(PLEX_Media, 'OBJ_BY_ID') else None
-            if not isinstance(obj, dict):
+            obj = media_record(ck)
+            if obj is None:
                 continue
             old_vc = int(obj.get('viewCount') or 0)
             old_lva = obj.get('lastViewedAt')
@@ -14949,7 +15022,7 @@ def _bad_structure_relocate_season(remote_host, src_season_dir, target_season_di
 
 def _bad_structure_update_cache(key, old_filepath, new_filepath):
     """After a successful flatten, update cache indices for `key`."""
-    obj = PLEX_Media.OBJ_BY_ID.get(key)
+    obj = media_record(key)
     if not obj: return
     if obj.get('file') == old_filepath:
         obj['file'] = new_filepath
@@ -17985,8 +18058,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
     if choice == '3':
         # Remove file [1] from cache
         key_to_remove = keys[0] if len(keys) > 0 else None
-        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
-            obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
+        if key_to_remove and (obj := media_record(key_to_remove)) is not None:
             removed_file = file1  # Use the actual file path passed in, not obj['file']
             library = obj.get('library')
             obj_type = obj.get('type')
@@ -18084,8 +18156,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
     elif choice == '4':
         # Remove file [2] from cache
         key_to_remove = keys[1] if len(keys) > 1 else keys[0]  # For multi-version, keys[0] is the original key
-        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
-            obj = PLEX_Media.OBJ_BY_ID[key_to_remove]
+        if key_to_remove and (obj := media_record(key_to_remove)) is not None:
             removed_file = file2  # Use the actual file path passed in
             library = obj.get('library')
             obj_type = obj.get('type')
@@ -18189,8 +18260,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
 
         # Remove file [1]
         key_to_remove = keys[0] if len(keys) > 0 else None
-        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
-            obj_to_remove = PLEX_Media.OBJ_BY_ID[key_to_remove]
+        if key_to_remove and (obj_to_remove := media_record(key_to_remove)) is not None:
             removed_file = obj_to_remove.get('file')
             library = obj_to_remove.get('library')
             obj_type = obj_to_remove.get('type')
@@ -18222,8 +18292,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
         # When a movie is moved to a DIFFERENT library, Plex assigns it a NEW ID
         # So we should DELETE the old cache entry and let --update-cache discover it fresh
         key_to_update = keys[1] if len(keys) > 1 else None
-        if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
-            obj = PLEX_Media.OBJ_BY_ID[key_to_update]
+        if key_to_update and (obj := media_record(key_to_update)) is not None:
             old_lib = obj.get('library', '')
             # Use the target library we saved before deleting file [1]
             new_lib = target_library if target_library else old_lib
@@ -18283,8 +18352,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
 
         # Remove file [2]
         key_to_remove = keys[1] if len(keys) > 1 else None
-        if key_to_remove and key_to_remove in PLEX_Media.OBJ_BY_ID:
-            obj_to_remove = PLEX_Media.OBJ_BY_ID[key_to_remove]
+        if key_to_remove and (obj_to_remove := media_record(key_to_remove)) is not None:
             removed_file = obj_to_remove.get('file')
             library = obj_to_remove.get('library')
             obj_type = obj_to_remove.get('type')
@@ -18316,8 +18384,7 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
         # When a movie is moved to a DIFFERENT library, Plex assigns it a NEW ID
         # So we should DELETE the old cache entry and let --update-cache discover it fresh
         key_to_update = keys[0] if len(keys) > 0 else None
-        if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
-            obj = PLEX_Media.OBJ_BY_ID[key_to_update]
+        if key_to_update and (obj := media_record(key_to_update)) is not None:
             old_lib = obj.get('library', '')
             new_lib = old_obj2.get('library', '') if old_obj2 else old_lib
 
@@ -18375,14 +18442,14 @@ def update_cache_after_resolution(choice, keys, file1, file2, all_files, renamed
 
         for idx, (old_path, new_path) in enumerate(zip(files_to_update, renamed_files)):
             key_to_update = keys[idx] if idx < len(keys) else None
-            if key_to_update and key_to_update in PLEX_Media.OBJ_BY_ID:
+            if key_to_update and (obj := media_record(key_to_update)) is not None:
                 # Update OBJ_BY_FILEPATH
                 if old_path in PLEX_Media.OBJ_BY_FILEPATH:
                     PLEX_Media.OBJ_BY_FILEPATH[new_path] = PLEX_Media.OBJ_BY_FILEPATH[old_path]
                     del PLEX_Media.OBJ_BY_FILEPATH[old_path]
 
                 # Update file path in OBJ_BY_ID
-                PLEX_Media.OBJ_BY_ID[key_to_update]['file'] = new_path
+                obj['file'] = new_path
 
         print(f"Cache updated: updated paths for {len(renamed_files)} renamed file(s)")
 
@@ -18425,10 +18492,10 @@ def refresh_cache_metadata(cache_key):
         True if successfully refreshed, False otherwise
     """
     try:
-        if cache_key not in PLEX_Media.OBJ_BY_ID:
+        obj = media_record(cache_key)
+        if obj is None:
             return False
 
-        obj = PLEX_Media.OBJ_BY_ID[cache_key]
         plex_id = obj.get('id')
 
         if not plex_id:
@@ -18607,103 +18674,6 @@ def merge_metadata_from_duplicates(source_key, target_key):
         print(f"  ⚠ Warning: Could not merge metadata: {e}")
         result['error'] = str(e)
         return result
-
-def update_cache_for_file(file_path, library_name, old_cache_key=None):
-    """Update cache by fetching a specific file from Plex server
-
-    This is used after file operations to replace placeholder entries with real Plex data.
-    Actively queries Plex for the file and updates all cache structures.
-
-    Args:
-        file_path: Full path to the file
-        library_name: Name of the library containing the file
-        old_cache_key: Optional old cache key to remove (for replaced placeholders)
-
-    Returns:
-        New cache key if found, None otherwise
-    """
-    try:
-        if library_name not in PLEX_Library.OBJ_DICT:
-            if VRB: print(f"{VRBPFX}Library '{library_name}' not found in cache")
-            return None
-
-        lib = PLEX_Library.OBJ_DICT[library_name]
-        lib.reload()
-
-        # Search for the file in Plex
-        # We need to iterate through all items to find the one with this file path
-        for item in lib.all():
-            try:
-                # For movies, check the file path
-                if hasattr(item, 'media'):
-                    for media in item.media:
-                        for part in media.parts:
-                            if part.file == file_path:
-                                # Found it! Now add/update in cache
-                                obj_type = _plex_type(item.type)
-
-                                # Remove old placeholder if exists
-                                if old_cache_key and old_cache_key in PLEX_Media.OBJ_BY_ID:
-                                    old_obj = PLEX_Media.OBJ_BY_ID[old_cache_key]
-                                    old_file = old_obj.get('file')
-
-                                    del PLEX_Media.OBJ_BY_ID[old_cache_key]
-                                    if old_file and old_file in PLEX_Media.OBJ_BY_FILEPATH:
-                                        del PLEX_Media.OBJ_BY_FILEPATH[old_file]
-
-                                    # Remove from library structures
-                                    if library_name in PLEX_Media.OBJ_BY_LIBRARY:
-                                        if obj_type in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
-                                            if old_cache_key in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
-                                                PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].remove(old_cache_key)
-
-                                # Create new cache entry with real Plex ID
-                                cache_key = f"{obj_type}:{part.id}"
-
-                                cache_entry = {
-                                    'id': item.ratingKey,
-                                    'type': obj_type,
-                                    'library': library_name,
-                                    'file': file_path,
-                                    'title': item.title,
-                                    'year': getattr(item, 'year', None),
-                                    'part_id': part.id,
-                                    'filesize': getattr(part, 'size', 0),
-                                    'duration': getattr(item, 'duration', 0),
-                                    'version': f"{getattr(item, 'duration', 0) / 60000:.2f}min" if hasattr(item, 'duration') else 'N/A'
-                                }
-
-                                # Add to all cache structures
-                                PLEX_Media.OBJ_BY_ID[cache_key] = cache_entry
-                                _index_filepath(file_path, cache_key)
-
-                                if library_name not in PLEX_Media.OBJ_BY_LIBRARY:
-                                    PLEX_Media.OBJ_BY_LIBRARY[library_name] = {}
-                                if obj_type not in PLEX_Media.OBJ_BY_LIBRARY[library_name]:
-                                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type] = []
-                                if cache_key not in PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type]:
-                                    PLEX_Media.OBJ_BY_LIBRARY[library_name][obj_type].append(cache_key)
-
-                                if obj_type == 'Movie':
-                                    # Store in OBJ_BY_MOVIE: keyed by cache_key, value is {version: filepath}
-                                    if cache_key not in PLEX_Media.OBJ_BY_MOVIE:
-                                        PLEX_Media.OBJ_BY_MOVIE[cache_key] = {}
-                                    PLEX_Media.OBJ_BY_MOVIE[cache_key][cache_entry['version']] = file_path
-
-                                if VRB: print(f"{VRBPFX}Cache updated: {file_path} -> {cache_key}")
-                                return cache_key
-
-            except PLEX_ERRORS as e:
-                if DBG: print(f"{DBGPFX}Error checking item: {e}")
-                continue
-
-        # File not found in Plex yet
-        if VRB: print(f"{VRBPFX}File not found in Plex: {file_path}")
-        return None
-
-    except PLEX_ERRORS as e:
-        print(f"  ⚠ Warning: Could not update cache for file: {e}")
-        return None
 
 # v2.69: 30-second cache-staleness window for the auto-refresh fast-path.
 _AUTO_UPDATE_CACHE_MAX_AGE_S = 30
@@ -19098,9 +19068,8 @@ def undo_resolution_action(undo_info, remote_host):
         if undo_info.get('metadata_merged'):
             target_key = undo_info.get('metadata_target_key')
             old_metadata = undo_info.get('old_metadata')
-            if target_key and old_metadata and target_key in PLEX_Media.OBJ_BY_ID:
+            if target_key and old_metadata and (obj := media_record(target_key)) is not None:
                 # Restore old metadata in cache
-                obj = PLEX_Media.OBJ_BY_ID[target_key]
                 obj['viewCount'] = old_metadata.get('viewCount', 0)
                 obj['lastViewedAt'] = old_metadata.get('lastViewedAt')
                 obj['labels'] = old_metadata.get('labels', [])
@@ -19133,7 +19102,7 @@ def undo_resolution_action(undo_info, remote_host):
         # Restore cache paths
         updated_keys = undo_info.get('updated_keys', [])
         for idx, key in enumerate(updated_keys):
-            if idx < len(original_files) and key in PLEX_Media.OBJ_BY_ID:
+            if idx < len(original_files) and (obj := media_record(key)) is not None:
                 old_file = renamed_files[idx]
                 new_file = original_files[idx]
 
@@ -19143,7 +19112,7 @@ def undo_resolution_action(undo_info, remote_host):
                     del PLEX_Media.OBJ_BY_FILEPATH[old_file]
 
                 # Update file path in OBJ_BY_ID
-                PLEX_Media.OBJ_BY_ID[key]['file'] = new_file
+                obj['file'] = new_file
 
         if all_success:
             print(f"✓ All files renamed back successfully")
@@ -19370,8 +19339,7 @@ def apply_pending_operations(pending_operations, resolution_log_data, default_re
             for pending_op in pending_operations:
                 keys = pending_op.get('keys', [])
                 for key in keys:
-                    if key in PLEX_Media.OBJ_BY_ID:
-                        obj = PLEX_Media.OBJ_BY_ID[key]
+                    if (obj := media_record(key)) is not None:
                         plex_id = obj.get('id')
                         library_name = obj.get('library')
 
@@ -19673,7 +19641,7 @@ def undo_operation(operation_log, remote_host=None):
 
                     # Update OBJ_BY_FILEPATH and OBJ_BY_LIBRARY
                     key = get_fullID(None, _plex_type(item_found.type), item_found.ratingKey)
-                    obj = PLEX_Media.OBJ_BY_ID.get(key)
+                    obj = media_record(key)
                     if obj:
                         # Update OBJ_BY_FILEPATH
                         if obj['file'] in PLEX_Media.OBJ_BY_FILEPATH:
@@ -20397,10 +20365,9 @@ def _apply_audio_language_operations(pending_operations, resolution_log_data):
 
     # Update cache for successful operations
     for plex_id, title, cache_key, lang_2 in items_to_analyze:
-        if cache_key in PLEX_Media.OBJ_BY_ID:
-            obj = PLEX_Media.OBJ_BY_ID[cache_key]
+        if (obj := media_record(cache_key)) is not None:
             lang_3 = ISO_639_1_TO_2.get(lang_2, lang_2)
-            if lang_3 not in obj.get('audio_languages', []):
+            if lang_3 and lang_3 not in obj.get('audio_languages', []):
                 if 'audio_languages' not in obj:
                     obj['audio_languages'] = []
                 obj['audio_languages'].append(lang_3)
@@ -21441,8 +21408,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
     # PERFORMANCE OPTIMIZATION: During cache rebuild, skip duplicate detection and timestamp checks
     # This eliminates expensive cache lookups and file I/O for duplicate checking
-    if not FORCE_CACHE_UPDATE and key in PLEX_Media.OBJ_BY_ID:
-        val = PLEX_Media.OBJ_BY_ID[key]
+    if not FORCE_CACHE_UPDATE and (val := media_record(key)) is not None:
 
         # Compare cached vs current: check both FILE and IDs
         current_file = os.path.normpath(part.file) if filepath is None else filepath
@@ -21621,8 +21587,7 @@ def add_media_obj_via_PLEX_API(obj, library, item, media_idx,media_cnt,media, pa
 
     # If key already exists, check if we're resuming from checkpoint
     is_new_object = key not in PLEX_Media.OBJ_BY_ID
-    if key in PLEX_Media.OBJ_BY_ID:
-        existing_obj = PLEX_Media.OBJ_BY_ID[key]
+    if (existing_obj := media_record(key)) is not None:
         existing_files = existing_obj.get('files', {})
         # Check if this exact version already exists (resuming from checkpoint)
         if version in existing_files:
@@ -22406,8 +22371,8 @@ def _process_movies_from_database(all_movies, library_name, library_idx=0, total
             for ver, new_fi in movie_dict.get('files', {}).items():
                 if isinstance(new_fi, dict) and new_fi.get('file_metadata') is None:
                     cached_fi = cached_files.get(ver)
-                    if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
-                        new_fi['file_metadata'] = cached_fi['file_metadata']
+                    if isinstance(cached_fi, dict) and (cached_meta := cached_fi.get('file_metadata')) is not None:
+                        new_fi['file_metadata'] = cached_meta
         PLEX_Media.OBJ_BY_ID[movie_key] = movie_dict
         _track_delta(display_title, 'Movie', is_new_movie)
 
@@ -22803,8 +22768,8 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
                             continue
                         # 1. exact version-key match
                         cached_fi = cached_files.get(ver)
-                        if isinstance(cached_fi, dict) and cached_fi.get('file_metadata') is not None:
-                            new_fi['file_metadata'] = cached_fi['file_metadata']
+                        if isinstance(cached_fi, dict) and (cached_meta := cached_fi.get('file_metadata')) is not None:
+                            new_fi['file_metadata'] = cached_meta
                             continue
                         # 2. filepath+filesize fallback (version drift across --scan)
                         new_fp = new_fi.get('filepath')
@@ -22853,7 +22818,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
 
             # Create Season object in OBJ_BY_ID (matching old API structure)
             season_dir = os.path.dirname(first_season_ep_filepath) if first_season_ep_filepath else ''
-            season_dict = {
+            season_dict: MediaRecord = {
                 'file': season_dir, 'files': {}, 'type': 'Season', 'type_str': 'Season',
                 'id': season_info['id'], 'title': season_info.get('title', f'Season {s_idx}'),
                 'originalTitle': '', 'year': 0, 'library': library_name,
@@ -22921,7 +22886,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
                 continue
             _sib_keys.sort(key=lambda k: PLEX_Media.OBJ_BY_ID.get(k, {}).get('E_idx', 0))
             for _ep_key in _sib_keys:
-                _ep_obj = PLEX_Media.OBJ_BY_ID.get(_ep_key)
+                _ep_obj = media_record(_ep_key)
                 if _ep_obj is not None:
                     _ep_obj['multi_episode_siblings'] = list(_sib_keys)
 
@@ -22957,7 +22922,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
                     f"  - Episode file is directly in the library root (not in a series subdirectory)\n"
                     f"  - Unusual directory structure")
             series_dir = os.path.join(lib_root, series_subdir)
-        series_dict = {
+        series_dict: MediaRecord = {
             'file': series_dir, 'files': {}, 'type': 'Series', 'type_str': 'Series',
             'id': series_id, 'title': series_info['title'],
             'originalTitle': series_info.get('originalTitle', ''), 'year': series_info.get('year', 0),
@@ -23027,7 +22992,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
         scraped_eps = scraped.get('episodes', {})
         if not scraped_eps:
             continue  # no scraped data → no abs_ep_idx
-        series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+        series_obj = media_record(series_key)
         if not series_obj:
             continue
         ep_data = PLEX_Media.OBJ_BY_SERIES_EPISODES.get(series_key, {})
@@ -23039,7 +23004,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
             for e_str in sorted(e_dict.keys()):
                 for _ver, ep_keys in e_dict[e_str].items():
                     for ep_key in ep_keys:
-                        ep_obj = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                        ep_obj = media_record(ep_key)
                         if not ep_obj:
                             continue
                         # Multi-episode non-leaders share the leader's abs_ep_idx
@@ -23056,7 +23021,7 @@ def _process_series_from_database(series_data_all, library_name, library_idx=0, 
             # Store season abs_ep_max
             s_key_lookup = PLEX_Media.OBJ_BY_SERIES.get(series_key, {}).get(s_str)
             if s_key_lookup:
-                season_obj = PLEX_Media.OBJ_BY_ID.get(s_key_lookup)
+                season_obj = media_record(s_key_lookup)
                 if season_obj:
                     season_obj['abs_ep_max'] = season_abs_max
             if season_abs_max > show_abs_max:
@@ -23309,7 +23274,7 @@ def _ensure_tsv_and_normalize_episodes(series_data_all, library_name):
                 if plex_e_idx != scraped_e_num:
                     # Store the scraped form on the episode obj (for debug/audit).
                     ep_key = f"Episode:{ep_dict['id']}"
-                    cached_ep = PLEX_Media.OBJ_BY_ID.get(ep_key)
+                    cached_ep = media_record(ep_key)
                     if cached_ep is not None:
                         cached_ep['scraped_E_str'] = scraped_e_str
 
@@ -24300,8 +24265,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
                     # Build detailed info BEFORE removing (capture original paths before deletion)
                     removal_details = []
                     for key in removed_keys:
-                        if key in PLEX_Media.OBJ_BY_ID:
-                            obj = PLEX_Media.OBJ_BY_ID[key]
+                        if (obj := media_record(key)) is not None:
                             # Capture full object NOW before deletion (for JSON update log / undo)
                             detail_info = {
                                 'title': obj.get('title', obj.get('name', 'Unknown')),
@@ -24317,8 +24281,7 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
 
                     # Actually remove the stale entries from cache
                     for key in removed_keys:
-                        if key in PLEX_Media.OBJ_BY_ID:
-                            obj = PLEX_Media.OBJ_BY_ID[key]
+                        if (obj := media_record(key)) is not None:
                             removed_file = obj.get('file')
                             removed_obj_type = obj.get('type')
 
@@ -24477,6 +24440,8 @@ class PLEX_Library(PLEX_OBJ_TYPE_ABC):
             obj_type = obj['type']
             if lib not in updated_library_object_counts:
                 updated_library_object_counts[lib] = {}
+            if obj['type'] == 'Collection':
+                continue
             # v2.15: precompute path-segment WORD LISTS for fast title-search
             # path-fallback (the dotted-needle case like `war.einmal`).
             # Storing tokens (not just segments) so the hot filter doesn't
@@ -25716,18 +25681,18 @@ class PLEX_Collection(PLEX_OBJ_TYPE_ABC):
 
 class PLEX_Media(PLEX_OBJ_TYPE_ABC):
     TYPE_STR = 'media'
-    OBJ_BY_ID = {}          # dict: key=obj.type:part.id - value=DICT with always: "file", "type", "library", "title", "part_id"
+    OBJ_BY_ID: dict[str, MediaRecord | CollectionRecord] = {}  # dict: key=obj.type:part.id - value=DICT with always: "file", "type", "library", "title", "part_id"
                             #                                         and potentially other keys depending on TYPE!
-    OBJ_BY_FILEPATH = {}    # dict: key=filepath     - value=LIST (as filename can be part of SEVERAL libraries) of part_ids
-    OBJ_BY_LIBRARY  = {}    # dict: key=library_name - value=DICT: key=cache_key,  value=obj_dict
-    OBJ_BY_COLLECTION = {} # dict: key=collection_key (Collection:<id>) - value=collection_dict
+    OBJ_BY_FILEPATH: dict[str, list[str]] = {}  # dict: key=filepath     - value=LIST (as filename can be part of SEVERAL libraries) of part_ids
+    OBJ_BY_LIBRARY: dict[str, dict[str, list[str]]] = {}  # dict: key=library_name - value=DICT: key=cache_key,  value=obj_dict
+    OBJ_BY_COLLECTION: dict[str, CollectionRecord] = {}  # dict: key=collection_key (Collection:<id>) - value=collection_dict
     #                                   movie_obj_key = movie_key = obj.type:part.id for MOVIE OBJ
     #                                   series_obj_key  = series_key  = obj.type:part.id for SHOW OBJ
-    OBJ_BY_MOVIE    = {}    # dict: key=movie_obj_key  -                        value=DICT: key=version, value=LIST of part_ids
-    OBJ_BY_SERIES_EPISODES={} # dict: key=series_obj       - value=DICT: key='S0x'  value=DICT: key='E0x'    value=DICT: key=version, value=LIST of part_ids
-    OBJ_BY_SERIES     = {}    # dict: key=series_obj_key   - value=DICT: key='S0x'  value=key ?!
-    OBJ_BY_SERIES_SCRAPED = {} # dict: key=series_key → scraped episode data (title, source, episodes, numbering_issues)
-    OBJ_BY_ONDISK_LABEL = {} # dict: key=label_string → list of cache_keys that have that on-disk label
+    OBJ_BY_MOVIE: dict[str, dict[str, str]] = {}  # dict: key=movie_obj_key  -                        value=DICT: key=version, value=LIST of part_ids
+    OBJ_BY_SERIES_EPISODES: dict[str, dict[str, dict[str, dict[str, list[str]]]]] = {}  # dict: key=series_obj       - value=DICT: key='S0x'  value=DICT: key='E0x'    value=DICT: key=version, value=LIST of part_ids
+    OBJ_BY_SERIES: dict[str, dict[str, str]] = {}  # dict: key=series_obj_key   - value=DICT: key='S0x'  value=key ?!
+    OBJ_BY_SERIES_SCRAPED: dict[str, ScrapedSeries] = {}  # dict: key=series_key → scraped episode data (title, source, episodes, numbering_issues)
+    OBJ_BY_ONDISK_LABEL: dict[str, list[str]] = {}  # dict: key=label_string → list of cache_keys that have that on-disk label
 
     init_done = False
     # Filled by the --update-cache pass, drained by the one merged save at the
@@ -25904,13 +25869,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                         obj['members'] = members
                         PLEX_Media.OBJ_BY_ID[key] = obj
                 case "Season":
-                    if obj.get('series_key') in PLEX_Media.OBJ_BY_SERIES_EPISODES and obj.get('S_str') in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(obj['series_key'], {}):
-                        members = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']].keys())
+                    parent_key, s_str = obj.get('series_key', ''), obj['S_str'] or ''
+                    if parent_key in PLEX_Media.OBJ_BY_SERIES_EPISODES and s_str in PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key]:
+                        members = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key][s_str].keys())
                         obj['members'] = members
                         PLEX_Media.OBJ_BY_ID[key] = obj
                 case "Episode":
-                    if obj.get('series_key') in PLEX_Media.OBJ_BY_SERIES_EPISODES and obj.get('S_str') in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(obj['series_key'], {}) and obj.get('E_str') in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(obj['series_key'], {}).get(obj['S_str'], {}):
-                        versions = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']][obj['E_str']].keys())
+                    parent_key, s_str, e_str = obj.get('series_key', ''), obj['S_str'] or '', obj['E_str'] or ''
+                    if e_str in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(parent_key, {}).get(s_str, {}):
+                        versions = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key][s_str][e_str].keys())
                         obj['versions'] = versions
                         PLEX_Media.OBJ_BY_ID[key] = obj
 
@@ -26002,15 +25969,15 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 case "Season": # key = series_key
                     # Defensive check: skip if parent series is missing (orphaned data)
                     # Skip check if OBJ_BY_SERIES is empty (database mode - Series objects not created)
-                    if PLEX_Media.OBJ_BY_SERIES and obj['series_key'] not in PLEX_Media.OBJ_BY_SERIES:
-                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned season - parent series '{obj['series_key']}' not found: key='{key}'")
+                    parent_key, s_str = obj.get('series_key', ''), obj['S_str'] or ''
+                    if PLEX_Media.OBJ_BY_SERIES and parent_key not in PLEX_Media.OBJ_BY_SERIES:
+                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned season - parent series '{parent_key}' not found: key='{key}'")
                         continue
                     # In database mode, we don't have Series objects, so skip member/count collection
-                    if obj['series_key'] in PLEX_Media.OBJ_BY_SERIES:
-                        #[ obj['S_str']+E_str for E_str in PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']].keys() ]
-                        members = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']].keys()) # E01, E02, ...
+                    if parent_key in PLEX_Media.OBJ_BY_SERIES:
+                        members = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key][s_str].keys()) # E01, E02, ...
                         E_count = len( members )
-                        S_count = len( PLEX_Media.OBJ_BY_SERIES[obj['series_key']].keys() )
+                        S_count = len( PLEX_Media.OBJ_BY_SERIES[parent_key].keys() )
                     else:
                         # Database mode: use fallback values
                         members = []
@@ -26019,17 +25986,16 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 case "Episode": # key = series_key
                     # Defensive check: skip if parent series is missing (orphaned data)
                     # Skip check if OBJ_BY_SERIES is empty (database mode - Series objects not created)
-                    if PLEX_Media.OBJ_BY_SERIES and obj['series_key'] not in PLEX_Media.OBJ_BY_SERIES:
-                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned episode - parent series '{obj['series_key']}' not found: key='{key}'")
+                    parent_key, s_str, e_str = obj.get('series_key', ''), obj['S_str'] or '', obj['E_str'] or ''
+                    if PLEX_Media.OBJ_BY_SERIES and parent_key not in PLEX_Media.OBJ_BY_SERIES:
+                        if DBG: print(f"{DBGPFX}PLEX_Media.init(): Skipping orphaned episode - parent series '{parent_key}' not found: key='{key}'")
                         continue
                     # Defensive check: skip if season/episode structure is missing (orphaned episode)
-                    if (obj.get('series_key') in PLEX_Media.OBJ_BY_SERIES_EPISODES and
-                        obj.get('S_str') in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(obj['series_key'], {}) and
-                        obj.get('E_str') in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(obj['series_key'], {}).get(obj['S_str'], {})):
-                        versions = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']][obj['E_str']].keys())
-                        if obj['series_key'] in PLEX_Media.OBJ_BY_SERIES:
-                            S_count = len( PLEX_Media.OBJ_BY_SERIES[obj['series_key']].keys() )
-                            E_count = len( PLEX_Media.OBJ_BY_SERIES_EPISODES[obj['series_key']][obj['S_str']].keys() )
+                    if e_str in PLEX_Media.OBJ_BY_SERIES_EPISODES.get(parent_key, {}).get(s_str, {}):
+                        versions = list(PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key][s_str][e_str].keys())
+                        if parent_key in PLEX_Media.OBJ_BY_SERIES:
+                            S_count = len( PLEX_Media.OBJ_BY_SERIES[parent_key].keys() )
+                            E_count = len( PLEX_Media.OBJ_BY_SERIES_EPISODES[parent_key][s_str].keys() )
                         else:
                             # Database mode: OBJ_BY_SERIES is empty, use fallback
                             S_count = 0
@@ -27655,6 +27621,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             updated_file_count = 0
             updated_fp_count   = 0
             for _k, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj['type'] == 'Collection':
+                    continue
                 # obj['file'] shortcut
                 obj_file = obj.get('file', '')
                 if obj_file:
@@ -32290,8 +32258,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 continue
             files_dict = obj.get('files', {})
             is_above = any(
-                (fi.get('filesize') or 0) > 0 and
-                (fi['filesize'] * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
+                (size := fi.get('filesize') or 0) > 0 and
+                (size * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
                 for fi in files_dict.values()
             )
             fp = next((fi.get('filepath', '') for fi in files_dict.values() if fi.get('filepath')), '')
@@ -32337,8 +32305,8 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
             if duration_ms < 60_000: continue
             files_dict = obj.get('files', {})
             is_above = any(
-                (fi.get('filesize') or 0) > 0 and
-                (fi['filesize'] * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
+                (size := fi.get('filesize') or 0) > 0 and
+                (size * 8) / (duration_ms / 1000) / 1_000_000 >= threshold
                 for fi in files_dict.values()
             )
             if is_above:
@@ -33615,11 +33583,12 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
         match obj['type']:
             case "Series": # key = series_key
                 year_str = f"\t({obj['year']})" if obj['year']>0 else ""
-                season_plural = "s" if obj['S_count']>1 else ""
-                print(f"> SERIES\t{obj['title']}{year_str}\t: {obj['S_count']} season{season_plural}")
+                season_count = obj.get('S_count', 0)
+                season_plural = "s" if season_count>1 else ""
+                print(f"> SERIES\t{obj['title']}{year_str}\t: {season_count} season{season_plural}")
                 # Season table
                 print(f"\n  {'SEASON':<8} {'KEY':<16} {'EPISODES':>8}")
-                for S_str in obj['members']:
+                for S_str in obj.get('members', []):
                     season_obj_id = PLEX_Media.OBJ_BY_SERIES[ key ][ S_str ]
                     # Count episodes in this season
                     ep_count = 0
@@ -33630,14 +33599,18 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                     print(f"  {S_str:<8} {season_obj_id:<16} {ep_count:>8}")
                 if VRB:
                     print(f"\n{obj['file']}")
-                    for S_str in obj['members']:
+                    for S_str in obj.get('members', []):
                         season_obj_id = PLEX_Media.OBJ_BY_SERIES[ key ][ S_str ]
-                        season = PLEX_Media.OBJ_BY_ID[ season_obj_id ]
+                        season = media_record(season_obj_id)
+                        if season is None:
+                            continue
                         print(f"SERIES\t{obj['title']} Season {season['S_idx']}: {season['title']}")
-                        for E_str in season['members']:
+                        for E_str in season.get('members', []):
                             for version,partList in PLEX_Media.OBJ_BY_SERIES_EPISODES[ key ][S_str][ E_str ].items():
                                 for part in partList:
-                                    episode = PLEX_Media.OBJ_BY_ID[ part ]
+                                    episode = media_record(part)
+                                    if episode is None:
+                                        continue
                                     if VERYVRB:
                                         print(f"SERIES\t{obj['title']} {episode['S0XE0X']} [{version}] {{{part}}}: {episode['title']}")
                                     else:
@@ -37050,6 +37023,8 @@ def _update_cache_child_paths(old_dir, new_dir):
     old_prefix = old_dir + os.sep
     new_prefix = new_dir + os.sep
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        if obj['type'] == 'Collection':
+            continue
         # Update 'file' field — exact match (dir objects) or child paths
         f = obj.get('file', '')
         if f == old_dir:
@@ -38645,8 +38620,8 @@ def _replay_pending_move_state(plex, quiet=False):
                 _fp_entry = PLEX_Media.OBJ_BY_FILEPATH.get(new_fp) if hasattr(PLEX_Media, 'OBJ_BY_FILEPATH') else None
                 _keys = _fp_entry if isinstance(_fp_entry, list) else ([_fp_entry] if _fp_entry else [])
                 for _ck in _keys:
-                    _o = PLEX_Media.OBJ_BY_ID.get(_ck) if hasattr(PLEX_Media, 'OBJ_BY_ID') else None
-                    if isinstance(_o, dict):
+                    _o = media_record(_ck)
+                    if _o is not None:
                         if _snap.get('collections'):
                             _o['collections'] = sorted(set((_o.get('collections') or []) + list(_snap['collections'])))
                         if _snap.get('labels'):
@@ -39765,11 +39740,11 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
         if _token:
             wrapper_dirs.setdefault(wrapper_dir, (series_key, library_name, _token))
     for episode_key, episode_obj in PLEX_Media.OBJ_BY_ID.items():
-        if episode_obj.get('type') != 'Episode':
+        if episode_obj['type'] != 'Episode':
             continue
         if episode_obj.get('library') not in scoped_libraries:
             continue
-        if episode_obj.get('series_key') and episode_obj['series_key'] not in scoped_keys:
+        if (_episode_series := episode_obj.get('series_key')) and _episode_series not in scoped_keys:
             continue
         derived = derive_naming_paths(episode_obj, library_roots)
         series_level_dir = derived.get('series_dir')
@@ -39913,7 +39888,7 @@ def _sort_new_consolidate_season_wrappers(all_series_list, dry_run=False, yes=Fa
             # per-series sort loop (its old dir is gone).  Episode-derived
             # wrappers (Plex merged several wrappers into one series) leave
             # the series obj untouched.
-            series_obj = PLEX_Media.OBJ_BY_ID.get(series_key)
+            series_obj = media_record(series_key)
             # Set when this series' OWN directory is the wrapper just drained,
             # so its cache entry moved with it -- read again further down to
             # decide whether the series counts as consolidated.
@@ -41136,20 +41111,20 @@ def _handle_label_command(label_args, action, dry_run=False, yes=False):
     print(f"\nSummary: {added} {action_past}, {skipped} skipped, {errors} errors")
 
 
-def _resolve_label_target(identifier):
+def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
     """Resolve a label target identifier to (obj, obj_key) in cache.
     Accepts: numeric Plex ID, cache key (e.g. Movie:123), or title search string.
     Returns: (obj_dict, obj_key) or calls err() on failure.  Collections
     are never a target: they carry no labels here and no item_id to fetch."""
     # Try as cache key first
-    if identifier in PLEX_Media.OBJ_BY_ID and PLEX_Media.OBJ_BY_ID[identifier].get('type') != 'Collection':
-        return PLEX_Media.OBJ_BY_ID[identifier], identifier
+    if (record := media_record(identifier)) is not None:
+        return record, identifier
 
     # Try as numeric Plex ID
     try:
         plex_id = int(identifier)
         for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-            if cached_obj.get('id') == plex_id and cached_obj.get('type') != 'Collection':
+            if cached_obj.get('id') == plex_id and cached_obj['type'] != 'Collection':
                 return cached_obj, key
         err("00157", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
     except ValueError:
@@ -41159,7 +41134,7 @@ def _resolve_label_target(identifier):
     matches = []
     search_lower = identifier.lower()
     for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
-        if cached_obj.get('type') == 'Collection':
+        if cached_obj['type'] == 'Collection':
             continue
         title_lower = (cached_obj.get('title', '') or '').lower()
         orig_lower = (cached_obj.get('originalTitle', '') or '').lower()
