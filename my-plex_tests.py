@@ -10956,10 +10956,13 @@ class TestV269RetroactiveCoverage(unittest.TestCase):
 
     def test_state_preservation_directory_is_under_my_plex(self):
         """State files MUST live under ~/.my-plex/state-preservation/.
-        Any other location risks losing them across sessions."""
+        Any other location risks losing them across sessions.  In a test run
+        that ~ is the run's own home (_data_home), never the real one."""
         self.assertEqual(
             self.m._MOVE_STATE_DIR,
-            os.path.expanduser('~/.my-plex/state-preservation'))
+            os.path.join(self.m._data_home(), '.my-plex', 'state-preservation'))
+        self.assertFalse(self.m._MOVE_STATE_DIR.startswith(os.path.expanduser('~') + os.sep),
+                         "a test run's move state is under the real home")
 
     def test_state_file_atomic_write_then_rename(self):
         """Snapshot writes must be atomic (tmp → rename) so a SIGKILL mid-write
