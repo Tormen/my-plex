@@ -248,7 +248,7 @@ holds -- e.g. one built by `my-fda create` to run my-plex as `RUN_AS_USER`,
 granted by `my-fda add`: name it in `REENCODE_LAUNCHER` and the LaunchDaemon starts it,
 as root, and it becomes the user. Unset, the LaunchDaemon starts my-plex as
 `RUN_AS_USER`. The plist names its owner in a comment after the DOCTYPE
-(`<!-- installed by my-plex, ... -->`), so a deployment tool that reports
+(`<!-- installed by my-plex (...) -->`), so a deployment tool that reports
 jobs nobody installed knows it is my-plex's.
 
 ### Remote Operation

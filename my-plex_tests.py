@@ -19439,7 +19439,7 @@ class TestReencodeDaemonInstall(_RootInstallCase):
         doctype = next(i for i, ln in enumerate(lines) if ln.startswith('<!DOCTYPE'))
         stamps = [ln for ln in lines if ln.startswith('<!-- installed by ')]
         self.assertEqual(stamps, [lines[doctype + 1]], "one owner comment, right after the DOCTYPE")
-        self.assertEqual(stamps[0][len('<!-- installed by '):].split()[0].rstrip(','), 'my-plex')
+        self.assertEqual(stamps[0][len('<!-- installed by '):].split()[0], 'my-plex')
         calls = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
         self.assertIn(f'bootstrap system {plist_path}', calls)
         second = self.run_root(conf_lines=conf, env=env, run_dir=first.d)

@@ -8458,7 +8458,7 @@ def reencode_daemon_plist(user: str, named: "str | None") -> "dict[str, Any]":
 # job as a tool's instead of asking for it in the LINKS ("<!-- installed by
 # <owner> ..." right after the DOCTYPE).  No time in it: an unchanged job
 # stays byte-equal.  No "--" in it: an XML comment may not hold one.
-OWNER_STAMP = "<!-- installed by my-plex, its install option (root half): the reencode job -->"
+OWNER_STAMP = "<!-- installed by my-plex (its install option, root half): the reencode job -->"
 
 
 def _owner_stamped(data: bytes) -> bytes:
