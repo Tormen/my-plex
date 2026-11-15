@@ -7897,6 +7897,50 @@ def prompt_yes_no(question: str) -> bool:
             f"  - add --try to see what the command would do and ask nothing")
     return response in ['yes', 'y']
 
+
+# The keys api_key_missing() has already reported in this run.  The scrapers
+# run in a thread pool, so the check and the add are one step under the lock.
+_API_KEY_REPORTED: set[str] = set()
+_API_KEY_REPORTED_LOCK = threading.Lock()
+
+
+def api_key_missing(key: str, service: str, steps: list[str], alternative: str) -> None:
+    """Say that config key KEY (SERVICE's API key) is unset, once per run.
+
+    A scraper calls this before it gives up on a series, so a run over many
+    series would say it once per series.  With nobody to read a guide --
+    --yes/--no, -Q, or no terminal on stdin, the cases prompt_yes_no cannot
+    ask in either -- it is ONE warning line on stderr.  Otherwise it is the
+    setup guide: STEPS (how to get the key), the line to add to the config,
+    and ALTERNATIVE (another --source)."""
+    with _API_KEY_REPORTED_LOCK:
+        if key in _API_KEY_REPORTED:
+            return
+        _API_KEY_REPORTED.add(key)
+    if AUTO_YES or AUTO_NO or _boot.QUIET_ACTIVE or not sys.stdin.isatty():
+        print(f"WARNING: no {key} in the config -- {service} episode data skipped in this run"
+              f" (set it in your my-plex config: --help config)", file=sys.stderr)
+        return
+    title = f"{service} API key required (free, one-time setup, takes 2 minutes)"
+    print()
+    print("  ╔" + "═" * (len(title) + 4) + "╗")
+    print(f"  ║  {title}  ║")
+    print("  ╚" + "═" * (len(title) + 4) + "╝")
+    print()
+    for n, step in enumerate(steps, 1):
+        print(f"  Step {n}: {step}")
+        print()
+    print(f"  Step {len(steps) + 1}: add this line to your my-plex config (--help config) with an editor --")
+    print(f"          not with echo, which would leave the key in your shell history:")
+    print()
+    print(f"          {key} = '<the key>'")
+    print()
+    print(f"  Step {len(steps) + 2}: re-run this command.")
+    print()
+    print(f"  Alternative: {alternative}")
+    print()
+
+
 _SECRET_KEY_RE = re.compile(r'TOKEN|PASSWORD|SECRET|API_KEY', re.IGNORECASE)
 
 # A Plex token in a URL, in any case and with its '=' plain or
@@ -21989,6 +22033,42 @@ def _collect_missing_file_metadata(cached_obj: MediaRecord | CollectionRecord, d
     return queued
 
 
+@dataclass(frozen=True)
+class CollectorAnswers:
+    """What a metadata collector's stdout said about the files it was sent."""
+    entries: list[dict[str, Any]]   # one per file sent that it answered, in output order
+    skipped: int                    # lines that answered no file still unanswered
+    first_skipped: str              # the first such line, for the report
+
+
+def _collector_answers(stdout: str, sent: "set[str]") -> CollectorAnswers:
+    """The JSON lines in a collector's STDOUT that answer a file in SENT,
+    each file once.  Every file is then counted once however the output
+    looks: a line that is not JSON, names a file not sent, or answers a file
+    a second time is skipped and counted -- macado's reread (2026-11-15)
+    counted 69 such lines as files and printed 20753/20684."""
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    skipped = 0
+    first = ''
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed: object = json.loads(line)
+        except json.JSONDecodeError:
+            parsed = None
+        entry = cast("dict[str, Any]", parsed) if isinstance(parsed, dict) else None
+        path: object = entry.get('path') if entry is not None else None
+        if entry is None or not isinstance(path, str) or path not in sent or path in seen:
+            skipped += 1
+            first = first or line.strip()[:160]
+            continue
+        seen.add(path)
+        entries.append(entry)
+    return CollectorAnswers(entries, skipped, first)
+
+
 def _run_batch_metadata_collection() -> None:
     """Batch-collect file metadata for all queued files via parallel SSH workers.
 
@@ -22095,7 +22175,7 @@ for line in sys.stdin:
         result["container_duration"] = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000
         if has_ffprobe:
             try:
-                p = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-series_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, timeout=30)
+                p = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", fp], capture_output=True, timeout=30)
                 vdur = p.stdout.decode().strip()
                 if vdur and vdur != "N/A":
                     result["video_duration"] = float(vdur) * 1000
@@ -22171,13 +22251,13 @@ for line in sys.stdin:
         # Count actual results (lines in stdout), not partition_size
         actual_count = sum(1 for line in stdout_data.strip().split('\n') if line.strip()) if stdout_data.strip() else 0
         rate = actual_count / elapsed if elapsed > 0 else 0
-        if actual_count < partition_size:
-            missing = partition_size - actual_count
-            # Find the actual error from stderr (SSH disconnect, broken pipe, etc.)
+        if actual_count != partition_size:
+            # Lines are not files (one may be a duplicate or not JSON): which
+            # files were lost is said once the output is parsed, file by file.
             error_lines = [l for l in stderr_lines if any(kw in l.lower() for kw in
                 ['connection reset', 'broken pipe', 'disconnect', 'timeout', 'refused', 'error', 'fatal'])]
             error_reason = error_lines[-1] if error_lines else f"exit code {returncode}"
-            print(f"{w_prefix}| processed {actual_count}/{partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s) — {missing} file(s) lost: {error_reason}", flush=True)
+            print(f"{w_prefix}| returned {actual_count} result line(s) for {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s) [{error_reason}]", flush=True)
         else:
             print(f"{w_prefix}| completed {partition_size} files ({elapsed:.1f}s, {rate:.0f} files/s)", flush=True)
         return stdout_data, returncode, stderr_lines
@@ -22233,15 +22313,12 @@ for line in sys.stdin:
             print(f"  ⚠ {len(partition_files)} files lost (W{worker_id:02d}): {worker_error}", flush=True)
             continue
 
-        for line in stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            filepath = entry.get('path', '')
+        answers = _collector_answers(stdout, partition_files)
+        if answers.skipped:
+            print(f"  ⚠ W{worker_id:02d}: {answers.skipped} result line(s) answered no file it was sent"
+                  f" -- skipped, not counted (first: {answers.first_skipped})", flush=True)
+        for entry in answers.entries:
+            filepath = entry['path']
             responded_files.add(filepath)
             if 'error' in entry:
                 error_msg = entry.get('error', 'unknown')
@@ -22357,15 +22434,7 @@ for line in sys.stdin:
     for worker_id in sorted(worker_results.keys()):
         partition_files = set(partitions[worker_id]) if worker_id < len(partitions) else set()
         stdout, _, _ = worker_results[worker_id]
-        responded: set[str] = set()
-        if stdout.strip():
-            for line in stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        entry = json.loads(line)
-                        responded.add(entry.get('path', ''))
-                    except json.JSONDecodeError:
-                        pass
+        responded = {e['path'] for e in _collector_answers(stdout, partition_files).entries}
         all_lost_files.extend(sorted(partition_files - responded))
 
     for retry_num, delay in enumerate(SSH_RETRY_DELAYS):
@@ -22380,14 +22449,8 @@ for line in sys.stdin:
         # Parse retry results
         retry_responded: set[str] = set()
         if retry_stdout.strip():
-            for line in retry_stdout.strip().split('\n'):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                filepath = entry.get('path', '')
+            for entry in _collector_answers(retry_stdout, set(all_lost_files)).entries:
+                filepath = entry['path']
                 retry_responded.add(filepath)
 
                 if 'error' in entry:
@@ -22478,6 +22541,9 @@ for line in sys.stdin:
                 })
 
     processed = success_count + error_count + not_found_count + no_response_count
+    # Each file is counted once (_collector_answers), so this cannot exceed the
+    # files sent; if it does, the counting is wrong and the summary would lie.
+    assert processed <= total, f"metadata counted {processed} files of {total} sent"
     if no_response_count > 0:
         print(f"\n  Metadata collection done ({processed}/{total} files processed, {no_response_count} lost to SSH connection drops)", flush=True)
     else:
@@ -35720,25 +35786,12 @@ def _scrape_tvdb(series_title: str, metadata: dict[str, str], existing_episodes:
     global TVDB_API_KEY
 
     if not TVDB_API_KEY:
-        print()
-        print("  ╔══════════════════════════════════════════════════════════════════╗")
-        print("  ║  TVDB API key required (free, one-time setup, takes 2 minutes)  ║")
-        print("  ╚══════════════════════════════════════════════════════════════════╝")
-        print()
-        print("  Step 1: Go to https://thetvdb.com/dashboard")
-        print("          (Create a free account if you don't have one)")
-        print()
-        print("  Step 2: In your dashboard, go to 'API Keys' tab under your project")
-        print("          (or create a project first: any name will do)")
-        print()
-        print("  Step 3: Copy the API key and add it to your config file:")
-        print()
-        print("          echo \"TVDB_API_KEY = 'paste-your-key-here'\" >> ~/.my-plex.conf")
-        print()
-        print("  Step 4: Re-run this command. Done!")
-        print()
-        print("  Alternative: use --source tmdb or --source fernsehserien.de instead.")
-        print()
+        api_key_missing('TVDB_API_KEY', 'TVDB', [
+            "Go to https://thetvdb.com/dashboard\n"
+            "          (create a free account if you don't have one)",
+            "In your dashboard, open the 'API Keys' tab under your project\n"
+            "          (or create a project first: any name will do), and copy the key"],
+            "use --source tmdb or --source fernsehserien.de instead.")
         return None
 
     # Get TVDB series ID from external_ids or metadata
@@ -35850,27 +35903,13 @@ def _scrape_tmdb(series_title: str, metadata: dict[str, str], existing_episodes:
     global TMDB_API_KEY
 
     if not TMDB_API_KEY:
-        print()
-        print("  ╔══════════════════════════════════════════════════════════════════╗")
-        print("  ║  TMDB API key required (free, one-time setup, takes 2 minutes)  ║")
-        print("  ╚══════════════════════════════════════════════════════════════════╝")
-        print()
-        print("  Step 1: Go to https://www.themoviedb.org/signup")
-        print("          (Create a free account if you don't have one)")
-        print()
-        print("  Step 2: Go to https://www.themoviedb.org/settings/api")
-        print("          Click 'Request an API Key' → choose 'Developer'")
-        print("          Fill in any name/URL (personal use is fine)")
-        print()
-        print("  Step 3: Copy the 'API Read Access Token' (the long string,")
-        print("          NOT the short 'API Key') and add to your config file:")
-        print()
-        print("          echo \"TMDB_API_KEY = 'paste-your-token-here'\" >> ~/.my-plex.conf")
-        print()
-        print("  Step 4: Re-run this command. Done!")
-        print()
-        print("  Alternative: use --source tvdb or --source fernsehserien.de instead.")
-        print()
+        api_key_missing('TMDB_API_KEY', 'TMDB', [
+            "Go to https://www.themoviedb.org/signup\n"
+            "          (create a free account if you don't have one)",
+            "Go to https://www.themoviedb.org/settings/api\n"
+            "          click 'Request an API Key', choose 'Developer', any name/URL will do",
+            "Copy the 'API Read Access Token' (the long string, NOT the short 'API Key')"],
+            "use --source tvdb or --source fernsehserien.de instead.")
         return None
 
     # Get TMDB series ID from external_ids or metadata

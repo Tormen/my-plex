@@ -1230,6 +1230,30 @@ class TestCacheSkipLogic(unittest.TestCase):
         self.assertGreaterEqual(content.count("new_paths == cached_paths"), 2,
             "Both movie and episode skip logic must compare file paths")
 
+    def test_collector_answers_count_each_file_once(self):
+        """macado's reread printed "20753/20684 files processed": 69 result
+        lines answered no file still unanswered, yet were counted, and their
+        files were probed and counted again on the retry.  Each file sent is
+        now answered once: a duplicate, a line that is not JSON and a path
+        never sent are skipped and counted, the first of them kept."""
+        mp = _import_tool('mp_collector')
+        def line(p: str) -> str:
+            return json.dumps({'path': p, 'n': 1, 'container_duration': 1000})
+        out = "\n".join([line('/a'), line('/a'), 'not json', line('/elsewhere'), line('/b'), ''])
+        got = mp._collector_answers(out, {'/a', '/b', '/c'})
+        self.assertEqual([e['path'] for e in got.entries], ['/a', '/b'])
+        self.assertEqual(got.skipped, 3)
+        self.assertIn('"/a"', got.first_skipped, "the first skipped line is the duplicate")
+        self.assertEqual(mp._collector_answers('', {'/a'}).entries, [])
+
+    def test_collector_asks_ffprobe_for_show_entries(self):
+        """The collector's ffprobe call read `-series_entries` -- a rename of
+        "show" to "series" that reached a command-line option ffprobe does not
+        have -- so the per-stream video duration was never read."""
+        content = self._read_script()
+        self.assertNotIn('"-series_entries"', content)
+        self.assertIn('"-show_entries", "stream=duration"', content)
+
     def test_tool_not_found_is_fatal(self):
         content = self._read_script()
         self.assertIn("if result is None:\n            sys.exit(1)", content,
@@ -1445,8 +1469,8 @@ Summary must report metadata probing separately from library changes (added/remo
         assert match is not None, "the pattern above did not match"
         self.assertIsNotNone(match)
         func_body = match.group(1)
-        self.assertIn("json.loads(line)", func_body,
-            "Must parse JSON-lines output from collector script")
+        self.assertIn("_collector_answers(", func_body,
+            "Must parse the collector's JSON-lines through _collector_answers")
         self.assertIn("json.dumps(", func_body,
             "Collector script must output JSON via json.dumps")
 
@@ -14615,6 +14639,44 @@ class TestQuiet(unittest.TestCase):
         self.assertIn('--yes', r.stderr, "it did not name the way to answer")
         self.assertNotIn('went-on', r.stderr, "it went on without an answer")
         self.assertNotIn('EOFError', r.stderr, "still the bug handler")
+
+    def test_a_missing_api_key_is_one_line_once_when_nobody_reads_a_guide(self):
+        """macado's unattended cache reread (2026-11-15, --yes, no terminal)
+        printed the boxed TMDB and TVDB setup guides three times each -- once
+        per series -- for nobody to read.  With no terminal on stdin it is ONE
+        warning line on stderr per key, however many series ask; the guide is
+        never printed.  Adversarial: three calls for the same key."""
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "for _ in range(3):\n"
+            "    mp._scrape_tmdb('Some Series', {}, [], {'tmdb': '1'})\n"
+            "mp._scrape_tvdb('Some Series', {}, [], {'tvdb': '1'})\n"
+        )
+        r = subprocess.run([sys.executable, '-B', '-c', snippet], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, MY_PLEX_CONFIG=os.devnull))
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+        self.assertEqual(r.stderr.count('WARNING: no TMDB_API_KEY'), 1, r.stderr[-700:])
+        self.assertEqual(r.stderr.count('WARNING: no TVDB_API_KEY'), 1, r.stderr[-700:])
+        self.assertNotIn('Step 1', r.stdout + r.stderr, "the guide was printed with nobody to read it")
+
+    def test_at_a_terminal_the_api_key_guide_comes_once_and_never_says_echo(self):
+        """With a person there, the guide is printed -- once per key, not once
+        per series -- and its config step says to use an editor: the old
+        `echo "TMDB_API_KEY = '...'" >> ~/.my-plex.conf` put the key into shell
+        history."""
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "import sys\n"
+            "sys.stdin.isatty = lambda: True\n"
+            "for _ in range(3):\n"
+            "    mp._scrape_tmdb('Some Series', {}, [], {'tmdb': '1'})\n"
+        )
+        r = subprocess.run([sys.executable, '-B', '-c', snippet], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, MY_PLEX_CONFIG=os.devnull))
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+        self.assertEqual(r.stdout.count('TMDB API key required'), 1, r.stdout[-1500:])
+        self.assertIn("TMDB_API_KEY = '<the key>'", r.stdout)
+        self.assertNotIn('echo ', r.stdout, "the guide still sends the key through echo")
 
     def test_an_answer_given_in_advance_is_still_honoured_under_Q(self):
         """-Y/--yes is the tool's own answer for an unattended run, so -Q must
