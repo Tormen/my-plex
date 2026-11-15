@@ -14597,6 +14597,25 @@ class TestQuiet(unittest.TestCase):
         self.assertIn('-Q cannot ask', r.stderr, r.stderr[-700:])
         self.assertIn('--yes', r.stderr, "it did not name the way to answer")
 
+    def test_a_question_with_no_input_left_is_a_refusal_not_a_bug(self):
+        """A rollout step ran `--update-cache --force-plex` with no terminal:
+        input() hit end of input, and the run ended as a BUG (EOFError, exit
+        70, a crash trace) before anything was done.  No answer is a refusal:
+        the house ERROR with exit 1, naming --yes, and no crash trace.
+        Adversarial: stdin is EMPTY, not a 'no' -- the old code had no answer
+        to read at all."""
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "mp.prompt_yes_no('Delete the cache and rebuild it?')\n"
+            "os.write(2, b'went-on\\n')\n"
+        )
+        r = subprocess.run([sys.executable, '-B', '-c', snippet], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 1, r.stderr[-700:])
+        self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: no answer to: Delete the cache', r.stderr[-700:])
+        self.assertIn('--yes', r.stderr, "it did not name the way to answer")
+        self.assertNotIn('went-on', r.stderr, "it went on without an answer")
+        self.assertNotIn('EOFError', r.stderr, "still the bug handler")
+
     def test_an_answer_given_in_advance_is_still_honoured_under_Q(self):
         """-Y/--yes is the tool's own answer for an unattended run, so -Q must
         not turn a pre-answered question into a refusal."""
