@@ -15603,32 +15603,22 @@ class TestInstallFirewallRules(unittest.TestCase):
 
 
 def _firewall_stub(d: str) -> str:
-    """A my-little-snitch in directory D that answers as the real one does
-    and logs every call to D/calls (`cli <argv>`), so a test reads what root
-    asked of it.  `list R` prints the lines of D/listing that CONTAIN R, as
-    the real one does (a filter, so upload.pypi.org is in pypi.org's) -- no
-    D/listing is the real one's refusal of anyone but root; `remove` takes
-    IDs on stdin and fails on none (the real err 00036), and on ID while
-    D/fail-remove-ID exists, removing nothing; after a removal it drops
-    D/listing while D/remove-drops-listing exists, so the next `list` fails;
-    `allow` fails while D/fail-allow exists, and says "already there" while
-    D/already does."""
+    """A my-little-snitch in directory D that logs every call to D/calls
+    (`cli <argv>`), so a test reads what root asked of it.  `allow` prints
+    D/allow-says when it exists (what the real one prints about the denies it
+    removed or left), fails while D/fail-allow exists, and says "already
+    there" while D/already does; any other verb fails, as no root run needs
+    one."""
     stub = os.path.join(d, 'my-little-snitch')
     with open(stub, 'w') as f:
         f.write("#!/bin/dash\n"
                 f"D='{d}'\n"
                 'printf "cli %s\\n" "$*" >> "$D/calls"\n'
                 'case "$1" in\n'
-                '  list) [ -f "$D/listing" ] || { echo "ERROR 00099 [1]: needs root" >&2; exit 1; }\n'
-                '        grep -F -- "$2" "$D/listing"; exit 0;;\n'
-                '  remove) ids=$(cat)\n'
-                '          [ -n "$ids" ] || { echo "ERROR 00036 [1]: remove [go] <ID>.." >&2; exit 1; }\n'
-                '          for i in $ids; do [ -f "$D/fail-remove-$i" ] &&'
-                ' { echo "ERROR 00037 [1]: refused" >&2; exit 1; }; done\n'
-                '          for i in $ids; do echo "removed $i" >> "$D/calls"; done\n'
-                '          [ -f "$D/remove-drops-listing" ] && rm -f "$D/listing";;\n'
-                '  allow) [ -f "$D/fail-allow" ] && { echo "ERROR 00050 [1]: refused" >&2; exit 1; }\n'
+                '  allow) [ -f "$D/allow-says" ] && cat "$D/allow-says"\n'
+                '         [ -f "$D/fail-allow" ] && { echo "ERROR 00050 [1]: refused" >&2; exit 1; }\n'
                 '         [ -f "$D/already" ] && echo " >>> already there: x";;\n'
+                '  *) echo "ERROR 00099 [1]: not expected here: $1" >&2; exit 1;;\n'
                 'esac\n'
                 'exit 0\n')
     os.chmod(stub, 0o755)
@@ -15654,14 +15644,6 @@ def _listed_python(python3: str) -> str:
     real = re.sub(r'(/Python\.framework/Versions/[^/]+)/bin/python[0-9.]*$',
                   r'\1/Resources/Python.app/Contents/MacOS/Python', real)
     return re.sub(r'(/Cellar/[^/]+)/[^/]+/', r'\1/*/', real, count=1)
-
-
-def _another_minor(listed: str) -> str:
-    """LISTED with its Python minor one lower: another program, to a firewall."""
-    m = re.search(r'Versions/(\d+)\.(\d+)/', listed)
-    assert m, f"no Python version in {listed}"
-    old, new = f"{m[1]}.{m[2]}", f"{m[1]}.{int(m[2]) - 1}"
-    return listed.replace(f"@{old}/", f"@{new}/").replace(f"Versions/{old}/", f"Versions/{new}/")
 
 
 class _RootRun:
@@ -15713,7 +15695,7 @@ class _RootInstallCase(unittest.TestCase):
         return _listed_python(shutil.which('python3', path=_fake_ssh_env()['PATH']) or 'python3')
 
     def run_root(self, conf_lines: str = "RUN_AS_USER = 'nobody'\n", argv: 'tuple[str, ...]' = ('--install',),
-                 env: 'dict[str, str] | None' = None, listing: 'str | None' = '',
+                 env: 'dict[str, str] | None' = None,
                  copy: 'str | None' = None, firewall: bool = True,
                  touch: 'tuple[str, ...]' = (), conf_in_env: bool = False,
                  run_dir: 'str | None' = None) -> _RootRun:
@@ -15725,9 +15707,6 @@ class _RootInstallCase(unittest.TestCase):
         _su_stub(d)
         for name in touch:
             open(os.path.join(d, name), 'w').close()
-        if listing is not None:
-            with open(os.path.join(d, 'listing'), 'w') as f:
-                f.write(listing)
         home = os.path.join(d, 'home')
         os.makedirs(home, exist_ok=True)
         conf = os.path.join(d, 'my-plex.conf')
@@ -15814,36 +15793,6 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertFalse(os.path.exists(os.path.join(run.home, '.python.venv')),
                          "root built a venv")
 
-    def test_a_deny_is_removed_only_when_one_names_my_plex(self):
-        """No deny is the normal case, and `remove go` with no ID is an
-        error (err 00036): it must not be called then.  A deny naming
-        my-plex's Python, or `any`, goes; curl's deny for the same host
-        stays -- it is somebody else's decision."""
-        run = self.run_root()
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertFalse([c for c in run.calls if c.startswith('cli remove')],
-                         f"remove called with nothing to remove: {run.calls}")
-        self.assertIn('REMOVED: no deny rule', run.r.stdout)
-
-        py = self.listed_python()
-
-        def rule(rid: str, process: str, action: str) -> str:
-            return f"{rid}\t{process}  {action}  api.themoviedb.org  tcp/443  nobody\n"
-        run = self.run_root(listing=rule('aaa111', py, 'deny') + rule('bbb222', 'any', 'deny')
-                            + rule('ccc333', '/usr/bin/curl', 'deny') + rule('ddd444', py, 'allow'))
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
-                         ['removed aaa111', 'removed bbb222'], "\n".join(run.calls))
-        self.assertLess(run.calls.index('cli remove go'),
-                        run.calls.index(run.allows()[0]), "the allow came before the deny went")
-
-    def test_a_listing_that_fails_is_an_error_not_nothing_to_clear(self):
-        run = self.run_root(listing=None)
-        self.assertNotEqual(run.r.returncode, 0, run.text())
-        self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]:.* list ')
-        self.assertEqual(run.allows(), [], "it wrote rules past a deny it could not read")
-        self.assertEqual(run.su, [], "it handed over after a failure")
-
     def test_a_failed_rule_stops_before_the_drop(self):
         """A rule the firewall tool refuses is an ERROR, and nothing is
         handed over: the run as the user must not start on rules that are
@@ -15852,6 +15801,34 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertEqual(run.r.returncode, 1, run.text())
         self.assertRegex(run.r.stderr, r'ERROR \d{5} \[1\]:.* allow go ')
         self.assertEqual(run.su, [], "it handed over after a failure")
+
+    def test_denies_are_my_little_snitchs_and_its_lines_about_them_are_repeated(self):
+        """my-little-snitch's `allow go` removes a deny that would beat the
+        allow, in the same change, and names it -- or names one it leaves
+        with the line that removes it.  So root lists and removes nothing
+        itself (a `list` or `remove` here is refused, as the stub knows no
+        such verb), and repeats those deny lines under the remote, where the
+        user sees which deny went or still stands.  Adversarial on both: the
+        old code listed first and stopped on the refusal; a run that drops
+        the tool's output names no deny at all.  The `added:` line is the
+        normal case and is not repeated."""
+        says = (" >>> removing 1d8939: /opt/x/Python  deny  api.themoviedb.org  tcp/443  nobody\n"
+                "    > it wins over this allow: the same program, server, port and owner,"
+                " and a deny beats an allow\n"
+                " >>> added: /opt/x/Python  allow  api.themoviedb.org  tcp/443  nobody\n"
+                "    > removed 1 deny(s); all of it is in /var/db/root/x.json\n")
+        d = tempfile.mkdtemp(prefix='run-', dir=self.tmp)
+        with open(os.path.join(d, 'allow-says'), 'w') as f:
+            f.write(says)
+        run = self.run_root(run_dir=d)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertEqual([c for c in run.calls if not c.startswith('cli allow go ')], [],
+                         "root called my-little-snitch for more than its rules")
+        out = run.r.stdout
+        block = out.split('   > api.themoviedb.org', 1)[1].split('\n   > ', 1)[0]
+        self.assertIn('       >>> removing 1d8939: ', block, out)
+        self.assertIn('       > removed 1 deny(s)', block, out)
+        self.assertNotIn('>>> added:', out, "the normal case is repeated too")
 
     def test_without_RUN_AS_USER_it_takes_the_sudo_user_or_stops(self):
         """Empty RUN_AS_USER: the user who ran sudo.  No sudo either -- a
@@ -15947,208 +15924,20 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertIn(f"--config {run.conf}", line, f"not the file root read: {run.su}")
         self.assertNotIn(other, line)
 
-    def test_a_deny_for_another_program_or_another_remote_stays(self):
-        """Only a deny that stops my-plex is my-plex's to remove.  The ssh
-        remote here is a host whose NAME holds 'ssh' -- the house's own public
-        endpoint does -- so a pattern searched over the whole rule line took
-        Firefox's and curl's denies for it as ssh's.  The firewall tool's
-        list is a FILTER, so pypi.org's listing holds upload.pypi.org's
-        rules, and 10.0.0.1's holds 10.0.0.12's: a deny for another remote,
-        never this one's.  A deny for another port does not stop this one
-        either.  Each stays; the controls -- my-plex's Python and ssh on the
-        remote itself, any port -- go.
-
-        Another Python MINOR is another program too: it matched once, because
-        any process holding 'Python.app' was taken for my-plex's own."""
-        py = self.listed_python()
-
-        def rule(rid: str, process: str, remote: str, port: str) -> str:
-            return f"{rid}\t{process}  deny  {remote}  {port}  nobody\n"
-        listing = (rule('fff111', '/Applications/Firefox.app/Contents/MacOS/firefox',
-                        'ssh.example.net', 'tcp/53146')
-                   + rule('ccc222', '/usr/bin/curl', 'ssh.example.net', 'any')
-                   + rule('ppp333', py, 'upload.pypi.org', 'tcp/443')
-                   + rule('ttt444', py, 'ssh.example.net', 'tcp/22')
-                   + rule('ggg555', '/usr/bin/ssh', 'ssh.example.net', 'any')
-                   + rule('mmm777', _another_minor(py), 'pypi.org', 'any')
-                   + rule('hhh666', py, 'pypi.org', 'any'))
-        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\n"
-                                       "PLEX_DB_REMOTE = 'me@ssh.example.net:53146'\n",
-                            listing=listing)
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
-                         ['removed ggg555', 'removed hhh666'], "\n".join(run.calls))
-        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\nPLEX_DB_REMOTE = 'me@10.0.0.1'\n",
-                            listing=rule('aaa111', py, '10.0.0.12', 'any'))
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertEqual([c for c in run.calls if c.startswith('removed ')], [], "\n".join(run.calls))
-
-    def test_a_deny_is_removed_only_when_the_my_plex_user_owns_it(self):
-        """#42: a deny is its OWNER's decision.  The same deny -- my-plex's
-        Python, this remote, this port -- owned by another user stays, and so
-        does one owned by `nobody2`: the owner is matched as a whole field,
-        never as a substring of the line.  One owned by the my-plex user
-        (RUN_AS_USER here) goes, a verdict token after its owner or not.
-        So does one owned by `anyone` (#50: a rule with neither uid nor
-        system stops that user too).  `system` is root's own, so it stays --
-        and is NAMED, since it may still stop my-plex and beat the allow
-        just written."""
-        py = self.listed_python()
-
-        def rule(rid: str, owner: str, tail: str = '') -> str:
-            return f"{rid}\t{py}  deny  api.themoviedb.org  tcp/443  {owner}{tail}\n"
-        listing = (rule('own111', 'nobody') + rule('own222', 'nobody', '   cleanup?[expired]')
-                   + rule('oth333', 'someone-else') + rule('sub444', 'nobody2')
-                   + rule('any555', 'anyone') + rule('sys666', 'system'))
-        run = self.run_root(listing=listing)
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertEqual(sorted(c for c in run.calls if c.startswith('removed ')),
-                         ['removed any555', 'removed own111', 'removed own222'], "\n".join(run.calls))
-        self.assertRegex(run.r.stdout, r'(?m)^ >>> KEPT.*\n   > sys666  .*  system$',
-                         "the kept system deny is not named")
-        for rid in ('oth333', 'sub444'):
-            self.assertNotIn(rid, run.r.stdout, "another user's deny does not stop my-plex's user")
-
-    @staticmethod
-    def removed_block(stdout: str) -> 'tuple[list[str], list[str]]':
-        """The REMOVED headings a root run printed, and the `   > ` lines
-        under them (up to the next ` >>> `)."""
-        heads: list[str] = []
-        items: list[str] = []
-        inside = False
-        for line in stdout.splitlines():
-            if line.startswith(' >>> '):
-                inside = line.startswith(' >>> REMOVED')
-                if inside:
-                    heads.append(line)
-            elif inside and line.startswith('   > '):
-                items.append(line[5:])
-        return heads, items
-
-    def test_50_an_anyone_deny_is_removed_and_listed_with_its_ID_and_rule(self):
-        """#50: a deny owned by `anyone` (a rule with neither uid nor system)
-        stops the my-plex user too, so it goes -- until #42's fix it stayed,
-        named "kept", and beat every allow written beside it.  The output
-        lists it under REMOVED with its ID and the rule exactly as the
-        firewall tool's `list` printed it."""
-        py = self.listed_python()
-        rule = f"{py}  deny  api.themoviedb.org  tcp/443  anyone"
-        run = self.run_root(listing=f"any555\t{rule}\n")
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
-                         "\n".join(run.calls))
-        heads, items = self.removed_block(run.r.stdout)
-        self.assertEqual(len(heads), 1, run.r.stdout)
-        self.assertRegex(heads[0], r'\b1 deny rule\(s\)', "the count is not beside the heading")
-        self.assertEqual(items, [f"any555  {rule}"], run.r.stdout)
-        self.assertNotRegex(run.r.stdout, r'(?m)^.*KEPT.*\n(   > .*\n)*   > any555', "named kept as well")
-
-    def test_50_a_system_deny_is_kept_and_named_never_removed(self):
-        """`system` is root's own rule: not the my-plex user's decision to
-        undo.  It stays, and is named on a KEPT line with why -- it may still
-        stop my-plex -- and never appears under REMOVED."""
-        py = self.listed_python()
-        rule = f"{py}  deny  api.themoviedb.org  tcp/443  system"
-        run = self.run_root(listing=f"sys666\t{rule}\n")
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertFalse([c for c in run.calls if c.startswith('cli remove')], "\n".join(run.calls))
-        self.assertRegex(run.r.stdout, r'(?m)^ >>> KEPT.*system.*may still stop my-plex.*\n   > sys666  '
-                         + re.escape(rule) + '$', run.r.stdout)
-        _heads, items = self.removed_block(run.r.stdout)
-        self.assertEqual(items, [], run.r.stdout)
-
-    def test_50_another_users_deny_is_kept(self):
-        py = self.listed_python()
-        run = self.run_root(listing=f"oth333\t{py}  deny  api.themoviedb.org  tcp/443  someone-else\n")
-        self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertFalse([c for c in run.calls if c.startswith('cli remove')], "\n".join(run.calls))
-        self.assertNotIn('oth333', run.r.stdout)
-
-    def test_50_nothing_to_remove_is_one_line(self):
-        """No deny at all, or only ones that stay: ONE line says nothing was
-        removed -- no heading with an empty list under it."""
-        py = self.listed_python()
-        for listing in ('', f"sys666\t{py}  deny  api.themoviedb.org  tcp/443  system\n"):
-            run = self.run_root(listing=listing)
-            self.assertEqual(run.r.returncode, 0, run.text())
-            heads, items = self.removed_block(run.r.stdout)
-            self.assertEqual(len(heads), 1, run.r.stdout)
-            self.assertRegex(heads[0], r'^ >>> REMOVED: no deny rule\b', run.r.stdout)
-            self.assertEqual(items, [], run.r.stdout)
-            # It says only what was removed -- none owned by the user or
-            # `anyone` -- never that nothing stored stops the user: the
-            # system deny kept and named on the next line may.
-            self.assertIn('`anyone`', heads[0], run.r.stdout)
-            self.assertNotRegex(heads[0], r'none stored|nothing (stored )?(would )?stops?', run.r.stdout)
-
-    def test_50_a_failure_after_a_removal_still_lists_what_was_removed(self):
-        """A deny removed is gone from the firewall, so the run says so even
-        when a LATER remote's `list` (err 00037) or `remove` (err 00038)
-        fails and the run stops: the REMOVED block was printed after the
-        loop, err() exited before it, and any555 went with no line naming
-        it.  Adversarial both ways: the deny whose removal was refused is NOT
-        listed as removed."""
-        py = self.listed_python()
-        rule = f"{py}  deny  api.themoviedb.org  tcp/443  anyone"
-        run = self.run_root(listing=f"any555\t{rule}\n", touch=('remove-drops-listing',))
-        self.assertNotEqual(run.r.returncode, 0, run.text())
-        self.assertIn('ERROR 00037', run.r.stderr, run.text())
-        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
-                         "\n".join(run.calls))
-        self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
-        refused = f"{py}  deny  api4.thetvdb.com  tcp/443  anyone"
-        run = self.run_root(listing=f"any555\t{rule}\nany222\t{refused}\n",
-                            touch=('fail-remove-any222',))
-        self.assertNotEqual(run.r.returncode, 0, run.text())
-        self.assertIn('ERROR 00038', run.r.stderr, run.text())
-        self.assertEqual([c for c in run.calls if c.startswith('removed ')], ['removed any555'],
-                         "\n".join(run.calls))
-        self.assertEqual(self.removed_block(run.r.stdout)[1], [f"any555  {rule}"], run.text())
-
-    def test_50_the_REMOVED_list_is_exactly_what_remove_was_given(self):
-        """The printed claim must be what ran: the IDs under REMOVED, and the
-        count beside the heading, equal the IDs the firewall tool's `remove`
-        received -- no more, no fewer.  Adversarial: the Plex server's API
-        and its ssh endpoint are ONE address here, so an `any` deny for it
-        is in both remotes' listings (the stub, unlike the real tool, keeps
-        listing it after its removal) -- it is removed and listed once; a
-        `system` deny there is named once; one deny of the user's and one of
-        `anyone`'s on other remotes go; another user's stays."""
-        py = self.listed_python()
-        listing = (f"ip0001\tany  deny  192.0.2.10  any  anyone\n"
-                   f"ip0002\t/usr/bin/ssh  deny  192.0.2.10  any  system\n"
-                   f"own111\t{py}  deny  pypi.org  any  nobody\n"
-                   f"any222\t{py}  deny  api4.thetvdb.com  tcp/443  anyone\n"
-                   f"oth333\t{py}  deny  api4.thetvdb.com  tcp/443  someone-else\n")
-        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\nPLEX_API_REMOTE = '192.0.2.10'\n",
-                            listing=listing)
-        self.assertEqual(run.r.returncode, 0, run.text())
-        sent = [c.split(' ', 1)[1] for c in run.calls if c.startswith('removed ')]
-        self.assertEqual(sorted(sent), ['any222', 'ip0001', 'own111'], "\n".join(run.calls))
-        heads, items = self.removed_block(run.r.stdout)
-        self.assertEqual(len(heads), 1, run.r.stdout)
-        self.assertEqual(sorted(i.split('  ', 1)[0] for i in items), sorted(sent), run.r.stdout)
-        self.assertRegex(heads[0], rf'\b{len(sent)} deny rule\(s\)', run.r.stdout)
-        self.assertEqual(run.r.stdout.count('ip0002'), 1, run.r.stdout)
-
     def test_the_owner_is_the_user_not_how_RUN_AS_USER_spells_it(self):
         """macOS's getpwnam accepts a user name in any case (and an alias
         RecordName), while `my-little-snitch list` prints the owner as the
-        uid's canonical name.  RUN_AS_USER = 'NOBODY' is user nobody, so
-        nobody's deny goes -- compared as spelled, 'nobody' != 'NOBODY' and
-        the run removed nothing while that deny beat every allow written.
-        The rules and the drop name the canonical user too."""
+        uid's canonical name.  RUN_AS_USER = 'NOBODY' is user nobody, so the
+        rules and the drop name `nobody`: a rule owned by 'NOBODY' is read
+        back as another user's."""
         import pwd
         try:
             canonical = pwd.getpwnam('NOBODY').pw_name
         except KeyError:
             self.skipTest("this system's user names are case-sensitive")
         self.assertEqual(canonical, 'nobody')
-        py = self.listed_python()
-        run = self.run_root(conf_lines="RUN_AS_USER = 'NOBODY'\n",
-                            listing=f"own777\t{py}  deny  api.themoviedb.org  tcp/443  nobody\n")
+        run = self.run_root(conf_lines="RUN_AS_USER = 'NOBODY'\n")
         self.assertEqual(run.r.returncode, 0, run.text())
-        self.assertIn('removed own777', run.calls, "\n".join(run.calls))
         self.assertTrue(run.allows(), run.text())
         for a in run.allows():
             self.assertTrue(a.endswith('--owner nobody'), a)
@@ -16215,8 +16004,7 @@ class TestInstallAsRoot(_RootInstallCase):
 
     def test_a_second_run_writes_nothing_and_says_so(self):
         """Every rule already stored: the verdict counts none as written --
-        the run after a run must say it did nothing -- and no deny is
-        touched."""
+        the run after a run must say it did nothing."""
         first = self.run_root()
         self.assertEqual(first.r.returncode, 0, first.text())
         n = len(first.allows())
@@ -16224,7 +16012,6 @@ class TestInstallAsRoot(_RootInstallCase):
         again = self.run_root(touch=('already',))
         self.assertEqual(again.r.returncode, 0, again.text())
         self.assertIn(f"0 rule(s) written, {n} already there", again.r.stdout)
-        self.assertFalse([c for c in again.calls if c.startswith('cli remove')], again.calls)
 
     def test_a_missing_key_does_not_stop_roots_half(self):
         """Pins what README says of PLEX_DB_REMOTE_IDENTITY: root never reads

@@ -12,7 +12,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
-- **Title search** — bare words search movies/series by title AND filepath: `my-plex tagesschau` (episode title search with `ep:word`). Free text is normalized via `CLI_TEXT_NORMALIZE_REGEX` (default: collapse non-alphanumerics to spaces) on both sides, so `emily.in.paris` matches "Emily in Paris" and `who's-that-girl` matches "Who's That Girl". When the search resolves to a single Series (every hit traces to one series, no stray rows), my-plex renders the multi-line detail view — identical to `my-plex Series:NNN`. Use `-V` to keep the table view. A bare word beside `--info` or `--run-tests`, which exit before any list filter is read, is refused by name (err 00162) instead of being ignored.
+- **Title search** — bare words search movies/series by title AND filepath: `my-plex tagesschau` (episode title search with `ep:word`). Free text is normalized via `CLI_TEXT_NORMALIZE_REGEX` (default: collapse non-alphanumerics to spaces) on both sides, so `emily.in.paris` matches "Emily in Paris" and `who's-that-girl` matches "Who's That Girl". When the search resolves to a single Series (every hit traces to one series, no stray rows), my-plex renders the multi-line detail view — identical to `my-plex Series:NNN`. Use `-V` to keep the table view. A bare word beside `--info` or `--run-tests`, which exit before any list filter is read, is refused by name (err 00178) instead of being ignored.
 - **Column hiding** — `-field` removes columns: `my-plex lib1 -file` hides FILEPATH
 - **Filter + hide** — `-field:value` filters AND hides the column: `my-plex lib1 -genre:comedy` filters by comedy without showing the GENRE column
 - **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
@@ -322,17 +322,7 @@ in the middle of the very first run. `my-plex --help install` lists them
 all, from the one list the rules are written from. In this order:
 
 1. `python3` is 3.10 or newer, or an ERROR names the one found.
-2. A stored **deny** for that very remote -- any port, or its own -- that
-   names my-plex's Python, `ssh` or `any` and is **owned** by the user of
-   step 3 or by `anyone` is removed: a deny beats an allow. The output lists
-   every rule removed under `REMOVED`, with its ID and the rule as
-   `my-little-snitch list` prints it -- also when an ERROR stops the run
-   after it -- or says in one line that none was. A deny naming another
-   program -- another Python minor too -- or another remote, or owned by
-   another user, is somebody else's, and stays. One
-   owned by `system` (root's own) stays too, and is named under `KEPT`: it
-   may still stop my-plex.
-3. **Two rules per remote**: one naming the program that connects -- Python,
+2. **Two rules per remote**: one naming the program that connects -- Python,
    or `ssh` for the ssh endpoint -- and one for `any` process connecting via
    it. Each rule's **owner** is `RUN_AS_USER` from the site config, else
    `MY_USER` from the site file (`/LINKS/default/site.conf`, this machine's
@@ -340,11 +330,15 @@ all, from the one list the rules are written from. In this order:
    own name, as the firewall lists it (`ME` or an alias names user `me`, and
    its denies are `me`'s). With none of them, or
    with a name that is root or no user of this machine, it is an ERROR.
-4. **The drop**: `su -l <that user>`, so the rest runs as that user in a
+   A stored **deny** that would beat a rule is removed by my-little-snitch's
+   own `allow go`, in the same change and under its backup; the run repeats
+   its lines about denies -- one removed, or one it leaves and how to
+   remove it -- under the remote.
+3. **The drop**: `su -l <that user>`, so the rest runs as that user in a
    fresh login -- that user's HOME and PATH, nothing of root's environment --
    given the config root read when one was named.
 
-A failure in 1-3 is an ERROR, and nothing is handed over. Root builds no
+A failure in 1-2 is an ERROR, and nothing is handed over. Root builds no
 venv and writes nothing into its own home. As root, `--install` takes only
 `--config FILE` and `-Q` beside it: root hands over `--install` alone, so
 anything else would silently not run, and is an ERROR instead.
@@ -489,7 +483,6 @@ A fresh machine, in a root shell. The site config, `/etc/my-plex.conf`, says
       files over ssh, so there the firewall names ssh
     > owner:   plexuser        (whose rule it is -- not root, who writes it)
 
- >>> REMOVED: no deny rule -- none owned by plexuser or `anyone` stops my-plex for the remotes below
  >>> two rules per remote: the program itself, and `any` process via it
      (Little Snitch names a run from a shell "Terminal via Python")
    > api.themoviedb.org       [rc 0 0]  TMDB API: original-language backfill, --unmatched --resolve
