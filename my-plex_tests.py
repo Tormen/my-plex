@@ -19440,6 +19440,14 @@ class TestReencodeDaemonInstall(_RootInstallCase):
         stamps = [ln for ln in lines if ln.startswith('<!-- installed by ')]
         self.assertEqual(stamps, [lines[doctype + 1]], "one owner comment, right after the DOCTYPE")
         self.assertEqual(stamps[0][len('<!-- installed by '):].split()[0], 'my-plex')
+        self.assertRegex(stamps[0], r'^<!-- installed by my-plex install \(root\) on [^,]+, '
+                                    r'\d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4}: generated, build \S+ -->$')
+        # the time in it changes: written at another minute, by another build,
+        # the job is still the same job -- the second run must leave it alone
+        with open(plist_path, 'w') as f:
+            f.write('\n'.join(lines).replace(
+                stamps[0], '<!-- installed by my-plex install (root) on elsewhere, 2000-01-01 00:00 +0000:'
+                           ' generated, build 000000000000 -->') + '\n')
         calls = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
         self.assertIn(f'bootstrap system {plist_path}', calls)
         second = self.run_root(conf_lines=conf, env=env, run_dir=first.d)

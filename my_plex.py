@@ -8455,17 +8455,29 @@ def reencode_daemon_plist(user: str, named: "str | None") -> "dict[str, Any]":
 
 
 # The comment that names my-plex as the job's owner, so my-rollout reports the
-# job as a tool's instead of asking for it in the LINKS ("<!-- installed by
-# <owner> ..." right after the DOCTYPE).  No time in it: an unchanged job
-# stays byte-equal.  No "--" in it: an XML comment may not hold one.
-OWNER_STAMP = "<!-- installed by my-plex (its install option, root half): the reencode job -->"
+# job as a tool's instead of asking for it in the LINKS: one line right after
+# the DOCTYPE, in the shape the other tools' jobs carry -- "<!-- installed by
+# <tool> <option> (root) on <host>, <local time>: generated, build <id> -->".
+# The option is written "install", without its dashes: an XML comment may not
+# hold "--", and Python's plistlib refuses one that does.
+OWNER_STAMP = "<!-- installed by my-plex install "
 
 
 def _owner_stamped(data: bytes) -> bytes:
-    """DATA, a plist, with OWNER_STAMP on the line after its DOCTYPE."""
+    """DATA, a plist, with the owner comment on the line after its DOCTYPE."""
+    stamp = (f"{OWNER_STAMP}(root) on {socket.gethostname().split('.')[0]},"
+             f" {time.strftime('%Y-%m-%d %H:%M %z')}: generated, build {_script_build_id()} -->")
     lines = data.splitlines(True)
     at = next((i + 1 for i, ln in enumerate(lines) if ln.startswith(b"<!DOCTYPE")), 0)
-    return b"".join(lines[:at] + [OWNER_STAMP.encode() + b"\n"] + lines[at:])
+    return b"".join(lines[:at] + [stamp.encode() + b"\n"] + lines[at:])
+
+
+def _job_body(data: "bytes | None") -> "bytes | None":
+    """DATA without its owner comment: what tells a changed job from an
+    unchanged one (the comment's time and build change on every write)."""
+    if data is None:
+        return None
+    return b"".join(ln for ln in data.splitlines(True) if not ln.startswith(OWNER_STAMP.encode()))
 
 
 def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
@@ -8501,7 +8513,7 @@ def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
     shown = run_tool_locally('launchctl', ['print', target])
     loaded = shown is not None and shown.returncode == 0
     starts = len(plist['StartCalendarInterval'])
-    if old == data and loaded:
+    if _job_body(old) == _job_body(data) and loaded:
         print(f"    > {path}: unchanged, loaded  ({starts} start time(s))")
         return
     tmp = f"{path}.{os.getpid()}.tmp"
