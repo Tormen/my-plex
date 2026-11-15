@@ -14659,6 +14659,54 @@ class TestQuiet(unittest.TestCase):
         self.assertEqual(r.stderr.count('WARNING: no TVDB_API_KEY'), 1, r.stderr[-700:])
         self.assertNotIn('Step 1', r.stdout + r.stderr, "the guide was printed with nobody to read it")
 
+    def _api_keys_run(self, copy_text: str, own: str = '') -> 'subprocess.CompletedProcess[str]':
+        """One import of the tool whose data base holds COPY_TEXT as this
+        user's API-key copy, and whose named config is OWN; it prints the two
+        keys load_config_file() gives and which file set each."""
+        import getpass, pwd
+        d = tempfile.mkdtemp(prefix='my-plex-apikeys-')
+        self.addCleanup(shutil.rmtree, d, True)
+        me = pwd.getpwuid(os.getuid()).pw_name or getpass.getuser()
+        os.makedirs(os.path.join(d, 'data', me, 'my-plex'))
+        with open(os.path.join(d, 'data', me, 'my-plex', 'api-keys'), 'w') as f:
+            f.write(copy_text)
+        conf = os.path.join(d, 'own.conf')
+        with open(conf, 'w') as f:
+            f.write(own)
+        snippet = _tool_import_snippet(['my-plex']) + (
+            "c = mp.load_config_file()\n"
+            "print(repr(c.get('TMDB_API_KEY')), repr(c.get('TVDB_API_KEY')))\n"
+            "print(mp.CONFIG_RECORD['origin'].get('TMDB_API_KEY'))\n"
+        )
+        return subprocess.run([sys.executable, '-B', '-c', snippet], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=120,
+                              env=dict(os.environ, MY_PLEX_CONFIG=conf,
+                                       MY_PLEX_TEST_DATA_BASE_DIR=os.path.join(d, 'data')))
+
+    def test_an_api_key_no_config_sets_comes_from_the_users_copy(self):
+        """ada's and macado's users had no TMDB/TVDB key: it lives in root's
+        record now, and --install copies it to DATA_BASE_DIR/<user>/my-plex/
+        api-keys.  A key no config sets comes from that copy, and the copy is
+        named as where it came from; a key the user's own config sets wins
+        (adversarial: both carry TMDB_API_KEY, with different values)."""
+        copy = "# root's record, copied by --install\nTMDB_API_KEY = 'from-copy'\nTVDB_API_KEY = 'tv-copy'\n"
+        r = self._api_keys_run(copy)
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+        self.assertIn("'from-copy' 'tv-copy'", r.stdout)
+        self.assertIn('/my-plex/api-keys', r.stdout, "the copy is not named as the key's origin")
+        r = self._api_keys_run(copy, own="TMDB_API_KEY = 'own'\n")
+        self.assertEqual(r.returncode, 0, r.stderr[-700:])
+        self.assertIn("'own' 'tv-copy'", r.stdout, "the copy won over the user's own config")
+
+    def test_a_mangled_api_key_copy_stops_the_run_without_showing_the_line(self):
+        """A line that is not `KEY = 'value'` stops the run (a half-read copy
+        would scrape with one key and say nothing), naming the line by its
+        number only -- its text may hold a key."""
+        r = self._api_keys_run("TMDB_API_KEY = secret-without-quotes\n")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertRegex(r.stderr, r'ERROR \d{5} \[1\]: .*api-keys line 1 is not')
+        self.assertNotIn('secret-without-quotes', r.stdout + r.stderr)
+
     def test_at_a_terminal_the_api_key_guide_comes_once_and_never_says_echo(self):
         """With a person there, the guide is printed -- once per key, not once
         per series -- and its config step says to use an editor: the old
@@ -15873,6 +15921,50 @@ class TestInstallAsRoot(_RootInstallCase):
         self.assertNotIn('.python.venv', "\n".join(run.calls))
         self.assertFalse(os.path.exists(os.path.join(run.home, '.python.venv')),
                          "root built a venv")
+
+    def test_root_copies_the_api_key_record_for_the_user_0600_and_then_leaves_it(self):
+        """--install's root half gives RUN_AS_USER a copy of root's record
+        (API_KEYS_RECORD) at DATA_BASE_DIR/<user>/my-plex/api-keys, mode 0600,
+        and never prints a key.  The run after it finds the copy as it should
+        be and says "unchanged" -- adversarial: a copy whose mode drifted to
+        0644 is written again."""
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
+        d = tempfile.mkdtemp(prefix='keys-', dir=self.tmp)
+        rec = os.path.join(d, 'api-keys.record')
+        fake = {name: f"{name.split('_')[0].lower()}-fake-value" for name in ('TMDB_API_KEY', 'TVDB_API_KEY')}
+        text = "".join(f"{name} = '{value}'\n" for name, value in fake.items())
+        with open(rec, 'w') as f:
+            f.write(text)
+        data = os.path.join(d, 'data')
+        copy = os.path.join(data, me, 'my-plex', 'api-keys')
+        lines = f"RUN_AS_USER = '{me}'\nAPI_KEYS_RECORD = {rec!r}\n"
+        env = {'MY_PLEX_TEST_DATA_BASE_DIR': data}
+        run = self.run_root(conf_lines=lines, env=env)
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn(f"{copy}: written for {me}  (0600, 2 key(s)", run.r.stdout)
+        self.assertNotIn('fake-value', run.r.stdout + run.r.stderr, "a key was printed")
+        with open(copy) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(os.stat(copy).st_mode & 0o777, 0o600)
+        again = self.run_root(conf_lines=lines, env=env)
+        self.assertIn(f"{copy}: unchanged  (2 key(s))", again.r.stdout, again.text())
+        os.chmod(copy, 0o644)
+        drift = self.run_root(conf_lines=lines, env=env)
+        self.assertIn(f"{copy}: written for {me}", drift.r.stdout, drift.text())
+        self.assertEqual(os.stat(copy).st_mode & 0o777, 0o600)
+
+    def test_without_a_record_root_writes_no_api_key_copy(self):
+        """API_KEYS_RECORD empty (the default), or naming a file this machine
+        does not have (a Mac without etc/secrets): one line each, no copy, and
+        the drop still happens."""
+        run = self.run_root()
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('none: API_KEYS_RECORD is empty', run.r.stdout)
+        run = self.run_root(conf_lines="RUN_AS_USER = 'nobody'\nAPI_KEYS_RECORD = '/nonexistent/api-keys'\n")
+        self.assertEqual(run.r.returncode, 0, run.text())
+        self.assertIn('none: no file at /nonexistent/api-keys', run.r.stdout)
+        self.assertEqual(run.su[:2], ['-l', 'nobody'], run.text())
 
     def test_a_failed_rule_stops_before_the_drop(self):
         """A rule the firewall tool refuses is an ERROR, and nothing is
@@ -17356,7 +17448,7 @@ class TestConfigLayers(unittest.TestCase):
     def test_a_named_file_that_is_absent_is_refused(self):
         self.site("PLEX_DB_REMOTE_HOST = 'site-host'\n")
         out = self.refused(os.path.join(self.d, 'absent.conf'))
-        self.assertIn('ERROR 00024', out)
+        self.assertIn('ERROR 00027', out)
         self.assertIn('absent.conf', out)
 
     def test_two_different_user_files_are_an_error(self):

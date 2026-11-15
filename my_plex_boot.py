@@ -509,6 +509,7 @@ def _root_install(launcher: str, argv: "list[str]") -> "NoReturn":
     try:
         user, named = tool.install_firewall(config)
         tool.install_reencode_daemon(user, named)
+        tool.install_api_keys(user)
     except Exception as unexpected:  # the top of root's --install half: one ERROR line, the trace in a file, exit 70
         # Outside the tool's run(), so its bug handler is called here: one
         # ERROR line and a trace file, never a traceback -- and no drop.

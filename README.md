@@ -12,7 +12,7 @@ The swiss-army knife for PLEX - a comprehensive Plex media management tool with 
 - **List libraries** (`--list`, `--libraries`) with supported/unsupported status
 - **List media** across all libraries with flexible filtering (by type, language, watch status, labels)
 - **Filter tokens** — intuitive shorthand: `watched:no rating>7 genre` (bare field names add display columns without filtering)
-- **Title search** — bare words search movies/series by title AND filepath: `my-plex tagesschau` (episode title search with `ep:word`). Free text is normalized via `CLI_TEXT_NORMALIZE_REGEX` (default: collapse non-alphanumerics to spaces) on both sides, so `emily.in.paris` matches "Emily in Paris" and `who's-that-girl` matches "Who's That Girl". When the search resolves to a single Series (every hit traces to one series, no stray rows), my-plex renders the multi-line detail view — identical to `my-plex Series:NNN`. Use `-V` to keep the table view. A bare word beside `--info` or `--run-tests`, which exit before any list filter is read, is refused by name (err 00179) instead of being ignored.
+- **Title search** — bare words search movies/series by title AND filepath: `my-plex tagesschau` (episode title search with `ep:word`). Free text is normalized via `CLI_TEXT_NORMALIZE_REGEX` (default: collapse non-alphanumerics to spaces) on both sides, so `emily.in.paris` matches "Emily in Paris" and `who's-that-girl` matches "Who's That Girl". When the search resolves to a single Series (every hit traces to one series, no stray rows), my-plex renders the multi-line detail view — identical to `my-plex Series:NNN`. Use `-V` to keep the table view. A bare word beside `--info` or `--run-tests`, which exit before any list filter is read, is refused by name (err 00184) instead of being ignored.
 - **Column hiding** — `-field` removes columns: `my-plex lib1 -file` hides FILEPATH
 - **Filter + hide** — `-field:value` filters AND hides the column: `my-plex lib1 -genre:comedy` filters by comedy without showing the GENRE column
 - **External ID URLs** — bare `imdb` / `tmdb` / `tvdb` tokens add a clickable URL column to each row (episodes inherit IDs from their parent series)
@@ -334,11 +334,17 @@ all, from the one list the rules are written from. In this order:
    own `allow go`, in the same change and under its backup; the run repeats
    its lines about denies -- one removed, or one it leaves and how to
    remove it -- under the remote.
-3. **The drop**: `su -l <that user>`, so the rest runs as that user in a
+3. On the Plex server, **the reencode LaunchDaemon** (see the nightly job).
+4. **The API keys**: with `API_KEYS_RECORD` set (site config), that user
+   gets a copy of root's record of `TMDB_API_KEY` and `TVDB_API_KEY` at
+   `DATA_BASE_DIR/<user>/my-plex/api-keys` (0600), rewritten only when it
+   differs. No record on this machine is said in one line. The keys are
+   counted, never printed.
+5. **The drop**: `su -l <that user>`, so the rest runs as that user in a
    fresh login -- that user's HOME and PATH, nothing of root's environment --
    given the config root read when one was named.
 
-A failure in 1-2 is an ERROR, and nothing is handed over. Root builds no
+A failure in 1-4 is an ERROR, and nothing is handed over. Root builds no
 venv and writes nothing into its own home. As root, `--install` takes only
 `--config FILE` and `-Q` beside it: root hands over `--install` alone, so
 anything else would silently not run, and is an ERROR instead.
@@ -497,6 +503,8 @@ A fresh machine, in a root shell. The site config, `/etc/my-plex.conf`, says
       getting through (my-little-snitch log /opt/homebrew/bin/python3)
  >>> the reencode LaunchDaemon (my-plex.reencode)
     > none: the Plex database is not on this machine (PLEX_DB_PATH) -- it runs on the Plex server
+ >>> the TMDB/TVDB API keys for plexuser (API_KEYS_RECORD)
+    > none: API_KEYS_RECORD is empty -- each user sets the keys in their own config
 
  >>> dropping to plexuser for the rest -- nothing below this line runs as root
 ```
@@ -623,7 +631,9 @@ naming it; the search goes on with the next name.
 Each file runs with every value set before it defined, so yours can extend
 a site value (`X = X + [...]`); a plain assignment replaces it whole. The
 Plex token and API keys (`PLEX_XML_URL`, `PLEX_TOKEN`, `TVDB_API_KEY`,
-`TMDB_API_KEY`) belong in your config only, and the keys of
+`TMDB_API_KEY`) belong in your config only -- or, for the two API keys, in
+root's record `API_KEYS_RECORD`, which `--install` copies for you; a key
+your config sets wins over the copy -- and the keys of
 `--install` -- `PLEX_DB_REMOTE`, `PLEX_DB_REMOTE_IDENTITY`,
 `LITTLE_SNITCH_CLI`, `RUN_AS_USER` and `PLEX_API_REMOTE` -- in the site
 config only: my-plex refuses them in the other. As root, a config file --
