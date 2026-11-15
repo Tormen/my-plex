@@ -8454,6 +8454,20 @@ def reencode_daemon_plist(user: str, named: "str | None") -> "dict[str, Any]":
     return plist
 
 
+# The comment that names my-plex as the job's owner, so my-rollout reports the
+# job as a tool's instead of asking for it in the LINKS ("<!-- installed by
+# <owner> ..." right after the DOCTYPE).  No time in it: an unchanged job
+# stays byte-equal.  No "--" in it: an XML comment may not hold one.
+OWNER_STAMP = "<!-- installed by my-plex, its install option (root half): the reencode job -->"
+
+
+def _owner_stamped(data: bytes) -> bytes:
+    """DATA, a plist, with OWNER_STAMP on the line after its DOCTYPE."""
+    lines = data.splitlines(True)
+    at = next((i + 1 for i, ln in enumerate(lines) if ln.startswith(b"<!DOCTYPE")), 0)
+    return b"".join(lines[:at] + [OWNER_STAMP.encode() + b"\n"] + lines[at:])
+
+
 def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
     """--install's root half, on the Plex server: write and load the
     LaunchDaemon REENCODE_DAEMON_LABEL (reencode_daemon_plist).  Nowhere
@@ -8476,7 +8490,7 @@ def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
     if REENCODE_LAUNCHER and not os.path.isfile(REENCODE_LAUNCHER):
         err("00041", f"REENCODE_LAUNCHER {REENCODE_LAUNCHER!r} is not there -- no LaunchDaemon written\n"
                      f"  build the launcher first, or empty the key to start my-plex itself")
-    data = plistlib.dumps(plist)
+    data = _owner_stamped(plistlib.dumps(plist))
     path = os.path.join(LAUNCH_DAEMONS_DIR, f"{REENCODE_DAEMON_LABEL}.plist")
     try:
         with open(path, 'rb') as f:
